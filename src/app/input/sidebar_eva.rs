@@ -163,10 +163,7 @@ pub(crate) fn cameo_click(
 }
 
 /// RTTI 7 (BuildingType): the structure and defense strips.
-///
-/// Also read by [`shift_queue_repeat`] to keep the Shift repeat off the two
-/// strips whose native click never queues a second copy.
-pub(crate) fn is_structure_strip(category: ProductionCategory) -> bool {
+fn is_structure_strip(category: ProductionCategory) -> bool {
     matches!(
         category,
         ProductionCategory::Building | ProductionCategory::Defense
