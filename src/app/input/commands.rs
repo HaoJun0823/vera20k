@@ -41,20 +41,32 @@ fn resolve_owner(state: &mut AppState) -> String {
     preferred_local_owner(state).unwrap_or_else(|| DEFAULT_OWNER.to_string())
 }
 
-pub(crate) fn queue_build_by_type(state: &mut AppState, type_id: &str) {
+/// Queue `repeat` builds of `type_id` as `repeat` ordinary PRODUCE events.
+///
+/// `repeat` comes from [`crate::app::input::sidebar_eva::shift_queue_repeat`],
+/// which reads the configured `[VERA] ShiftQueueCount=`; its default lives with
+/// the profile that owns the setting.
+///
+/// Each copy is the same deterministic command, so several of them replay and
+/// hash exactly like repeated clicks. All of them carry the current tick, so
+/// they execute in one frame and in issue order.
+pub(crate) fn queue_build_by_type(state: &mut AppState, type_id: &str, repeat: u32) {
     let owner: String = resolve_owner(state);
     let type_interned = intern_in_sim(state, type_id);
-    schedule_command(
-        state,
-        &owner,
-        Command::QueueProduction {
-            type_id: type_interned,
-        },
-    );
+    for _ in 0..repeat.max(1) {
+        schedule_command(
+            state,
+            &owner,
+            Command::QueueProduction {
+                type_id: type_interned,
+            },
+        );
+    }
     log::info!(
-        "Build command queued: owner={} type={} issue_frame=current",
+        "Build command queued: owner={} type={} count={} issue_frame=current",
         owner,
-        type_id
+        type_id,
+        repeat.max(1)
     );
 }
 

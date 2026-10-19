@@ -913,11 +913,17 @@ pub(crate) fn push_local_eva(state: &mut AppState, event: &str) {
 /// A press on a build cameo: `SelectClass::Action @ 0x006AAD00`'s decision
 /// (`sidebar_eva::cameo_click`) against the local player's queue, then its
 /// `GUIBuildSound`, EVA line and event.
+///
+/// `shift` also feeds VERA's own Shift repeat, which is not a native input:
+/// gamemd reads the modifier for the right button only (`0x006AAD66`), so an
+/// unshifted or right-button press is byte-for-byte the ported decision. The
+/// sound and the EVA line are spoken once per click regardless of the repeat.
 fn sidebar_cameo_press(
     state: &mut AppState,
     type_id: &str,
     press: sidebar_eva::CameoPress,
     at_build_limit: bool,
+    shift: bool,
 ) {
     let Some(category) = state
         .rules()
@@ -944,11 +950,14 @@ fn sidebar_cameo_press(
                 )
             })
     });
+    // The linked Factory's state also decides whether Shift may repeat: a held
+    // or finished build takes the resume/placement arm, not a fresh PRODUCE.
+    let own_for_repeat = linked_factory.map(|(status, _)| status);
     let click = sidebar_eva::cameo_click(
         &queue,
         category,
         type_iid,
-        linked_factory.map(|(status, _)| status),
+        own_for_repeat,
         type_iid.and_then(|type_id| {
             state
                 .match_state
@@ -997,7 +1006,14 @@ fn sidebar_cameo_press(
     }
     match click.order {
         None => {}
-        Some(sidebar_eva::CameoOrder::Produce) => queue_build_by_type(state, type_id),
+        Some(sidebar_eva::CameoOrder::Produce) => {
+            // The copies carry the current tick, so they execute in one frame in
+            // issue order; the sound and EVA above were spoken once. The count
+            // is the player's `[VERA] ShiftQueueCount=`.
+            let count = state.persistence.options_profile.shift_queue_count;
+            let repeat = sidebar_eva::shift_queue_repeat(category, own_for_repeat, shift, count);
+            queue_build_by_type(state, type_id, repeat);
+        }
         Some(sidebar_eva::CameoOrder::Suspend) => suspend_build(state, category),
         Some(sidebar_eva::CameoOrder::Abandon { all }) => {
             cancel_build_by_type(state, type_id, all);
@@ -1081,7 +1097,7 @@ pub(crate) fn apply_sidebar_action(state: &mut AppState, action: SidebarAction) 
             } else {
                 sidebar_eva::CameoPress::Left
             };
-            sidebar_cameo_press(state, &type_id, press, at_build_limit);
+            sidebar_cameo_press(state, &type_id, press, at_build_limit, shift);
         }
         SidebarAction::SuperWeaponPress { section, right } => {
             let selection = (|| {
