@@ -1279,7 +1279,7 @@ fn advance_one_simulation_frame(
         // Native drives the follow camera from the tail of
         // LogicClass__PerTickUpdate 0x0055B6B8, after every object has updated,
         // so the view lands on this tick's position rather than the last one's.
-        crate::app::input::camera::update_follow_camera(state);
+        crate::app::input::camera::update_follow_camera(state, &drained_lifecycle_outputs);
         // Rendering is rebuilt from lifecycle facts every frame. Replay the
         // app-owned transactions in native emission order for state that has a
         // direct attachment or retained audio handle.
@@ -1334,7 +1334,8 @@ fn advance_one_simulation_frame(
                 | LifecycleOutput::ProductionFactoryUnlinked { .. }
                 | LifecycleOutput::BuildingPlacementRetry { .. }
                 | LifecycleOutput::BuildingPlacementSucceeded { .. }
-                | LifecycleOutput::BuildingProductionAbandoned { .. } => {}
+                | LifecycleOutput::BuildingProductionAbandoned { .. }
+                | LifecycleOutput::FollowReleased { .. } => {}
                 LifecycleOutput::ObjectPointerExpired { stable_id } => {
                     state
                         .match_state
@@ -1884,15 +1885,15 @@ pub(crate) fn screen_point_to_world_with_camera(
     (screen.0 / zoom + camera.0, screen.1 / zoom + camera.1)
 }
 
-/// Borrow current real-cell flags for the inverse. There is no retained app
-/// bridge projection to invalidate after collapse, repair or world replacement.
-/// Native 6D674C resolves the current cell before reading 0x100/0x800; see
+/// Borrow current real-cell levels and flags for the inverse. There is no app
+/// projection to invalidate after collapse, tile changes or world replacement.
+/// Native 6D674C resolves the current cell before reading level/0x100/0x800; see
 /// tools/bridge_click_state_oracle/README.md.
-pub(crate) fn tactical_bridge_cells(
+pub(crate) fn tactical_cells(
     sim: &crate::sim::world::Simulation,
-) -> Option<&dyn terrain::TacticalBridgeLookup> {
+) -> Option<&dyn terrain::TacticalCellLookup> {
     sim.resolved_terrain()
-        .map(|terrain| terrain as &dyn terrain::TacticalBridgeLookup)
+        .map(|terrain| terrain as &dyn terrain::TacticalCellLookup)
 }
 
 /// Shared owner for world-space point -> map-cell resolution in the app layer.
@@ -1902,15 +1903,13 @@ pub(crate) fn tactical_bridge_cells(
 pub(crate) fn world_point_to_cell(
     world_x: f32,
     world_y: f32,
-    height_map: &std::collections::BTreeMap<(u16, u16), u8>,
-    bridge_cells: Option<&dyn terrain::TacticalBridgeLookup>,
+    cells: Option<&dyn terrain::TacticalCellLookup>,
 ) -> (u16, u16) {
     let inverse = terrain::screen_to_cell_tactical_inverse(
         world_x,
         world_y,
         terrain::TacticalInverseContext {
-            height_map,
-            bridge_cells,
+            cells,
             viewport_offset_x: 0.0,
             viewport_offset_y: 0.0,
         },
@@ -1940,10 +1939,9 @@ pub(crate) fn screen_point_to_world_cell(
     world_point_to_cell(
         world_x,
         world_y,
-        state.height_map(),
-        state.sim_view().and_then(|view| {
-            crate::app::match_runtime::sim_tick::tactical_bridge_cells(view.simulation())
-        }),
+        state
+            .sim_view()
+            .and_then(|view| tactical_cells(view.simulation())),
     )
 }
 
@@ -2139,7 +2137,14 @@ mod tests {
         }
 
         assert_eq!(
-            world_point_to_cell(world_x, world_y, &height_map, None),
+            world_point_to_cell(
+                world_x,
+                world_y,
+                Some(&crate::map::terrain::TacticalCellFixture {
+                    levels: &height_map,
+                    bridges: None
+                })
+            ),
             (rx, ry)
         );
     }
@@ -2159,8 +2164,10 @@ mod tests {
             world_x,
             world_y,
             crate::map::terrain::TacticalInverseContext {
-                height_map: &height_map,
-                bridge_cells: Some(&bridge_cells),
+                cells: Some(&crate::map::terrain::TacticalCellFixture {
+                    levels: &height_map,
+                    bridges: Some(&bridge_cells),
+                }),
                 viewport_offset_x: 0.0,
                 viewport_offset_y: 0.0,
             },
@@ -2171,7 +2178,14 @@ mod tests {
         };
 
         assert_eq!(
-            world_point_to_cell(world_x, world_y, &height_map, Some(&bridge_cells)),
+            world_point_to_cell(
+                world_x,
+                world_y,
+                Some(&crate::map::terrain::TacticalCellFixture {
+                    levels: &height_map,
+                    bridges: Some(&bridge_cells)
+                })
+            ),
             (
                 expected_rx.round().max(0.0) as u16,
                 expected_ry.round().max(0.0) as u16,
@@ -2183,7 +2197,14 @@ mod tests {
     fn world_point_to_cell_clamps_negative_results_to_zero() {
         let height_map = BTreeMap::new();
         assert_eq!(
-            world_point_to_cell(-500.0, -500.0, &height_map, None),
+            world_point_to_cell(
+                -500.0,
+                -500.0,
+                Some(&crate::map::terrain::TacticalCellFixture {
+                    levels: &height_map,
+                    bridges: None
+                })
+            ),
             (0, 0)
         );
     }

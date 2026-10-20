@@ -265,6 +265,7 @@ use crate::sim::tiberium::TiberiumPlacementObjectContext;
 use crate::sim::trigger_runtime::{TriggerEffect, TriggerRuntime};
 use crate::sim::vision::{self, FogState};
 use crate::util::fixed_math::SimFixed;
+use crate::sim::native_identity::NativeUniqueIdCursor;
 
 /// Test fixtures' seed. Real launches negotiate a per-match seed through
 /// `ScenarioDescriptor`, and only test builds can construct with this value.
@@ -1972,7 +1973,7 @@ impl Simulation {
                     self.kill_passengers(stable_id, attacker, uninit_context);
                 }
                 //44264C precedes the recursive destruction effects.
-                self.set_building_light_active(stable_id, false);
+                self.lighting_sources.set_building_light_active(stable_id, false);
             }
             crate::sim::combat::FatalLifecycleStage::AfterDeathEffects => {
                 if !matches!(category, EntityCategory::Unit | EntityCategory::Structure) {
@@ -2236,7 +2237,7 @@ impl Simulation {
         mut wave: crate::sim::wave::Wave,
         rules: &RuleSet,
     ) {
-        let stable_id = self.allocate_stable_id();
+        let stable_id = self.substrate.allocate_stable_id();
         if !wave.constructor_distance_is_live() {
             // Constructor UnInit precedes registration and unique identity,
             // but FireAt stores the returned dead pointer. The stable id only
@@ -3375,6 +3376,81 @@ impl Simulation {
         self.overlay_grid = Some(grid);
     }
 
+    // Client-crate fixtures for operations that take their owners.
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn bomb_defuse_for_test(&mut self, carrier: u64) {
+        Self::bomb_defuse(&mut self.substrate, &mut self.bombs, carrier);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn suspend_production_for_test(
+        &mut self,
+        owner: &str,
+        category: crate::sim::production::ProductionCategory,
+    ) -> bool {
+        crate::sim::production::suspend_production(
+            &self.interner,
+            &mut self.production,
+            &self.session,
+            owner,
+            category,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_trigger_variable_for_test(&mut self, global: bool, index: i32, set: bool) -> bool {
+        Self::set_trigger_variable(
+            &self.session,
+            &mut self.scenario_rng,
+            &mut self.trigger_runtime,
+            global,
+            index,
+            set,
+        )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn submit_object_display_for_test(
+        &mut self,
+        id: u64,
+        layer: display_layers::DisplayLayer,
+        rules: Option<&RuleSet>,
+    ) {
+        Self::submit_object_display(
+            &self.interner,
+            &self.terrain_objects,
+            &mut self.substrate,
+            id,
+            layer,
+            rules,
+        );
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn apply_runtime_bridge_mark_stamp_for_test(
+        &mut self,
+        stamp: crate::map::bridge_facts::BridgeFlagStamp,
+        family: crate::map::bridge_facts::BridgeStampFamily,
+    ) {
+        Self::apply_runtime_bridge_mark_stamp(
+            &mut self.resolved_terrain,
+            &mut self.real_cell_bridge_flags_0x1180,
+            stamp,
+            family,
+        );
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pause_scenario_for_test(&mut self, duration: i32) -> Vec<TriggerEffect> {
+        self.session.pause_scenario(duration)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn expire_scenario_pause_for_test(&mut self) -> Vec<TriggerEffect> {
+        self.session.expire_scenario_pause()
+    }
+
     // Client-crate fixtures; in-crate tests use the fields.
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3385,6 +3461,11 @@ impl Simulation {
     #[cfg(any(test, feature = "test-support"))]
     pub fn fog_mut_for_test(&mut self) -> &mut FogState {
         &mut self.fog
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn substrate_mut_for_test(&mut self) -> &mut ObjectSubstrate {
+        &mut self.substrate
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3676,25 +3757,24 @@ impl Simulation {
     /// High-bridge anchor construction uses the same literal setter as bridge
     /// damage/repair, but it additionally creates the family/anchor relations
     /// from which Rust derives live bridge topology.
-    pub fn apply_runtime_bridge_mark_stamp(
-        &mut self,
+    pub(crate) fn apply_runtime_bridge_mark_stamp(
+        resolved_terrain: &mut Option<ResolvedTerrainGrid>,
+        real_cell_bridge_flags_0x1180: &mut RealCellBridgeFlags0x1180,
         stamp: crate::map::bridge_facts::BridgeFlagStamp,
         family: crate::map::bridge_facts::BridgeStampFamily,
     ) {
-        let Some(terrain) = self.resolved_terrain.as_ref() else {
+        let Some(terrain) = resolved_terrain.as_ref() else {
             return;
         };
-        if !terrain.bridge_flag_authority_matches_shape(&self.real_cell_bridge_flags_0x1180) {
-            self.real_cell_bridge_flags_0x1180 = terrain.capture_real_cell_bridge_flags_0x1180();
+        if !terrain.bridge_flag_authority_matches_shape(real_cell_bridge_flags_0x1180) {
+            *real_cell_bridge_flags_0x1180 = terrain.capture_real_cell_bridge_flags_0x1180();
         }
-        let updates = self
-            .resolved_terrain
+        let updates = resolved_terrain
             .as_mut()
             .expect("terrain presence checked before runtime bridge Mark setter")
             .apply_runtime_bridge_mark_stamp(stamp, family);
         for (index, flags) in updates {
-            self.real_cell_bridge_flags_0x1180
-                .set_allocated_cell(index, flags);
+            real_cell_bridge_flags_0x1180.set_allocated_cell(index, flags);
         }
     }
 
@@ -4438,7 +4518,12 @@ impl Simulation {
                 // their ordered registry/ID effects before live-object AI;
                 // Scenario IDs and retirement order are preserved independently
                 // of the intervening Scenario RNG and queue mutations.
-                self.publish_overlay_constructions(spread.into_overlay_constructions());
+                Self::publish_overlay_constructions(
+                    &mut self.native_unique_ids,
+                    &mut self.load_objects,
+                    &mut self.substrate,
+                    spread.into_overlay_constructions(),
+                );
             }
         }
     }
@@ -4465,21 +4550,20 @@ impl Simulation {
     }
 
     pub(crate) fn publish_overlay_constructions(
-        &mut self,
+        native_unique_ids: &mut Option<NativeUniqueIdCursor>,
+        load_objects: &mut LoadObjectLifecycle,
+        substrate: &mut ObjectSubstrate,
         receipts: impl IntoIterator<Item = OverlayConstructionReceipt>,
     ) {
         for receipt in receipts {
-            let stable_id = self.allocate_stable_id();
-            let handle = self
-                .load_objects
+            let stable_id = substrate.allocate_stable_id();
+            let handle = load_objects
                 .construct_overlay(stable_id, receipt.cell(), || {
-                    crate::sim::native_identity::NativeUniqueIdCursor::assign_runtime(
-                        &mut self.native_unique_ids,
-                    )
+                    NativeUniqueIdCursor::assign_runtime(native_unique_ids)
                 })
                 .expect("runtime Overlay constructor must join its owned registries");
-            self.load_objects
-                .finish_cell_construction(handle, receipt, &mut self.substrate.pending_delete)
+            load_objects
+                .finish_cell_construction(handle, receipt, &mut substrate.pending_delete)
                 .expect("runtime Overlay constructor must finish its owned lifecycle");
         }
     }
@@ -4620,14 +4704,6 @@ impl Simulation {
         true
     }
 
-    /// Acknowledge one completed radar-terrain presentation update
-    /// ([`DirtyCells::acknowledge_radar`](crate::sim::dirty_cells::DirtyCells::acknowledge_radar)).
-    /// The marks are presentation handoff state, so this consumption cannot
-    /// mutate lockstep state.
-    pub(crate) fn acknowledge_radar_terrain_dirty(&mut self, generation: u64) -> bool {
-        self.dirty_cells.acknowledge_radar(generation)
-    }
-
     fn poll_triggers_for_master_frame(
         &mut self,
         rules: Option<&RuleSet>,
@@ -4686,17 +4762,6 @@ impl Simulation {
         self.house_ai_activation_order_test_trace.push(event);
     }
 
-    /// Shared identity source for every modeled runtime `AbstractClass` analogue.
-    ///
-    /// `AbstractClass::Create_ID @ 0x00410230` delegates to
-    /// `ScenarioClass::NextUniqueID @ 0x0068BCB0`; individual stores therefore
-    /// must not own independent counters.
-    pub fn allocate_stable_id(&mut self) -> u64 {
-        self.substrate
-            .next_stable_object_id
-            .allocate(&self.substrate.entities)
-    }
-
     /// CreateBullet46B050 without Fire: consumes one native constructor ID,
     /// retains the independent construction fields and joins Object expiry
     /// listeners through the existing store, but not Logic or Display.
@@ -4710,7 +4775,7 @@ impl Simulation {
         let native_id = crate::sim::native_identity::NativeUniqueIdCursor::assign_runtime(
             &mut self.native_unique_ids,
         );
-        let id = self.allocate_stable_id();
+        let id = self.substrate.allocate_stable_id();
         self.projectiles.construct(
             id,
             native_id,
@@ -4819,7 +4884,7 @@ impl Simulation {
         rules: &RuleSet,
     ) {
         for projectile in spawns {
-            let stable_id = self.allocate_stable_id();
+            let stable_id = self.substrate.allocate_stable_id();
             let inviso = projectile
                 .payload
                 .projectile_type()
@@ -5183,7 +5248,7 @@ impl Simulation {
         admit_inline: bool,
         packets: &mut Vec<crate::sim::voxel_anim::VoxelDebrisSpawn>,
     ) -> Result<(), crate::util::native_x87::NativeX87Error> {
-        let stable_id = self.allocate_stable_id();
+        let stable_id = self.substrate.allocate_stable_id();
         let native_unique_id = self.next_native_runtime_id();
         let object = crate::sim::voxel_anim::spawn_debris_piece(
             stable_id,
@@ -5614,7 +5679,7 @@ impl Simulation {
                 .object_type(entity.type_ref(), rules)
                 .is_some_and(|object| object.can_be_occupied)
         {
-            self.bomb_defuse(stable_id);
+            Self::bomb_defuse(&mut self.substrate, &mut self.bombs, stable_id);
         }
         if category == EntityCategory::Structure {
             //448260: gap removal precedes ordinary sight release and owner
@@ -6717,13 +6782,11 @@ impl Simulation {
                     continue;
                 }
                 effects.gap_generators.entry(viewer).or_default().push(
-                    vision::GapGeneratorSource {
-                        stable_id: entity.stable_id(),
-                        owner: entity.owner(),
-                        rx: entity.position.rx(),
-                        ry: entity.position.ry(),
-                        radius: deposit.radius(),
-                    },
+                    gap_generator::building_gap_source(
+                        entity,
+                        deposit.radius(),
+                        self.resolved_terrain.as_ref(),
+                    ),
                 );
             }
         }

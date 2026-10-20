@@ -156,6 +156,13 @@ pub(crate) fn current_cursor_feedback_kind(state: &AppState) -> Option<CursorFee
                 return Some(CursorFeedbackKind::SuperWeaponTarget(CursorId::Default));
             }
         }
+        if !crate::app::input::commands::super_weapon_pointer_target_at_cursor_is_valid(
+            state, section,
+        ) {
+            return Some(CursorFeedbackKind::SuperWeaponTarget(
+                CursorId::NoForceShield,
+            ));
+        }
         let cursor_id = state
             .rules()
             .and_then(|r| r.super_weapon(section))
@@ -283,14 +290,12 @@ pub(crate) fn current_cursor_feedback_kind(state: &AppState) -> Option<CursorFee
         ));
     }
     let hover = crate::app::input::entity_pick::hover_target_at_point(
-        sim,
+        crate::app::input::entity_pick::presented(state, sim),
         world_x,
         world_y,
         &owner,
         state.match_state.sandbox_full_visibility,
         state.rules(),
-        state.height_map(),
-        crate::app::match_runtime::sim_tick::tactical_bridge_cells(sim),
     );
     if selected.is_empty() {
         return no_selection_cursor(hover.as_ref());
@@ -317,6 +322,7 @@ pub(crate) fn current_cursor_feedback_kind(state: &AppState) -> Option<CursorFee
             state.overlay_registry(),
             modifier,
             force_move_key,
+            state.match_state.input.planning.active(),
         );
         return Some(promote_attack_move_feedback(
             kind,
@@ -588,6 +594,7 @@ pub(super) fn capability_cursor_for_hover(
     overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
     modifier: super::context_order::OrderModifier,
     force_move_key: bool,
+    planning: bool,
 ) -> CursorFeedbackKind {
     use super::context_order::OrderModifier;
     use crate::map::entities::EntityCategory;
@@ -637,20 +644,25 @@ pub(super) fn capability_cursor_for_hover(
         if super::context_order::self_click_command(
             sim,
             rules,
+            overlay_registry,
             entity.owner(),
             selected,
             Some(hover),
+            planning,
         )
         .is_some()
         {
             return CursorFeedbackKind::Deploy;
         }
-        if super::context_order::self_deploy_is_refused(sim, rules, entity.owner(), selected, hover)
-            || hovered_obj.is_some_and(|obj| {
-                super::context_order::self_deploy_is_blocked(entity, obj)
-                    || super::context_order::is_simple_deploy_unit(entity, obj)
-            })
-        {
+        if super::context_order::self_answers_no_deploy(
+            sim,
+            rules,
+            overlay_registry,
+            entity.owner(),
+            selected,
+            hover,
+            planning,
+        ) {
             return CursorFeedbackKind::NoDeploy;
         }
 
@@ -865,11 +877,17 @@ pub(super) fn capability_cursor_for_hover(
     // Hovering an own unit that is NOT selected still takes Select, and a
     // no-selection hover keeps DetermineAction's no-selection Select. An
     // Aircraft cursor owner's 0 there becomes its Cell action instead
-    // (`0x00417D7C`), which the object action below answers.
+    // (`0x00417D7C`), and a Building's stays 0 (`0x0044750D`), which the
+    // object action below answers.
     if hover_is_selected_own_unit(hover, &selected)
         && !best_id
             .and_then(|id| sim.entities().get(id))
-            .is_some_and(|actor| actor.category() == EntityCategory::Aircraft)
+            .is_some_and(|actor| {
+                matches!(
+                    actor.category(),
+                    EntityCategory::Aircraft | EntityCategory::Structure
+                )
+            })
     {
         return CursorFeedbackKind::Invalid;
     }
@@ -878,13 +896,13 @@ pub(super) fn capability_cursor_for_hover(
         | HoverTargetKind::FriendlyStructure
         | HoverTargetKind::EnemyUnit
         | HoverTargetKind::EnemyStructure => {
-            // The ordinary Unit object's class tail is shared with click
-            // dispatch. Another allied House is not an own-object Select:
-            // Techno70059B -> Unit7403EB answers NoMove. Other friendly
-            // class routes retain their existing capability/selection paths
-            // until their own What_Action wrappers are audited. Ivan's
-            // admitted Attack was handled above; its refused attack still
-            // follows the shared Select/NoMove tail instead of inventing one.
+            // The cursor owner's class tail is shared with click dispatch
+            // ([`super::context_order::object_action_answers_friendly`]).
+            // Another allied House is not an own-object Select: Techno70059B
+            // answers 0, which Unit7403EB and Infantry51F05E turn into
+            // NoMove and a Building keeps. Ivan's admitted Attack was handled
+            // above; its refused attack still follows the shared
+            // Select/NoMove tail instead of inventing one.
             let friendly = matches!(
                 hover.kind,
                 HoverTargetKind::FriendlyUnit | HoverTargetKind::FriendlyStructure
@@ -1896,6 +1914,7 @@ mod tests {
             None,
             crate::app::input::context_order::OrderModifier::Normal,
             false,
+            false,
         );
 
         // 7. Dump the gate inputs so we can see which condition fails
@@ -1957,6 +1976,7 @@ mod tests {
             Some(&rules),
             None,
             crate::app::input::context_order::OrderModifier::Normal,
+            false,
             false,
         );
         assert_eq!(
@@ -2777,6 +2797,7 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
                     None,
                     crate::app::input::context_order::OrderModifier::Normal,
                     false,
+                    false,
                 ),
                 CursorFeedbackKind::EnemyUnit,
             );
@@ -3143,6 +3164,7 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
                     None,
                     crate::app::input::context_order::OrderModifier::Normal,
                     false,
+                    false,
                 );
                 let row = native["actions"]
                     .as_array()
@@ -3260,6 +3282,7 @@ Verses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%
             Some(rules),
             None,
             crate::app::input::context_order::OrderModifier::Normal,
+            false,
             false,
         )
     }

@@ -23,8 +23,10 @@ use crate::sim::intern::InternedId;
 use crate::sim::intern::StringInterner;
 use crate::sim::movement::ground_pose::Position;
 use crate::sim::production::ProductionState;
+use crate::sim::scenario_session::ScenarioSession;
 use crate::sim::world::FrameChannel;
 use crate::sim::world::FrameEffects;
+use crate::sim::world::LifecycleOutput;
 use crate::sim::world::{SimSoundEvent, Simulation};
 
 /// An admitted HouseAbandon4FAA10 keeps this registry identity through
@@ -48,9 +50,13 @@ impl HouseFactoryAbandonment {
         })
     }
 
-    fn begin(&self, sim: &mut Simulation) {
-        if sim.session.current_house() == Some(self.owner) {
-            sim.lifecycle_outputs.emit(
+    fn begin(
+        &self,
+        session: &ScenarioSession,
+        lifecycle_outputs: &mut FrameChannel<LifecycleOutput>,
+    ) {
+        if session.current_house() == Some(self.owner) {
+            lifecycle_outputs.emit(
                 crate::sim::world::LifecycleOutput::ProductionFactoryAbandoning {
                     owner: self.owner,
                     category: self.category,
@@ -60,9 +66,13 @@ impl HouseFactoryAbandonment {
         }
     }
 
-    fn finish(self, sim: &mut Simulation) {
-        if sim.session.current_house() == Some(self.owner) {
-            sim.lifecycle_outputs.emit(
+    fn finish(
+        self,
+        session: &ScenarioSession,
+        lifecycle_outputs: &mut FrameChannel<LifecycleOutput>,
+    ) {
+        if session.current_house() == Some(self.owner) {
+            lifecycle_outputs.emit(
                 crate::sim::world::LifecycleOutput::ProductionFactoryUnlinked {
                     owner: self.owner,
                     category: self.category,
@@ -155,7 +165,14 @@ pub fn enqueue_by_type(
             held_start,
             money,
         );
-        publish_cameo_factory_link(sim, owner_id, category, type_interned);
+        publish_cameo_factory_link(
+            &sim.production,
+            &sim.session,
+            &mut sim.lifecycle_outputs,
+            owner_id,
+            category,
+            type_interned,
+        );
         return true;
     }
     let enqueue_order = sim.production.next_enqueue_order();
@@ -192,12 +209,18 @@ pub fn enqueue_by_type(
 
 /// The SUSPEND event: `HouseClass::Suspend_Production @ 0x004FA910` puts the
 /// category's running build on hold.
-pub fn suspend_production(sim: &mut Simulation, owner: &str, category: ProductionCategory) -> bool {
-    let Some(owner_id) = sim.interner.get(owner) else {
+pub(crate) fn suspend_production(
+    interner: &StringInterner,
+    production: &mut ProductionState,
+    session: &ScenarioSession,
+    owner: &str,
+    category: ProductionCategory,
+) -> bool {
+    let Some(owner_id) = interner.get(owner) else {
         return false;
     };
-    let frame = sim.session.binary_frame();
-    sim.production
+    let frame = session.binary_frame();
+    production
         .factories_mut()
         .suspend(owner_id, category, frame, true)
 }
@@ -260,7 +283,14 @@ pub(super) fn start_active_production(
         .factories_mut()
         .resume(holder, time_to_build, frame, held_start, money);
     if let FactoryHolder::House(owner, category) = holder {
-        publish_cameo_factory_link(sim, owner, category, type_id);
+        publish_cameo_factory_link(
+            &sim.production,
+            &sim.session,
+            &mut sim.lifecycle_outputs,
+            owner,
+            category,
+            type_id,
+        );
     }
     Some(stable_id)
 }
@@ -269,16 +299,18 @@ pub(super) fn start_active_production(
 /// Queued/refused StartProduction never constructs here; same-type resume
 /// explicitly publishes the same link. Registry identity stays authoritative.
 fn publish_cameo_factory_link(
-    sim: &mut Simulation,
+    production: &ProductionState,
+    session: &ScenarioSession,
+    lifecycle_outputs: &mut FrameChannel<LifecycleOutput>,
     owner: InternedId,
     category: ProductionCategory,
     type_id: InternedId,
 ) {
-    if sim.session.current_house() != Some(owner) {
+    if session.current_house() != Some(owner) {
         return;
     }
-    if let Some(factory) = sim.production.factories().view(owner, category) {
-        sim.lifecycle_outputs.emit(
+    if let Some(factory) = production.factories().view(owner, category) {
+        lifecycle_outputs.emit(
             crate::sim::world::LifecycleOutput::ProductionFactoryLinked {
                 owner,
                 type_id,
@@ -446,7 +478,7 @@ pub fn cancel_production_for_owner(
         CancelOutcome::QueuedRemoved => true,
         CancelOutcome::AdmittedEmpty | CancelOutcome::AbandonedActive(_) => {
             let abandonment = abandonment.expect("admitted House abandon has a Factory");
-            abandonment.begin(sim);
+            abandonment.begin(&sim.session, &mut sim.lifecycle_outputs);
             if let CancelOutcome::AbandonedActive(object) = outcome {
                 settle_abandoned(
                     sim,
@@ -457,7 +489,7 @@ pub fn cancel_production_for_owner(
                     effects,
                 );
             }
-            abandonment.finish(sim);
+            abandonment.finish(&sim.session, &mut sim.lifecycle_outputs);
             finish_house_abandon(sim, rules, owner_id, category, effects);
             true
         }

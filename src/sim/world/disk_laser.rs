@@ -118,7 +118,7 @@ impl Simulation {
     /// calls Create_ID410230/68BCB0 or spends Scenario+214. Reserve only the
     /// independent Rust handle, before FireAt's GetROF continuation.
     pub(crate) fn construct_disk_laser(&mut self) -> u64 {
-        let id = self.allocate_stable_id();
+        let id = self.substrate.allocate_stable_id();
         assert!(
             self.disk_lasers
                 .shots
@@ -313,7 +313,8 @@ impl Simulation {
                 let impact = effect_target_coordinate(self, rules, target.projectile_target(self))
                     .expect("Disk effect target");
                 construct(
-                    self,
+                    &self.session,
+                    &mut self.lifecycle_outputs,
                     first,
                     impact,
                     0,
@@ -368,7 +369,8 @@ impl Simulation {
                 }
                 let duration = 8 - shot.step;
                 construct(
-                    self,
+                    &self.session,
+                    &mut self.lifecycle_outputs,
                     first,
                     point(a + 1),
                     0,
@@ -377,7 +379,8 @@ impl Simulation {
                     NativeF32Bits::from_bits(0x3F000000),
                 );
                 construct(
-                    self,
+                    &self.session,
+                    &mut self.lifecycle_outputs,
                     point(b),
                     point(b - 1),
                     0,

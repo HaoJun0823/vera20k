@@ -449,7 +449,14 @@ impl Simulation {
             // then team+80=1 even if the variable index was rejected. The
             // existing trigger owner keeps dirty admission and timer resets.
             39 | 40 => {
-                self.set_trigger_variable(false, action.argument, action.action_id == 39);
+                Self::set_trigger_variable(
+                    &self.session,
+                    &mut self.scenario_rng,
+                    &mut self.trigger_runtime,
+                    false,
+                    action.argument,
+                    action.action_id == 39,
+                );
                 if let Some(team) = self.team_script_vm.teams.get_mut(&team_id) {
                     team.advance_pending = true;
                 }
@@ -1347,7 +1354,7 @@ impl Simulation {
                 }
                 self.foot_mark_remove(member, Some(rules), registry, frame_effects);
                 let placeable = crate::sim::build_site::can_place_building_at(
-                    self, rules, registry, building, cell, None, None,
+                    self, rules, registry, building, cell, None, None, None,
                 );
                 if !placeable {
                     let _ = crate::sim::build_site::flush_for_placement(
