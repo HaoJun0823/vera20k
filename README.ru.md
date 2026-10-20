@@ -56,17 +56,30 @@ VERA20K делают игроки для игроков, и последнее �
 
 ![Приложение передаёт команды симуляции и получает состояние мира; данные отрисовки передаются рендерингу.](docs/images/architecture.ru.png)
 
+## Системные требования
+
+- **Игра:** собственная копия Red Alert 2: Yuri's Revenge версии 1.001. VERA20K не содержит
+  игровых файлов и читает оригинальные архивы `.mix` из папки, указанной в `ra2_dir`.
+- **Windows:** Windows 10 или новее на x64. Windows на ARM64 собирается из исходного кода;
+  CI собирает и тестирует его.
+- **Linux:** x86-64 или ARM64, с Vulkan, X11 или Wayland и ALSA (libasound2). Официальные сборки
+  делаются на Ubuntu 22.04, поэтому им нужен glibc 2.35 или новее; SteamOS на Steam Deck
+  подходит. Linux на ARM64 собирается из исходного кода.
+- **macOS:** macOS 11 или новее на Apple Silicon — только для него мы выпускаем сборки.
+  Intel Mac собирается из исходного кода и не тестируется в CI.
+- **Графика:** видеокарта с поддержкой Vulkan, DirectX 12 или Metal. Рендерер запрашивает только
+  эти три API и не имеет запасного пути через OpenGL или DirectX 11, поэтому видеокарта, которая
+  не поддерживает ни одного из них, запустить игру не сможет.
+
 ## Сборка и запуск
 
 Понадобится:
 
-- **Игра:** Red Alert 2: Yuri's Revenge.
-- **Rust и Git:** актуальная стабильная версия [Rust](https://rustup.rs/), установленная через
-  rustup, и [Git](https://git-scm.com/).
+- **Rust и Git:** [Rust](https://rustup.rs/) 1.88 или новее, установленный через rustup, и
+  [Git](https://git-scm.com/).
 - **Инструменты сборки:** на Windows — C++ Build Tools из Visual Studio, которые предложит
   установить установщик Rust; на macOS — `xcode-select --install`; в Debian и Ubuntu —
   `sudo apt install build-essential libasound2-dev pkg-config`.
-- **Графика:** видеокарта с поддержкой Vulkan, DirectX 12 или Metal.
 
 В VERA20K уже играли на Windows, Linux и macOS.
 
@@ -77,6 +90,8 @@ cp config.toml.example config.toml
 # Перед запуском отредактируй config.toml и укажи папку с игрой в ra2_dir:
 cargo run --release --bin vera20k
 ```
+
+Сборка занимает несколько ГБ в `target/`.
 
 ## Как мы работаем
 

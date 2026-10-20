@@ -55,17 +55,30 @@ Pilarna visar dataflödet:
 
 ![Applikationen skickar kommandon till simuleringen, som returnerar världstillståndet; applikationen skickar renderingsdata till renderingen.](docs/images/architecture.sv.png)
 
+## Systemkrav
+
+- **Spelet:** en egen kopia av Red Alert 2: Yuri's Revenge, version 1.001. VERA20K innehåller inga
+  spelfiler och läser de ursprungliga `.mix`-arkiven i mappen du anger som `ra2_dir`.
+- **Windows:** Windows 10 eller senare på x64. Windows på ARM64 byggs från källkoden; CI kompilerar
+  och testar det.
+- **Linux:** x86-64 eller ARM64, med Vulkan, X11 eller Wayland och ALSA (libasound2). De officiella
+  byggena görs på Ubuntu 22.04 och kräver därför glibc 2.35 eller senare; SteamOS på Steam Deck
+  uppfyller det. Linux på ARM64 byggs från källkoden.
+- **macOS:** macOS 11 eller senare på Apple Silicon, vilket är det vi släpper byggen för. Intel-Macar
+  byggs från källkoden och testas inte i CI.
+- **Grafik:** ett grafikkort med Vulkan, DirectX 12 eller Metal. Renderaren begär bara dessa tre
+  API:er, det finns ingen återfallsväg till OpenGL eller DirectX 11, så ett grafikkort som inte
+  erbjuder någon av dem kan inte köra spelet.
+
 ## Bygg och kör
 
 Du behöver:
 
-- **Spelet:** Red Alert 2: Yuri's Revenge.
-- **Rust och Git:** den senaste stabila versionen av [Rust](https://rustup.rs/), installerad med
-  rustup, och [Git](https://git-scm.com/).
+- **Rust och Git:** [Rust](https://rustup.rs/) 1.88 eller senare, installerad med rustup, och
+  [Git](https://git-scm.com/).
 - **Byggverktyg:** på Windows Visual Studios C++-byggverktyg, som Rusts installationsprogram
   erbjuder sig att installera; på macOS `xcode-select --install`; på Debian och Ubuntu
   `sudo apt install build-essential libasound2-dev pkg-config`.
-- **Grafik:** ett grafikkort med Vulkan, DirectX 12 eller Metal.
 
 VERA20K har spelats på Windows, Linux och macOS.
 
@@ -76,6 +89,8 @@ cp config.toml.example config.toml
 # Redigera config.toml och ange din spelmapp i ra2_dir innan du kör:
 cargo run --release --bin vera20k
 ```
+
+Bygget skriver flera GB till `target/`.
 
 ## Så arbetar vi
 

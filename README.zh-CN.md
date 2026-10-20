@@ -52,15 +52,27 @@ VERA20K 由玩家打造、为玩家而做，项目的方向由玩家说了算。
 
 ![应用层向模拟层发送指令并接收世界状态，再向渲染层发送绘制数据。](docs/images/architecture.zh-CN.png)
 
+## 系统需求
+
+- **游戏：** 自备一份《红色警戒2：尤里的复仇》，版本 1.001。VERA20K 不含任何游戏文件，
+  它读取你在 `ra2_dir` 中指定的文件夹里的原版 `.mix` 压缩包。
+- **Windows：** Windows 10 或更高版本（x64）。Windows ARM64 需要自行编译，CI 会构建并测试它。
+- **Linux：** x86-64 或 ARM64，需要 Vulkan、X11 或 Wayland，以及 ALSA（libasound2）。
+  官方版本在 Ubuntu 22.04 上构建，因此需要 glibc 2.35 或更高；Steam Deck 上的 SteamOS 满足要求。
+  Linux ARM64 需要自行编译。
+- **macOS：** macOS 11 或更高版本（Apple Silicon），这也是我们发布的版本。Intel Mac 需要自行编译，
+  未纳入 CI 测试。
+- **显卡：** 支持 Vulkan、DirectX 12 或 Metal 的 GPU。渲染器只申请这三种接口，没有 OpenGL
+  或 DirectX 11 的回退路径，因此三者都不支持的显卡无法运行。
+
 ## 编译与运行
 
 你需要：
 
-- **游戏：**《红色警戒2：尤里的复仇》。
-- **Rust 和 Git：** 通过 rustup 安装的最新稳定版 [Rust](https://rustup.rs/)，以及 [Git](https://git-scm.com/)。
+- **Rust 和 Git：** 通过 rustup 安装的 [Rust](https://rustup.rs/) 1.88 或更高版本，以及
+  [Git](https://git-scm.com/)。
 - **构建工具：** Windows 上需要 Visual Studio 的 C++ 生成工具，Rust 安装程序会提示安装；macOS 上运行
   `xcode-select --install`；Debian 和 Ubuntu 上运行 `sudo apt install build-essential libasound2-dev pkg-config`。
-- **显卡：** 支持 Vulkan、DirectX 12 或 Metal 的 GPU。
 
 VERA20K 已在 Windows、Linux 和 macOS 上运行游玩过。
 
@@ -71,6 +83,8 @@ cp config.toml.example config.toml
 # 运行前，编辑 config.toml，将 ra2_dir 设为你的游戏文件夹：
 cargo run --release --bin vera20k
 ```
+
+构建会在 `target/` 中占用数 GB 空间。
 
 ## 我们如何开发
 

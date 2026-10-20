@@ -54,15 +54,27 @@ VERA20K สร้างโดยเกมเมอร์ เพื่อเก�
 
 ![แอปพลิเคชันส่งคำสั่งไปยังการจำลองและรับสถานะของโลกกลับมา แล้วส่งข้อมูลการวาดไปยังการเรนเดอร์](docs/images/architecture.th.png)
 
+## ความต้องการของระบบ
+
+- **เกม:** สำเนา Red Alert 2: Yuri's Revenge เวอร์ชัน 1.001 ของคุณเอง VERA20K ไม่มีไฟล์เกมใด ๆ
+  และจะอ่านไฟล์ `.mix` ต้นฉบับจากโฟลเดอร์ที่คุณตั้งเป็น `ra2_dir`
+- **Windows:** Windows 10 หรือใหม่กว่าบน x64 ส่วน Windows บน ARM64 ต้องบิลด์จากซอร์สโค้ด ซึ่ง CI
+  จะบิลด์และทดสอบให้
+- **Linux:** x86-64 หรือ ARM64 ที่มี Vulkan ใช้ X11 หรือ Wayland และมี ALSA (libasound2)
+  บิลด์ทางการสร้างบน Ubuntu 22.04 จึงต้องใช้ glibc 2.35 หรือใหม่กว่า และ SteamOS บน Steam Deck
+  ผ่านข้อกำหนดนี้ ส่วน Linux บน ARM64 ต้องบิลด์จากซอร์สโค้ด
+- **macOS:** macOS 11 หรือใหม่กว่าบน Apple Silicon ซึ่งเป็นเวอร์ชันที่เราเผยแพร่ ส่วน Intel Mac
+  ต้องบิลด์จากซอร์สโค้ดและไม่ได้รับการทดสอบใน CI
+- **กราฟิก:** GPU ที่รองรับ Vulkan, DirectX 12 หรือ Metal ตัวเรนเดอร์ขอเฉพาะสาม API นี้เท่านั้น
+  ไม่มีทางถอยไปใช้ OpenGL หรือ DirectX 11 ดังนั้น GPU ที่ไม่รองรับสักตัวจะรันเกมไม่ได้
+
 ## บิลด์และรัน
 
 สิ่งที่ต้องมี:
 
-- **เกม:** Red Alert 2: Yuri's Revenge
-- **Rust และ Git:** [Rust](https://rustup.rs/) เวอร์ชันเสถียรล่าสุดที่ติดตั้งผ่าน rustup และ [Git](https://git-scm.com/)
+- **Rust และ Git:** [Rust](https://rustup.rs/) 1.88 หรือใหม่กว่า ที่ติดตั้งผ่าน rustup และ [Git](https://git-scm.com/)
 - **เครื่องมือบิลด์:** บน Windows ใช้ C++ build tools ของ Visual Studio ซึ่งตัวติดตั้ง Rust จะเสนอให้ติดตั้ง
   บน macOS รัน `xcode-select --install` บน Debian และ Ubuntu รัน `sudo apt install build-essential libasound2-dev pkg-config`
-- **กราฟิก:** GPU ที่รองรับ Vulkan, DirectX 12 หรือ Metal
 
 มีการเล่น VERA20K บน Windows, Linux และ macOS แล้ว
 
@@ -73,6 +85,8 @@ cp config.toml.example config.toml
 # ก่อนรัน ให้แก้ไข config.toml และตั้งค่า ra2_dir เป็นโฟลเดอร์เกมของคุณ:
 cargo run --release --bin vera20k
 ```
+
+การบิลด์ใช้พื้นที่หลาย GB ใน `target/`
 
 ## วิธีทำงานของเรา
 

@@ -56,17 +56,31 @@ Die Pfeile zeigen den Datenfluss:
 
 ![Die Anwendung sendet Befehle an die Simulation, die den Weltzustand zurückgibt; die Anwendung sendet Zeichendaten an das Rendering.](docs/images/architecture.de.png)
 
+## Systemanforderungen
+
+- **Das Spiel:** eine eigene Kopie von Red Alert 2: Yuri's Revenge, Version 1.001. VERA20K enthält
+  keine Spieldateien und liest die ursprünglichen `.mix`-Archive in dem Ordner, den du als
+  `ra2_dir` angibst.
+- **Windows:** Windows 10 oder neuer auf x64. Windows auf ARM64 wird aus dem Quellcode gebaut; CI
+  kompiliert und testet es.
+- **Linux:** x86-64 oder ARM64, mit Vulkan, X11 oder Wayland und ALSA (libasound2). Offizielle
+  Builds entstehen auf Ubuntu 22.04 und brauchen daher glibc 2.35 oder neuer; SteamOS auf dem
+  Steam Deck erfüllt das. Linux auf ARM64 wird aus dem Quellcode gebaut.
+- **macOS:** macOS 11 oder neuer auf Apple Silicon, wofür wir Builds veröffentlichen. Intel-Macs
+  werden aus dem Quellcode gebaut und nicht in CI getestet.
+- **Grafik:** eine Grafikkarte mit Vulkan, DirectX 12 oder Metal. Der Renderer fordert nur diese
+  drei Schnittstellen an, es gibt keinen Rückfall auf OpenGL oder DirectX 11; eine Grafikkarte,
+  die keine davon bietet, kann das Spiel nicht ausführen.
+
 ## Kompilieren und starten
 
 Du brauchst:
 
-- **Das Spiel:** Red Alert 2: Yuri's Revenge.
-- **Rust und Git:** die aktuelle stabile Version von [Rust](https://rustup.rs/), installiert mit
-  rustup, und [Git](https://git-scm.com/).
+- **Rust und Git:** [Rust](https://rustup.rs/) 1.88 oder neuer, installiert mit rustup, und
+  [Git](https://git-scm.com/).
 - **Build-Werkzeuge:** unter Windows die C++-Build-Tools von Visual Studio, deren Installation
   der Rust-Installer anbietet; unter macOS `xcode-select --install`; unter Debian und Ubuntu
   `sudo apt install build-essential libasound2-dev pkg-config`.
-- **Grafik:** eine Grafikkarte mit Vulkan, DirectX 12 oder Metal.
 
 VERA20K wurde bereits unter Windows, Linux und macOS gespielt.
 
@@ -77,6 +91,8 @@ cp config.toml.example config.toml
 # Bearbeite config.toml und setze ra2_dir auf deinen Spielordner, bevor du das Spiel startest:
 cargo run --release --bin vera20k
 ```
+
+Der Build belegt mehrere GB in `target/`.
 
 ## So arbeiten wir
 

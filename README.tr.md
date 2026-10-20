@@ -56,17 +56,30 @@ Oklar veri akışını gösterir:
 
 ![Uygulama simülasyona komut gönderir ve dünya durumunu alır; görüntülemeye çizim verilerini gönderir.](docs/images/architecture.tr.png)
 
+## Sistem gereksinimleri
+
+- **Oyun:** Red Alert 2: Yuri's Revenge 1.001 sürümünün kendi kopyanız. VERA20K hiçbir oyun dosyası
+  içermez ve orijinal `.mix` arşivlerini `ra2_dir` olarak ayarladığınız klasörden okur.
+- **Windows:** x64 üzerinde Windows 10 veya üzeri. ARM64 üzerinde Windows kaynaktan derlenir; CI
+  onu derleyip test eder.
+- **Linux:** Vulkan, X11 ya da Wayland ve ALSA (libasound2) bulunan x86-64 veya ARM64. Resmi
+  derlemeler Ubuntu 22.04'te yapıldığı için glibc 2.35 veya üzeri gerekir; Steam Deck'teki SteamOS
+  bunu karşılar. ARM64 üzerinde Linux kaynaktan derlenir.
+- **macOS:** Apple Silicon üzerinde macOS 11 veya üzeri; yayınladığımız yapı bu. Intel Mac'ler
+  kaynaktan derlenir ve CI'da test edilmez.
+- **Grafik:** Vulkan, DirectX 12 ya da Metal destekleyen bir GPU. Görüntüleyici yalnızca bu üç API'yi
+  ister, OpenGL veya DirectX 11'e düşme yolu yoktur; bu yüzden hiçbirini sunmayan bir GPU oyunu
+  çalıştıramaz.
+
 ## Derleme ve çalıştırma
 
 Gerekenler:
 
-- **Oyun:** Red Alert 2: Yuri's Revenge.
-- **Rust ve Git:** rustup ile kurulmuş güncel kararlı [Rust](https://rustup.rs/) sürümü ve
+- **Rust ve Git:** rustup ile kurulmuş [Rust](https://rustup.rs/) 1.88 veya üzeri ve
   [Git](https://git-scm.com/).
 - **Derleme araçları:** Windows'ta, Rust kurulum programının kurmayı önerdiği Visual Studio C++
   derleme araçları; macOS'te `xcode-select --install`; Debian ve Ubuntu'da
   `sudo apt install build-essential libasound2-dev pkg-config`.
-- **Grafik:** Vulkan, DirectX 12 ya da Metal destekleyen bir GPU.
 
 VERA20K, Windows, Linux ve macOS üzerinde oynandı.
 
@@ -77,6 +90,8 @@ cp config.toml.example config.toml
 # Çalıştırmadan önce config.toml dosyasını düzenleyip ra2_dir değerini oyun klasörünüz olarak ayarlayın:
 cargo run --release --bin vera20k
 ```
+
+Derleme `target/` içinde birkaç GB yer kaplar.
 
 ## Nasıl çalışıyoruz
 

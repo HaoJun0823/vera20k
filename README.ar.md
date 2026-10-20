@@ -56,15 +56,28 @@ VERA20K من صنع اللاعبين ومن أجلهم، وللاعبين الك
 
 ![يرسل التطبيق الأوامر إلى المحاكاة التي تعيد حالة العالم، ويرسل بيانات الرسم إلى التصيير.](docs/images/architecture.ar.png)
 
+## متطلبات النظام
+
+- **اللعبة:** نسخة خاصة بك من Red Alert 2: Yuri's Revenge، الإصدار 1.001. لا يحتوي VERA20K على أي
+  ملفات للعبة، بل يقرأ أرشيفات `.mix` الأصلية من المجلد الذي تحدده في `ra2_dir`.
+- **Windows:** Windows 10 أو أحدث على x64. أما Windows على ARM64 فيُبنى من الشيفرة المصدرية،
+  وCI يبنيه ويختبره.
+- **Linux:** x86-64 أو ARM64، مع Vulkan وX11 أو Wayland وALSA (libasound2). البنيات الرسمية تُنتج
+  على Ubuntu 22.04، لذا تحتاج إلى glibc 2.35 أو أحدث؛ وSteamOS على Steam Deck يستوفي ذلك.
+  أما Linux على ARM64 فيُبنى من الشيفرة المصدرية.
+- **macOS:** macOS 11 أو أحدث على Apple Silicon، وهي النسخة التي ننشرها. أما أجهزة Intel Mac فتُبنى
+  من الشيفرة المصدرية ولا تُختبر في CI.
+- **الرسوميات:** بطاقة رسوميات تدعم Vulkan أو DirectX 12 أو Metal. لا يطلب المُصيّر إلا هذه الواجهات
+  الثلاث، ولا يوجد مسار بديل عبر OpenGL أو DirectX 11، لذا لا تستطيع أي بطاقة لا توفر أياً منها
+  تشغيل اللعبة.
+
 ## البناء والتشغيل
 
 تحتاج إلى:
 
-- **اللعبة:** Red Alert 2: Yuri's Revenge.
-- **Rust وGit:** أحدث إصدار مستقر من [Rust](https://rustup.rs/) مثبتًا عبر rustup، و[Git](https://git-scm.com/).
+- **Rust وGit:** [Rust](https://rustup.rs/) 1.88 أو أحدث، مثبتًا عبر rustup، و[Git](https://git-scm.com/).
 - **أدوات البناء:** على Windows أدوات بناء C++ من Visual Studio، ويعرض مثبّت Rust تثبيتها؛ وعلى macOS الأمر
   `xcode-select --install`؛ وعلى Debian وUbuntu الأمر `sudo apt install build-essential libasound2-dev pkg-config`.
-- **الرسوميات:** بطاقة رسوميات تدعم Vulkan أو DirectX 12 أو Metal.
 
 وقد استُخدم VERA20K للعب على Windows وLinux وmacOS.
 
@@ -79,6 +92,8 @@ cargo run --release --bin vera20k
 ```
 
 </div>
+
+يشغل البناء عدة غيغابايت في `target/`.
 
 ## كيف نعمل
 
