@@ -244,6 +244,18 @@ jobs:
     # Tag pushes always publish; a dispatch chooses, and "none" stops here with
     # the archives left as workflow artifacts.
     if: needs.prepare.outputs.publish != 'none'
+    #
+    # MAINTENANCE DECISION, left to the maintainers: `needs: build` means one
+    # platform failing stops the release. That is deliberate -- a release that
+    # silently lacks macOS is worse than no release -- but hosted runners do
+    # drop jobs ("not acquired by Runner of type hosted"), and then a fully
+    # built Windows and Linux are discarded too.
+    #
+    # To publish whatever succeeded instead, add `always()` to the condition
+    # above and assert the expected archives exist before `gh release create`;
+    # the Checksums step already fails on a missing file. The trade-off is that
+    # a capacity failure would ship a release missing a platform, so the
+    # assertion has to name all three.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -324,8 +336,16 @@ jobs:
           # `tformat` (not `format`) terminates every record with a newline;
           # `format` drops the last one, so `read` at EOF discards the final
           # line -- which silently hides the only commit in a one-commit range.
+          #
+          # A release page cannot show a whole project's history. The first
+          # release has no previous tag, so its range is every commit ever
+          # made; cap the list and link the full comparison instead.
+          CHANGELOG_LIMIT=30
+          total="$(git rev-list --count --no-merges "$base..$GITHUB_SHA")"
+          compare_url="$repo_url/compare/$base...$GITHUB_SHA"
           : > commits.md
-          git log --no-merges --max-count=80 --pretty=tformat:'%H%x09%s' "$base..$GITHUB_SHA" \
+          git log --no-merges --max-count="$CHANGELOG_LIMIT" \
+            --pretty=tformat:'%H%x09%s' "$base..$GITHUB_SHA" \
             | while IFS=$'\t' read -r h s; do
                 if [ -z "$h" ]; then continue; fi
                 printf -- '- [`%s`](%s/commit/%s) %s\n' "${h:0:7}" "$repo_url" "$h" "$s" >> commits.md
@@ -343,11 +363,22 @@ jobs:
           - Build time: \`$STAMP\` (UTC)
           - Built from commit [\`$SHA7\`]($repo_url/commit/$GITHUB_SHA)
 
-          ### Changes since $base_label
+          ### Changelog
 
           EOF
           if [ "$n" -gt 0 ]; then
+            if [ "$total" -gt "$n" ]; then
+              # Newest first, so the cap keeps what a player most wants to read.
+              printf '%s commits since %s; the newest %s are below.\n\n' \
+                "$total" "$base_label" "$n" >> notes.md
+            else
+              printf '%s commit(s) since %s.\n\n' "$total" "$base_label" >> notes.md
+            fi
             cat commits.md >> notes.md
+            if [ "$total" -gt "$n" ]; then
+              printf '\n_%s more not shown — [full comparison](%s)._\n' \
+                "$((total - n))" "$compare_url" >> notes.md
+            fi
           else
             echo 'No commits were added since the previous release.' >> notes.md
           fi
