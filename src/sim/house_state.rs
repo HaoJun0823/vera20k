@@ -480,6 +480,11 @@ pub struct HouseState {
     /// Diplomacy row reads.
     #[serde(default)]
     ui_name: HouseUiName,
+    /// House+0x248: the player sent EXIT (`Execute_DoList 0x0064C7E7`).
+    /// Diplomacy hides its chat box (`0x00658525`); nothing else in live
+    /// play reads it.
+    #[serde(default)]
+    left_game: bool,
     #[serde(default)]
     native_construction: Option<NativeHouseConstruction>,
     #[serde(default)]
@@ -1489,6 +1494,14 @@ impl HouseState {
         self.ui_name = name;
     }
 
+    pub fn left_game(&self) -> bool {
+        self.left_game
+    }
+
+    pub(crate) fn mark_left_game(&mut self) {
+        self.left_game = true;
+    }
+
     pub(crate) fn validate_scenario_name(&self) -> Result<(), &'static str> {
         if self.native_scenario_name.as_ref().is_some_and(|name| {
             name.contains('\0')
@@ -2463,6 +2476,7 @@ impl HouseState {
             name,
             native_scenario_name: None,
             ui_name: HouseUiName::TypeName,
+            left_game: false,
             native_construction: None,
             scenario_parameters: HouseScenarioParameters::default(),
             initial_techno_records: Vec::new(),

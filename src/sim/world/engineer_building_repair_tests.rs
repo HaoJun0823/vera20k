@@ -219,9 +219,9 @@ impl Fixture {
             ),
         );
         if name == "allied_damaged" {
-            sim.house_alliances
+            sim.house_alliances_mut_for_test()
                 .insert("AMERICANS".into(), ["SECOND".into()].into_iter().collect());
-            sim.house_alliances
+            sim.house_alliances_mut_for_test()
                 .insert("SECOND".into(), ["AMERICANS".into()].into_iter().collect());
         }
         sim.native_unique_ids = Some(NativeUniqueIdCursor::test_at_current_value(999));
@@ -267,7 +267,7 @@ impl Fixture {
             ));
             // The native command witness follows Event4C6CB0 with the
             // ordinary Mission5B3570 Commence receiver before its snapshot.
-            sim.mission_commence_exact(id, 0).unwrap();
+            sim.substrate.mission_commence_exact(id, 0).unwrap();
             let entity = sim.substrate.entities.get_mut(id).unwrap();
             assert_eq!(
                 entity.mission.effective().raw(),
@@ -388,6 +388,7 @@ impl Fixture {
             state["power_dirty"] = json!(prior["dirty"][0] == 1);
             state["radar_dirty"] = json!(prior["dirty"][1] == 1);
             sim.power_states
+                .map_mut_for_test()
                 .insert(*id, serde_json::from_value(state).unwrap());
         }
         // The native witness supplies constructor-cleared discovery history
@@ -399,7 +400,7 @@ impl Fixture {
         discovery
             .set_discovered_by_current_house_for_test(history["discovered_by_current_house"] == 1);
         discovery.set_discovered_by_other_house_for_test(history["discovered_by_other_house"] == 1);
-        sim.sound_events.clear();
+        sim.sound_events.clear_for_test();
         Self {
             sim,
             rules,

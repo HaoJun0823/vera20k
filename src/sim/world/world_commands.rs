@@ -137,7 +137,7 @@ impl Simulation {
         //50C905/50C90B: centered cue follows every member callback, even
         //when the registry is empty or every infantry refuses the action.
         if let Some(sound_id) = rules.general.cheer_sound() {
-            self.sound_events.push(SimSoundEvent::VocCentered {
+            self.sound_events.emit(SimSoundEvent::VocCentered {
                 sound_id: sound_id.to_owned(),
             });
             effects.flush_sound(self, Some(rules));
@@ -491,6 +491,43 @@ impl Simulation {
         self.encode_header_event(command_owner, crate::sim::command::DESTRUCT_OPCODE)
     }
 
+    /// EVENT_REMOVEPLAYER's record: the header House is the sender, the
+    /// dword payload the removed House's index (`0x004C6720`).
+    pub fn encode_remove_player_record(
+        &self,
+        command_owner: crate::sim::intern::InternedId,
+        house_index: i32,
+    ) -> Option<CommandRecord> {
+        self.encode_house_index_event(
+            command_owner,
+            crate::sim::command::REMOVE_PLAYER_OPCODE,
+            house_index,
+        )
+    }
+
+    /// EVENT_ALLY's record: the header House is the sender, the dword
+    /// payload the other House's index (`0x00731877..0x007318C8`).
+    pub fn encode_ally_record(
+        &self,
+        command_owner: crate::sim::intern::InternedId,
+        house_index: i32,
+    ) -> Option<CommandRecord> {
+        self.encode_house_index_event(command_owner, crate::sim::command::ALLY_OPCODE, house_index)
+    }
+
+    /// `EventClass(house, type, index)` (`0x004C6720`): a header event
+    /// whose dword payload is a House index.
+    fn encode_house_index_event(
+        &self,
+        command_owner: crate::sim::intern::InternedId,
+        opcode: u8,
+        house_index: i32,
+    ) -> Option<CommandRecord> {
+        let mut record = self.encode_header_event(command_owner, opcode)?;
+        record.payload_mut()[..4].copy_from_slice(&house_index.to_le_bytes());
+        Some(record)
+    }
+
     fn encode_header_event(
         &self,
         command_owner: crate::sim::intern::InternedId,
@@ -646,6 +683,23 @@ impl Simulation {
                 .then(|| CommandEnvelope::new(owner, execute_tick, Command::ExitMatch));
         }
 
+        let house_index_event: Option<fn(i32) -> Command> = match record.opcode() {
+            crate::sim::command::REMOVE_PLAYER_OPCODE => {
+                Some(|house_index| Command::RemovePlayer { house_index })
+            }
+            crate::sim::command::ALLY_OPCODE => Some(|house_index| Command::Ally { house_index }),
+            _ => None,
+        };
+        if let Some(command) = house_index_event {
+            let house_index = usize::try_from(record.house_id()).ok()?;
+            let owner = *self.houses.order().get(house_index)?;
+            let other = i32::from_le_bytes(record.payload()[..4].try_into().ok()?);
+            return self
+                .houses
+                .contains_key(&owner)
+                .then(|| CommandEnvelope::new(owner, execute_tick, command(other)));
+        }
+
         if record.opcode() == crate::sim::command::DESTRUCT_OPCODE {
             let house_index = usize::try_from(record.house_id()).ok()?;
             let owner = *self.houses.order().get(house_index)?;
@@ -691,7 +745,7 @@ impl Simulation {
                 *tail_grid = None;
             }
             if let (Some(tail), Some(cell)) = (tail_grid.as_mut(), terrain.cell(rx, ry)) {
-                let _ = tail.refresh_resolved_cell(cell, false);
+                let _ = tail.refresh_resolved_cell(cell, self.overlay_grid.as_ref(), false);
             }
         }
 
@@ -791,7 +845,7 @@ impl Simulation {
             && rules.general.sell_sound.is_some()
             && let Some(receiver) = self.interner.get(command_owner)
         {
-            self.sound_events.push(SimSoundEvent::WallSold { receiver });
+            self.sound_events.emit(SimSoundEvent::WallSold { receiver });
         }
         let _discarded_actual_cost = rules.building_actual_cost(wall_type);
 
@@ -1472,16 +1526,83 @@ impl Simulation {
                 let Some(owner) = self.interner.get(command_owner) else {
                     return false;
                 };
-                if !self.houses.contains_key(&owner) {
+                let Some(house) = self.houses.get_mut(&owner) else {
+                    return false;
+                };
+                // Execute_DoList's EXIT block (0x0064C7BF..0x0064C862), for
+                // every sender: House+0x248, then Flag_To_Die when no other
+                // human House is undefeated (0x005E2BA0).
+                house.mark_left_game();
+                if self.other_undefeated_humans(owner) == 0 {
+                    self.flag_house_to_die(owner);
+                }
+                // A Simulation without a current House (diagnostic and replay
+                // drivers) has no remote senders.
+                if self
+                    .session
+                    .current_house()
+                    .is_none_or(|local| local == owner)
+                {
+                    // The local sender's EventClass__Execute (0x004C7903)
+                    // writes the termination byte at 0x004C7917. The app
+                    // consumes the owner-tagged edge after this tail.
+                    if !self.quit_requested {
+                        self.executed_exit_owner = Some(owner);
+                    }
+                    self.quit_requested = true;
+                } else {
+                    // A remote sender never reaches Execute (0x0064C91B):
+                    // the app runs DestroyConnection(house, 0) for it
+                    // (0x0064C9B1).
+                    self.departed_owners.push(owner);
+                }
+                true
+            }
+            Command::MoveFlash { rx, ry } => {
+                rules.is_some_and(|rules| self.spawn_move_flash(rules, (*rx, *ry)))
+            }
+            Command::Ally { house_index } => {
+                // EventClass::Execute 0x004C6DEE..0x004C6E23: no admission
+                // gate; the sender toggles on its own mask, announced.
+                let (Some(owner), Some(other), Some(rules)) = (
+                    self.interner.get(command_owner),
+                    usize::try_from(*house_index)
+                        .ok()
+                        .and_then(|index| self.houses.order().get(index).copied()),
+                    rules,
+                ) else {
+                    return false;
+                };
+                if crate::sim::combat::combat_weapon::is_ally_by_object(
+                    Some(self.house_alliances()),
+                    &self.interner,
+                    owner,
+                    other,
+                ) {
+                    self.make_enemy(owner, other, rules, true);
+                } else {
+                    self.make_ally(owner, other, rules, overlay_registry, frame_effects, true);
+                }
+                true
+            }
+            Command::RemovePlayer { house_index } => {
+                // EventClass::Execute 0x004C7B73: IsHumanControlled
+                // (0x0050B730, House+0x1EC outside mode 0), then
+                // Flag_To_Die (0x004C7BE1).
+                let Some(owner) = usize::try_from(*house_index)
+                    .ok()
+                    .and_then(|index| self.houses.order().get(index).copied())
+                else {
+                    return false;
+                };
+                if !self
+                    .houses
+                    .get(&owner)
+                    .is_some_and(|house| house.is_human())
+                {
                     return false;
                 }
-                // EventClass__Execute @ 0x004C6CB0, opcode 0x13: the due
-                // EXIT event writes the termination byte at 0x004C7917. The
-                // app consumes the owner-tagged edge after this tail dispatch.
-                if !self.quit_requested {
-                    self.executed_exit_owner = Some(owner);
-                }
-                self.quit_requested = true;
+                self.flag_house_to_die(owner);
                 true
             }
             // `EventClass::Execute 0x004C6ED2..0x004C6F01`: a live target
@@ -1751,7 +1872,7 @@ impl Simulation {
                             // Dormant: no retail `[AircraftTypes]` entry has
                             // `Passengers=`.
                             let now = self.session.binary_frame();
-                            let _ = self.mission_assign_exact(
+                            let _ = self.substrate.mission_assign_exact(
                                 *transport_id,
                                 crate::sim::mission::MissionId::from_known(MissionType::Unload),
                                 now,
@@ -1893,7 +2014,7 @@ impl Simulation {
                 };
                 // Enemy-only.
                 if crate::map::houses::are_houses_friendly(
-                    &self.house_alliances,
+                    self.house_alliances.as_map(),
                     command_owner,
                     self.interner.resolve(target_owner),
                 ) {
@@ -1979,6 +2100,53 @@ impl Simulation {
                     overlay_registry,
                     frame_effects,
                     false,
+                )
+            }
+            Command::CompletePaidSuperWeapon {
+                selection,
+                target_rx,
+                target_ry,
+            } => {
+                let Some(rules) = rules else {
+                    return false;
+                };
+                let owner = self.interner.intern(command_owner);
+                self.fire_super_weapon_selected(
+                    rules,
+                    owner,
+                    selection.destination,
+                    (*target_rx, *target_ry),
+                    overlay_registry,
+                    frame_effects,
+                    false,
+                    Some(*selection),
+                )
+            }
+            Command::CancelPaidSuperWeapon { selection } => {
+                let Some(rules) = rules else {
+                    return false;
+                };
+                let owner = self.interner.intern(command_owner);
+                self.cancel_paid_super_weapon_selection(rules, owner, *selection)
+            }
+            Command::BeginPaidSuperWeapon {
+                selection,
+                target_rx,
+                target_ry,
+            } => {
+                let Some(rules) = rules else {
+                    return false;
+                };
+                let owner = self.interner.intern(command_owner);
+                self.fire_super_weapon_selected(
+                    rules,
+                    owner,
+                    selection.source,
+                    (*target_rx, *target_ry),
+                    overlay_registry,
+                    frame_effects,
+                    false,
+                    Some(*selection),
                 )
             }
             Command::EnterBunker { unit_id, bunker_id } => {
@@ -2146,7 +2314,7 @@ impl Simulation {
             entity.disguise_hides_house_from(
                 house,
                 Some(&self.fog),
-                Some(&self.house_alliances),
+                Some(self.house_alliances.as_map()),
                 &self.interner,
             )
         }) {
@@ -2238,7 +2406,7 @@ impl Simulation {
             && let Some(sound_id) = self.selection_voice_request(rules, stable_id, voice_latch)
         {
             let sound_id = sound_id.to_owned();
-            self.sound_events.push(SimSoundEvent::UnitVoiceRequested {
+            self.sound_events.emit(SimSoundEvent::UnitVoiceRequested {
                 owner: stable_id,
                 sound_id,
             });
@@ -2383,7 +2551,7 @@ impl Simulation {
             return false;
         }
         let refinery_owner = self.interner.resolve(refinery.owner());
-        if !are_houses_friendly(&self.house_alliances, command_owner, refinery_owner) {
+        if !are_houses_friendly(self.house_alliances.as_map(), command_owner, refinery_owner) {
             return false;
         }
         let refinery_type = self.interner.resolve(refinery.type_ref());
@@ -2428,7 +2596,7 @@ impl Simulation {
         };
         if self.substrate.entities.get(actor_id).is_some_and(|actor| {
             combat::combat_weapon::is_ally_by_object(
-                Some(&self.house_alliances),
+                Some(self.house_alliances.as_map()),
                 &self.interner,
                 player,
                 actor.owner(),
@@ -2953,9 +3121,76 @@ mod tests {
         }
     }
 
+    /// CAN_LOAD refuses a bunker under Construction or being sold
+    /// (`0x0043C326..0x0043C346`) before the adapter releases the tank's
+    /// current seek or sends DOCK_NOW, so the bunker's buildup is not cut
+    /// short by DOCK_NOW's ready latch and the tank keeps its seek.
+    #[test]
+    fn enter_bunker_refuses_a_bunker_building_up_or_being_sold() {
+        use crate::sim::docking::bunker_install::BunkerState;
+        use crate::sim::docking::bunker_link::BunkerLink;
+        let rules = bunker_rules();
+        for mission in [MissionType::Construction, MissionType::Selling] {
+            let mut sim = Simulation::new();
+            crate::sim::arena_fixture::flat_ground(&mut sim, &rules);
+            spawn_bunker_struct(&mut sim, 2, "Americans", 10, 10);
+            spawn_bunker_struct(&mut sim, 3, "Americans", 16, 10);
+            spawn_bunkerable(&mut sim, 1, "Americans", "TANK", 13, 14);
+            assert!(sim.apply_command(
+                "Americans",
+                &Command::EnterBunker {
+                    unit_id: 1,
+                    bunker_id: 3,
+                },
+                Some(&rules),
+            ));
+            sim.substrate
+                .entities
+                .get_mut(2)
+                .unwrap()
+                .mission
+                .set_current_for_test(MissionId::from_known(mission), 1);
+
+            let applied = sim.apply_command(
+                "Americans",
+                &Command::EnterBunker {
+                    unit_id: 1,
+                    bunker_id: 2,
+                },
+                Some(&rules),
+            );
+
+            assert!(!applied, "{mission:?}");
+            let building = sim.substrate.entities.get(2).unwrap();
+            assert_eq!(building.building_ready_latch(), 0, "{mission:?}");
+            assert_eq!(building.mission.queued(), MissionId::NONE, "{mission:?}");
+            assert_eq!(
+                building.bunker_runtime.unwrap().state(),
+                BunkerState::Idle,
+                "{mission:?}"
+            );
+            assert_eq!(
+                sim.substrate.entities.get(1).unwrap().bunker.link(),
+                BunkerLink::Approaching(3),
+                "{mission:?} keeps the current seek"
+            );
+            assert_eq!(
+                sim.substrate
+                    .entities
+                    .get(3)
+                    .unwrap()
+                    .bunker_runtime
+                    .unwrap()
+                    .installing_unit(),
+                Some(1),
+                "{mission:?}"
+            );
+        }
+    }
+
     #[test]
     fn bunker_full_lifecycle_enter_install_then_eject() {
-        use crate::sim::docking::bunker_install::{BunkerState, tick_bunker_install};
+        use crate::sim::docking::bunker_install::{BunkerState, update_bunker};
         use crate::sim::docking::bunker_link::BunkerLink;
         let rules = bunker_rules();
         let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
@@ -2992,9 +3227,8 @@ mod tests {
             sim.substrate.entities.get(2).unwrap(),
             sim.resolved_terrain.as_ref(),
         );
-        // Place the tank ON the bunker cell. The native destination setter
-        // still admits this same-cell order; Drive Process consumes it before
-        // the install machine can observe the stopped candidate.
+        // The tank stands in the bunker's cell, where it stops after its
+        // approach.
         spawn_bunkerable(&mut sim, 1, "Americans", "TANK", 10, 10);
         let unit = sim.substrate.entities.get_mut(1).unwrap();
         unit.body_facing
@@ -3016,20 +3250,29 @@ mod tests {
             crate::sim::world::RevealOutcome::Revealed { .. }
         ));
 
-        // 1) Enter: admission + install machine starts.
-        assert!(sim.apply_command(
-            "Americans",
-            &Command::EnterBunker {
-                unit_id: 1,
-                bunker_id: 2,
-            },
-            Some(&rules),
-        ));
+        // 1) Enter, after the approach: CAN_LOAD's IS_OCCUPIED (0x0043C526)
+        // refuses an order from inside the foundation, so the fixture starts
+        // where the adapter leaves an arrived tank. The bunker's production
+        // DOCK_NOW starts the install; the tank keeps its approach link.
         assert_eq!(
-            sim.substrate.entities.get(1).unwrap().bunker.link(),
-            BunkerLink::Approaching(2)
+            crate::sim::radio::transmit(
+                &mut sim,
+                1,
+                2,
+                crate::sim::radio::RadioMessage::DockNow,
+                crate::sim::radio::RadioPayload::default(),
+                Some(&rules),
+                crate::sim::world::FrameEffects::default(),
+            ),
+            crate::sim::radio::RadioResponse::Roger
         );
-        // Prepared same-cell admission, then the real production locomotor
+        sim.substrate
+            .entities
+            .get_mut(1)
+            .unwrap()
+            .bunker
+            .set_bunker_link_for_test(BunkerLink::Approaching(2));
+        // Prepared same-cell arrival, then the real production locomotor
         // corridor and installer, in their production order, one frame at a
         // time. No head/position writes or Facing::Snap complete the motion.
         // Object/Techno AI and a whole native match remain outside this test.
@@ -3040,10 +3283,11 @@ mod tests {
                 .process_ground_locomotor_stats_for_test(1, Some(&rules), None)
                 .expect("flat arena supplies every production movement receiver");
             moved += movement.moved_steps;
-            tick_bunker_install(
+            update_bunker(
                 &mut sim,
                 &rules,
                 None,
+                2,
                 crate::sim::world::FrameEffects::default(),
             );
             let state = sim
@@ -3162,12 +3406,6 @@ mod tests {
         for _ in 0..600 {
             sim.process_ground_locomotor_stats_for_test(1, Some(&rules), None)
                 .expect("normal release reaches the production movement corridor");
-            tick_bunker_install(
-                &mut sim,
-                &rules,
-                None,
-                crate::sim::world::FrameEffects::default(),
-            );
             sim.session
                 .set_binary_frame_for_test(sim.session.binary_frame() + 1);
             let unit = sim.substrate.entities.get(1).unwrap();
