@@ -64,6 +64,8 @@ mod gattling_loop_tests;
 #[cfg(test)]
 mod house_cue_tests;
 #[cfg(test)]
+mod one_shot_lifetime_tests;
+#[cfg(test)]
 mod unit_voice_lifecycle_tests;
 #[cfg(test)]
 mod unit_voice_tests;
@@ -1298,33 +1300,58 @@ fn sfx_buffer_frames(sample_rate: u32, supported: &rodio::cpal::SupportedBufferS
     }
 }
 
-/// Open the default output with [`sfx_buffer_frames`], falling back to
-/// rodio's own default sink when the device refuses that period.
+/// Sample rate the SFX sink asks the device for, before falling back to the
+/// endpoint default.
+///
+/// VERA-owned output rate, not a native value. Stock audio is 22 050 Hz, so a
+/// 48 kHz sink resamples by ~2.2x while a 192 kHz endpoint would resample by
+/// ~8.7x on every live channel. The device callback must consume all of that
+/// extra work in real time, and when it falls behind, `Player::empty()` stops
+/// becoming true, so `report_finished_outputs` never retires the output and the
+/// channel stays held. Around a dozen such channels exhaust the pool and every
+/// later cue loses the priority gate. Pinning the sink keeps every machine on
+/// the ratio the 48 kHz endpoints already run without symptoms.
+///
+/// A device that refuses 48 kHz falls back to its own default, which is no
+/// worse than the previous behaviour.
+const PREFERRED_SFX_SAMPLE_RATE: u32 = 48_000;
+
+/// Open the default output at [`PREFERRED_SFX_SAMPLE_RATE`], falling back to
+/// the endpoint's own rate and then to rodio's default sink when the device
+/// refuses the requested configuration.
 fn open_sfx_sink() -> Result<MixerDeviceSink, rodio::DeviceSinkError> {
     use rodio::cpal::traits::{DeviceTrait, HostTrait};
 
-    let low_latency = rodio::cpal::default_host()
-        .default_output_device()
-        .and_then(|device| {
-            let config = device.default_output_config().ok()?;
-            let frames = sfx_buffer_frames(config.sample_rate(), config.buffer_size());
-            DeviceSinkBuilder::from_device(device)
-                .ok()?
-                .with_buffer_size(rodio::cpal::BufferSize::Fixed(frames))
-                .open_stream()
-                .inspect(|_| {
-                    log::info!(
-                        "SFX output buffer: {frames} frames at {} Hz",
-                        config.sample_rate()
-                    );
-                })
-                .map_err(|e| log::warn!("SFX low-latency output unavailable ({e}); using default"))
-                .ok()
-        });
-    match low_latency {
-        Some(sink) => Ok(sink),
-        None => DeviceSinkBuilder::open_default_sink(),
+    let open = |requested_rate: u32| -> Option<MixerDeviceSink> {
+        let device = rodio::cpal::default_host().default_output_device()?;
+        let config = device.default_output_config().ok()?;
+        let rate = if requested_rate == 0 {
+            config.sample_rate()
+        } else {
+            requested_rate
+        };
+        let frames = sfx_buffer_frames(rate, config.buffer_size());
+        DeviceSinkBuilder::from_device(device)
+            .ok()?
+            .with_sample_rate(std::num::NonZero::new(rate)?)
+            .with_buffer_size(rodio::cpal::BufferSize::Fixed(frames))
+            .open_stream()
+            .inspect(|_| log::info!("SFX output buffer: {frames} frames at {rate} Hz"))
+            .map_err(|e| log::warn!("SFX output unavailable at {rate} Hz ({e}); trying next rate"))
+            .ok()
+    };
+
+    if let Some(sink) = open(PREFERRED_SFX_SAMPLE_RATE) {
+        return Ok(sink);
     }
+    if let Some(sink) = open(0) {
+        log::warn!(
+            "SFX sink fell back to the endpoint default rate; cues will resample from their \
+             22 050 Hz source at that ratio"
+        );
+        return Ok(sink);
+    }
+    DeviceSinkBuilder::open_default_sink()
 }
 
 impl SfxPlayer {
