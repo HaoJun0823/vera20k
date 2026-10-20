@@ -34,16 +34,6 @@ on:
         type: choice
         options: [draft, prerelease, none]
         default: draft
-      # EXAMPLE: optional program data for future releases, for instance
-      # translation files. Uncomment this input and the marked block in the
-      # build job's Package step together; they are one feature. The guard in
-      # that block refuses retail game files (*.mix, *.shp, *.vxl, ini/), which
-      # this project never ships (README.md, README.txt.in).
-      #
-      #   extra_assets:
-      #     description: 'Optional extra repo-relative files or directories to add to every archive (space separated), for example: i18n/'
-      #     type: string
-      #     required: false
 
 permissions:
   contents: read
@@ -190,37 +180,6 @@ jobs:
           cp "target/shipping/${{ matrix.program }}" config.toml.example LICENSE-GPL \
             dist/THIRD_PARTY_LICENSES.html "dist/$name/"
           sed "s/@VERSION@/${TAG}/" .github/release/README.txt.in > "dist/$name/README.txt"
-
-          # ────────────────────────────────────────────────────────────────
-          # EXAMPLE: optional program data for future releases, such as
-          # translation files. Uncomment this block and the matching
-          # `extra_assets` input together; they are one feature.
-          #
-          # The guard refuses retail game files (*.mix, *.shp, *.vxl, ini/)
-          # regardless of what the dispatch form says: this project ships none
-          # (README.md, README.txt.in), so neither may its releases.
-          #
-          # EXTRA_ASSETS: ${{ inputs.extra_assets }}
-          # ... set it in the step's env: block above when enabling:
-          #
-          #   if [ -n "${EXTRA_ASSETS:-}" ]; then
-          #     read -r -a extras <<< "$EXTRA_ASSETS"
-          #     for rel in "${extras[@]}"; do
-          #       case "$rel" in
-          #         ini|ini/*|*/ini/*|*.mix|*.MIX|*.shp|*.SHP|*.vxl|*.VXL)
-          #           echo "Refusing retail game files in a release archive: $rel" >&2
-          #           exit 1
-          #           ;;
-          #       esac
-          #       if [ ! -e "$rel" ]; then
-          #         echo "extra_assets entry does not exist: $rel" >&2
-          #         exit 1
-          #       fi
-          #       cp -R "$rel" "dist/$name/"
-          #       echo "Added extra asset: $rel"
-          #     done
-          #   fi
-          # ────────────────────────────────────────────────────────────────
 
           # Files sit at the archive root so they can be extracted straight into
           # the game folder.
@@ -413,11 +372,12 @@ jobs:
           # Assert the substitution happened instead of shipping a literal
           # placeholder to players. Both the shell form ($VAR / ${VAR}) and an
           # @@NAME@@ template marker are checked; a quoted heredoc <<'EOF' would
-          # silently keep either one.
+          # silently keep either one. Commit lines are skipped: a subject may
+          # legitimately mention a variable such as $RA2_DIR.
           placeholder='(\$[{]?[A-Z_]+[}]?|@@[A-Z_]+@@)'
-          if grep -qE "$placeholder" notes.md; then
+          if grep -v '^- \[`' notes.md | grep -qE "$placeholder"; then
             echo "!! release notes still contain an unexpanded placeholder:" >&2
-            grep -nE "$placeholder" notes.md >&2
+            grep -v '^- \[`' notes.md | grep -nE "$placeholder" >&2
             exit 1
           fi
           echo "--- notes.md ($(wc -l < notes.md) lines) ---"
