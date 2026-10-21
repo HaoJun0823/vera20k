@@ -51,6 +51,13 @@ impl crate::app::persistence::options::launcher::LauncherPreviewOperations for A
         // The next battle frame lays out and draws the sidebar at this size.
         self.persistence.options_profile.sidebar = size;
     }
+    fn set_display(&mut self, display: crate::ui::main_menu_dialogs::options::DisplayTarget) {
+        // Applied at once, like Full Screen: the window moves to the picked
+        // screen (or back to the system's choice) before the page is accepted.
+        self.persistence.options_profile.display = display.clone();
+        let displays = crate::app::display_target::current_displays(&self.platform.window);
+        crate::app::display_target::apply(&self.platform.window, &displays, &display);
+    }
     fn set_full_screen(&mut self, full_screen: bool) {
         App::set_full_screen(self, full_screen);
     }
@@ -832,12 +839,19 @@ Details: {details}"
                 .and_then(|csf| csf.get(key))
                 .map(str::to_owned)
         });
+        // The Display list is VERA's own: it reads the screens attached now, so
+        // a screen plugged in or removed since the last launch shows correctly.
+        let displays = crate::app::display_target::current_displays(&state.platform.window)
+            .iter()
+            .map(|display| display.choice().clone())
+            .collect();
         let dialog = launcher_dialog_from_profile(
             &state.persistence.options_profile,
             labels,
             state.platform.window.fullscreen().is_some(),
             state.renderer.fps_overlay.is_visible(),
             state.audio.launcher_audio_available,
+            displays,
         );
         state.frontend.options_dialog = Some(dialog);
     }
