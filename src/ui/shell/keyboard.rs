@@ -88,11 +88,23 @@ pub struct KeyboardState {
     pub scroll: ListScrollInteraction,
 }
 impl KeyboardState {
-    pub fn new(parent: KeyboardParent, commands: Vec<KeyboardCommandRow>) -> Self {
+    /// `trailing_categories` are listed after every category the commands
+    /// carry, whatever the sort would do with them: VERA's own category must
+    /// stay at the end and must exist before any command is registered in it.
+    pub fn new(
+        parent: KeyboardParent,
+        commands: Vec<KeyboardCommandRow>,
+        trailing_categories: Vec<String>,
+    ) -> Self {
         // CBS_SORT/LBS_SORT: sort localized strings, preserving command identity.
         let mut categories: Vec<_> = commands.iter().map(|r| r.category.clone()).collect();
         categories.sort_by_key(|s| s.to_lowercase());
         categories.dedup();
+        for category in trailing_categories {
+            if !categories.contains(&category) {
+                categories.push(category);
+            }
+        }
         let mut result = Self {
             title: Default::default(),
             title_receipt: None,
@@ -426,6 +438,36 @@ mod tests {
             }
         }
     }
+    /// VERA's own category is listed after every retail one even though it
+    /// sorts before them, so an enhancement's keys never land among the
+    /// original ones and the category exists before its first command does.
+    #[test]
+    fn trailing_categories_follow_every_command_category() {
+        let rows = vec![
+            KeyboardCommandRow {
+                command_index: 0,
+                name: "Stop".into(),
+                category: "Control".into(),
+                description: "stop".into(),
+            },
+            KeyboardCommandRow {
+                command_index: 1,
+                name: "Health".into(),
+                category: "Selection".into(),
+                description: "health".into(),
+            },
+        ];
+        // "AaaVera" sorts first, so finding it last proves it is appended;
+        // "Control" is already derived, so it must not appear twice.
+        let state = KeyboardState::new(
+            KeyboardParent::Launcher,
+            rows,
+            vec!["AaaVera".into(), "Control".into()],
+        );
+        assert_eq!(state.categories, ["Control", "Selection", "AaaVera"]);
+        assert_eq!(state.category, 0, "the retail category opens selected");
+    }
+
     #[test]
     fn sorted_categories_and_commands_keep_identity_and_no_initial_selection() {
         let rows = vec![
@@ -448,7 +490,7 @@ mod tests {
                 description: "alliance".into(),
             },
         ];
-        let mut state = KeyboardState::new(KeyboardParent::Launcher, rows);
+        let mut state = KeyboardState::new(KeyboardParent::Launcher, rows, Vec::new());
         assert_eq!(state.categories, ["Control", "Selection"]);
         assert!(state.selected_command().is_none());
         state.select_command(0);
