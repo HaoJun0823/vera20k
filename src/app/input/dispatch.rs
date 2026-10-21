@@ -1772,9 +1772,9 @@ const AUTO_PLAY_COMMANDS_PER_FRAME: usize = 8;
 /// VERA's own: auto play runs exactly while a host is installed, so there is no
 /// second switch that has to be kept in step with it.
 ///
-/// The agent is a `ScriptedAgent`, and where its script comes from is still
-/// open (docs/autoplay.md): until something supplies one, this installs the
-/// path with nothing to play.
+/// The installed policy is a `ScriptedPolicy`, and where its script comes from
+/// is still open (docs/autoplay.md): until something supplies one, this
+/// installs the path with nothing to play.
 fn toggle_auto_play(state: &mut AppState) {
     let previous = state.match_state.auto_play.take();
     let installing = previous.is_none();
@@ -1788,7 +1788,7 @@ fn toggle_auto_play(state: &mut AppState) {
             return;
         };
         state.match_state.auto_play = Some(crate::sim::autoplay::AutoPlayHost::new(
-            Box::new(crate::sim::autoplay::ScriptedAgent::default()),
+            Box::new(crate::sim::autoplay::ScriptedPolicy::default()),
             owner,
             AUTO_PLAY_COMMANDS_PER_FRAME,
         ));

@@ -88,7 +88,8 @@ Timing the agent must be written against:
 | Area | State |
 |---|---|
 | `src/sim/autoplay/observation.rs` | Implemented: `AutoPlayView` with credits, power output/drain/balance, own entities, `max_health`, ready buildings, ground walkability. Each field reads its authoritative owner. |
-| `src/sim/autoplay/agent.rs` | Implemented: `AutoPlayAgent` and `ScriptedAgent`, a fixed `(frame, Command)` schedule. |
+| `src/sim/autoplay/policy.rs` | Implemented: `AutoPlayPolicy`, the swappable seam, with the one-self-contained-issuer contract. |
+| `src/sim/autoplay/scripted_policy.rs` | Implemented: `ScriptedPolicy`, a fixed `(frame, Command)` schedule — the only policy so far. |
 | `src/sim/autoplay/host.rs` | Implemented: `AutoPlayHost::step` — observation → agent → gate → `queue_commands`. The gate reuses `Simulation::entity_owned_by_id` and `Simulation::order_actor_admits` rather than restating them. |
 | `src/sim/autoplay/autoplay_tests.rs` | Implemented: 10 tests over the envelope, the gate's three rejections, the per-frame cap, input lock, the release schedule and the observation. Four run on synthetic rules so they hold without `RA2_DIR`; six need it to spawn real object types. |
 | `vera20k` hotkey category | Groundwork, delivered separately: `catalog::VERA_CATEGORY_KEY` is declared in the input layer and listed after every category the retail commands carry. |
@@ -97,7 +98,7 @@ Timing the agent must be written against:
 | A scripted scenario test (MCV → build → place → unit) | Not started. The actuation path is unit-tested, not yet exercised end to end in `headless_scenario`. |
 | Anything in `sim::ai_*` | Untouched. |
 
-`ScriptedAgent` takes a typed `Vec<(u64, Command)>`, not JSON. `Command` is
+`ScriptedPolicy` takes a typed `Vec<(u64, Command)>`, not JSON. `Command` is
 serde-derived, but its `InternedId` fields are numeric, so a JSON script could
 not be written by hand without a second, competing command spelling. A
 name-resolving script format is therefore a brain-stage question, not a hand
@@ -107,9 +108,9 @@ one, and H0's "Done when" below is adjusted accordingly.
 
 | Responsibility | Owner |
 |---|---|
-| Read-only projection of what the player can see | `sim::autoplay::observation` (new) |
-| Agent interface | `sim::autoplay::agent` (new) |
-| Admission gate, per-frame cap, envelope construction | `sim::autoplay::host` (new) |
+| Read-only projection of what the house can see | `sim::autoplay::observation` |
+| Policy interface — the swappable brain | `sim::autoplay::policy` |
+| Admission gate, per-frame cap, envelope construction — the stable hand | `sim::autoplay::host` |
 | Calling the host once per frame | the frame loop: `app/match_runtime/sim_tick`, and the headless runner |
 | Everything else | unchanged. No existing owner moves. |
 
@@ -157,30 +158,51 @@ Rules:
   should be fog-limited at all is a **brain** question, not decided here; the field is
   provided with a switch so either answer works.
 
-### Agent
+### Policy
+
+The swappable brain. **One policy drives a house at a time**, and it is expected to be
+self-contained.
 
 ```rust
-pub trait AutoPlayAgent {
-    fn on_frame(&mut self, view: &AutoPlayView<'_>) -> Vec<Command>;
+pub trait AutoPlayPolicy {
+    fn name(&self) -> &'static str;
+    fn decide(&mut self, view: &AutoPlayView<'_>) -> Vec<Command>;
 }
 ```
 
-Called once per frame, between frames. The agent owns its own state, including whatever
-it is waiting for.
+Called once per frame, between frames. The policy owns its own state — its plan, its
+generator, its memory of what it asked for and what has happened since. It is the only
+issuer for its house, so the host arbitrates nothing and keeps no ledger on its behalf;
+there is never a second competitor to share one with. If a future need forces the host to
+know about outstanding work, that is a new decision, not an assumption to build on now.
+
+Implementations are interchangeable, which is the point of the seam:
+
+| Policy | Decisions come from |
+|---|---|
+| Retail AI | the loaded rules for basic choices — what may be built, which buildings count as economic and which as defensive — and `AIMD.INI` for strategy, tactics and team instruction groups. A mod that extends either file changes what it decides without touching VERA. |
+| `ScriptedPolicy` | a fixed `(frame, Command)` schedule. Implements it today. |
+| A later controller | anything. |
+
+The seam also runs the other way: the host takes an owner rather than assuming the local
+player, so the same hands can stand in for a computer player.
 
 ### Host
 
 ```rust
-pub struct AutoPlayHost { agent: Box<dyn AutoPlayAgent>, max_per_frame: usize }
+pub struct AutoPlayHost { policy: Box<dyn AutoPlayPolicy>, owner: InternedId, max_per_frame: usize }
 
 impl AutoPlayHost {
-    pub fn step(&mut self, sim: &mut Simulation, rules: &RuleSet);
+    pub fn step(&mut self, sim: &mut Simulation);
 }
 ```
 
-Per frame: build the view for the local house → call `on_frame` → gate each command →
-wrap into `CommandEnvelope { owner: <local house>, execute_tick: sim.session().tick(), .. }`
-→ `sim.queue_commands(..)`.
+Per frame: build the view for `owner` → `policy.decide` → gate each command → wrap into
+`CommandEnvelope { owner, execute_tick: sim.session().tick(), .. }` → `sim.queue_commands`.
+
+It takes no `RuleSet`: the host does not decide anything, and a policy that needs the
+loaded rules takes them when it is constructed or when the seam grows a rules argument.
+Adding one now would be plumbing for a policy that does not exist yet.
 
 The gate is deliberately minimal. Strict human equivalence is a non-goal, so the gate
 only prevents self-harm, it does not re-derive `What_Action`:
@@ -192,21 +214,22 @@ only prevents self-harm, it does not re-derive `What_Action`:
 - at most `max_per_frame` commands;
 - `session.input_locked()` is respected.
 
-## Determinism rules for agents
+## Determinism rules for policies
 
-The agent is part of the deterministic input stream, so:
+A policy is part of the deterministic input stream, so:
 
 - no wall clock, no file or network reads during a decision;
 - no iteration over unordered containers;
 - no `f32` in a decision;
-- any randomness comes from a seeded generator the agent owns, never from a simulation
+- any randomness comes from a seeded generator the policy owns, never from a simulation
   stream.
 
-Replay stays correct regardless of what the agent does, because replay re-runs the
-command stream, not the agent.
+Replay stays correct regardless of what a policy does, because replay re-runs the command
+stream, not the policy.
 
-Residual: agent state is not serialized, so a save/load mid-match loses the agent's
-memory of what it was waiting for. Accepted for now; noted for the brain stage.
+Residual: policy state is not serialized, so a save/load mid-match loses the policy's
+memory of what it was waiting for. Accepted for now; it belongs with whichever policy
+first needs to survive a load.
 
 ## Implementation chains
 
@@ -214,7 +237,7 @@ One PR each. A stage is done when its "Done when" holds.
 
 ### Stage H0: scripted actuation (skeleton delivered)
 
-Scope: `observation`, `agent` with a `ScriptedAgent` playing a fixed list of
+Scope: `observation`, the `policy` seam with a `ScriptedPolicy` playing a fixed list of
 `(frame, Command)` pairs, `host`, and tests.
 
 Delivered: the three modules and their tests, the frame-loop wiring, and the AutoPlay
@@ -222,7 +245,7 @@ hotkey that installs the host.
 
 Still to do for this stage, before it counts as done:
 
-- **Where the script comes from.** The hotkey installs a `ScriptedAgent`, and nothing
+- **Where the script comes from.** The hotkey installs a `ScriptedPolicy`, and nothing
   supplies it a script yet, so switching auto play on runs an empty agent. Options are a
   file the player drops next to the map, a scripted scenario, or the policy layer
   answering directly — all brain-adjacent, so this is the next decision.
@@ -246,10 +269,25 @@ surface.
 
 ## Decided: where the brain's decisions come from
 
-**Decision: reuse `sim::ai_*`, but only as a source of decisions.** The agent translates
-each decision into commands. It never writes house state, `is_human` stays true, and the
-player keeps selection, the sidebar and the right to order anything at any time. AI
-takeover is operation, not control.
+**Decision: the retail AI becomes one policy implementation on the `policy` seam — it is
+not bridged into the host.** This is the difference between a Modula-2-style plugin host
+and a direct coupling: the host stays stable and knows nothing about which policy drives
+it, and the retail AI is a peer of a script and of a later controller rather than a
+special case wired into the hand.
+
+Two consequences worth stating, because they shape the work:
+
+- **Nothing here is a port of gamemd's AI.** The retail AI's own decision code is a
+  policy's business; the host and the observation layer are VERA's, and they must not
+  grow parts that only make sense for one policy.
+- **AI function is split across two INI layers, and the policy reads both**: the loaded
+  rules decide the basics (what may be built, which buildings are economic and which are
+  defensive), and `AIMD.INI` decides strategy, tactics and team instruction groups. A mod
+  that extends either file changes the policy's decisions without touching VERA.
+
+The policy does not write house state, `is_human` stays true, and the player keeps
+selection, the sidebar and the right to order anything at any time. AI takeover is
+operation, not control.
 
 One premise behind that decision needs recording precisely, because it is easy to
 overstate:
@@ -279,21 +317,29 @@ start the AI today. Auto play is what gives them meaning for a human house.
 
 ## Deferred: the brain
 
-Specified above: decisions come from `sim::ai_*`, delivered as commands. Still open:
-2. **Fog honesty.** `sim::ai_*` sees the whole map. Reusing it for the player house makes
-   the player omniscient. Fine for unattended play, wrong for anything competitive.
-   Switch already provided in `AutoPlayView`.
-3. **House-state memory.** `ai_production`, `ai_unit_choices` and the team timers are the
-   computer AI's memory. One owner writes them: either the existing AI (computer houses)
-   or the agent (player house), never both.
-4. **RNG.** Some AI decision paths draw from a simulation stream. Reuse changes the draw
-   sequence. Harmless for replay, but such a match must not be used for native parity.
+The seam is in place and one trivial policy occupies it. Still open:
+
+1. **The retail AI policy.** Building it means giving it its own memory — plan, generator,
+   production bookkeeping — rather than reading the computer AI's house fields, which are
+   never populated for a human house. It is a policy-internal change; the host does not
+   move for it.
+2. **Fog honesty.** The computer AI sees the whole map, so a policy reusing its decisions
+   makes the driven house omniscient. Fine for unattended play, wrong for anything
+   competitive. `AutoPlayView` already offers a fog-filtered view, and whether to use it
+   is the policy's call.
+3. **Per-house AI state ownership.** `ai_production`, `ai_unit_choices` and the team timers
+   are the computer AI's memory, and one owner writes them: the existing AI for a computer
+   house, or a policy for the house it drives — never both at once.
+4. **RNG.** Some AI decision paths draw from a simulation stream. A policy must draw from
+   its own, so its decisions cannot disturb the simulation's sequence; a path that shares
+   the stream would make such a match unusable for native parity.
 5. **Team scripts.** `team_script_vm` assigns missions directly. Some actions have no
    player equivalent, so translation is lossy and needs an action-by-action ruling.
-6. **Out-of-process agent.** Whether the brain lives outside the process (BWAPI-Client /
-   PySC2 style), and if so over what transport.
-7. **Where the host is called from** once a real policy exists, and how it is gated per
-   match mode.
+6. **Out-of-process policy.** Whether a policy can live outside the process (BWAPI-Client /
+   PySC2 style), and if so over what transport. The seam is in-process today.
+7. **Driving a computer house.** `AutoPlayHost` already takes an owner rather than
+   assuming the local player, so this is reachable; what it means for the existing
+   computer AI, which writes house state directly, is undecided.
 
 ## Validation per stage
 

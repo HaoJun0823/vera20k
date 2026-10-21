@@ -1,11 +1,12 @@
 //! The actuation path on the retail rival arena: the host's gate and envelope,
-//! the scripted agent's release schedule, and the observation reading the
+//! the scripted policy's release schedule, and the observation reading the
 //! owners it claims to read.
 
 use crate::rules::ruleset::RuleSet;
-use crate::sim::autoplay::agent::{AutoPlayAgent, ScriptStep, ScriptedAgent};
 use crate::sim::autoplay::host::AutoPlayHost;
 use crate::sim::autoplay::observation::AutoPlayView;
+use crate::sim::autoplay::policy::AutoPlayPolicy;
+use crate::sim::autoplay::scripted_policy::{ScriptStep, ScriptedPolicy};
 use crate::sim::command::{Command, CommandEnvelope};
 use crate::sim::world::Simulation;
 
@@ -39,7 +40,7 @@ fn american(sim: &mut Simulation) -> crate::sim::intern::InternedId {
 /// A host for `Americans` playing `script`.
 fn host(sim: &mut Simulation, script: Vec<(u64, Command)>) -> AutoPlayHost {
     AutoPlayHost::new(
-        Box::new(ScriptedAgent::from_pairs(script)),
+        Box::new(ScriptedPolicy::from_pairs(script)),
         american(sim),
         usize::MAX,
     )
@@ -150,7 +151,7 @@ fn the_per_frame_cap_drops_the_overflow() {
         .expect("an American tank");
     let owner = american(&mut sim);
     let mut host = AutoPlayHost::new(
-        Box::new(ScriptedAgent::from_pairs([
+        Box::new(ScriptedPolicy::from_pairs([
             (0, Command::Stop { entity_id: tank }),
             (0, Command::Scatter { entity_id: tank }),
             (
@@ -176,14 +177,14 @@ fn the_per_frame_cap_drops_the_overflow() {
 }
 
 #[test]
-fn the_scripted_agent_releases_each_step_once_at_its_frame() {
+fn the_scripted_policy_releases_each_step_once_at_its_frame() {
     let Some((mut sim, rules)) = arena(0xA17) else {
         return;
     };
     let tank = sim
         .spawn_object("MTNK", "Americans", 16, 16, 64, &rules)
         .expect("an American tank");
-    let mut agent = ScriptedAgent::new(vec![
+    let mut agent = ScriptedPolicy::new(vec![
         ScriptStep {
             frame: 5,
             command: Command::Stop { entity_id: tank },
@@ -204,13 +205,13 @@ fn the_scripted_agent_releases_each_step_once_at_its_frame() {
 
     // Out of order input is sorted, and same-frame steps keep their given order.
     assert_eq!(agent.pending().len(), 3);
-    assert!(agent.on_frame(&AutoPlayView::new(&sim, owner)).is_empty());
+    assert!(agent.decide(&AutoPlayView::new(&sim, owner)).is_empty());
     assert_eq!(sim.session().tick(), 0);
 
     // Frame 5 releases both of its steps, once, in script order.
     advance_to(&mut sim, &rules, 5);
     assert_eq!(sim.session().tick(), 5);
-    let released = agent.on_frame(&AutoPlayView::new(&sim, owner));
+    let released = agent.decide(&AutoPlayView::new(&sim, owner));
     assert_eq!(
         released,
         vec![
@@ -219,14 +220,14 @@ fn the_scripted_agent_releases_each_step_once_at_its_frame() {
         ]
     );
     assert!(
-        agent.on_frame(&AutoPlayView::new(&sim, owner)).is_empty(),
+        agent.decide(&AutoPlayView::new(&sim, owner)).is_empty(),
         "a step is released once, not every frame"
     );
 
     // Frame 9 releases the last one.
     advance_to(&mut sim, &rules, 9);
     assert_eq!(
-        agent.on_frame(&AutoPlayView::new(&sim, owner)),
+        agent.decide(&AutoPlayView::new(&sim, owner)),
         vec![Command::Guard {
             entity_id: tank,
             target: None
@@ -248,7 +249,7 @@ fn a_host_issued_command_is_drained_by_the_frame_that_follows_its_step() {
         .expect("an American tank");
     let owner = american(&mut sim);
     let mut host = AutoPlayHost::new(
-        Box::new(ScriptedAgent::from_pairs([(
+        Box::new(ScriptedPolicy::from_pairs([(
             5,
             Command::Stop { entity_id: tank },
         )])),
@@ -333,7 +334,7 @@ fn a_house_with_no_registration_issues_nothing() {
     let (mut sim, _rules) = synthetic_arena(0xA17);
     let stranger = sim.interner.intern("Stranger");
     let mut host = AutoPlayHost::new(
-        Box::new(ScriptedAgent::from_pairs([(0, Command::Cheer)])),
+        Box::new(ScriptedPolicy::from_pairs([(0, Command::Cheer)])),
         stranger,
         usize::MAX,
     );

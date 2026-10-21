@@ -1,9 +1,19 @@
-//! The auto play driver: observation → agent → gate → command queue.
+//! The auto play hand: observation → policy → gate → command queue.
 //!
 //! [`AutoPlayHost::step`] is the whole path. It runs once per frame, before the
 //! frame advances, and ends at `Simulation::queue_commands` — the same
 //! append-only ingress the player's clicks reach. It writes no simulation
 //! state of its own.
+//!
+//! This is the stable layer, and it is deliberately ignorant of what drives
+//! it: it holds one [`crate::sim::autoplay::policy::AutoPlayPolicy`], asks it
+//! once a frame, and queues what comes back. It arbitrates nothing between
+//! policies and keeps no ledger of outstanding work, because the contract is
+//! that a house has one self-contained issuer at a time. Which policy is
+//! installed is the caller's choice.
+//!
+//! Nothing here assumes the driven house is the local player's, so the same
+//! hand can drive a computer house.
 //!
 //! The gate is deliberately minimal. Strict equivalence with a human click is
 //! a non-goal (`docs/autoplay.md`), so this does not re-derive `What_Action`,
@@ -29,33 +39,39 @@
 //! `Command::megamission_actor`, which classifies commands for MegaMission
 //! scheduling and planning cancellation and is untouched here.
 
-use crate::sim::autoplay::agent::AutoPlayAgent;
 use crate::sim::autoplay::observation::AutoPlayView;
+use crate::sim::autoplay::policy::AutoPlayPolicy;
 use crate::sim::command::{Command, CommandEnvelope};
 use crate::sim::intern::InternedId;
 use crate::sim::world::Simulation;
 
-/// Drives one agent for one house.
+/// Drives one policy for one house.
 pub struct AutoPlayHost {
-    agent: Box<dyn AutoPlayAgent>,
+    policy: Box<dyn AutoPlayPolicy>,
     owner: InternedId,
     max_per_frame: usize,
     rejected: usize,
 }
 
 impl AutoPlayHost {
-    pub fn new(agent: Box<dyn AutoPlayAgent>, owner: InternedId, max_per_frame: usize) -> Self {
+    pub fn new(policy: Box<dyn AutoPlayPolicy>, owner: InternedId, max_per_frame: usize) -> Self {
         Self {
-            agent,
+            policy,
             owner,
             max_per_frame,
             rejected: 0,
         }
     }
 
-    /// The house every issued command is stamped with.
+    /// The house every issued command is stamped with. Not necessarily the
+    /// local player's: a computer house can be driven the same way.
     pub fn owner(&self) -> InternedId {
         self.owner
+    }
+
+    /// The policy driving the house, for diagnostics.
+    pub fn policy_name(&self) -> &'static str {
+        self.policy.name()
     }
 
     /// Commands the gate has dropped since the host was built. Diagnostics
@@ -74,7 +90,7 @@ impl AutoPlayHost {
             return;
         }
         let owner_name = sim.interner().resolve(owner).to_owned();
-        let commands = self.agent.on_frame(&AutoPlayView::new(sim, owner));
+        let commands = self.policy.decide(&AutoPlayView::new(sim, owner));
         let execute_tick = sim.session().tick();
         let mut admitted = Vec::new();
         for command in commands {

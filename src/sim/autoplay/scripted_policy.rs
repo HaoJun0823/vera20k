@@ -1,24 +1,12 @@
-//! The agent interface and the scripted agent.
+//! The scripted policy: a fixed list of commands released by frame number.
 //!
-//! An agent is called once per frame, between frames, and answers with the
-//! commands the player would have produced by clicking. It owns whatever state
-//! it needs, including what it is waiting for; the simulation does not.
-//!
-//! Determinism: the agent is part of the deterministic input stream. It may not
-//! read a clock, a file or a socket while deciding, may not iterate an
-//! unordered container, and may not let an `f32` reach a decision. Any
-//! randomness must come from a generator it seeds and owns, never from a
-//! simulation stream.
+//! It is a schedule, not a plan — it never reads the view. It exists so the
+//! actuation path can be built and tested against something, and it is the
+//! simplest thing that can occupy the policy seam.
 
 use crate::sim::autoplay::observation::AutoPlayView;
+use crate::sim::autoplay::policy::AutoPlayPolicy;
 use crate::sim::command::Command;
-
-/// A player substitute: it looks at [`AutoPlayView`] and answers with commands.
-pub trait AutoPlayAgent {
-    /// Called once per frame. Returned commands are queued for this house and
-    /// take effect in the frame tail of the next frame.
-    fn on_frame(&mut self, view: &AutoPlayView<'_>) -> Vec<Command>;
-}
 
 /// One command, released at one frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,18 +16,14 @@ pub struct ScriptStep {
     pub command: Command,
 }
 
-/// An agent that plays a fixed script: a list of `(frame, Command)` pairs.
-///
-/// The script is a schedule, not a policy — it never reads the view. It exists
-/// so the actuation path can be built and tested before any policy does, which
-/// is the point of the hands-before-brain ordering in `docs/autoplay.md`.
+/// A policy that plays a fixed script.
 #[derive(Debug, Clone, Default)]
-pub struct ScriptedAgent {
+pub struct ScriptedPolicy {
     steps: Vec<ScriptStep>,
     next: usize,
 }
 
-impl ScriptedAgent {
+impl ScriptedPolicy {
     /// A script in any order; it is sorted by frame with a stable sort, so the
     /// release order of same-frame steps is the order they were given.
     pub fn new(steps: Vec<ScriptStep>) -> Self {
@@ -63,8 +47,12 @@ impl ScriptedAgent {
     }
 }
 
-impl AutoPlayAgent for ScriptedAgent {
-    fn on_frame(&mut self, view: &AutoPlayView<'_>) -> Vec<Command> {
+impl AutoPlayPolicy for ScriptedPolicy {
+    fn name(&self) -> &'static str {
+        "scripted"
+    }
+
+    fn decide(&mut self, view: &AutoPlayView<'_>) -> Vec<Command> {
         let tick = view.tick();
         let mut released = Vec::new();
         while let Some(step) = self.steps.get(self.next) {
