@@ -1015,6 +1015,11 @@ fn advance_one_simulation_frame(
             // Delay-zero AnimClass construction can emit StartSound during the
             // final map-load sweep. Keep it until this first tactical drain;
             // `drain(..)` below still consumes every event exactly once.
+            // Auto play is another command producer: it runs before the drain,
+            // so what it issues now is among this frame's due commands.
+            if let Some(host) = state.match_state.auto_play.as_mut() {
+                host.step(sim);
+            }
             let due_commands = if tick_lane == TickLane::Ordinary {
                 sim.take_due_commands()
             } else {

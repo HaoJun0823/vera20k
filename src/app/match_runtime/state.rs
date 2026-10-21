@@ -15,6 +15,10 @@ pub(crate) struct MatchState {
     /// the shell, the launch path and the saved-game restore; read by the app
     /// loop only. Read `GameMode` through [`Self::session_mode`].
     pub(crate) session: super::session::MatchSession,
+    /// Auto play: the agent driving the local house, if one is installed.
+    /// `None` is the normal case — a match with no agent is an ordinary match,
+    /// and the frame loop does nothing extra. See `docs/autoplay.md`.
+    pub(crate) auto_play: Option<crate::sim::autoplay::AutoPlayHost>,
     /// The in-match connection wait and its dialog 0xEA
     /// (`Wait_For_Players 0x00648710`).
     pub(crate) network_wait: super::network_match::NetworkMatchWait,
@@ -114,8 +118,7 @@ impl MatchState {
                 .radar_anim
                 .as_ref()
                 .is_some_and(|radar| radar.movie_pause())
-            || (self.match_presentation.in_game_menu.is_open()
-                && !self.session_mode().is_network())
+            || (self.match_presentation.in_game_menu.is_open() && !self.session_mode().is_network())
     }
 
     /// `GameMode` (`0x00A8B238`) from whichever side holds it: the installed

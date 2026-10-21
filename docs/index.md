@@ -13,7 +13,7 @@ A short map of the code. If it disagrees with the code, the code is right. Each 
 
 ## The code
 
-- `sim/` — all game state and deterministic gameplay.
+- `sim/` — all game state and deterministic gameplay. Scripted auto play, an agent issuing the player's own commands, is planned in [autoplay.md](autoplay.md).
 - `render/` — the wgpu renderer.
 - `app/` — window, input, loading and saving; wires sim, render, ui, audio and net together.
 - `ui/` — menus, dialogs, in-game screens and the sidebar.
