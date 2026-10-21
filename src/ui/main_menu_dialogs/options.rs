@@ -292,10 +292,9 @@ impl DisplayChoice {
 /// Which screen the game opens on: the player's pick, or the window system's.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) enum DisplayTarget {
-    /// `[VERA] Display=` absent or empty: the system's own screen, its primary
-    /// one, and the window is moved there. A system that names no primary
-    /// screen (Wayland) has nothing to move to and keeps the window where the
-    /// system put it.
+    /// `[VERA] Display=` absent or empty: no screen is named and the window
+    /// is never moved, so it opens wherever the window system puts it, as in
+    /// every build before this option.
     #[default]
     Auto,
     /// A [`DisplayChoice::id`]. A screen that is gone at the next launch leaves

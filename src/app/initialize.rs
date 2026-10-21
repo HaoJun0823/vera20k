@@ -216,23 +216,9 @@ impl App {
         } else {
             crate::app::display_target::current_displays_for(event_loop)
         };
-        let primary = if capture {
-            None
-        } else {
-            event_loop.primary_monitor()
-        };
-        let wanted_display = super::display_target::screen_for(
-            &displays,
-            primary.as_ref(),
-            &options_profile.display,
-        );
-        let fullscreen = (!capture && options_profile.full_screen).then(|| {
-            super::display_target::fullscreen_for(
-                &displays,
-                primary.as_ref(),
-                &options_profile.display,
-            )
-        });
+        let wanted_display = super::display_target::screen_for(&displays, &options_profile.display);
+        let fullscreen = (!capture && options_profile.full_screen)
+            .then(|| super::display_target::fullscreen_for(&displays, &options_profile.display));
         let mut window_attrs: WindowAttributes = WindowAttributes::default()
             .with_title(super::WINDOW_TITLE)
             .with_inner_size(inner_size)

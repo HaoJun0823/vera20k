@@ -141,11 +141,8 @@ impl App {
         let displays = crate::app::display_target::current_displays(&window);
         let target = state.persistence.options_profile.display.clone();
         crate::app::display_target::center_windowed(&window, &displays, &target);
-        let primary = window.primary_monitor();
         window.set_fullscreen(Some(crate::app::display_target::fullscreen_for(
-            &displays,
-            primary.as_ref(),
-            &target,
+            &displays, &target,
         )));
     }
 

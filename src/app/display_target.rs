@@ -6,10 +6,9 @@
 //! live move all agree on what a saved name means.
 //!
 //! Two kinds of target. A saved screen name points at one screen of the
-//! Options list. [`DisplayTarget::Auto`] is the system's own screen, its
-//! primary one, and moves the window there like any other choice. A name the
-//! desktop no longer lists answers nothing, so that window stays where the
-//! system puts it.
+//! Options list. [`DisplayTarget::Auto`] names no screen: the window stays
+//! where the system puts it, as in every build before this option. A name the
+//! desktop no longer lists answers nothing in the same way.
 //!
 //! VERA's own option: `[VERA]` is VERA's section and no engine reads it, and
 //! the list sits on the Vera options page rather than the retail page whose
@@ -82,45 +81,30 @@ pub(crate) fn current_displays_for(
 
 /// The index of the screen a target means, among `ids`.
 ///
-/// `system` is the index of the screen the system itself would use, its
-/// primary one. [`DisplayTarget::Auto`] is that screen, so Auto is a choice
-/// and not the absence of one; a session with no primary screen (Wayland) has
-/// none, and Auto then leaves the window to the system.
-///
-/// A saved name answers the screen it names, matched whole: `\\.\DISPLAY1` is
-/// not `\\.\DISPLAY10`, and the Windows device names are upper case, so a
-/// hand-edited lower-case name is a different device. A name the desktop no
-/// longer lists answers nothing.
+/// [`DisplayTarget::Auto`] answers nothing, so the window system keeps its
+/// own placement. A saved name answers the screen it names, matched whole:
+/// `\\.\DISPLAY1` is not `\\.\DISPLAY10`, and the Windows device names are
+/// upper case, so a hand-edited lower-case name is a different device. A name
+/// the desktop no longer lists answers nothing.
 fn target_index<'a>(
     ids: impl IntoIterator<Item = &'a str>,
-    system: Option<usize>,
     target: &DisplayTarget,
 ) -> Option<usize> {
     match target {
-        DisplayTarget::Auto => system,
+        DisplayTarget::Auto => None,
         DisplayTarget::Fixed(wanted) => ids.into_iter().position(|id| id == wanted),
     }
 }
 
-/// The screen a target means, when there is one.
-///
-/// [`DisplayTarget::Auto`] is the system's own screen: its primary one, or
-/// nothing when the system names none. A saved name answers the screen it
-/// names while that screen is attached; a name the desktop no longer lists
-/// answers nothing, so the window stays where the system puts it.
+/// The screen a target names while that screen is attached; `None` for
+/// [`DisplayTarget::Auto`] or a name the desktop no longer lists, which leaves
+/// the window where the system puts it.
 pub(crate) fn screen_for(
     displays: &[MonitorChoice],
-    primary: Option<&MonitorHandle>,
     target: &DisplayTarget,
 ) -> Option<MonitorHandle> {
-    let system = primary.and_then(|primary| {
-        displays
-            .iter()
-            .position(|display| display.handle == *primary)
-    });
     let index = target_index(
         displays.iter().map(|display| display.choice.id.as_str()),
-        system,
         target,
     )?;
     Some(displays[index].handle.clone())
@@ -152,8 +136,7 @@ pub(crate) fn centered_outer_position(
 /// not full screen and must not ask it: `winit`'s full-screen change is applied
 /// on its own thread, so the window's own answer is stale for a while after one.
 pub(crate) fn center_windowed(window: &Window, displays: &[MonitorChoice], target: &DisplayTarget) {
-    let primary = window.primary_monitor();
-    let Some(monitor) = screen_for(displays, primary.as_ref(), target) else {
+    let Some(monitor) = screen_for(displays, target) else {
         return;
     };
     window.set_outer_position(centered_outer_position(window, &monitor));
@@ -162,15 +145,13 @@ pub(crate) fn center_windowed(window: &Window, displays: &[MonitorChoice], targe
 /// Whether the window already sits on the screen `target` means.
 ///
 /// True when the target answers no screen at all: there is nothing to move it
-/// to, and Auto on a system that names no primary screen (Wayland) is the case
-/// this exists for.
+/// to, which is always the case for Auto.
 pub(crate) fn window_is_on(
     window: &Window,
     displays: &[MonitorChoice],
     target: &DisplayTarget,
 ) -> bool {
-    let primary = window.primary_monitor();
-    let Some(chosen) = screen_for(displays, primary.as_ref(), target) else {
+    let Some(chosen) = screen_for(displays, target) else {
         return true;
     };
     window
@@ -201,8 +182,7 @@ pub(crate) fn apply(window: &Window, displays: &[MonitorChoice], target: &Displa
         center_windowed(window, displays, target);
         return;
     }
-    let primary = window.primary_monitor();
-    let Some(monitor) = screen_for(displays, primary.as_ref(), target) else {
+    let Some(monitor) = screen_for(displays, target) else {
         return;
     };
     window.set_fullscreen(None);
@@ -211,12 +191,8 @@ pub(crate) fn apply(window: &Window, displays: &[MonitorChoice], target: &Displa
 
 /// The full-screen request for `target`: the screen the target means, or the
 /// system's own choice when a saved name is gone.
-pub(crate) fn fullscreen_for(
-    displays: &[MonitorChoice],
-    primary: Option<&MonitorHandle>,
-    target: &DisplayTarget,
-) -> Fullscreen {
-    Fullscreen::Borderless(screen_for(displays, primary, target))
+pub(crate) fn fullscreen_for(displays: &[MonitorChoice], target: &DisplayTarget) -> Fullscreen {
+    Fullscreen::Borderless(screen_for(displays, target))
 }
 
 #[cfg(test)]
@@ -230,13 +206,8 @@ mod tests {
     #[test]
     fn a_named_screen_resolves_to_its_place_in_the_list() {
         assert_eq!(
-            target_index(ids().iter().copied(), Some(0), &DisplayTarget::Auto),
-            Some(0)
-        );
-        assert_eq!(
             target_index(
                 ids().iter().copied(),
-                Some(0),
                 &DisplayTarget::Fixed("\\\\.\\DISPLAY1".to_owned())
             ),
             Some(0)
@@ -244,7 +215,6 @@ mod tests {
         assert_eq!(
             target_index(
                 ids().iter().copied(),
-                Some(0),
                 &DisplayTarget::Fixed("\\\\.\\DISPLAY3".to_owned())
             ),
             Some(2)
@@ -258,7 +228,6 @@ mod tests {
         assert_eq!(
             target_index(
                 ids().iter().copied(),
-                Some(0),
                 &DisplayTarget::Fixed("\\\\.\\DISPLAY9".to_owned())
             ),
             None
@@ -273,7 +242,6 @@ mod tests {
         assert_eq!(
             target_index(
                 many.iter().copied(),
-                Some(0),
                 &DisplayTarget::Fixed("\\\\.\\DISPLAY1".to_owned())
             ),
             Some(1)
@@ -283,7 +251,6 @@ mod tests {
         assert_eq!(
             target_index(
                 many.iter().copied(),
-                Some(0),
                 &DisplayTarget::Fixed("\\\\.\\display1".to_owned())
             ),
             None
@@ -291,30 +258,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_answers_the_screens_own_choice() {
-        // Auto is a choice, not the absence of one: it puts the window on the
-        // screen the system itself would use.
+    fn auto_leaves_the_window_to_the_system() {
+        // A profile that never picked a screen keeps the placement every
+        // earlier build had: nothing is resolved, so nothing is moved.
         assert_eq!(
-            target_index(ids().iter().copied(), Some(1), &DisplayTarget::Auto),
-            Some(1)
-        );
-        // A named screen answers itself, whichever screen the system prefers.
-        assert_eq!(
-            target_index(
-                ids().iter().copied(),
-                Some(0),
-                &DisplayTarget::Fixed("\\\\.\\DISPLAY3".to_owned())
-            ),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn auto_without_a_system_screen_answers_nothing() {
-        // A session with no primary screen (Wayland) leaves the window where
-        // the system put it, which is the whole of Auto there.
-        assert_eq!(
-            target_index(ids().iter().copied(), None, &DisplayTarget::Auto),
+            target_index(ids().iter().copied(), &DisplayTarget::Auto),
             None
         );
     }
@@ -326,14 +274,10 @@ mod tests {
         assert_eq!(
             target_index(
                 [].iter().copied(),
-                None,
                 &DisplayTarget::Fixed("\\\\.\\DISPLAY1".to_owned())
             ),
             None
         );
-        assert_eq!(
-            target_index([].iter().copied(), None, &DisplayTarget::Auto),
-            None
-        );
+        assert_eq!(target_index([].iter().copied(), &DisplayTarget::Auto), None);
     }
 }
