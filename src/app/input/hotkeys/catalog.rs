@@ -41,7 +41,7 @@ pub(crate) fn registered_commands() -> &'static [CommandMetadata] {
 /// commands. The CSF has no entry, so the page shows the key itself.
 pub(crate) const VERA_CATEGORY_KEY: &str = "vera20k";
 
-const REGISTERED_COMMANDS: [CommandMetadata; 87] = [
+const REGISTERED_COMMANDS: [CommandMetadata; 88] = [
     command!(
         HotkeyCommand::Follow,
         "Follow",
@@ -736,6 +736,20 @@ const REGISTERED_COMMANDS: [CommandMetadata; 87] = [
         "Cmnd:Delete",
         "TXT_INTERFACE",
         "Cmnd:DeleteDesc",
+        None
+    ),
+    // VERA's own, appended after the retail commands. It carries no default
+    // key: the retail KEYBOARDMD.INI has no entry for it, so the player picks
+    // one in the keyboard page. The CSF has no entry either and falls back to
+    // showing the key. The category must stay the one `VERA_CATEGORY_KEY`
+    // names, or this command opens a second category of its own — the macro
+    // takes a literal, so a test pins the two together.
+    command!(
+        HotkeyCommand::ToggleAutoPlay,
+        "AutoPlay",
+        "VERA:AutoPlay",
+        "vera20k",
+        "VERA:AutoPlayDesc",
         None
     ),
 ];

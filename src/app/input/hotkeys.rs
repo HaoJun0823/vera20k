@@ -59,6 +59,9 @@ pub(crate) enum HotkeyCommand {
     Taunt(usize),
     ScreenCapture,
     SetView(usize),
+    /// VERA's own: install or remove the auto play host. Registered after the
+    /// retail commands so the original catalog indices are untouched.
+    ToggleAutoPlay,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -613,13 +616,38 @@ mod tests {
         crate::test_fixture::json("tools/storage_oracle/keyboard_bindings.json")
     }
 
+    /// Auto play's key belongs to VERA's own category, and `category_key` is
+    /// what puts it there. The catalog entry has to spell the literal, so this
+    /// pins it against the constant the keyboard page is told about.
+    #[test]
+    fn auto_play_is_registered_in_veras_own_category() {
+        let row = catalog::registered_commands()
+            .iter()
+            .find(|row| row.command == HotkeyCommand::ToggleAutoPlay)
+            .expect("AutoPlay is registered");
+        assert_eq!(row.category_key, catalog::VERA_CATEGORY_KEY);
+        assert_eq!(row.ini_name, "AutoPlay");
+        // It ships unbound: KEYBOARDMD.INI has no entry for it, so nothing
+        // maps to it until the player assigns a key.
+        let defaults = HotkeyBindings::reload_from_ini_bytes(None);
+        assert!(
+            !defaults
+                .by_key
+                .values()
+                .any(|command| *command == HotkeyCommand::ToggleAutoPlay),
+            "auto play has no default key"
+        );
+    }
+
     #[test]
     fn registered_catalog_matches_original_objects_and_metadata_getters() {
         let fixture = native_keyboard_fixture();
         let native = fixture["catalog"].as_array().unwrap();
         let catalog = catalog::registered_commands();
-        assert_eq!(catalog.len(), 87);
-        assert_eq!(catalog.len(), native.len());
+        assert_eq!(native.len(), 87, "the oracle pins the retail catalog");
+        // VERA's own commands are appended after the retail ones, so the
+        // registered catalog is longer; the retail prefix must still match.
+        assert!(catalog.len() >= native.len());
         for (index, (actual, expected)) in catalog.iter().zip(native).enumerate() {
             assert_eq!(expected["index"].as_u64(), Some(index as u64));
             assert_eq!(actual.ini_name, expected["ini_name"].as_str().unwrap());
@@ -656,7 +684,9 @@ mod tests {
         }
         let loaded = HotkeyBindings::reload_from_ini_bytes(Some(ini.as_bytes()));
         assert_eq!(loaded.by_key.len(), 87);
-        for (index, metadata) in catalog::registered_commands().iter().enumerate() {
+        // Only the retail 87 have a name in the fixture; VERA's own commands
+        // are not bound by it.
+        for (index, metadata) in catalog::registered_commands().iter().take(87).enumerate() {
             assert_eq!(
                 loaded.command_at(0x200 + index as u16),
                 Some(metadata.command)

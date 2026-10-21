@@ -1763,6 +1763,48 @@ fn place_ready_building_for_tab(state: &mut AppState, tab: SidebarTab) {
     }
 }
 
+/// How many commands one agent may issue in a frame. No native equivalent is
+/// known — gamemd has no auto play — so this caps VERA's own path rather than
+/// reproducing a limit. It is generous next to what a player can click in a
+/// 67 ms frame.
+const AUTO_PLAY_COMMANDS_PER_FRAME: usize = 8;
+
+/// VERA's own: auto play runs exactly while a host is installed, so there is no
+/// second switch that has to be kept in step with it.
+///
+/// The agent is a `ScriptedAgent`, and where its script comes from is still
+/// open (docs/autoplay.md): until something supplies one, this installs the
+/// path with nothing to play.
+fn toggle_auto_play(state: &mut AppState) {
+    let previous = state.match_state.auto_play.take();
+    let installing = previous.is_none();
+    if installing {
+        let Some(owner) = state
+            .match_state
+            .sim_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.simulation.session().current_house())
+        else {
+            return;
+        };
+        state.match_state.auto_play = Some(crate::sim::autoplay::AutoPlayHost::new(
+            Box::new(crate::sim::autoplay::ScriptedAgent::default()),
+            owner,
+            AUTO_PLAY_COMMANDS_PER_FRAME,
+        ));
+    }
+    // A toggle gives no other sign it fired, and this is the message sink that
+    // takes plain text rather than a CSF template.
+    crate::app::input::messages::post_selection_navigation_text(
+        state,
+        if installing {
+            "Auto play on"
+        } else {
+            "Auto play off"
+        },
+    );
+}
+
 fn dispatch_retail_hotkey(state: &mut AppState, command: HotkeyCommand) {
     match command {
         HotkeyCommand::HealthNav => selection_navigation::execute_category_navigation(
@@ -1836,6 +1878,8 @@ fn dispatch_retail_hotkey(state: &mut AppState, command: HotkeyCommand) {
         HotkeyCommand::Follow => crate::app::input::camera::toggle_follow_target(state),
         HotkeyCommand::PlanningMode => crate::app::input::planning_mode::toggle(state),
         HotkeyCommand::Delete => crate::app::input::planning_mode::delete_at_cursor(state),
+        // VERA's own: auto play is on while a host is installed.
+        HotkeyCommand::ToggleAutoPlay => toggle_auto_play(state),
         HotkeyCommand::ScatterObject => queue_scatter_for_selected(state),
         HotkeyCommand::AllToCheer => queue_house_cheer(state),
         HotkeyCommand::VeterancyNav => selection_navigation::execute_category_navigation(

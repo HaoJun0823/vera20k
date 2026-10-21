@@ -91,8 +91,9 @@ Timing the agent must be written against:
 | `src/sim/autoplay/agent.rs` | Implemented: `AutoPlayAgent` and `ScriptedAgent`, a fixed `(frame, Command)` schedule. |
 | `src/sim/autoplay/host.rs` | Implemented: `AutoPlayHost::step` — observation → agent → gate → `queue_commands`. The gate reuses `Simulation::entity_owned_by_id` and `Simulation::order_actor_admits` rather than restating them. |
 | `src/sim/autoplay/autoplay_tests.rs` | Implemented: 10 tests over the envelope, the gate's three rejections, the per-frame cap, input lock, the release schedule and the observation. Four run on synthetic rules so they hold without `RA2_DIR`; six need it to spawn real object types. |
-| `vera20k` hotkey category | Groundwork, delivered separately: `catalog::VERA_CATEGORY_KEY` is declared in the input layer and listed after every category the retail commands carry. It holds no command yet — auto play's own key is registered in it once the host is called from the frame loop. |
-| Frame-loop wiring | Not started. The host is not called from anywhere yet, so the hotkey currently only records the choice. |
+| `vera20k` hotkey category | Groundwork, delivered separately: `catalog::VERA_CATEGORY_KEY` is declared in the input layer and listed after every category the retail commands carry. |
+| AutoPlay hotkey | Implemented: `HotkeyCommand::ToggleAutoPlay`, registered in the `vera20k` category with **no default key** — `KEYBOARDMD.INI` has no entry for it, so the player assigns one. Pressing it installs or removes `MatchState::auto_play`. |
+| Frame-loop wiring | Implemented: `advance_one_simulation_frame` steps the host immediately before `take_due_commands`, when one is installed. A match with no host takes the unchanged path. |
 | A scripted scenario test (MCV → build → place → unit) | Not started. The actuation path is unit-tested, not yet exercised end to end in `headless_scenario`. |
 | Anything in `sim::ai_*` | Untouched. |
 
@@ -216,14 +217,15 @@ One PR each. A stage is done when its "Done when" holds.
 Scope: `observation`, `agent` with a `ScriptedAgent` playing a fixed list of
 `(frame, Command)` pairs, `host`, and tests.
 
-Delivered: the three modules and their tests. No production file outside
-`src/sim/autoplay/` was modified.
+Delivered: the three modules and their tests, the frame-loop wiring, and the AutoPlay
+hotkey that installs the host.
 
 Still to do for this stage, before it counts as done:
 
-- Wire `AutoPlayHost::step` into a frame loop: `app/match_runtime/sim_tick`, or the
-  headless runner. This needs an answer to "how is auto play switched on", which is a
-  policy-free but still undecided question (see Open questions).
+- **Where the script comes from.** The hotkey installs a `ScriptedAgent`, and nothing
+  supplies it a script yet, so switching auto play on runs an empty agent. Options are a
+  file the player drops next to the map, a scripted scenario, or the policy layer
+  answering directly — all brain-adjacent, so this is the next decision.
 - An end-to-end scripted scenario in `src/headless_scenario.rs`: deploy the MCV, queue a
   power plant, place it at a site from `placement_site`, queue a unit — reproducible
   through `ReplayRunner` with identical state hashes.
