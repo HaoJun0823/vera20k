@@ -32,6 +32,11 @@ use std::sync::Arc;
 
 pub(crate) use crate::sim::scenario_session::ScenarioGameMode as SessionMode;
 
+mod cooperative_round;
+pub(crate) use cooperative_round::{
+    CooperativeRoundEvent, CooperativeRoundOptions, CooperativeRoundState, CooperativeRoundStep,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkReturnContext {
     LanLobby,
@@ -152,6 +157,15 @@ enum NetworkPhase {
         /// Live source membership indexes the immutable historical launch.
         connected: Vec<usize>,
     },
+    /// The co-op result dialog BC6 between missions: the finished start,
+    /// the round's own roster (the next mission's, which the master's
+    /// `+0x68`/`0x0069B8C0` or a received `0x32` changes) and its readiness.
+    CooperativeRound {
+        previous: Arc<crate::app::match_bootstrap::PreparedNetworkStartup>,
+        connected: Vec<usize>,
+        launch: SkirmishLaunchSession,
+        round: CooperativeRoundState,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +191,18 @@ pub(crate) enum NetworkLoadingRequest {
         recipients: Vec<usize>,
         byte: u8,
     },
+    /// BC6's `0x26` to every node.
+    CooperativeReady,
+    /// BC6's `0x24` (Quit) to every node.
+    CooperativeLeave,
+    /// The master's `0x34`.
+    CooperativeBegin,
+    /// The master's `0x32` to every bound human slot.
+    CooperativeOptions(CooperativeRoundOptions),
+    /// A guest's `0x23`.
+    CooperativeAck,
+    /// The master's `0x31`.
+    CooperativeGo,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,12 +487,15 @@ impl MatchSession {
             NetworkPhase::Lobby => None,
             NetworkPhase::Setup { launch, .. } => Some(launch),
             NetworkPhase::Frozen { startup, .. } => Some(startup.launch_session()),
+            NetworkPhase::CooperativeRound { launch, .. } => Some(launch),
         }
     }
 
     fn editable_network_setup(&mut self) -> anyhow::Result<&mut SkirmishLaunchSession> {
         match self.network.as_mut().map(|network| &mut network.phase) {
-            Some(NetworkPhase::Setup { launch, .. }) => Ok(launch),
+            Some(
+                NetworkPhase::Setup { launch, .. } | NetworkPhase::CooperativeRound { launch, .. },
+            ) => Ok(launch),
             _ => anyhow::bail!("network setup is not editable"),
         }
     }
@@ -824,6 +853,50 @@ impl MatchSession {
         Ok(removed)
     }
 
+    /// Cooperative's country refresh (`0x005C2500`), on the host and a
+    /// guest alike: every row below the setup's capacity (`[0xA8BB0C]`)
+    /// takes `country` (None is Random) in its combo and its node
+    /// (`NodeNameTag__SetCountry`), whoever owns the row. Without `ai_rows`
+    /// the AI rows keep theirs.
+    pub(crate) fn reset_network_countries(
+        &mut self,
+        country: Option<crate::skirmish_launch::LaunchCountry>,
+        ai_rows: bool,
+    ) -> anyhow::Result<()> {
+        let rows = self.network_setup_capacity().unwrap_or(0).clamp(0, 8) as u8;
+        let Some(NetworkSession {
+            phase:
+                NetworkPhase::Setup {
+                    launch,
+                    inactive_choices,
+                    ..
+                },
+            ..
+        }) = self.network.as_mut()
+        else {
+            anyhow::bail!("network setup is not editable");
+        };
+        let set = |current: crate::skirmish_launch::LaunchCountry| match country {
+            Some(country) => (country, false),
+            None => (current, true),
+        };
+        for human in &mut launch.humans {
+            if human.raw_slot_index.is_some_and(|row| row < rows) {
+                (human.slot.country, human.slot.country_random) = set(human.slot.country);
+            }
+        }
+        for ai in launch.opponents.iter_mut().filter(|_| ai_rows) {
+            if ai.raw_slot_index < rows {
+                (ai.country, ai.country_random) = set(ai.country);
+            }
+        }
+        for choices in inactive_choices.iter_mut().take(usize::from(rows)) {
+            (choices.country, choices.country_random) = set(choices.country);
+        }
+        launch.rebuild_house_roster();
+        Ok(())
+    }
+
     pub(crate) fn set_network_row_choices(
         &mut self,
         row: u8,
@@ -1124,6 +1197,38 @@ impl MatchSession {
             NetworkPhase::Setup { observer_row, .. } => *observer_row,
             _ => None,
         }
+    }
+
+    /// `MPGameOptions__SelectScenario` (`0x005E7BF0`): the map file and the
+    /// row count `[0xA8BB0C]` (the map's players, capped by the mode and
+    /// the WOL room) only. Unlike ChooseMap it re-cuts no rows and keeps
+    /// every start and team.
+    pub(crate) fn select_network_scenario(
+        &mut self,
+        file: String,
+        capacity: i32,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !file.is_empty() && capacity > 0,
+            "map requires a valid participant capacity"
+        );
+        let network = self
+            .network
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("no network visit"))?;
+        let session_mode = network.return_context.session_mode();
+        let room = network.room;
+        let NetworkPhase::Setup {
+            launch,
+            capacity: rows,
+            ..
+        } = &mut network.phase
+        else {
+            anyhow::bail!("network setup is not editable");
+        };
+        *rows = row_capacity(session_mode, room, &launch.mode, capacity);
+        launch.selected_map_file = Some(file);
+        Ok(())
     }
 
     /// Accepted BC ChooseMap5DE520: atomic map/mode selection followed by
@@ -1557,6 +1662,15 @@ impl MatchSession {
         }
     }
 
+    /// The WOL start terms: the setup's, then the frozen start's.
+    pub(crate) fn network_wol_start(&self) -> Option<&WolStartTerms> {
+        let network = self.network.as_ref()?;
+        match &network.phase {
+            NetworkPhase::Frozen { startup, .. } => Some(startup.wol_start()),
+            _ => Some(&network.wol_start),
+        }
+    }
+
     pub(crate) fn network_max_ahead_frames(&self) -> Option<i32> {
         self.network.as_ref()?.max_ahead_frames
     }
@@ -1596,21 +1710,7 @@ impl MatchSession {
             "accepted host seed differs from admitted setup seed"
         );
         network.proposed_seed = Some(agreed_seed);
-        anyhow::ensure!(
-            launch.house_roster_is_consistent(),
-            "network House constructor cache disagrees with the participant roster"
-        );
-        crate::sim::scenario_bootstrap::MatchLaunchDescriptor::from_resolved(launch.clone())
-            .map_err(|error| anyhow::anyhow!("network assignments unresolved: {error}"))?;
-        anyhow::ensure!(
-            launch
-                .selected_map_file
-                .as_deref()
-                .is_some_and(|file| !file.is_empty()
-                    && file.trim() == file
-                    && !file.eq_ignore_ascii_case("auto")),
-            "network start requires an exact map selection"
-        );
+        admit_network_start_roster(launch)?;
         let max_ahead_frames = network
             .max_ahead_frames
             .ok_or_else(|| anyhow::anyhow!("network start requires accepted timing"))?;
@@ -1690,7 +1790,10 @@ impl MatchSession {
     /// One in-battle chat packet to `recipients`.
     pub(crate) fn request_chat(&mut self, recipients: Vec<usize>, text: String) {
         if let Some(network) = self.network.as_mut()
-            && matches!(network.phase, NetworkPhase::Frozen { .. })
+            && matches!(
+                network.phase,
+                NetworkPhase::Frozen { .. } | NetworkPhase::CooperativeRound { .. }
+            )
         {
             network
                 .loading_requests
@@ -1759,7 +1862,10 @@ impl MatchSession {
 
     pub(crate) fn network_connected_source_indices(&self) -> &[usize] {
         match self.network.as_ref().map(|network| &network.phase) {
-            Some(NetworkPhase::Frozen { connected, .. }) => connected,
+            Some(
+                NetworkPhase::Frozen { connected, .. }
+                | NetworkPhase::CooperativeRound { connected, .. },
+            ) => connected,
             _ => &[],
         }
     }
@@ -1815,11 +1921,13 @@ impl MatchSession {
 
 /// What a WOL start hands the match: OnGameStart's `[0xB779C4]` (the
 /// channel's tournament value, 2 in a clan room) and Start Game Now's two
-/// clan name lists `[0xB77A04]`/`[0xB76568]`.
+/// clan name lists `[0xB77A04]`/`[0xB76568]`; `quick_coop` is the WOL mode
+/// `[0xA8B244] == 2`, which scenario load reads at `0x0068755E`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct WolStartTerms {
     pub(crate) tournament: i32,
     pub(crate) squad_lists: [Vec<String>; 2],
+    pub(crate) quick_coop: bool,
 }
 
 /// A WOL game channel's kind from its record: tournament `+0x14` and the
@@ -1943,11 +2051,33 @@ fn validate_network_rows(launch: &SkirmishLaunchSession) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A start's admission, shared by the first start and a co-op
+/// continuation: a consistent House roster, resolved assignments and an
+/// exact map.
+fn admit_network_start_roster(launch: &SkirmishLaunchSession) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        launch.house_roster_is_consistent(),
+        "network House constructor cache disagrees with the participant roster"
+    );
+    crate::sim::scenario_bootstrap::MatchLaunchDescriptor::from_resolved(launch.clone())
+        .map_err(|error| anyhow::anyhow!("network assignments unresolved: {error}"))?;
+    anyhow::ensure!(
+        launch
+            .selected_map_file
+            .as_deref()
+            .is_some_and(|file| !file.is_empty()
+                && file.trim() == file
+                && !file.eq_ignore_ascii_case("auto")),
+        "network start requires an exact map selection"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{MatchSession, NetworkRoom, SessionMode};
 
-    fn network_fixture() -> crate::skirmish_launch::SkirmishLaunchSession {
+    pub(super) fn network_fixture() -> crate::skirmish_launch::SkirmishLaunchSession {
         let profile: serde_json::Value = serde_json::from_str(crate::test_fixture::text(
             "tools/map_observation.command-bar.example.json",
         ))
@@ -2226,6 +2356,77 @@ mod tests {
         assert_eq!(setup.local_player_index, 0);
         assert_eq!(setup.required_start_count(), 2);
         assert!(setup.house_roster_is_consistent());
+    }
+
+    #[test]
+    fn cooperative_country_refresh_can_keep_the_ai_rows() {
+        use crate::skirmish_launch::LaunchCountry;
+        let mut session = MatchSession::default();
+        session.enter_network(super::NetworkReturnContext::LanLobby);
+        let mut launch = network_fixture();
+        launch
+            .opponents
+            .push(crate::skirmish_launch::SkirmishAiSlot {
+                raw_slot_index: 2,
+                country: LaunchCountry::Yuri,
+                country_random: false,
+                color_index: 3,
+                color_random: false,
+                start_position: crate::skirmish_launch::LaunchStartPosition::Auto,
+                team: crate::skirmish_launch::LaunchTeam::None,
+                difficulty: crate::skirmish_launch::AiDifficulty::Easy,
+            });
+        launch.ai_player_count = 1;
+        launch.rebuild_house_roster();
+        session.accept_network_setup(launch, false, None).unwrap();
+        let ai_country = |session: &MatchSession| {
+            let ai = &session.network_setup().unwrap().opponents[0];
+            (ai.country, ai.country_random)
+        };
+        // BC open's refreshes leave the AI rows to the profile restore.
+        session
+            .reset_network_countries(Some(LaunchCountry::Russia), false)
+            .unwrap();
+        let setup = session.network_setup().unwrap();
+        assert!(
+            setup
+                .humans
+                .iter()
+                .all(|human| human.slot.country == LaunchCountry::Russia
+                    && !human.slot.country_random)
+        );
+        assert_eq!(ai_country(&session), (LaunchCountry::Yuri, false));
+        // Use Map's refresh (`+0x18`) takes every row.
+        session.reset_network_countries(None, true).unwrap();
+        assert_eq!(ai_country(&session), (LaunchCountry::Yuri, true));
+    }
+
+    #[test]
+    fn select_scenario_keeps_rows_starts_and_teams() {
+        use crate::skirmish_launch::{LaunchStartPosition, LaunchTeam};
+        let mut session = MatchSession::default();
+        session.enter_network(super::NetworkReturnContext::LanLobby);
+        let mut launch = network_fixture();
+        launch.local_player_index = 0;
+        launch.humans[0].slot.start_position = LaunchStartPosition::Position(3);
+        launch.humans[1].slot.team = LaunchTeam::Team(2);
+        session
+            .accept_network_setup(launch.clone(), true, None)
+            .unwrap();
+        let before = session.network_setup().unwrap().clone();
+        assert_eq!(
+            before.humans[0].slot.start_position,
+            LaunchStartPosition::Position(3)
+        );
+        // 0x005E7BF0 writes the map and [0xA8BB0C], nothing in the rows.
+        session
+            .select_network_scenario("C1A01MD.MAP".into(), 4)
+            .unwrap();
+        let after = session.network_setup().unwrap();
+        assert_eq!(after.selected_map_file.as_deref(), Some("C1A01MD.MAP"));
+        assert_eq!(session.network_setup_capacity(), Some(4));
+        assert_eq!(after.humans, before.humans);
+        assert_eq!(after.opponents, before.opponents);
     }
 
     #[test]

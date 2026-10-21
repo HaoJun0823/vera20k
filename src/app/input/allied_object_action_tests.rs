@@ -179,6 +179,7 @@ fn ares_no_manual_fire_object_click_keeps_native_movement_fallback() {
             &[actor],
             TargetKind::Cell(12, 10),
             true,
+            OrderMode::Move,
             &overlays,
         );
         if native_cell["action"] == 5 {
@@ -258,7 +259,7 @@ fn native_ivan_bomb_feedback(name: &str) -> crate::app::types::CursorFeedbackKin
     assert_eq!(row["output"]["boundary"], "returned");
     match row["output"]["action"].as_u64().unwrap() {
         53 => crate::app::types::CursorFeedbackKind::IvanBomb,
-        54 => crate::app::types::CursorFeedbackKind::Invalid,
+        54 => crate::app::types::CursorFeedbackKind::NoIvanBomb,
         other => panic!("unexpected native Ivan consumer action {other}"),
     }
 }
@@ -691,6 +692,7 @@ fn a_building_over_another_selected_building_does_nothing() {
             &selected,
             owner,
             Some(&hover),
+            None,
             (10, 14),
             OrderModifier::Normal,
             false,
@@ -888,6 +890,7 @@ fn a_pillbox_clicking_an_enemy_out_of_range_selects_it() {
                 &selection,
                 TargetKind::Entity(target),
                 false,
+                OrderMode::Move,
                 &overlays,
             );
             let receivers: Vec<u64> = dispatch.receivers.iter().copied().collect();

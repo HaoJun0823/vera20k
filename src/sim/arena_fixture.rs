@@ -40,7 +40,7 @@ pub fn rival_arena(rules: &RuleSet, seed: u64) -> Simulation {
 }
 
 /// The same two-house arena with enough room for a mechanism's footprint.
-pub(crate) fn rival_arena_with_size(rules: &RuleSet, seed: u64, size: u16) -> Simulation {
+pub fn rival_arena_with_size(rules: &RuleSet, seed: u64, size: u16) -> Simulation {
     let mut sim = Simulation::with_seed(seed);
     flat_ground_with_size(&mut sim, rules, size);
     for (name, human) in [("Russians", false), ("Americans", true)] {
@@ -318,26 +318,19 @@ pub fn install_status_miner_cargo(
     ore: usize,
     gems: usize,
 ) {
+    use crate::rules::tiberium_type::TiberiumTypeId;
     use crate::sim::miner::{CargoBale, Miner, MinerConfig, ResourceType, miner_kind_for_object};
-    let config = MinerConfig::from_rules(rules);
     let kind = miner_kind_for_object(object).expect("native prior is a miner");
-    let mut miner = Miner::new(kind, &config, object.storage.max(0) as u16);
+    let mut miner = Miner::new(kind, &MinerConfig::default(), object.storage.max(0) as u16);
+    let bale = |id, resource| {
+        CargoBale::of_type(TiberiumTypeId(id), resource, rules)
+            .expect("rules list the first two Tiberium types")
+    };
     miner.set_cargo_for_test(
-        std::iter::repeat_n(
-            CargoBale {
-                resource_type: ResourceType::Ore,
-                value: config.ore_bale_value,
-            },
-            ore,
-        )
-        .chain(std::iter::repeat_n(
-            CargoBale {
-                resource_type: ResourceType::Gem,
-                value: config.gem_bale_value,
-            },
-            gems,
-        ))
-        .collect(),
+        std::iter::repeat_with(|| bale(0, ResourceType::Ore))
+            .take(ore)
+            .chain(std::iter::repeat_with(|| bale(1, ResourceType::Gem)).take(gems))
+            .collect(),
     );
     entity.miner = Some(miner);
 }

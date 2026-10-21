@@ -28,7 +28,7 @@ use crate::rules::ini_parser::{IniFile, IniSection};
 use crate::rules::mission_data::MissionControl;
 use crate::rules::native_processing::{
     CountryProjection, CountryVeterancyState, ProcessedRulesLayers, RulesLayerStack,
-    house_type_index_of_name,
+    SideProjection, house_type_index_of_name,
 };
 use crate::rules::object_type::{BuildCategory, FactoryType, ObjectCategory, ObjectType};
 use crate::rules::particle_system_type::{ParticleSystemType, ParticleSystemTypeId};
@@ -3958,6 +3958,10 @@ pub struct RuleSet {
     /// Side identities in native `[Sides]` registration order, including
     /// sides allocated later by a per-country `Side=` override.
     side_ids: Vec<String>,
+    /// Read-only projection of the live SideExt owner, in the same native
+    /// array order as side_ids. Rebuilt after every Process/reset/save restore.
+    #[cfg(feature = "ares")]
+    side_extensions: Vec<(i32, bool, i32)>,
     /// Uppercase side identity -> source-order index.
     side_indices: HashMap<String, SideIdx>,
     /// Effective side for each country after `[Sides]` membership and the
@@ -4050,6 +4054,8 @@ pub struct RuleSet {
     ares_prerequisites: Option<GenericPrerequisites>,
     /// Immutable projection of NativeRulesRegistryState's ordered armor catalog.
     ares_armors: Option<crate::rules::ares_armor::ArmorCatalog>,
+    #[cfg(feature = "ares")]
+    ares_global_controls: crate::rules::native_processing::AresGlobalControls,
     /// Derived type-membership index for the lifecycle hooks; rebuilt together
     /// with the RuleSet after every load/reset/pass. The catalog above is its
     /// only source of truth. This cache is not serialized or hashed separately.
@@ -4188,6 +4194,21 @@ pub struct RuleSet {
 }
 
 impl RuleSet {
+    /// RulesExt+14A indexed by native House difficulty0/1/2 (hardest first).
+    /// Only the compiled Ares CanBuild owner consumes this retained policy.
+    pub fn ares_ai_bypasses_build_limit(&self, difficulty_index: usize) -> bool {
+        #[cfg(feature = "ares")]
+        {
+            self.ares_global_controls
+                .ai_bypasses_build_limit(difficulty_index)
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            let _ = difficulty_index;
+            false
+        }
+    }
+
     pub(crate) fn reveal_trigger_radius(&self) -> i32 {
         self.reveal_trigger_radius
     }
@@ -4203,7 +4224,7 @@ impl RuleSet {
             processed,
             project_country_side_registry(
                 processed.country_projection(),
-                processed.side_registry_names(),
+                processed.side_projection(),
             ),
         )?;
         let mut native_identity_counts = HashMap::new();
@@ -4453,6 +4474,26 @@ impl RuleSet {
                 object.gunner_turrets = *gunner_turrets;
             }
         }
+        #[cfg(feature = "ares")]
+        for (category, name, state) in processed.factory_owner_states() {
+            if let Some(object) = rules
+                .object_list
+                .iter_mut()
+                .find(|object| object.category == category && object.id == name)
+            {
+                object.project_factory_owners(state);
+            }
+        }
+        #[cfg(feature = "ares")]
+        for (name, state) in processed.explicit_factory_states() {
+            if let Some(object) = rules
+                .object_list
+                .iter_mut()
+                .find(|object| object.category == ObjectCategory::Building && object.id == name)
+            {
+                object.project_explicit_factory(state);
+            }
+        }
         for (category, name, references) in processed.techno_reference_states() {
             if let Some(object) = rules
                 .object_list
@@ -4562,6 +4603,15 @@ impl RuleSet {
                 .find(|o| o.category == ObjectCategory::Building && o.id == name)
             {
                 building.project_building_upgrade(upgrade.clone());
+            }
+        }
+        for (name, extra_power) in processed.building_extra_power_states() {
+            if let Some(building) = rules
+                .object_list
+                .iter_mut()
+                .find(|object| object.category == ObjectCategory::Building && object.id == name)
+            {
+                building.extra_power = extra_power;
             }
         }
         for (name, offset) in processed.building_target_coord_offsets() {
@@ -5325,6 +5375,8 @@ impl RuleSet {
             country_ids: country_side_registry.country_ids,
             country_indices: country_side_registry.country_indices,
             side_ids: country_side_registry.side_ids,
+            #[cfg(feature = "ares")]
+            side_extensions: country_side_registry.side_extensions,
             side_indices: country_side_registry.side_indices,
             country_sides: country_side_registry.country_sides,
             color_schemes,
@@ -5366,6 +5418,8 @@ impl RuleSet {
             prerequisite_lists: Default::default(),
             ares_prerequisites: None,
             ares_armors: processed.ares_armors().cloned(),
+            #[cfg(feature = "ares")]
+            ares_global_controls: processed.ares_global_controls().clone(),
             ares_prerequisite_alternates: HashSet::new(),
             terrain_rules,
             tiberium_types,
@@ -5597,6 +5651,19 @@ impl RuleSet {
             .copied()
     }
 
+    /// Installed Ares Building Find10007E50, shared with BuiltAt's current-pass
+    /// vector reader. Runtime upgrade queries use the current registered IDs,
+    /// rejecting none/<none> before the first case-insensitive stored-ID hit.
+    pub fn ares_find_building(&self, token: &str) -> Option<i32> {
+        crate::rules::native_processing::ares_type_index_of_name(
+            token,
+            self.type_array_ids(ObjectCategory::Building)
+                .iter()
+                .map(String::as_str),
+        )
+        .map(|index| i32::try_from(index).expect("BuildingTypes exceeds native i32 index space"))
+    }
+
     /// Resolve a TaskForce member through the exact native family order used
     /// by `gamemd.exe 0x004C4EF0`: Infantry, Unit, then Aircraft. BuildingType
     /// is never searched.
@@ -5784,7 +5851,7 @@ impl RuleSet {
     /// slices and are not claimed by this hash yet.
     pub fn simulation_config_hash(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        // v34: retain Country starting-veterancy type membership across Rules passes.
+        // v34: Country starting-veterancy; optional extensions add domains below.
         b"rules-simulation-config-v34".hash(&mut hasher);
         self.source_ini_hash.hash(&mut hasher);
         b"country-parent-v1".hash(&mut hasher);
@@ -5805,6 +5872,12 @@ impl RuleSet {
             .map(|(id, country)| (id.to_ascii_uppercase(), &country.veteran_types))
             .collect::<BTreeMap<_, _>>()
             .hash(&mut hasher);
+        #[cfg(feature = "ares")]
+        {
+            b"ares-side-sidebar-v1".hash(&mut hasher);
+            self.side_ids.hash(&mut hasher);
+            self.side_extensions.hash(&mut hasher);
+        }
         self.object_list
             .iter()
             .filter(|object| object.category == ObjectCategory::Building)
@@ -5818,6 +5891,19 @@ impl RuleSet {
         crate::rules::ARES_ENABLED.hash(&mut hasher);
         #[cfg(feature = "ares")]
         {
+            b"ares-global-controls-v1".hash(&mut hasher);
+            self.ares_global_controls.hash(&mut hasher);
+            b"ares-factory-owners-v1".hash(&mut hasher);
+            self.object_list
+                .iter()
+                .map(|object| {
+                    (
+                        (object.category, object.id.to_ascii_uppercase()),
+                        object.factory_owners_hash_state(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+                .hash(&mut hasher);
             // A previous Process can retain this manual-action policy even
             // when the current source stack contains only invalid tokens.
             b"ares-no-manual-fire-v1".hash(&mut hasher);
@@ -6635,13 +6721,17 @@ impl RuleSet {
     pub(crate) fn refresh_country_side_projection<'a>(
         &mut self,
         countries: impl Iterator<Item = CountryProjection<'a>>,
-        sides: impl Iterator<Item = &'a str>,
+        sides: impl Iterator<Item = SideProjection<'a>>,
     ) {
         let projection = project_country_side_registry(countries, sides);
         self.countries = projection.rules;
         self.country_ids = projection.country_ids;
         self.country_indices = projection.country_indices;
         self.side_ids = projection.side_ids;
+        #[cfg(feature = "ares")]
+        {
+            self.side_extensions = projection.side_extensions;
+        }
         self.side_indices = projection.side_indices;
         self.country_sides = projection.country_sides;
     }
@@ -6784,6 +6874,16 @@ impl RuleSet {
         self.country_indices.get(&id.to_ascii_uppercase()).copied()
     }
 
+    /// Installed Ares1001BA90 shared Find: first stored-ID match, sentinel
+    /// rejection and no alias/ParentCountry expansion. Callers own self fallback.
+    /// Native controls: rules_oracle/ares_country_veterancy.json parent_find.
+    pub fn ares_find_country(&self, token: &str) -> Option<CountryIdx> {
+        crate::rules::native_processing::ares_country_index_of_name(
+            token,
+            self.country_ids.iter().map(String::as_str),
+        )
+    }
+
     /// HouseRead500A05 calls ReadHouseType475540: an absent Country maps
     /// caller-1 to entry0; known tokens use the shared alias-before-ID5117D0
     /// lookup. Unknown nonempty tokens need the native factory branch and
@@ -6862,6 +6962,58 @@ impl RuleSet {
     /// Resolve a side index back to its source spelling.
     pub fn side_name(&self, index: SideIdx) -> Option<&str> {
         self.side_ids.get(index.0 as usize).map(String::as_str)
+    }
+
+    /// The already-allocated Side array, including constructor-only entries;
+    /// querying it never rereads an INI or creates a missing side.
+    pub fn allocated_sides(&self) -> impl Iterator<Item = (SideIdx, &str)> {
+        self.side_ids.iter().enumerate().map(|(index, id)| {
+            (
+                SideIdx(u8::try_from(index).expect("[Sides] exceeds u8 identity space")),
+                id.as_str(),
+            )
+        })
+    }
+
+    /// Signed SideExt+88. Zero and negative values are intentional native
+    /// selector inputs, not missing values or an instruction to clamp to one.
+    /// An ordinary retail build has no SideExt configuration.
+    pub fn side_sidebar_mix_file_index(&self, index: SideIdx) -> Option<i32> {
+        #[cfg(feature = "ares")]
+        return self
+            .side_extensions
+            .get(usize::from(index.0))
+            .map(|&(mix, _, _)| mix);
+        #[cfg(not(feature = "ares"))]
+        {
+            let _ = index;
+            None
+        }
+    }
+
+    /// SideExt+8C selects Yuri-specific sidebar filenames independently of
+    /// the Side array index and Sidebar.MixFileIndex.
+    pub fn side_sidebar_yuri_file_names(&self, index: SideIdx) -> Option<bool> {
+        #[cfg(feature = "ares")]
+        return self
+            .side_extensions
+            .get(usize::from(index.0))
+            .map(|&(_, yuri, _)| yuri);
+        #[cfg(not(feature = "ares"))]
+        {
+            let _ = index;
+            None
+        }
+    }
+
+    /// Signed SideExt+90 after reached EVA.Tag reads. Binding uses saved
+    /// Scenario.Side and preserves an out-of-catalog value; filename selection
+    /// decides whether that value has a column. Native: Ares1002FB00.
+    #[cfg(feature = "ares")]
+    pub fn side_eva_voice_index(&self, side: i32) -> Option<i32> {
+        self.side_extensions
+            .get(usize::try_from(side).ok()?)
+            .map(|&(_, _, voice)| voice)
     }
 
     /// Return the country's effective side after its optional `Side=`
@@ -7655,6 +7807,8 @@ struct ProjectedCountrySideRegistry {
     country_ids: Vec<String>,
     country_indices: HashMap<String, CountryIdx>,
     side_ids: Vec<String>,
+    #[cfg(feature = "ares")]
+    side_extensions: Vec<(i32, bool, i32)>,
     side_indices: HashMap<String, SideIdx>,
     country_sides: Vec<Option<SideIdx>>,
 }
@@ -7665,9 +7819,15 @@ struct ProjectedCountrySideRegistry {
 /// invent Countries, lose prior Side vectors and change allocation chronology.
 fn project_country_side_registry<'a>(
     countries: impl Iterator<Item = CountryProjection<'a>>,
-    sides: impl Iterator<Item = &'a str>,
+    sides: impl Iterator<Item = SideProjection<'a>>,
 ) -> ProjectedCountrySideRegistry {
-    let side_ids: Vec<String> = sides.map(str::to_owned).collect();
+    let sides = sides.collect::<Vec<_>>();
+    let side_ids: Vec<String> = sides.iter().map(|(id, _)| (*id).to_owned()).collect();
+    #[cfg(feature = "ares")]
+    let side_extensions = sides
+        .iter()
+        .map(|(_, sidebar)| sidebar.expect("allocated Side owns its Ares extension"))
+        .collect();
     let mut side_indices = HashMap::with_capacity(side_ids.len());
     for (index, id) in side_ids.iter().enumerate() {
         side_indices
@@ -7706,6 +7866,8 @@ fn project_country_side_registry<'a>(
         country_ids,
         country_indices,
         side_ids,
+        #[cfg(feature = "ares")]
+        side_extensions,
         side_indices,
         country_sides,
     }
@@ -7939,10 +8101,15 @@ mod tests {
         for row in rows {
             let pass = detail_cached_ini(&row["sections"]);
             if row["kind"] == "audio_visual" {
-                retained =
-                    process_native_rules_cold_start(retained, &pass, &IniFile::empty(), None)
-                        .unwrap()
-                        .into_registry_state_discarding_events();
+                retained = process_native_rules_cold_start(
+                    retained,
+                    &pass,
+                    &IniFile::empty(),
+                    None,
+                    &crate::rules::sound_ini::EvaRegistry::default(),
+                )
+                .unwrap()
+                .into_registry_state_discarding_events();
             } else if row["kind"] == "type_reset_and_process" {
                 retained = retained.destructive_reset();
             }

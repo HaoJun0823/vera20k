@@ -741,8 +741,21 @@ pub enum LifecycleOutput {
         stable_id: u64,
     },
     /// ObjectDetachAll5F52EF..5F5306 hands the follow camera back when it
-    /// follows this object, whatever the argument and the Deselect gate.
+    /// follows this object, whatever the argument and the Deselect gate. A
+    /// logic Select's Unselect_All emits one per object it deselects
+    /// (Deselect `0x005F4503..0x005F4513`), which a later Select in the same
+    /// frame may select again.
     FollowReleased {
+        stable_id: u64,
+    },
+    /// A Select (`TechnoClass::Select @ 0x006FBFA0`, vt+0x14C) the game made
+    /// itself rather than local input: its ObjectClass::Select
+    /// (`0x005F4520`) inserted the object into the client's current-objects
+    /// vector (`0x00A8ECB8`), before its Selected tag event (`0x006FBFE4`).
+    /// Outputs follow Select call order: the actor, each partner as
+    /// `0x00637840` Selects it, and any Select a tag event starts in between.
+    /// Input Selects write the app's selection ledger themselves.
+    ObjectSelected {
         stable_id: u64,
     },
     /// DispatchPointerExpired7258D0 reaches navigation733160 at7259B1
@@ -4523,10 +4536,8 @@ impl Simulation {
     /// bridge-damage, wall-sale and teleport (`0x007193C7`) callers share this
     /// owner; the other caller chains remain separate migration work.
     ///
-    /// RESIDUALS, recorded rather than guessed:
-    /// - The aircraft-Patrol arm, which clears two patrol-cursor fields on an
-    ///   aircraft whose committed mission is Patrol. Neither field is
-    ///   represented; the arm is a no-op for every ground object.
+    /// After the Restore an aircraft now on Patrol restarts it
+    /// (`0x0070D513..0x0070D532`, [`crate::sim::aircraft::restart_patrol_after_restore`]).
     pub(crate) fn stop_all_targeting_on_detach(
         &mut self,
         detach_id: u64,
@@ -4579,6 +4590,10 @@ impl Simulation {
             let restored = self
                 .mission_restore_represented(listener_id, rules, registry, effects)
                 .expect("detach sweep listener was resolved immediately before the Restore");
+            // `0x0070D513..0x0070D532`, whatever the Restore did.
+            if let Some(listener) = self.substrate.entities.get_mut(listener_id) {
+                crate::sim::aircraft::restart_patrol_after_restore(listener);
+            }
 
             let target_cleared = self.listener_targets(listener_id, target);
             if target_cleared {
@@ -4816,6 +4831,10 @@ impl Simulation {
             if mission_is_suspended {
                 self.mission_restore_represented(listener_id, rules, registry, effects)
                     .expect("represented expiry restore remains available");
+                // `0x00707A51..0x00707A6C`.
+                if let Some(listener) = self.substrate.entities.get_mut(listener_id) {
+                    crate::sim::aircraft::restart_patrol_after_restore(listener);
+                }
             }
         }
 

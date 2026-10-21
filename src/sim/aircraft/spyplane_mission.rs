@@ -19,9 +19,9 @@
 //! The handlers draw nothing themselves: the Scenario draws are the edge
 //! pick's (`PickCellOnEdge @ 0x004AA440`). They write the mission timer and
 //! detach nothing. `AircraftClass::AI`'s head clears `+0x6D2` in every
-//! mission but 1, 27, 30 and 31 (byte table `0x004151C0`), so the latch
-//! Approach sets holds through Overfly; VERA does not port that clear, which
-//! this plane never reaches.
+//! mission but 1, 27, 30 and 31 (byte table `0x004151C0`,
+//! [`super::ai_head_latch_clear`]), so the latch Approach sets holds through
+//! Overfly.
 
 use crate::rules::ruleset::RuleSet;
 use crate::sim::components::NavTargetRef;
@@ -74,7 +74,7 @@ pub(super) fn approach(
         }
         Some(_) => {
             if range.is_some_and(|range| distance <= range) {
-                snapshot(sim, id, rules, true);
+                snapshot(sim, id, rules, true, frame_effects);
             }
         }
     }
@@ -104,7 +104,7 @@ pub(super) fn overfly(
     let target = entity.attack_target.target();
     let distance = super::target_distance(sim, id, target);
     if weapon(sim, id, rules).is_some_and(|(range, _)| distance <= range) {
-        snapshot(sim, id, rules, false);
+        snapshot(sim, id, rules, false, frame_effects);
     }
     if super::nav_com_absent(sim, id) {
         head_for_opposite_edge(sim, id, rules, frame_effects);
@@ -152,11 +152,17 @@ fn head_for_opposite_edge(
 /// `MapClass @ 0x00567DA0` (the fog border around the snapshot, radius
 /// `LastSightRange + 3`) is presentation: the shroud renderer rebuilds from
 /// the vision owner.
-fn snapshot(sim: &mut Simulation, id: u64, rules: &RuleSet, sound: bool) {
+fn snapshot(
+    sim: &mut Simulation,
+    id: u64,
+    rules: &RuleSet,
+    sound: bool,
+    frame_effects: FrameEffects<'_>,
+) {
     let Some((_, damage)) = weapon(sim, id, rules) else {
         return;
     };
-    sim.refresh_object_sight(id, rules, damage);
+    sim.refresh_object_sight(id, rules, damage, frame_effects);
     if sound
         && let Some(camera) = rules.general.spy_plane_camera.clone()
         && let Some(plane) = sim.substrate.entities.get(id)

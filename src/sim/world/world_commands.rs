@@ -1612,7 +1612,7 @@ impl Simulation {
                     owner,
                     other,
                 ) {
-                    self.make_enemy(owner, other, rules, true);
+                    self.make_enemy(owner, other, rules, overlay_registry, frame_effects, true);
                 } else {
                     self.make_ally(owner, other, rules, overlay_registry, frame_effects, true);
                 }
@@ -1671,7 +1671,17 @@ impl Simulation {
                     .get(*transport_id)
                     .and_then(|t| t.passenger_role.cargo())
                     .is_some_and(|c| !c.is_empty());
-                if !has_passengers {
+                // A gap generator's self click sends the same Unload
+                // (`0x004434FF..0x00443514`) with no cargo; its mission
+                // toggles the super-charge.
+                let gap_generator = self
+                    .substrate
+                    .entities
+                    .get(*transport_id)
+                    .filter(|t| t.category() == crate::map::entities::EntityCategory::Structure)
+                    .and_then(|t| self.interner.object_type(t.type_ref(), rules))
+                    .is_some_and(|object| object.gap_generator);
+                if !has_passengers && !gap_generator {
                     return false;
                 }
                 let category = self
@@ -1995,8 +2005,9 @@ impl Simulation {
 
     /// The rally click's event 0x1E for each selected factory:
     /// `BuildingClass::SetRallyPoint @ 0x00443860` queues it and
-    /// `EventClass::Execute @ 0x004C6DAA` runs `Set_ArchiveTarget @
-    /// 0x0070C610`, so the factory archives the cell (its only store).
+    /// [`Self::execute_archive_event`] runs it, so the factory archives the
+    /// cell (its only store). [`Self::takes_rally_point`] is VERA's command
+    /// admission.
     ///
     /// The input owner `factory_rally_cell_input` has already run native
     /// Map56DC20's nearby-passable search separately for each producer. This
@@ -2013,10 +2024,8 @@ impl Simulation {
         ids.sort_unstable();
         ids.dedup();
         for stable_id in ids {
-            if self.takes_rally_point(stable_id, command_owner, rules)
-                && let Some(entity) = self.substrate.entities.get_mut(stable_id)
-            {
-                entity.set_archive_target(Some(crate::sim::combat::TargetKind::Cell(rx, ry)));
+            if self.takes_rally_point(stable_id, command_owner, rules) {
+                self.execute_archive_event(stable_id, crate::sim::combat::TargetKind::Cell(rx, ry));
             }
         }
         // `EVA_NewRallyPointEstablished` is not a sim fact: `BuildingClass::
@@ -2026,30 +2035,42 @@ impl Simulation {
     }
 
     /// The object click's event 0x1E for a non-factory building
-    /// ([`Command::ArchiveObject`]), `EventClass::Execute @ 0x004C6DAA`: the
-    /// resolved building's planning tokens are cleared (`0x006386E0`, event
-    /// NULL), a dead building (`+0x90`) is skipped, and otherwise it archives
-    /// the target as the event resolves it ([`Self::resolve_event_token`]):
-    /// null when the object no longer exists. The owner test is VERA's
-    /// command admission.
+    /// ([`Command::ArchiveObject`]), run by [`Self::execute_archive_event`].
+    /// The owner test is VERA's command admission.
     ///
     /// [`Command::ArchiveObject`]: crate::sim::command::Command::ArchiveObject
     fn archive_object(&mut self, command_owner: &str, entity_id: u64, target_id: u64) -> bool {
-        if !self.entity_owned_by_id(command_owner, entity_id) {
-            return false;
-        }
+        self.entity_owned_by_id(command_owner, entity_id)
+            && self
+                .execute_archive_event(entity_id, crate::sim::combat::TargetKind::Entity(target_id))
+    }
+
+    /// `EventClass::Execute @ 0x004C6DAA`'s event 0x1E (ARCHIVE) for
+    /// `entity_id`: its planning tokens are cleared (`0x006386E0`, event
+    /// NULL), a dead object (`+0x90`) is skipped, and otherwise
+    /// `Set_ArchiveTarget @ 0x0070C610` stores `target` as the event resolves
+    /// it ([`Self::resolve_event_token`]): null for an object no longer
+    /// present, while a Cell always resolves. Returns whether it archived.
+    fn execute_archive_event(
+        &mut self,
+        entity_id: u64,
+        target: crate::sim::combat::TargetKind,
+    ) -> bool {
         self.planning_detach_actor(entity_id);
-        let target =
-            self.resolve_event_token(Some(crate::sim::combat::TargetKind::Entity(target_id)));
-        let Some(building) = self
+        // The target resolves only for a live object (`0x004C6DCD` precedes
+        // `0x006E6E20`), so a dead one stamps no fallback Cell.
+        if !self
             .substrate
             .entities
-            .get_mut(entity_id)
-            .filter(|building| building.lifecycle.object_alive())
-        else {
+            .get(entity_id)
+            .is_some_and(|object| object.lifecycle.object_alive())
+        {
             return false;
-        };
-        building.set_archive_target(target);
+        }
+        let target = self.resolve_event_token(Some(target));
+        if let Some(object) = self.substrate.entities.get_mut(entity_id) {
+            object.set_archive_target(target);
+        }
         true
     }
 
@@ -2085,6 +2106,25 @@ impl Simulation {
     /// selection, but does not retroactively remove an existing one.
     /// VERA-only: applies the local `Command::Select` snapshot, its source of truth, to
     /// IsSelected `Object+0x83` through `Deselect @ 0x005F44A0` and `Select @ 0x005F4520`.
+    ///
+    /// RESIDUAL: the input ledger resolves a mutation's Select calls, their
+    /// planning expansion (`0x00637840`) and Unselect_All drains included;
+    /// this then Selects only the final new members, in vector order, with
+    /// the `0x00AC4CF6` guard clear. So (a) a Select a partner's Selected tag
+    /// event (33) starts expands its own tail node, where native's guard
+    /// returns early; (b) an object Selected and then drained within one
+    /// mutation, or a selected object drained and Selected again within it,
+    /// raises no event 33 (native raises one per Select, `0x006FBFE4`; the
+    /// re-Selected object keeps its bit here, so `try_select_object` sees it
+    /// already selected); (c) the new members' events run in vector order, not
+    /// call order. Trigger: a tag with event 33 on a planning partner (a);
+    /// on an object a later Select of the same mutation drains, which takes
+    /// another house's object on the player's planning node (b); or on two
+    /// objects one mutation selects (c). Effect: extra partners selected, or
+    /// a missing or reordered event 33 and the actions it runs (RNG draws
+    /// included). Frequency: rare; needs Selected triggers, and (a, b)
+    /// Planning Mode. Downstream risk: the selection's later orders, and
+    /// whatever those trigger actions change.
     fn apply_selection_snapshot(
         &mut self,
         stable_ids: &[u64],
@@ -2153,13 +2193,77 @@ impl Simulation {
 
     /// Commit an input-admitted Techno selection through Object5F4520, then
     /// its successful Techno6FBFD0..6FBFE4 Event33 callback (Steam gamemd).
-    /// The app's picking/navigation owner admits discovery+41B and House50B6F0
-    /// before emitting the ordered Select command. Keep the graphical-client
-    /// B73550 gate there: replaying this command must not depend on a renderer.
+    /// The app's input ledger applies TechnoClass::Select's gate
+    /// ([`Self::techno_select_admits`]) and Unselect_All
+    /// ([`Self::select_unselects_all`]) before emitting the ordered Select
+    /// command. Keep the graphical-client B73550 gate there: replaying this
+    /// command must not depend on a renderer.
     /// Raw lifecycle Select writers use Selection::select and do not raise33.
     pub(crate) fn try_select_object(
         &mut self,
         stable_id: u64,
+        context: super::UninitContext<'_>,
+    ) -> bool {
+        self.object_select(stable_id, false, context)
+    }
+
+    /// `TechnoClass::Select @ 0x006FBFA0`'s gate (`0x006FBFA3..0x006FBFC3`):
+    /// the current house has discovered the object (`+0x41B`) or its owner
+    /// is the human player (`HouseClass::IsHumanPlayer @ 0x0050B6F0`). Its
+    /// third arm, a zero main window handle (`0x00B73550`), never holds in a
+    /// running game. Every Select of a Techno passes it: the game's own
+    /// ([`Self::techno_select`]) and each Select the app's input ledger
+    /// resolves, planning partners included.
+    pub fn techno_select_admits(&self, stable_id: u64) -> bool {
+        self.substrate
+            .entities
+            .get(stable_id)
+            .is_some_and(|entity| {
+                entity.discovery.discovered_by_current_house()
+                    || self.house_is_human_player(entity.owner())
+            })
+    }
+
+    /// `ObjectClass::Select @ 0x005F4520` into a non-empty selection whose
+    /// first object (current-objects `[0]`) is `first`
+    /// (`0x005F45AF..0x005F45F8`): Unselect_All (`0x0048DC90`) runs unless
+    /// both owners are the human player (`0x0050B6F0`), so a selection holds
+    /// either the player's objects or one other object. Both Select owners
+    /// decide with this: the input ledger, which knows `[0]`, and
+    /// [`Self::object_select`].
+    pub fn select_unselects_all(&self, first: u64, new: u64) -> bool {
+        let human = |id: u64| {
+            self.substrate
+                .entities
+                .get(id)
+                .is_some_and(|entity| self.house_is_human_player(entity.owner()))
+        };
+        let first_human = human(first);
+        first_human != human(new) || !first_human
+    }
+
+    /// `ObjectClass::Select @ 0x005F4520` and the Selected tag event that
+    /// `TechnoClass::Select` raises after it (`0x006FBFD0..0x006FBFE4`). A
+    /// Select the game makes itself (`logic`) first runs Unselect_All
+    /// (`0x0048DC90`: Deselect `0x005F44A0` of every selected object, each
+    /// releasing Follow, [`LifecycleOutput::FollowReleased`]) when
+    /// [`Self::select_unselects_all`] says so, then reports its insertion
+    /// into the current-objects vector ([`LifecycleOutput::ObjectSelected`]),
+    /// before the tag event can Select anything else. An input Select arrives
+    /// as a snapshot its owner already resolved.
+    ///
+    /// The simulation keeps selected bytes, not the vector's order, so this
+    /// reads the first selected object in store order as `[0]`. Every
+    /// Select keeps a selection all the player's or a single other object,
+    /// so any member answers as `[0]` would; they differ only if a selected
+    /// object changed owner and stayed selected.
+    ///
+    /// [`LifecycleOutput::ObjectSelected`]: super::LifecycleOutput::ObjectSelected
+    /// [`LifecycleOutput::FollowReleased`]: super::LifecycleOutput::FollowReleased
+    fn object_select(
+        &mut self,
+        stable_id: u64,
+        logic: bool,
         context: super::UninitContext<'_>,
     ) -> bool {
         if !self.can_select_object(stable_id, context.rules())
@@ -2171,44 +2275,59 @@ impl Simulation {
         {
             return false;
         }
+        if logic {
+            let first = self
+                .substrate
+                .entities
+                .values()
+                .find(|entity| entity.selection.is_selected())
+                .map(|entity| entity.stable_id());
+            if first.is_some_and(|first| self.select_unselects_all(first, stable_id)) {
+                for id in self.substrate.entities.keys_sorted() {
+                    if let Some(entity) = self.substrate.entities.get_mut(id)
+                        && entity.selection.is_selected()
+                    {
+                        entity.selection.deselect();
+                        // Deselect's Follow release (`0x005F4503..0x005F4513`).
+                        self.lifecycle_outputs
+                            .emit(super::LifecycleOutput::FollowReleased { stable_id: id });
+                    }
+                }
+            }
+        }
         let Some(entity) = self.substrate.entities.get_mut(stable_id) else {
             return false;
         };
         entity.selection.select();
+        if logic {
+            self.lifecycle_outputs
+                .emit(super::LifecycleOutput::ObjectSelected { stable_id });
+        }
         // Selection has already changed when the synchronous Tag actions run.
         // They may change ownership, remove the Tag, or retire the object.
         self.dispatch_object_tag_event(stable_id, 33, Some(stable_id), None, context);
         true
     }
 
-    /// `TechnoClass::Select @ 0x006FBFA0` (vt+0x14C) for a logic caller that
-    /// re-selects one of its own objects: an object the current house has
-    /// not discovered (`+0x41B`) and does not own as its human player is
-    /// refused (the graphical client's gate); then ObjectClass::Select and
-    /// the tag event ([`Self::try_select_object`]); then, for a human
-    /// player's or passive house's object while the selection-voice latch
+    /// `TechnoClass::Select @ 0x006FBFA0` (vt+0x14C) for a logic caller: an
+    /// object [`Self::techno_select_admits`] refuses is not selected; then
+    /// ObjectClass::Select and the tag event ([`Self::object_select`]);
+    /// then, for a human player's
+    /// or passive house's object while the selection-voice latch
     /// `0x00822CF2` is set (`0x006FBFF4..0x006FC018`), VoiceSelect (vt+0x360)
-    /// through [`Self::selection_voice_request`].
-    ///
-    /// RESIDUAL: the planning-node selection add (`0x00637840`) runs in the
-    /// app's selection resolver, since planning mode is local; these logic
-    /// Selects skip it. It differs only when a reselected crewman, escapee or
-    /// parasite still holds a path while the local player is in planning mode.
+    /// through [`Self::selection_voice_request`]; last, the planning-node add
+    /// (`0x006FC020`, [`Self::planning_select_tail_node`]), which in the local
+    /// player's Planning Mode Selects this object's tail-node partners
+    /// through this same function. A passenger or parasite keeps its path
+    /// through Limbo, so a reselected escapee or released parasite pulls in
+    /// its node's partners.
     pub(crate) fn techno_select(
         &mut self,
         stable_id: u64,
         voice_latch: bool,
         context: super::UninitContext<'_>,
     ) -> bool {
-        let Some(entity) = self.substrate.entities.get(stable_id) else {
-            return false;
-        };
-        if !entity.discovery.discovered_by_current_house()
-            && !self.house_is_human_player(entity.owner())
-        {
-            return false;
-        }
-        if !self.try_select_object(stable_id, context) {
+        if !self.techno_select_admits(stable_id) || !self.object_select(stable_id, true, context) {
             return false;
         }
         let rules = context.rules();
@@ -2219,6 +2338,7 @@ impl Simulation {
                 sound_id,
             });
         }
+        self.planning_select_tail_node(stable_id, voice_latch, context);
         true
     }
 

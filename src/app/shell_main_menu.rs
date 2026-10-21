@@ -624,6 +624,19 @@ impl App {
     /// scenario stream back to the offline shell, retaining the runtime and
     /// presentation resources.
     pub(super) fn close_finished_scenario(state: &mut AppState) {
+        Self::retire_finished_scenario(state);
+        Self::persist_returned_session_toggles(state);
+        state.frontend.score_page = None;
+        state.frontend.campaign_score_page = None;
+        // 0x0072D780 releases the score art.
+        state.frontend.score_art = None;
+        state.frontend.campaign_score_art = None;
+        state.frontend.screen = GameScreen::MainMenu;
+    }
+
+    /// The teardown every finished scenario shares, the co-op continuation
+    /// included, which never reaches Main_Game's shell return.
+    pub(crate) fn retire_finished_scenario(state: &mut AppState) {
         // Main_Game48CEBF also retires ScenarioStarted after score Continue;
         // source: original gamemd.exe Main_Game48CCC0 (EBX=0 at48CCD4).
         if let Some(runtime) = state.match_state.sim_runtime.as_mut() {
@@ -631,15 +644,8 @@ impl App {
         }
         crate::app::match_runtime::sim_tick::flush_replay_log(state);
         Self::capture_returned_multiplayer_scenario(state);
-        Self::persist_returned_session_toggles(state);
         state.match_state.startup.clear();
         state.match_state.scenario_elapsed_clock.reset();
-        state.frontend.score_page = None;
-        state.frontend.campaign_score_page = None;
-        // 0x0072D780 releases the score art.
-        state.frontend.score_art = None;
-        state.frontend.campaign_score_art = None;
-        state.frontend.screen = GameScreen::MainMenu;
         state.match_state.input.zoom_level = 1.0;
         state.match_state.input.zoom_target = 1.0;
     }
@@ -647,7 +653,7 @@ impl App {
     /// PrepareSession re-enters the active mode's shell: LAN starts a new BB,
     /// WOL its lobby 0x113, Skirmish a new0x102. The session keeps the
     /// admitted network return owner.
-    pub(super) fn resume_shell_after_match(state: &mut AppState) {
+    pub(crate) fn resume_shell_after_match(state: &mut AppState) {
         if state.frontend.external_launch {
             Self::start_quit_cascade(state);
             return;
@@ -723,7 +729,6 @@ impl App {
         // A new 0x102 creates its kind-1 statics hidden (0x0060A5B0).
         state.frontend.skirmish_shell_state.statics.reset();
         state.frontend.skirmish_shell_last_painted_pressed_button = None;
-        Self::ensure_active_cooperative_shell_selection(state);
         // The skirmish dialog (0x102) slides its controls in on first paint like
         // every shell dialog; the per-frame slide trigger starts that wave once
         // the skirmish shell becomes the showing screen. Clear any stale wave

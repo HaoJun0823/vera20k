@@ -233,10 +233,10 @@ pub(crate) fn produce_cash_on_grand_opening(
 /// else `Spend_Money(-amount)` (`0x0043FDAA..0x0043FDD1`).
 ///
 /// The two warp gates ahead of the block (`IsWarpingOut` `+0x270` at
-/// `0x0043FD0C`, `IsBeingWarped` `+0x271` at `0x0043FD1E`) jump past it; VERA
-/// has no chrono-warp bytes on a building, so the block always runs.
-/// Residual trigger: a captured derrick inside a Chronosphere warp — the
-/// native timer dies on the skipped frame, VERA's keeps paying.
+/// `0x0043FD0C`, `IsBeingWarped` `+0x271` at `0x0043FD1E`) jump past it. In
+/// VERA the object turn's temporal prologue (`temporal_ai_prologue`) returns
+/// for a warped building before this step, so a timer whose expiry frame
+/// falls inside the warp dies as natively.
 pub(crate) fn produce_cash_step(sim: &mut Simulation, stable_id: u64, rules: &RuleSet) {
     let Some(entity) = sim.substrate.entities.get(stable_id) else {
         return;
@@ -1200,6 +1200,36 @@ mod tests {
             credits(&sim, americans) < 5_000,
             "the link keeps draining after the mission drops"
         );
+    }
+
+    /// The drain re-check (`0x007361A9..0x00736204`) precedes
+    /// `TemporalClass::Update` (`0x00736204`), so a disc being erased still
+    /// drops a ray left with no link.
+    #[test]
+    fn a_warped_disc_still_drops_a_ray_with_no_link() {
+        let rules = rules();
+        let mut sim = Simulation::with_seed(0x0073_61A9);
+        let _yuri = house(&mut sim, "YuriCountry", false, 500);
+        let _americans = house(&mut sim, "Americans", true, 500);
+        base(&mut sim, &rules, "YuriCountry", 40, 40);
+        base(&mut sim, &rules, "Americans", 4, 4);
+        let disk = sim
+            .spawn_object("DISK", "YuriCountry", 30, 30, 0, &rules)
+            .expect("disc spawns");
+        attach_drain_anim(&mut sim, disk, &rules);
+        let stray = assert_drain_anim(&sim, disk);
+        sim.substrate
+            .entities
+            .get_mut(disk)
+            .unwrap()
+            .set_temporal_for_test(crate::sim::temporal::TemporalState::warped_by_for_test(
+                disk,
+            ));
+        run_ticks(&mut sim, &rules, 1);
+        let disc = sim.entities().get(disk).unwrap();
+        assert!(disc.is_warped_out(), "the fixture keeps the disc warped");
+        assert_eq!(disc.drain.anim, None);
+        assert!(anim_uninited(&sim, stray));
     }
 
     /// `UnitClass::AI @ 0x007361B3`: every 16th frame the disc re-checks the

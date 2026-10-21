@@ -589,7 +589,7 @@ pub(crate) fn building_mission_unload_absorber(
                 // integer reader at 0x5276D0 and stores it at +0xEE8
                 // (0x004610B3..0x004610C7). The unload tail tests this field
                 // `> 0` before dirtying House+0x5778 (0x0044DC55..0x0044DC75).
-                object.extra_power > 0,
+                object.extra_power.output() > 0,
                 height,
             ))
         })
@@ -1202,7 +1202,13 @@ fn eject_from_aircraft(
     .is_ok();
     // `0x00415565`: and goes back once the ejector returns.
     if picked_up {
-        sim.foot_place_down(aircraft_id, rules, overlay_registry, &mut |_, _| {});
+        sim.foot_place_down(
+            aircraft_id,
+            rules,
+            overlay_registry,
+            &mut |_, _| {},
+            effects,
+        );
     }
     ejected
 }

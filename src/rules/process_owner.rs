@@ -172,6 +172,8 @@ pub struct NativeScenarioRulesLoad {
 pub enum NativeScenarioRulesPrefix<'a> {
     NonCampaign(Option<&'a IniFile>),
     Campaign(Option<&'a IniFile>),
+    /// Admitted generated .SED route: Full_Init's saved DL skips ClearClasses.
+    RandomMap(Option<&'a IniFile>),
 }
 
 impl NativeScenarioRulesLoad {
@@ -223,6 +225,7 @@ impl NativeRulesProcessOwner {
             &selected_rules_root,
             &fixed_art,
             langrule.as_ref(),
+            &fixed_eva,
         )?;
         Ok(Self {
             sources: NativeRulesSourceSnapshot {
@@ -295,7 +298,7 @@ impl NativeRulesProcessOwner {
             .registry_state();
         rules.refresh_country_side_projection(
             registry.country_projection(),
-            registry.side_projection_names(),
+            registry.side_projection(),
         );
     }
 
@@ -410,13 +413,21 @@ impl NativeRulesProcessOwner {
     /// one native registry owner.
     pub fn startup_compatibility_projection(&self) -> Result<ProcessedRulesLayers, RulesError> {
         self.startup_layers()
-            .process_with_fixed_art(&self.sources.fixed_art)
+            .process_with_fixed_art_and_registry_state_recovering(
+                &self.sources.fixed_art,
+                NativeRulesRegistryState::default(),
+                RulesProcessContext::Ordinary,
+                &self.sources.fixed_eva,
+            )
+            .map_err(|failure| failure.into_parts().0)
     }
 
     /// Execute the active Full_Init Rules chronology in place.
     ///
     /// Noncampaign runs `E_multi` against the process-retained registry;
     /// campaign runs optional scenario-basename INI P against that registry.
+    /// Ordinary Full_Init first clears RulesExt global controls; the admitted
+    /// RandomMap arm preserves them under its saved-DL ClearClasses bypass.
     /// The common reset deletes Types, processes root, clears ColorAdd,
     /// processes LANG, then rereads only root ColorAdd before (noncampaign
     /// mode)/map P. The four AudioVisual selectors retain LANG's last read.
@@ -432,9 +443,21 @@ impl NativeRulesProcessOwner {
             .take()
             .expect("native Rules registry transition may not be re-entered");
         let pre_reset_state = registry_owner.into_registry_state();
+        #[cfg(feature = "ares")]
+        let pre_reset_state = {
+            let mut state = pre_reset_state;
+            // Full_Init686B5D/686B65 clears classes before the early map/rules
+            // pass on ordinary loads. The generated RMG arm retains RulesExt;
+            // the later TypeReset6686C0 is a separate, retaining transaction.
+            if !matches!(&prefix, NativeScenarioRulesPrefix::RandomMap(_)) {
+                state.clear_scenario_global_controls();
+            }
+            state
+        };
 
         let (pre_reset_trace, mode_rules_override) = match prefix {
-            NativeScenarioRulesPrefix::NonCampaign(mode) => (
+            NativeScenarioRulesPrefix::NonCampaign(mode)
+            | NativeScenarioRulesPrefix::RandomMap(mode) => (
                 process_native_noncampaign_rules_prepass(
                     pre_reset_state,
                     &self.sources.selected_rules_root,
@@ -446,6 +469,7 @@ impl NativeRulesProcessOwner {
                     pre_reset_state,
                     named,
                     &self.sources.fixed_art,
+                    &self.sources.fixed_eva,
                 ) {
                     Ok(trace) => trace,
                     Err(failure) => {
@@ -465,6 +489,7 @@ impl NativeRulesProcessOwner {
             &self.sources.fixed_art,
             pre_reset_state,
             RulesProcessContext::ScenarioReset,
+            &self.sources.fixed_eva,
         ) {
             Ok(processed) => processed,
             Err(failure) => {
@@ -532,3 +557,11 @@ impl NativeRulesProcessOwner {
 #[cfg(test)]
 #[path = "session_country_tests.rs"]
 mod session_country_tests;
+
+#[cfg(all(test, feature = "ares"))]
+#[path = "ares_eva_process_tests.rs"]
+mod ares_eva_tests;
+
+#[cfg(all(test, feature = "ares"))]
+#[path = "process_owner_global_controls_tests.rs"]
+mod global_controls_tests;

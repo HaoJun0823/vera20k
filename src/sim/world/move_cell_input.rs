@@ -341,7 +341,8 @@ impl Simulation {
         let cells = NativeCellQuery::isolated(terrain);
         let coords = ground_pose::target_get_coords(TargetKind::Entity(target), self, Some(&cells))
             .ok_or("What_Action target disappeared")?;
-        // `CDQ; AND EDX,0xFF; ADD; SAR 8` (`0x0044745D..0x00447479`).
+        // `CDQ; AND EDX,0xFF; ADD; SAR 8` (`0x0044745D..0x00447479`), kept
+        // as the signed words the rungs read.
         let cell = (
             crate::util::lepton::lepton_to_cell_packed(coords.x),
             crate::util::lepton::lepton_to_cell_packed(coords.y),
@@ -699,13 +700,9 @@ impl Simulation {
     /// (`0x007001E9..0x00700217`), and Foot's wrapper (`0x004DDED0`) makes
     /// none. Ctrl+Alt over an object moves a Harrier, natively as here.
     ///
-    /// RESIDUAL: the Cell query's attack rung (`0x007008A6..`): over a destroyable
-    ///   cliff or a `LegalTarget=` overlay native answers Attack, which the
-    ///   Immune rung then tests on the object and the click sends to Foot
-    ///   `0x004D74E0` as an attack on the object. [`Self::cell_move_action`]
-    ///   does not model that rung, so VERA answers Move. Trigger: an aircraft
-    ///   over an object it may not attack standing on such a Cell. Frequency:
-    ///   rare.
+    /// The Cell query's unforced Attack rung (`0x007008A6..`) answers before
+    /// these Move rungs; the input layer asks it first
+    /// (`context_order::aircraft_cell_attack_under_object`).
     pub fn foot_object_class_action(
         &self,
         viewer: InternedId,
@@ -788,16 +785,9 @@ impl Simulation {
         registry: Option<&OverlayTypeRegistry>,
     ) -> MoveAction {
         let action = if action == MoveAction::None {
-            let cells = self
-                .resolved_terrain
-                .as_ref()
-                .map(NativeCellQuery::canonical);
-            let Some(coords) =
-                ground_pose::target_get_coords(TargetKind::Entity(target), self, cells.as_ref())
-            else {
+            let Some(cell) = self.object_coords_cell(target) else {
                 return action;
             };
-            let cell = ((coords.x / 256) as u16, (coords.y / 256) as u16);
             let query = CellActionQuery {
                 mouse_over: false,
                 shift: false,
@@ -812,6 +802,22 @@ impl Simulation {
         } else {
             action
         }
+    }
+
+    /// The Cell under the object `target`'s GetCoords (vt+0x48), a Techno or
+    /// a Terrain object, each axis `>> 8` toward zero (`CDQ; AND EDX,0xFF;
+    /// SAR 8`): the Cell an Aircraft's What_Action over the object asks its
+    /// own Cell action on (`0x00417D80..0x00417DB7`), the Cell a building's
+    /// factory rungs judge (`0x0044745D..0x00447479`), and its rally Cell
+    /// over the object (`0x004436A4..0x004436C9`).
+    pub fn object_coords_cell(&self, target: u64) -> Option<(u16, u16)> {
+        let cells = self
+            .resolved_terrain
+            .as_ref()
+            .map(NativeCellQuery::canonical);
+        let coords =
+            ground_pose::target_get_coords(TargetKind::Entity(target), self, cells.as_ref())?;
+        Some(((coords.x / 256) as u16, (coords.y / 256) as u16))
     }
 
     /// The destination a Foot's Move or NoMove click over an object orders:

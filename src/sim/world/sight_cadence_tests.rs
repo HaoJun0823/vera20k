@@ -186,7 +186,7 @@ fn exact_zero_sight_gate_differs_from_empty_walk_and_override() {
     assert!(admission.latched);
     assert_eq!(admission.radius, -1);
     assert!(admission.cells.is_empty());
-    sim.refresh_object_sight(zero, &rules, 3);
+    sim.refresh_object_sight(zero, &rules, 3, crate::sim::world::FrameEffects::default());
     assert!(sim.fog.sight_is_latched(zero, owner));
     assert_eq!(
         sim.fog.sight_admissions_for_test()[&(zero, owner)].radius,
@@ -1618,7 +1618,7 @@ fn a_reveal_before_navigation_publication_tests_the_cell_heights() {
     assert_ne!(early, flat, "the cliff hides cells before publication");
     let grid = PathGrid::from_resolved_terrain(sim.resolved_terrain.as_ref().unwrap());
     sim.install_fixture_path_grid(Some(&grid));
-    sim.refresh_object_sight(id, &rules, 0);
+    sim.refresh_object_sight(id, &rules, 0, crate::sim::world::FrameEffects::default());
     assert_eq!(
         sim.fog.sight_admission(id, owner).unwrap().cells,
         early,
@@ -1684,7 +1684,7 @@ fn an_alliance_moves_the_allys_building_sight_within_the_call() {
         .spawn_object("MTNK", "Russians", 8, 22, 0, &rules)
         .unwrap();
     // The Spy Plane's kind of reveal: a radius that replaces its Sight=.
-    sim.refresh_object_sight(tank, &rules, 7);
+    sim.refresh_object_sight(tank, &rules, 7, crate::sim::world::FrameEffects::default());
     let tank_sight = sim.fog.sight_admission(tank, russians).unwrap().clone();
     assert_eq!(tank_sight.radius, 7);
     assert!(!sim.fog.sight_is_latched(standing, americans));
@@ -1697,7 +1697,7 @@ fn an_alliance_moves_the_allys_building_sight_within_the_call() {
         FrameEffects::default(),
         false,
     );
-    // RESIDUAL (`Simulation::admit_allied_building_sight`): native's latch
+    // RESIDUAL (`Simulation::admit_alliance_sight`): native's latch
     // (`+0x250`), set by the plant's Unlimbo, makes this `UpdateReveal`
     // return (`0x0070B0B1`); VERA opens it here.
     assert!(sim.fog.sight_is_latched(standing, americans));
@@ -1726,7 +1726,14 @@ fn an_alliance_moves_the_allys_building_sight_within_the_call() {
     assert!(sim.fog.sight_is_latched(plant, americans));
     assert!(sim.fog.is_cell_visible(americans, origin.0, origin.1));
 
-    sim.make_enemy(russians, americans, &rules, false);
+    sim.make_enemy(
+        russians,
+        americans,
+        &rules,
+        None,
+        FrameEffects::default(),
+        false,
+    );
     assert!(
         !sim.fog.sight_is_latched(plant, americans),
         "0x004F9FD8's release precedes the bit write"
@@ -1831,4 +1838,47 @@ fn an_infantry_arrival_refreshes_its_sight_border() {
     let border = vision::sight_border_cells((12, 12, z), radius + 3, 0);
     assert!(!border.is_empty());
     assert_eq!(trace.border_receivers, border);
+}
+
+#[test]
+fn make_ally_refreshes_own_sight_after_admission_and_skips_a_refused_repeat() {
+    let Some((mut sim, rules, _)) = retail_arena() else {
+        return;
+    };
+    sim.fog = vision::FogState::new(32, 32);
+    let player = sim.intern("Americans");
+    let other = add_computer_house(&mut sim, "Russians");
+    add_computer_house(&mut sim, "Confederation");
+    let id = sim
+        .spawn_object("MTNK", "Americans", 8, 22, 0, &rules)
+        .unwrap();
+    assert!(
+        sim.entities()
+            .get(id)
+            .unwrap()
+            .discovery
+            .discovered_by_current_house()
+    );
+    sim.refresh_object_sight(id, &rules, 7, crate::sim::world::FrameEffects::default());
+    let before = sim.fog.sight_admission(id, player).unwrap().clone();
+    assert_eq!(before.radius, 7);
+    sim.substrate
+        .entities
+        .get_mut(id)
+        .unwrap()
+        .position
+        .set_rx_for_test(9);
+    sim.make_ally(other, player, &rules, None, FrameEffects::default(), false);
+    let refreshed = sim.fog.sight_admission(id, player).unwrap().clone();
+    assert_eq!((refreshed.origin.0, refreshed.origin.1), (9, 22));
+    assert_eq!(refreshed.radius, rules.object("MTNK").unwrap().sight);
+    sim.substrate
+        .entities
+        .get_mut(id)
+        .unwrap()
+        .position
+        .set_rx_for_test(10);
+    // CanAlly rejects the existing edge before the pre-release visitor.
+    sim.make_ally(other, player, &rules, None, FrameEffects::default(), false);
+    assert_eq!(sim.fog.sight_admission(id, player), Some(&refreshed));
 }

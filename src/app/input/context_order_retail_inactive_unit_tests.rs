@@ -96,6 +96,7 @@ fn retail_inactive_robot_tank_crushes_or_selects_instead_of_attacking() {
         &[robot],
         TargetKind::Entity(gi),
         true,
+        OrderMode::Move,
         &registry,
     );
     assert!(!fire.commands.is_empty());
@@ -126,6 +127,7 @@ fn retail_inactive_robot_tank_crushes_or_selects_instead_of_attacking() {
         &[robot],
         TargetKind::Entity(gi),
         true,
+        OrderMode::Move,
         &registry,
     );
     assert!(crush.consumed && !crush.select_fallback);
@@ -136,6 +138,7 @@ fn retail_inactive_robot_tank_crushes_or_selects_instead_of_attacking() {
         &[robot],
         TargetKind::Entity(tank),
         true,
+        OrderMode::Move,
         &registry,
     );
     assert!(select.select_fallback && select.commands.is_empty());
@@ -185,6 +188,7 @@ fn retail_tank_being_warped_out_neither_attacks_nor_fires() {
         &[tank],
         TargetKind::Cell(18, 18),
         true,
+        OrderMode::Move,
         &registry,
     );
     assert!(fire.commands.is_empty(), "{:?}", fire.commands);

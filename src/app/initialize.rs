@@ -502,6 +502,9 @@ impl App {
                 },
             )
             .unwrap_or_default();
+        if let Some(assets) = startup_asset_manager.as_ref() {
+            process_assets.install_native_ini_hashes(assets, &skirmish_modes);
+        }
         let mut skirmish_shell_state = crate::ui::skirmish_shell::SkirmishShellState::default();
         // Seed the Credits/Unit Count slider ranges from rulesmd's
         // [MultiplayerDialogSettings] so a mod that changes the money/unit bounds
@@ -825,6 +828,7 @@ impl App {
                 wol_preferences: Default::default(),
                 score_page: None,
                 campaign_score_page: None,
+                coop_score_page: None,
                 score_art: None,
                 campaign_score_art: None,
                 finished_game_count: 0,

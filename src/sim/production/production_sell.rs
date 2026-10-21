@@ -633,7 +633,8 @@ fn sale_survivors(
     // Both read NoSurvivor (`0x0044A4CA`, How_Many_Survivors), clear on a
     // building alive to sell.
     let count = sim.building_survivor_count(rules, id);
-    let passengers = sim.eject_absorbed_passengers(rules, registry, id, &cells, frame_effects);
+    let passengers =
+        sim.eject_absorbed_passengers(rules, registry, id, None, &cells, frame_effects);
     let garrison = crate::sim::passenger::garrison_eject::sell_building_occupants(
         sim,
         rules,

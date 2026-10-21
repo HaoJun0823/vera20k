@@ -268,7 +268,11 @@ fn special_ordinary_retask_cancels_shared_route(kind: &str) {
         );
     }
     assert!(
-        !sim.planning_enter_idle(actor, crate::rules::ruleset::RuleSet::empty_for_test()),
+        !sim.planning_enter_idle(
+            actor,
+            crate::rules::ruleset::RuleSet::empty_for_test(),
+            true
+        ),
         "{kind} must not restart an old leg"
     );
     assert!(sim.pending_command_snapshot().is_empty());
@@ -349,6 +353,8 @@ fn native_dispatch_latches_match_production_flags_and_keep_path_shape() {
     }
 }
 
+/// The node start queues Deliberate with commence 1 (`0x00638606`), so a
+/// ready object makes it current at once and queues nothing.
 #[test]
 fn guard_commit_consumes_first_node_stages_deliberate_and_retains_next_node() {
     let (mut sim, rules, owner) = fixture();
@@ -370,16 +376,12 @@ fn guard_commit_consumes_first_node_stages_deliberate_and_retains_next_node() {
     assert_eq!(path.nodes.len(), 1);
     assert_eq!(path.pending, -1);
     assert_eq!(path.current.as_ref().unwrap().payload()[22], 2);
+    let mission = &sim.substrate.entities.get(1).unwrap().mission;
     assert_eq!(
-        sim.substrate
-            .entities
-            .get(1)
-            .unwrap()
-            .mission
-            .queued()
-            .known(),
+        mission.current().known(),
         Some(crate::sim::mission::MissionType::Deliberate)
     );
+    assert_eq!(mission.queued(), crate::sim::mission::MissionId::NONE);
     assert!(sim.take_due_commands().is_empty());
     sim.session.set_tick_for_test(sim.session.tick() + 1);
     let due = sim.take_due_commands();
@@ -905,12 +907,9 @@ fn connect_actor_group_follows_tail_encounter_order_and_deduplicates() {
     for actor in [2, 1] {
         append(&mut sim, &rules, owner, actor, (12, 15));
     }
-    assert_eq!(
-        sim.planning_connect_actors(owner, &[1, 2, 3]),
-        vec![2, 1, 3]
-    );
+    assert_eq!(sim.planning_connect_actors(&[1, 2, 3]), vec![2, 1, 3]);
     sim.planning_detach_actor(2);
-    assert_eq!(sim.planning_connect_actors(owner, &[1, 3]), vec![1, 3]);
+    assert_eq!(sim.planning_connect_actors(&[1, 3]), vec![1, 3]);
 }
 
 #[test]
@@ -1662,6 +1661,10 @@ fn press_refusals_and_hover_follow_the_selected_paths() {
     assert!(!sim.planning_release_refused(&[1], first));
     // A node hit skips 639DA0, so an aircraft without a token passes.
     assert_eq!(sim.planning_press_refusal(&[4, 5], first), None);
+    // Radar653CD1 calls639DA0 directly: even a tactical node that admits
+    // this selection cannot bypass the radar's selection-only check.
+    assert_eq!(sim.planning_selection_refusal(&[4, 5]), Some(NoAircraft));
+    assert_eq!(sim.planning_selection_refusal(&[1, 3]), None);
 
     // 639DA0 with no node hit: the first object that cannot use waypoints.
     let open = [first[0] + 200, first[1] + 200];
@@ -1692,4 +1695,150 @@ fn press_refusals_and_hover_follow_the_selected_paths() {
     assert_eq!(sim.planning.paths[&1].loop_start, Some(0));
     assert_eq!(sim.planning_invalid_node_reason(&[1], 1), Some(1));
     assert_eq!(sim.planning_press_refusal(&[1], first), Some(InvalidNode));
+}
+
+/// TechnoClass::Enter_Idle_Mode asks vt+0x430 before the node start
+/// (`0x00709A6B`): an Aircraft answers its `+0x6D5` byte (`0x0041B9E0`),
+/// which only Mission_Attack state 10 clears around its idle call, so that
+/// call starts no planned node; a later idle entry does.
+#[test]
+fn an_aircraft_starts_its_planned_node_only_with_its_arrival_byte_set() {
+    let (mut sim, rules, owner) = fixture();
+    assert_eq!(sim.substrate.allocate_stable_id(), 4);
+    crate::sim::world::lifecycle_tests::insert_entity(
+        &mut sim,
+        4,
+        crate::map::entities::EntityCategory::Aircraft,
+    );
+    let jet = sim.substrate.entities.get_mut(4).unwrap();
+    jet.lifecycle.set_in_limbo_for_test(false);
+    jet.in_logic_vector.set_for_test(true);
+    append(&mut sim, &rules, owner, 4, (12, 15));
+    append(&mut sim, &rules, owner, 4, (16, 15));
+    let path = sim.planning.paths.get_mut(&4).unwrap();
+    path.pending = 1;
+    path.executing = false;
+    assert!(!sim.planning_enter_idle(4, &rules, false));
+    assert!(!sim.planning.paths[&4].executing);
+    assert!(sim.planning_enter_idle(4, &rules, true));
+    assert!(sim.planning.paths[&4].executing);
+}
+
+/// The local player's Planning Mode byte (`0x00AC4CF4`).
+struct PlanningMode;
+
+impl crate::sim::world::LocalPlanningBoundary for PlanningMode {
+    fn leave_planning(
+        &self,
+        _: &Simulation,
+        _: &RuleSet,
+    ) -> Option<crate::sim::command::CommandEnvelope> {
+        None
+    }
+
+    fn planning_active(&self) -> bool {
+        true
+    }
+}
+
+/// A connect (`0x0063AD50`, no owner check; receiver `0x00637F4D..0x00637F64`
+/// checks only the node's house) can put another house's object on the
+/// player's node. Selecting the player's actor then runs `0x00637840` over
+/// it: each member's `TechnoClass::Select @ 0x006FBFA0` admits it only when
+/// discovered (`+0x41B`) or the human player's, and `ObjectClass::Select @
+/// 0x005F4520` runs Unselect_All (`0x0048DC90`) when its owner's human status
+/// differs from the first selected object's or that one is not the
+/// player's (`0x005F45AF..0x005F45F8`). Members [player 1, enemy 2, player
+/// 3]: the enemy drains the actor and the player's member drains the enemy,
+/// each Deselect (`0x005F44A0`) releasing Follow.
+#[test]
+fn a_tail_node_enemy_passes_the_select_gate_and_unselects_all() {
+    for discovered in [true, false] {
+        let (mut sim, rules, owner) = fixture();
+        let enemy = sim.interner.intern("Russians");
+        sim.houses
+            .register(crate::sim::house_state::HouseState::new(
+                enemy, 1, None, false, 0, 10,
+            ));
+        append(&mut sim, &rules, owner, 1, (12, 15));
+        let connect = sim.encode_plan_connect_record(owner, 2, (12, 15)).unwrap();
+        sim.change_owner(2, enemy);
+        apply(&mut sim, &rules, connect);
+        append(&mut sim, &rules, owner, 3, (12, 15));
+        assert_eq!(sim.planning_select_partners(1, true), [1, 2, 3]);
+        sim.substrate
+            .entities
+            .get_mut(2)
+            .unwrap()
+            .discovery
+            .set_discovered_by_current_house_for_test(discovered);
+        sim.lifecycle_outputs.clear_for_test();
+
+        assert!(sim.techno_select(
+            1,
+            false,
+            crate::sim::world::UninitContext::new(&rules, None).with_effects(
+                crate::sim::world::FrameEffects::default().with_local_planning(&PlanningMode)
+            ),
+        ));
+        let selected: Vec<u64> = (1..=3)
+            .filter(|&id| {
+                sim.substrate
+                    .entities
+                    .get(id)
+                    .unwrap()
+                    .selection
+                    .is_selected()
+            })
+            .collect();
+        // Each Unselect_All Deselect releases Follow (`0x005F4503..
+        // 0x005F4513`) before the draining Select inserts its object.
+        let outputs: Vec<(&str, u64)> = sim
+            .lifecycle_outputs
+            .as_slice()
+            .iter()
+            .filter_map(|output| match output {
+                crate::sim::world::LifecycleOutput::ObjectSelected { stable_id } => {
+                    Some(("select", *stable_id))
+                }
+                crate::sim::world::LifecycleOutput::FollowReleased { stable_id } => {
+                    Some(("release", *stable_id))
+                }
+                _ => None,
+            })
+            .collect();
+        if discovered {
+            assert_eq!(selected, [3]);
+            assert_eq!(
+                outputs,
+                [
+                    ("select", 1),
+                    ("release", 1),
+                    ("select", 2),
+                    ("release", 2),
+                    ("select", 3)
+                ]
+            );
+        } else {
+            assert_eq!(selected, [1, 3], "an undiscovered enemy is refused");
+            assert_eq!(outputs, [("select", 1), ("select", 3)]);
+        }
+    }
+}
+
+/// `0x0063AD50` expands a selected actor's tail group whatever the actor's
+/// owner (`0x0063ADB0..0x0063AEBC`).
+#[test]
+fn connect_actor_group_expands_another_houses_actor() {
+    let (mut sim, rules, owner) = fixture();
+    let enemy = sim.interner.intern("Russians");
+    sim.houses
+        .register(crate::sim::house_state::HouseState::new(
+            enemy, 1, None, false, 0, 10,
+        ));
+    append(&mut sim, &rules, owner, 1, (12, 15));
+    let connect = sim.encode_plan_connect_record(owner, 2, (12, 15)).unwrap();
+    sim.change_owner(2, enemy);
+    apply(&mut sim, &rules, connect);
+    assert_eq!(sim.planning_connect_actors(&[2]), vec![1, 2]);
 }

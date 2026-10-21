@@ -265,6 +265,14 @@ impl ApplicationHandler for App {
         if self.state.is_some() {
             return;
         }
+        // Asked once AppKit has launched and activated the app; macOS keeps a
+        // chooser from any other process behind the app the player was using.
+        if std::mem::take(&mut self.ask_for_game_folder) && !super::app_bundle::ensure_game_folder()
+        {
+            log::info!("No game folder chosen; exiting");
+            event_loop.exit();
+            return;
+        }
         log::info!("Application resumed — creating window and GPU context");
         let capture_dimensions = match (self.shell_capture.as_ref(), self.tactical_capture.as_ref())
         {
@@ -710,6 +718,10 @@ impl ApplicationHandler for App {
                     crate::app::input::keyboard::key(state, &event);
                     return;
                 }
+                if crate::app::input::coop_score::active(state) {
+                    crate::app::input::coop_score::key(state, &event);
+                    return;
+                }
                 if state.frontend.network_options.is_some() {
                     crate::app::input::network_options::key(state, &event);
                     return;
@@ -1095,6 +1107,9 @@ impl ApplicationHandler for App {
                 if Self::wol_active(state) {
                     Self::handle_wol_mouse_move(state);
                 }
+                if crate::app::input::coop_score::active(state) {
+                    crate::app::input::coop_score::cursor_moved(state);
+                }
                 if Self::score_shell_active(state) {
                     Self::handle_score_shell_mouse_move(state);
                 }
@@ -1245,7 +1260,9 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
-                if Self::campaign_score_shell_active(state) {
+                if crate::app::input::coop_score::active(state) {
+                    crate::app::input::coop_score::mouse(state, button, btn_state.is_pressed());
+                } else if Self::campaign_score_shell_active(state) {
                     if button == MouseButton::Left {
                         if btn_state.is_pressed() {
                             Self::handle_campaign_score_mouse_down(state);
@@ -1351,6 +1368,9 @@ impl ApplicationHandler for App {
                 crate::app::shell_wol::poll(state),
                 crate::app::shell_network_setup::poll(state),
                 crate::app::input::multiplayer_setup::poll(state),
+                crate::app::input::coop_score::active(state)
+                    .then(|| crate::app::input::coop_score::poll(state))
+                    .flatten(),
                 crate::app::input::sound::poll_scroll_repeat(state),
                 Self::poll_movie_list_scroll(state),
                 Self::poll_choose_map_scroll(state),

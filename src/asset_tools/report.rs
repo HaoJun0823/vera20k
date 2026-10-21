@@ -476,10 +476,12 @@ pub struct AnimSlot {
     /// Draw offset relative to the building origin.
     pub offset: [i32; 2],
     pub rate: u16,
-    /// Slot played instead of this one while the building is damaged.
+    /// Slot played while the building is damaged; this slot itself when the
+    /// art declares no damaged variant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub damaged_variant: Option<String>,
-    /// Slot played instead of this one while the building is garrisoned.
+    /// Slot played while the building is garrisoned; this slot itself when the
+    /// art declares no garrisoned variant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub garrisoned_variant: Option<String>,
     pub candidates: Vec<ArtCandidate>,

@@ -7,7 +7,8 @@
 //! It answers the visit's and the WOL setup's requests once no shell
 //! transition runs: like a real service, a reply arrives after the page that
 //! asked has slid out. Any login is accepted. The lobbies, games and users
-//! are fixed stand-ins; Boris's game is a tournament room, and the user is
+//! are fixed stand-ins; Boris's game is a tournament room, Vladimir's has
+//! other rules (its exInfo hash differs from the user's), and the user is
 //! in a stand-in squad, so clan games can be created. Two of the users say
 //! one line each when a chat lobby is joined, and a locate finds them. A
 //! created game is joined by one stand-in guest, in no squad, who picks,
@@ -20,7 +21,8 @@
 //! Quick Match finds a `Lob_40_0` lobby whose stand-in matchbot answers a
 //! request with `Working`, the pool size and a `Start` that makes the user
 //! the host and Natasha the opponent; she joins the created game, accepts,
-//! and the start then fails as a custom one does.
+//! and the start then fails as a custom one does. Quick Co-op's `Lob_39_0`
+//! has the same matchbot, whose `Start` names Cooperative on `C2S01MD.MAP`.
 
 use super::lobby::WolJoined;
 use super::service::WolLadderRecord;
@@ -108,7 +110,11 @@ fn setup_requests(state: &mut AppState) -> Vec<NetworkSetupRequest> {
 
 fn answer_setup(state: &mut AppState, request: NetworkSetupRequest) {
     if let NetworkSetupRequest::WolChat(WolChatLine::Locate { name }) = &request {
-        let result = locate(&String::from_utf16_lossy(name));
+        let result = locate(
+            &String::from_utf16_lossy(name),
+            stand_in_hash(state),
+            &stand_in_map(state),
+        );
         service_event(state, WolServiceEvent::Located(result));
         return;
     }
@@ -365,7 +371,7 @@ fn answer(state: &mut AppState, request: WolServiceRequest) {
         WolServiceRequest::ListChannels { kind, .. } => WolServiceEvent::Channels {
             kind,
             channels: if kind == GAME_CHANNEL {
-                games()
+                games(stand_in_hash(state), &stand_in_map(state))
             } else {
                 lobbies()
             },
@@ -373,7 +379,7 @@ fn answer(state: &mut AppState, request: WolServiceRequest) {
         WolServiceRequest::JoinChannel { mut channel, .. } => {
             let local = nickname(state);
             let lobby = channel.kind != GAME_CHANNEL;
-            let quick_match = channel.name == QUICK_MATCH_LOBBY;
+            let quick_match = [QUICK_MATCH_LOBBY, QUICK_COOP_LOBBY].contains(&channel.name.as_str());
             let mut members = if quick_match {
                 quick_match_members()
             } else if lobby {
@@ -406,8 +412,14 @@ fn answer(state: &mut AppState, request: WolServiceRequest) {
         WolServiceRequest::Chat {
             line: WolChatLine::Locate { name },
             ..
-        } => WolServiceEvent::Located(locate(&String::from_utf16_lossy(&name))),
-        WolServiceRequest::Locate(name) => WolServiceEvent::Located(locate(&name)),
+        } => WolServiceEvent::Located(locate(
+            &String::from_utf16_lossy(&name),
+            stand_in_hash(state),
+            &stand_in_map(state),
+        )),
+        WolServiceRequest::Locate(name) => {
+            WolServiceEvent::Located(locate(&name, stand_in_hash(state), &stand_in_map(state)))
+        }
         // The user is in the stand-in squad; the stand-in users are in none.
         WolServiceRequest::SquadInfo { id: 0 | SQUAD } => WolServiceEvent::Squad {
             id: SQUAD,
@@ -589,9 +601,9 @@ fn page(state: &mut AppState, name: &str) {
 /// A locate finds Boris in his game, Ivan with find disabled (`0x40132`)
 /// and the other lobby stand-ins in the first chat lobby; anyone else is
 /// not logged in (`0x40130`).
-fn locate(name: &str) -> Result<WolChannel, u32> {
+fn locate(name: &str, hash: i32, map: &str) -> Result<WolChannel, u32> {
     if name.eq_ignore_ascii_case("Boris") {
-        return Ok(games().remove(1));
+        return Ok(games(hash, map).remove(1));
     }
     if name.eq_ignore_ascii_case("Ivan") {
         return Err(0x0004_0132);
@@ -645,12 +657,20 @@ fn lobbies() -> Vec<WolChannel> {
     [(0, 4), (1, 0), (2, 0)]
         .into_iter()
         .map(|(number, users)| lobby(format!("Lob_41_{number}"), users))
-        .chain([lobby(QUICK_MATCH_LOBBY.into(), 2)])
+        .chain([
+            lobby(QUICK_MATCH_LOBBY.into(), 2),
+            lobby(QUICK_COOP_LOBBY.into(), 2),
+        ])
         .collect()
 }
 
-/// The Quick Match lobby, its matchbot and the opponent it names.
+/// The Quick Match and Quick Co-op lobbies, their matchbot and the opponent
+/// it names.
 const QUICK_MATCH_LOBBY: &str = "Lob_40_0";
+const QUICK_COOP_LOBBY: &str = "Lob_39_0";
+/// The map the stand-in matchbot names for Quick Co-op: the Soviet
+/// campaign's first (`coopcampmd.ini` `[Soviet]` `Map1`).
+pub(crate) const QUICK_COOP_MAP: &str = "C2S01MD.MAP";
 const MATCHBOT: &str = "matchbot";
 
 fn quick_match_members() -> Vec<WolMember> {
@@ -699,19 +719,29 @@ pub(crate) fn matchbot_options(
     use crate::skirmish_launch::{
         LaunchCountry, LaunchStartPosition, LaunchTeam, SkirmishHumanSlot, SkirmishLocalSlot,
     };
-    let mode = state
-        .frontend
-        .skirmish_modes
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("no mode"))?;
+    let quick_coop = super::quick_match::quick_coop(state);
+    let mode = if quick_coop {
+        state
+            .frontend
+            .skirmish_modes
+            .iter()
+            .find(|mode| mode.class == crate::skirmish_modes::MpModeClass::Cooperative)
+    } else {
+        state.frontend.skirmish_modes.first()
+    }
+    .ok_or_else(|| anyhow::anyhow!("no mode"))?;
     let file = state
         .frontend
         .scenario_catalog
         .records()
         .iter()
         .find(|record| {
-            crate::map::skirmish_scenarios::record_matches_mode(record, mode)
-                && record.player_capacity >= 2
+            if quick_coop {
+                record.file_name.eq_ignore_ascii_case(QUICK_COOP_MAP)
+            } else {
+                crate::map::skirmish_scenarios::record_matches_mode(record, mode)
+                    && record.player_capacity >= 2
+            }
         })
         .map(|record| record.file_name.clone())
         .ok_or_else(|| anyhow::anyhow!("no map for the matchbot"))?;
@@ -731,7 +761,14 @@ pub(crate) fn matchbot_options(
     let mut launch = crate::skirmish_launch::SkirmishLaunchSession {
         mode: crate::skirmish_launch::SkirmishLaunchMode::from_game_mode(mode),
         selected_map_file: Some(file.clone()),
-        humans: vec![human(0, host, 5, 1), human(1, guest, 4, 3)],
+        // In Quick Co-op the host's +0x20 replaces the map with the first
+        // Allied one, whose stage admits only Americans (index 0); a peer
+        // country outside it turns Random, which the shell never resolves.
+        humans: if quick_coop {
+            vec![human(0, host, 0, 1), human(1, guest, 0, 3)]
+        } else {
+            vec![human(0, host, 5, 1), human(1, guest, 4, 3)]
+        },
         local_player_index: 0,
         opponents: Vec::new(),
         ai_player_count: 0,
@@ -761,26 +798,60 @@ fn lobby_members() -> Vec<WolMember> {
     ]
 }
 
-/// Open games of other stand-in hosts, and one that is full. Each keeps an
-/// observer slot, which the shown capacity leaves out.
-fn games() -> Vec<WolChannel> {
-    let game = |host: &str, users, max_users, ping| WolChannel {
+/// The hash the stand-in hosts publish: the user's own, so their games
+/// pass admission (0 without the process sources, when it is skipped).
+fn stand_in_hash(state: &AppState) -> i32 {
+    super::lobby::local_ini_hash(state).unwrap_or(0)
+}
+
+/// The first scenario record, which Tanya's and Vladimir's games name.
+fn stand_in_map(state: &AppState) -> String {
+    state
+        .frontend
+        .scenario_catalog
+        .records()
+        .first()
+        .map(|record| record.file_name.clone())
+        .unwrap_or_default()
+}
+
+/// Open games of other stand-in hosts, one that is full and one whose
+/// rules differ (`hash + 1`). Each keeps an observer slot, which the shown
+/// capacity leaves out. Their scenarios name `map`, the random map and a
+/// name the 40-byte exInfo cuts.
+fn games(hash: i32, map: &str) -> Vec<WolChannel> {
+    let game = |host: &str, users, max_users, ping, hash: i32, scenario: &str| WolChannel {
         kind: GAME_CHANNEL,
         max_users,
         users,
         ping,
         name: format!("{host}'s_game"),
-        ex_info: format!("{EX_INFO_VERSION},0,0,0,1,"),
+        ex_info: crate::ui::wol_lobby::ExInfo {
+            version: EX_INFO_VERSION,
+            hash,
+            observer_open: 1,
+            scenario: scenario.into(),
+            ..Default::default()
+        }
+        .write(),
         ..Default::default()
     };
     vec![
-        game("Tanya", 1, 7, 40),
+        game("Tanya", 1, 7, 40, hash, map),
         // A tournament room (+0x14): two rows.
         WolChannel {
             tournament: 1,
-            ..game("Boris", 2, 7, 180)
+            ..game("Boris", 2, 7, 180, hash, "RandMap.Sed")
         },
-        game("Natasha", 6, 7, 350),
+        game(
+            "Natasha",
+            6,
+            7,
+            350,
+            hash,
+            "Transylvania_but_much_longer_still.yro",
+        ),
+        game("Vladimir", 2, 7, 90, hash.wrapping_add(1), map),
     ]
 }
 
@@ -836,11 +907,18 @@ mod tests {
         let context = AdmissionContext {
             quick_match: false,
             clan_id: 0,
-            local_hash: None,
+            local_hash: Some(7),
         };
-        let games = games();
+        let games = games(7, "Transylv.yro");
         assert_eq!(admit(&games[0], false, context), Ok(()));
         assert_eq!(admit(&games[2], false, context), Err(Some("WOL:GameFull")));
+        assert_eq!(admit(&games[3], false, context), Err(Some("TXT_MISMATCH")));
+        assert_eq!(games[0].ex_info, "25,7,0,0,1,Transylv.yro");
+        assert_eq!(
+            games[2].ex_info().scenario,
+            "Transylvania_but_much_longer_",
+            "the 40-byte cut"
+        );
         assert_eq!(host_of(&games[1].name), "Boris");
         assert!(lobbies()[0].lobby_number() == Some(0));
         let list = servers();

@@ -32,11 +32,13 @@ use crate::ui::sidebar::{SidebarChromeLayoutSpec, SidebarTab};
 use crate::ui::skirmish_shell::{SavedSeedBrowserState, SavedSeedMode};
 use crate::util::config::GameConfig;
 
+pub mod app_bundle;
 pub(crate) mod audio_runtime;
 pub(crate) mod campaign_defeat;
 pub(crate) mod campaign_victory;
 pub(crate) mod chrono_screen;
 mod cncnet;
+mod cooperative_round;
 #[cfg(feature = "debug-tools")]
 pub(crate) mod debug_tools;
 pub(crate) mod diagnostics;
@@ -113,6 +115,9 @@ pub struct App {
     startup_options: crate::app::frontend::startup_options::RetailStartupOptions,
     spawn_request: Option<crate::app::frontend::cncnet_spawn::SpawnRequest>,
     startup_failure: Option<String>,
+    /// Make sure config.toml names a game folder before the window opens
+    /// ([`app_bundle`]).
+    ask_for_game_folder: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +164,7 @@ impl App {
             startup_options,
             spawn_request: None,
             startup_failure: None,
+            ask_for_game_folder: false,
         }
     }
 
@@ -174,6 +180,7 @@ impl App {
             startup_options: crate::app::frontend::startup_options::RetailStartupOptions::default(),
             spawn_request: None,
             startup_failure: None,
+            ask_for_game_folder: false,
         }
     }
 
@@ -191,7 +198,14 @@ impl App {
             startup_options: crate::app::frontend::startup_options::RetailStartupOptions::default(),
             spawn_request: None,
             startup_failure: None,
+            ask_for_game_folder: false,
         }
+    }
+
+    /// Before the window opens, ask for the Yuri's Revenge folder until
+    /// config.toml names one: a launch from the macOS app bundle.
+    pub fn ask_for_game_folder_first(&mut self) {
+        self.ask_for_game_folder = true;
     }
 
     pub fn finish_capture(&mut self) -> Result<()> {

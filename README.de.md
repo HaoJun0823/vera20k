@@ -1,7 +1,7 @@
 <img src="docs/images/new-conscirpt-hero-image.png" alt="VERA20K Titelbild" width="100%">
 
 <p align="center" dir="ltr">
-  <a href="README.sv.md" lang="sv">Svenska</a> · <a href="README.zh-CN.md" lang="zh-CN">简体中文</a> · <strong>Deutsch</strong> · <a href="README.ar.md" lang="ar" dir="rtl">العربية</a> · <a href="README.ru.md" lang="ru">Русский</a> · <a href="README.th.md" lang="th">ไทย</a> · <a href="README.tr.md" lang="tr">Türkçe</a> · <a href="README.md" lang="en">English</a>
+  <a href="README.sv.md" lang="sv">Svenska</a> · <a href="README.zh-CN.md" lang="zh-CN">简体中文</a> · <strong>Deutsch</strong> · <a href="README.ar.md" lang="ar" dir="rtl">العربية</a> · <a href="README.es.md" lang="es">Español</a> · <a href="README.ru.md" lang="ru">Русский</a> · <a href="README.th.md" lang="th">ไทย</a> · <a href="README.tr.md" lang="tr">Türkçe</a> · <a href="README.md" lang="en">English</a>
 </p>
 <p align="center" dir="ltr">
   <a href="https://github.com/YuriPlanet/vera20k/actions/workflows/macos.yml?query=branch%3Amain" title="Letzter Testlauf der Bibliothek unter macOS (manuell gestartet)"><img src="https://github.com/YuriPlanet/vera20k/actions/workflows/macos.yml/badge.svg?branch=main" alt="Bibliothekstests unter macOS" height="23" align="middle"></a>
@@ -67,7 +67,7 @@ Die Pfeile zeigen den Datenfluss:
 
 Du brauchst:
 
-- **Rust und Git:** [Rust](https://rustup.rs/) 1.88 oder neuer, installiert mit rustup, und
+- **Rust und Git:** [Rust](https://rustup.rs/) 1.97 oder neuer, installiert mit rustup, und
   [Git](https://git-scm.com/).
 - **Build-Werkzeuge:** unter Windows die C++-Build-Tools von Visual Studio, deren Installation
   der Rust-Installer anbietet; unter macOS `xcode-select --install`; unter Debian und Ubuntu
@@ -94,8 +94,15 @@ ursprüngliche Engine mit Ghidra, übertragen dann ihr Verhalten nach Rust und p
 
 ## Anpassung
 
-Optionale Funktionen (z. B. aus Ares) sollen sich über INI-Dateien konfigurieren und,
-wo sinnvoll, im Client ein- und ausschalten lassen.
+VERA20K spielt sich standardmäßig wie das Originalspiel. Jede neue Funktion, auch Erweiterungen
+aus Mods wie Ares, muss ausgeschaltet bleiben, bis sie auf einem dieser Wege aktiviert wird:
+
+- **Eine Build-Option**, z. B. `--features ares` für die unterstützten [Ares-Erweiterungen](docs/ares.md).
+- **Eine Lobby-Option im Spiel**, die für jede Partie gewählt wird.
+- **Ein INI-Schlüssel**, den eine Mod oder eine Karte setzt.
+
+Wie du Einzelspieler-Gefechte oder Kampagnen von YR über einen CnCNet-Client startest, steht in der
+[Offline-Client-Einrichtung](integrations/cncnet/README.md).
 
 ## Mitmachen
 

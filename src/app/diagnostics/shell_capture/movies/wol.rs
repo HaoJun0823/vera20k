@@ -60,6 +60,9 @@ pub enum WolTarget {
     LobbyFind,
     /// A ranked user with a clan and a locale: the hovered row's help.
     LobbyUserTooltip,
+    /// Hovered games: a retail map's description, then the random map's
+    /// `TXT_RANDOM_MAP_DESCRIPTION`, after the ping (`0x00780D90`).
+    LobbyGameTooltip,
     /// A lost connection in `0x113`: the `TXT_YOURE_DISCON` box.
     LobbyDisconnected,
     /// OK on that box: the runner ends, a fresh `0x10E` settled.
@@ -299,6 +302,11 @@ pub enum WolTarget {
     QmPostmatch,
     /// Then `0x122` Yes: the opponent added, the logged-out `0x10E`.
     QmPostmatchYes,
+    /// Quick Co-op: the host's guest joins; Cooperative `+0x20` replaces
+    /// the matchbot's map, `+0x94` publishes C0; the start reaches loading.
+    QcHostStartLoading,
+    /// Quick Co-op: the host's C0, then its options, accepted at once.
+    QcGuestJoined,
 }
 
 impl WolTarget {
@@ -487,7 +495,14 @@ impl WolTarget {
                 | Self::QmHostStartLoading
                 | Self::QmPostmatch
                 | Self::QmPostmatchYes
+                | Self::QcHostStartLoading
+                | Self::QcGuestJoined
         )
+    }
+
+    /// Welcome's Quick Co-op (`[0xA8B244]` 2) runs the same runner.
+    pub(super) fn quick_coop(self) -> bool {
+        matches!(self, Self::QcHostStartLoading | Self::QcGuestJoined)
     }
 
     /// `0x11E` over `0x10E` after lobby Back.
@@ -579,6 +594,7 @@ pub(crate) const WOL_CHECKPOINTS: &[(&str, WolTarget)] = &[
     ("wol-0x113-filtered-chat", WolTarget::LobbyFilteredChat),
     ("wol-0x113-find", WolTarget::LobbyFind),
     ("wol-0x113-user-tooltip", WolTarget::LobbyUserTooltip),
+    ("wol-0x113-game-tooltip", WolTarget::LobbyGameTooltip),
     ("wol-0x113-disconnected", WolTarget::LobbyDisconnected),
     (
         "wol-0x113-disconnect-return",
@@ -686,6 +702,8 @@ pub(crate) const WOL_CHECKPOINTS: &[(&str, WolTarget)] = &[
     ("wol-qm-host-start-loading", WolTarget::QmHostStartLoading),
     ("wol-0x122-postmatch", WolTarget::QmPostmatch),
     ("wol-0x122-yes", WolTarget::QmPostmatchYes),
+    ("wol-qc-host-start-loading", WolTarget::QcHostStartLoading),
+    ("wol-qc-guest-joined", WolTarget::QcGuestJoined),
 ];
 
 /// The controlled guest of the C2 targets, the host of the C9 targets.
@@ -966,7 +984,9 @@ impl WolCapture {
                     self.phase = next;
                     return Ok(());
                 }
-                let (mode_button, mode_name) = if self.target.quick_match() {
+                let (mode_button, mode_name) = if self.target.quick_coop() {
+                    (crate::ui::wol_shell::QUICK_COOP, "Quick Co-op")
+                } else if self.target.quick_match() {
                     (crate::ui::wol_shell::QUICK_MATCH, "Quick Match")
                 } else {
                     (crate::ui::wol_shell::CUSTOM_MATCH, "Custom Match")
@@ -1014,7 +1034,9 @@ impl WolCapture {
                         && requests[applies] == WolServiceRequest::EnsureApi,
                     "the flow did not start with the WOLAPI object: {requests:?}"
                 );
-                let mode = if self.target.quick_match() {
+                let mode = if self.target.quick_coop() {
+                    crate::ui::wol_shell::WolMode::QuickCoop
+                } else if self.target.quick_match() {
                     crate::ui::wol_shell::WolMode::QuickMatch
                 } else {
                     crate::ui::wol_shell::WolMode::CustomMatch
@@ -1427,7 +1449,7 @@ impl WolCapture {
                     ensure!(
                         requests
                             == [WolServiceRequest::JoinChannel {
-                                channel: games()[0].clone(),
+                                channel: local_games(state)[0].clone(),
                                 key: String::new(),
                             }],
                         "the open game was not joined"
@@ -1449,12 +1471,23 @@ impl WolCapture {
                             && key.is_empty(),
                         "unexpected created channel {channel:?}"
                     );
+                    // 0x0077E7A0 at Create: the local hash and the slots
+                    // WOL entry left (0x005E8B60): no AI, no observer slot.
+                    let hash = crate::app::shell_wol::lobby::local_ini_hash(state);
+                    ensure!(
+                        hash.is_some()
+                            && channel
+                                .ex_info
+                                .starts_with(&format!("25,{},0,0,0,", hash.unwrap_or(0))),
+                        "unexpected created exInfo {:?} for hash {hash:?}",
+                        channel.ex_info
+                    );
                     self.phase = WolPhase::Creating;
                 }
             }
             WolPhase::Joining if state.frontend.shell_exit.is_none() => {
                 // The result arrives once 0x113 is hidden.
-                let mut channel = games()[0].clone();
+                let mut channel = local_games(state)[0].clone();
                 channel.users += 1;
                 service_event(
                     state,
@@ -1838,7 +1871,7 @@ impl WolCapture {
                 ensure!(
                     lobby.shown
                         && lobby.ui.lobby_rows.len() == 3
-                        && lobby.ui.game_rows.len() == 3
+                        && lobby.ui.game_rows.len() == 4
                         && lobby.ui.player_rows.iter().any(|row| row.name == NICKNAME),
                     "the test service did not fill 0x113"
                 );
@@ -2833,7 +2866,7 @@ impl WolCapture {
             state,
             WolServiceEvent::Channels {
                 kind: GAME_CHANNEL,
-                channels: games(),
+                channels: local_games(state),
             },
         );
         self.event(frame, "controlled lobbies, join and games");
@@ -3180,6 +3213,37 @@ impl WolCapture {
                 self.settle();
                 return Ok(());
             }
+            WolTarget::LobbyGameTooltip => {
+                // Rows: Alpha (the retail map), Charlie, Delta, Bravo (the
+                // random map, full).
+                let (_, map) = first_record(state);
+                let random = App::csf_label(
+                    state,
+                    "TXT_RANDOM_MAP_DESCRIPTION",
+                    "TXT_RANDOM_MAP_DESCRIPTION",
+                );
+                let mut helps = Vec::new();
+                for (row, name) in [(0, map), (3, random)] {
+                    let lobby = Self::lobby(state)?;
+                    let geometry = lobby.ui.game_list.geometry(
+                        layout.games,
+                        lobby.ui.game_rows.len(),
+                        layout.page.scale,
+                    );
+                    let rect = geometry.row(row - lobby.ui.game_list.top_index);
+                    set_window_pointer_to_rect_center(state, rect);
+                    App::handle_wol_mouse_move(state);
+                    let help = crate::app::shell_wol::lobby::status_help(state);
+                    ensure!(
+                        !name.is_empty() && help.ends_with(&format!(", {name}")),
+                        "game row {row}'s help read {help:?}, not ending with {name:?}"
+                    );
+                    helps.push(help);
+                }
+                self.event(frame, json!({"hovered game helps": helps}));
+                self.settle();
+                return Ok(());
+            }
             WolTarget::LobbyDisconnected | WolTarget::LobbyDisconnectReturn => {
                 service_event(
                     state,
@@ -3294,7 +3358,7 @@ impl WolCapture {
                 self.event(frame, "kicked, then OK: TXT_YOULEFT and no channel");
             }
             WolTarget::JoinAdmission => {
-                // Rows: Alpha, Charlie (version 24), Delta, Bravo (full).
+                // Rows: Alpha, Charlie (other rules), Delta, Bravo (full).
                 game_row_click(state, 1)?;
                 game_row_click(state, 3)?;
                 let mismatch = App::csf_label(state, "TXT_MISMATCH", "TXT_MISMATCH");
@@ -4177,27 +4241,60 @@ fn lobbies() -> Vec<WolChannel> {
         .collect()
 }
 
-/// An open game with a free observer slot, a full one, one of another
-/// exInfo version and a keyed one limited to 800x600.
-fn games() -> Vec<WolChannel> {
-    let game = |name: &str, users, max_users, ex_info: &str, ping| WolChannel {
+/// An open game with a free observer slot on a retail map, a full one on
+/// the random map, one with other rules (`hash + 1`) and a keyed one
+/// limited to 800x600. `hash` is the local INI hash, which the others
+/// publish.
+fn games(hash: i32, map: &str) -> Vec<WolChannel> {
+    let game = |name: &str, users, max_users, ex_info: String, ping| WolChannel {
         kind: GAME_CHANNEL,
         max_users,
         users,
         ping,
         name: name.into(),
-        ex_info: ex_info.into(),
+        ex_info,
         ..Default::default()
     };
-    let mut keyed = game("Delta's_game", 2, 6, "25,0,0,0,0,d.map", 80);
+    let mut keyed = game("Delta's_game", 2, 6, format!("25,{hash},0,0,0,d.map"), 80);
     keyed.flags = CHANNEL_KEYED;
     keyed.game_flags = GAME_LIMIT_800;
     vec![
-        game("Alpha's_game", 2, 8, "25,0,1,0,1,a.map", 45),
-        game("Bravo's_game", 3, 4, "25,0,1,0,0,b.map", 120),
-        game("Charlie's_game", 1, 8, "24,0,0,0,0,c.map", -1),
+        game("Alpha's_game", 2, 8, format!("25,{hash},1,0,1,{map}"), 45),
+        game(
+            "Bravo's_game",
+            3,
+            4,
+            format!("25,{hash},1,0,0,RandMap.Sed"),
+            120,
+        ),
+        game(
+            "Charlie's_game",
+            1,
+            8,
+            format!("25,{},0,0,0,c.map", hash.wrapping_add(1)),
+            -1,
+        ),
         keyed,
     ]
+}
+
+/// The games with the local hash, Alpha's naming the first scenario record.
+fn local_games(state: &AppState) -> Vec<WolChannel> {
+    games(
+        crate::app::shell_wol::lobby::local_ini_hash(state).unwrap_or(0),
+        &first_record(state).0,
+    )
+}
+
+/// The first scenario record's file and description.
+fn first_record(state: &AppState) -> (String, String) {
+    state
+        .frontend
+        .scenario_catalog
+        .records()
+        .first()
+        .map(|record| (record.file_name.clone(), record.display_name.clone()))
+        .unwrap_or_default()
 }
 
 /// The chat sink's OnJoin for `Lob_41_0` with its users.

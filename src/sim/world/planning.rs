@@ -24,6 +24,11 @@ pub(super) struct PlanningState {
     #[serde(skip)]
     dynamic_nodes: BTreeSet<u64>,
     paths: BTreeMap<u64, PlanningPath>,
+    /// `0x00AC4CF6`: set while [`Simulation::planning_select_tail_node`]
+    /// Selects partners, so their Selects (and any Select their tag events
+    /// start) do not expand. Clear between calls; neither saved nor hashed.
+    #[serde(skip)]
+    select_expanding: bool,
 }
 
 impl<'de> Deserialize<'de> for PlanningState {
@@ -35,12 +40,16 @@ impl<'de> Deserialize<'de> for PlanningState {
             paths: BTreeMap<u64, PlanningPath>,
         }
         let stored = StoredPlanningState::deserialize(deserializer)?;
+        if crate::util::save_codec::layout::describing() {
+            return Ok(Self::default());
+        }
         let mut state = Self {
             next_node: stored.next_node,
             nodes: stored.nodes,
             locations: BTreeMap::new(),
             dynamic_nodes: BTreeSet::new(),
             paths: stored.paths,
+            select_expanding: false,
         };
         state.restore_index().map_err(serde::de::Error::custom)?;
         Ok(state)
@@ -470,7 +479,7 @@ impl Simulation {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn encode_plan_connect_record(
+    pub fn encode_plan_connect_record(
         &self,
         owner: InternedId,
         actor_id: u64,
@@ -904,6 +913,12 @@ impl Simulation {
                 .planning_invalid_node_reason(selected, node)
                 .map(|_| PlanningPressRefusal::InvalidNode);
         }
+        self.planning_selection_refusal(selected)
+    }
+
+    /// PlanMgr639DA0's selection-only check, also used directly by radar
+    /// input653CD1 without a tactical node hit test or refusal message.
+    pub fn planning_selection_refusal(&self, selected: &[u64]) -> Option<PlanningPressRefusal> {
         selected.iter().find_map(|&id| {
             match self
                 .substrate
@@ -947,29 +962,73 @@ impl Simulation {
         self.planning.nodes.get(id)
     }
 
-    /// The members that 0x00637840 (Ghidra's "PlayPlanningSelectionVoices")
-    /// Selects after `actor`'s Select (`0x006FC020`): its tail node's members
-    /// in encounter order (node `+0x4`, `+0x10`), whatever their owner. The
-    /// voices come from those members' own Selects.
-    pub fn planning_tail_members(&self, actor: u64) -> Vec<u64> {
+    /// The members a Select of `actor` pulls in through the planning-node add
+    /// (`0x00637840`, [`Self::planning_select_tail_node`]) in Planning Mode
+    /// (`0x00AC4CF4`): the members of `actor`'s tail node (token `+0x514` via
+    /// `0x00705D20`, node vector `+0x8` at count-1 `+0x14`) in encounter
+    /// order (node `+0x4`, `+0x10`), whatever their owner, `actor` included.
+    /// Native skips a member whose IsSelected `+0x83` is already set. The
+    /// input selection owner expands its own Selects and applies that skip,
+    /// TechnoClass::Select's gate, Unselect_All and the `0x00AC4CF6` guard
+    /// to that expansion only; a Select one of their tag events starts is
+    /// the game's own (see the residual at `apply_selection_snapshot`).
+    pub fn planning_select_partners(&self, actor: u64, planning_mode: bool) -> Vec<u64> {
+        if !planning_mode {
+            return Vec::new();
+        }
         self.planning_tail_node(actor)
             .map(|node| node.live_members.values().copied().collect())
             .unwrap_or_default()
     }
 
-    /// Connect639740 expands each selected actor's tail group in encounter
-    /// order. A selected actor without a path contributes only itself.
-    pub fn planning_connect_actors(&self, owner: InternedId, selected: &[u64]) -> Vec<u64> {
+    /// `0x00637840` (Ghidra's "PlayPlanningSelectionVoices"), the last call of
+    /// every successful `TechnoClass::Select` (`0x006FC020`, its only caller),
+    /// for the game's own Selects ([`Self::techno_select`]). With the guard
+    /// `0x00AC4CF6` clear (`0x00637840..0x00637847`) it sets it
+    /// (`0x00637853`, Planning Mode or not), Selects (vt+0x14C) each
+    /// [`Self::planning_select_partners`] member not yet selected (`+0x83`,
+    /// read as the loop reaches it) in the local player's Planning Mode, read
+    /// through the frame's [`super::LocalPlanningBoundary`], and clears it
+    /// (`0x0063789F`). The guard spans the whole loop, so neither the
+    /// partners' Selects nor a Select one of their Selected tag events
+    /// starts expands again. The voices come from the members' own Selects.
+    /// Native reads the member count once and each member from the live
+    /// vector; this reads the members once, which differs only if a
+    /// partner's tag event changes the node's membership mid-loop.
+    pub(super) fn planning_select_tail_node(
+        &mut self,
+        actor: u64,
+        voice_latch: bool,
+        context: super::UninitContext<'_>,
+    ) {
+        if self.planning.select_expanding {
+            return;
+        }
+        self.planning.select_expanding = true;
+        let planning_mode = context.effects().local_planning_active();
+        for member in self.planning_select_partners(actor, planning_mode) {
+            let selected = self
+                .substrate
+                .entities
+                .get(member)
+                .is_some_and(|entity| entity.selection.is_selected());
+            if !selected {
+                self.techno_select(member, voice_latch, context);
+            }
+        }
+        self.planning.select_expanding = false;
+    }
+
+    /// `0x0063AD50` expands each selected Techno's tail group (token via
+    /// `0x00705D20`, node vector at count-1) in encounter order, whatever its
+    /// owner (`0x0063ADB0..0x0063AEBC`); a selected actor without a path or
+    /// tail contributes only itself (`0x0063ADF0`, `0x0063AEC0`). The
+    /// connect event's receiver checks only the node's house.
+    pub fn planning_connect_actors(&self, selected: &[u64]) -> Vec<u64> {
         let mut actors = Vec::new();
         let mut seen = BTreeSet::new();
         for &actor in selected {
-            let tail = self.planning_tail_node(actor).filter(|_| {
-                self.substrate
-                    .entities
-                    .get(actor)
-                    .is_some_and(|entity| entity.owner() == owner)
-            });
-            if let Some(node) = tail {
+            if let Some(node) = self.planning_tail_node(actor) {
                 for &member in node.live_members.values() {
                     if seen.insert(member) {
                         actors.push(member);
@@ -1444,22 +1503,27 @@ impl Simulation {
         }
     }
 
-    /// Techno709A40 ->705D50 (!warp-in) ->6385C0. Called only after the
-    /// existing RefreshMegaMission owner declined to resume attack-move.
+    /// Techno709A40 -> vt+0x430 -> 6385C0. Called only after the existing
+    /// RefreshMegaMission owner declined to resume attack-move. vt+0x430 is
+    /// the not-warping-in test (`0x00705D50`) for every class but Aircraft,
+    /// whose override (`0x0041B9E0`) answers its `+0x6D5` byte,
+    /// `aircraft_arrival` here (clear only inside Mission_Attack state 10's
+    /// idle call, [`crate::sim::aircraft::enter_idle_mode_after_attack`]).
     pub(crate) fn planning_enter_idle(
         &mut self,
         actor: u64,
         rules: &crate::rules::ruleset::RuleSet,
+        aircraft_arrival: bool,
     ) -> bool {
-        if self
-            .substrate
-            .entities
-            .get(actor)
-            .is_none_or(|entity| entity.is_warping_in())
-        {
+        let Some(entity) = self.substrate.entities.get(actor) else {
             return false;
-        }
-        self.planning_start_actor(actor, rules)
+        };
+        let admitted = if entity.category() == crate::map::entities::EntityCategory::Aircraft {
+            aircraft_arrival
+        } else {
+            !entity.is_warping_in()
+        };
+        admitted && self.planning_start_actor(actor, rules)
     }
 
     pub(crate) fn planning_start_actor(
@@ -1489,6 +1553,19 @@ impl Simulation {
         else {
             return false;
         };
+        // `0x00638602..0x0063860C`: Queue_Mission(Deliberate, 1) through
+        // vt+0x1E8 commences it at once when the object is ready, before
+        // 0x00636590 consumes the node and the planned event is staged.
+        // Neither this owner nor its container consumes RNG.
+        let _ = self.mission_queue_exact(
+            actor,
+            crate::sim::mission::MissionId::from_known(
+                crate::sim::mission::MissionType::Deliberate,
+            ),
+            1,
+            self.session.binary_frame(),
+            &crate::sim::mission::authority::LiveReadyInputProvider { rules },
+        );
         record.payload_mut()[22] = 2;
         record.set_issue_header(
             4,
@@ -1505,17 +1582,6 @@ impl Simulation {
         if !keep_member {
             self.planning.remove_member(node_id, actor);
         }
-        // Native638623 queues Deliberate without Commence, before staging the
-        // planned event. Neither this owner nor its container consumes RNG.
-        let _ = self.mission_queue_exact(
-            actor,
-            crate::sim::mission::MissionId::from_known(
-                crate::sim::mission::MissionType::Deliberate,
-            ),
-            0,
-            self.session.binary_frame(),
-            &crate::sim::mission::authority::LiveReadyInputProvider { rules },
-        );
         // 637550 ->652230: deferred publication stamps frame+1. Reverse
         // pending traversal plus ring prepend restores generation order.
         self.queue_command(CommandEnvelope::new(

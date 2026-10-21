@@ -268,6 +268,26 @@ pub(crate) fn load_rules_with_merged_ini(
     IniFile,
     crate::rules::process_owner::NativeScenarioRulesReceipt,
 )> {
+    load_rules_with_prefix_for_test(
+        asset_manager,
+        crate::rules::process_owner::NativeScenarioRulesPrefix::NonCampaign(mode_rules_override),
+        map_rules_overrides,
+    )
+}
+
+/// Same production owner as the ordinary fixture; the generated launch snapshot
+/// explicitly preserves Full_Init's RMG admission instead of inferring it from INI.
+#[cfg(test)]
+pub(crate) fn load_rules_with_prefix_for_test(
+    asset_manager: &AssetManager,
+    prefix: crate::rules::process_owner::NativeScenarioRulesPrefix<'_>,
+    map_rules_overrides: Option<&IniFile>,
+) -> Option<(
+    RuleSet,
+    IniFile,
+    IniFile,
+    crate::rules::process_owner::NativeScenarioRulesReceipt,
+)> {
     let audio = crate::rules::audio_sources::AudioDefinitions::select(asset_manager);
     let (_, _, mut native_owner) = load_startup_rules(
         asset_manager,
@@ -277,12 +297,7 @@ pub(crate) fn load_rules_with_merged_ini(
     .into_parts();
     let no_map = IniFile::from_str("");
     let (rules, processed_ini, fixed_art_ini, receipt) = native_owner
-        .load_scenario(
-            crate::rules::process_owner::NativeScenarioRulesPrefix::NonCampaign(
-                mode_rules_override,
-            ),
-            map_rules_overrides.unwrap_or(&no_map),
-        )
+        .load_scenario(prefix, map_rules_overrides.unwrap_or(&no_map))
         .map_err(|error| log::warn!("Failed native noncampaign rules rebuild: {error}"))
         .ok()?
         .into_parts();
@@ -560,7 +575,7 @@ pub(crate) fn finish_presentation_assets(
     overlays: crate::app::frontend::skirmish::OverlayPresentationAssets,
     house_color_map: HouseColorMap,
     csf: Option<crate::assets::csf_file::CsfFile>,
-) -> crate::app::loading::init::PresentationLoadAssets {
+) -> anyhow::Result<crate::app::loading::init::PresentationLoadAssets> {
     // These nested MIXes live inside local.mix/localmd.mix and are not
     // auto-extracted by the two-level archive discovery pass.
     for cameo_mix in ["cameomd.mix", "cameo.mix"] {
@@ -570,8 +585,13 @@ pub(crate) fn finish_presentation_assets(
         }
     }
     let sidebar_cameo_atlas = build_sidebar_cameo_atlas(gpu, batch, asset_manager, Some(rules));
-    let sidebar_chrome =
-        crate::render::sidebar_chrome::build_sidebar_chrome_set(gpu, batch, asset_manager);
+    let sidebar_chrome = crate::render::sidebar_chrome::build_sidebar_chrome_set(
+        gpu,
+        batch,
+        asset_manager,
+        rules,
+        simulation.session().scenario_side(),
+    )?;
     let fnt_file = asset_manager.get_ref("GAME.FNT").and_then(|data| {
         crate::assets::fnt_file::FntFile::from_bytes(data)
             .map_err(|error| log::warn!("Failed to parse GAME.FNT: {error}"))
@@ -595,7 +615,7 @@ pub(crate) fn finish_presentation_assets(
         Some(simulation),
         detail_level,
     );
-    crate::app::loading::init::PresentationLoadAssets {
+    Ok(crate::app::loading::init::PresentationLoadAssets {
         tile_atlas,
         building_zshape,
         unit_atlas: manifest.unit_atlas,
@@ -612,7 +632,7 @@ pub(crate) fn finish_presentation_assets(
         lighting_grid,
         csf,
         fnt_file,
-    }
+    })
 }
 
 #[cfg(test)]

@@ -28,7 +28,8 @@ PRODUCERS = tuple('tools.projectile_oracle.' + name for name in (
      'tools.spatial_oracle.building_sale_triggers',
      'tools.spatial_oracle.campaign_hunt',
      'tools.spatial_oracle.building_anim_detail',
-     'tools.procedural_drawing_oracle.airstrike_beam')
+     'tools.procedural_drawing_oracle.airstrike_beam',
+     'tools.storage_oracle.ini_crc')
 HELPERS = ('tools.native_slope', 'tools.projectile_oracle.collision_fixture',
            'tools.spatial_oracle.building_anim_translucency_setup',
            'tools.spatial_oracle.building_anim_detail_setup',
@@ -65,7 +66,6 @@ with ExitStack() as stack:
         guards.extend(stack.enter_context(patch.object(owner, name,
                       side_effect=RuntimeError('forbidden cache operation: ' + name)))
                       for owner, name in ((native_oracle, 'configured_gamemd'),
-                                          (native_oracle, 'image_sha256'),
                                           (Path, 'read_bytes'),
                                           (pickle, 'load'), (pickle, 'loads')))
     if module == 'tools.control_group_text_oracle':

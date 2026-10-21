@@ -448,6 +448,7 @@ pub(crate) fn build_display_effect_instances(
                 (rx, ry),
                 config,
                 anim.use_cell_drawer(),
+                anim.remap().as_ref(),
             )
         };
         let key = ShpSpriteKey {
@@ -1408,6 +1409,7 @@ pub(crate) fn build_parachute_instances(
                         (entity.position.rx(), entity.position.ry()),
                         input.rules.art().anim_runtime_config(shp_name),
                         false,
+                        anim.remap().as_ref(),
                     ),
                     alpha: 1.0,
                     ..Default::default()

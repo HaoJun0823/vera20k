@@ -555,12 +555,10 @@ pub struct ObjectType {
     /// negated consumption.
     /// Source: building_power_status.json reader_controls.
     pub power: i32,
-    /// Extra power bonus per occupant for `InfantryAbsorb`/`UnitAbsorb`
-    /// buildings. Parsed from `ExtraPower=` (signed i32). Only contributes
-    /// when the building has `InfantryAbsorb=yes` or `UnitAbsorb=yes` and
-    /// at least one passenger is garrisoned. Stock YR: YAPOWR Bio-Reactor
-    /// uses `ExtraPower=100` × up to 5 garrisoned infantry.
-    pub extra_power: i32,
+    /// BuildingType `ExtraPower=` output `+0xEE8` and drain `+0xEEC`, the
+    /// ordered Rules processor's retained reader result (stock YAPOWR
+    /// Bio-Reactor output 100, GAGAP drain 9000).
+    pub extra_power: crate::rules::building_extra_power::BuildingExtraPower,
     /// Building foundation footprint (e.g., "3x2", "1x1"). Buildings only.
     pub foundation: String,
     /// Pixel offset for health bar / selection bracket Y position.
@@ -850,6 +848,12 @@ pub struct ObjectType {
     /// Add/Remove_Tracking owner; an explicit false is a distinct retained input.
     #[cfg(feature = "ares")]
     keep_alive: Option<bool>,
+    /// Immutable projection of the retained TechnoTypeExt+308/+314/+320/+321
+    /// reader. Country identities bind during Process, never from merged INI.
+    #[cfg(feature = "ares")]
+    factory_owners: crate::rules::native_processing::AresFactoryOwners,
+    #[cfg(feature = "ares")]
+    explicit_factory: crate::rules::native_processing::AresExplicitFactory,
     /// TechnoType+D33, read by Foot Approach_Target4D5690. Constructor
     /// 71152A sets true; ReadINI7144AF uses native ReadBool with the current
     /// value as its default. Attack still searches when this flag is false.
@@ -870,9 +874,10 @@ pub struct ObjectType {
     /// weapon slot 0 instead of 1 (`0x0070DD70`).
     pub spray_attack: bool,
     /// `DistributedFire=` — the type spreads fire across several nearby targets
-    /// instead of committing to one. VERA parses it only to keep those types
-    /// OFF the single-target passive-acquire commit; the spread-fire mechanism
-    /// itself is not implemented. Default no.
+    /// instead of committing to one. GreatestThreat collects its candidates
+    /// (`combat::greatest_threat`), the entity's distributed-fire state picks
+    /// the next one (`0x00709550`), and FireAt drops the fired target
+    /// (`0x006FF872..0x006FF8EB`, `combat::world_fire`). Default no.
     pub distributed_fire: bool,
     /// `VHPScan=` estimated-health filtering/scoring; native default None.
     pub vhp_scan: VhpScan,
@@ -2052,8 +2057,9 @@ pub struct ObjectType {
     /// TechnoType+CD2: ReadInt713FBC stores AL without a clamp;4566EC
     /// sign-extends it. The constructor's default is zero, not General.GapRadius.
     pub gap_radius_in_cells: i8,
-    /// `SuperGapRadiusInCells=` — oversized gap radius applied during
-    /// specific game states.
+    /// TechnoType+CD3 `SuperGapRadiusInCells=`: the gap radius while
+    /// super-charged. Mission_Unload's gap arm needs it nonzero
+    /// (`0x0044E2B0`) and caches it in `+0x26C` (`0x0044E2DC`).
     pub super_gap_radius_in_cells: i8,
     /// BuildingType+170C: signed ReadInt460C41, current default zero.
     pub psychic_detection_radius: i32,
@@ -2142,6 +2148,100 @@ impl ObjectType {
         {
             None
         }
+    }
+
+    /// BuiltAt BuildingTypes ordinals, bound at each reached TechnoType read.
+    /// An empty list leaves the source factory unspecified; duplicates are kept.
+    pub fn built_at(&self) -> &[i32] {
+        #[cfg(feature = "ares")]
+        {
+            self.factory_owners.built_at()
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            &[]
+        }
+    }
+
+    /// BuildingExt+126: source factory only admits an explicit BuiltAt match.
+    pub fn factory_explicit_only(&self) -> bool {
+        #[cfg(feature = "ares")]
+        {
+            self.explicit_factory.explicit_only()
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            false
+        }
+    }
+
+    /// Allowed original factory Countries in native list order, duplicates kept.
+    pub fn factory_owners(&self) -> &[crate::rules::ruleset::CountryIdx] {
+        #[cfg(feature = "ares")]
+        {
+            self.factory_owners.allowed()
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            &[]
+        }
+    }
+
+    /// Countries excluded for the same candidate that satisfies FactoryOwners.
+    pub fn forbidden_factory_owners(&self) -> &[crate::rules::ruleset::CountryIdx] {
+        #[cfg(feature = "ares")]
+        {
+            self.factory_owners.forbidden()
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            &[]
+        }
+    }
+
+    /// TypeExt+320: HaveAllPlans followed by Permanent writes the same field.
+    pub fn factory_owners_permanent(&self) -> bool {
+        #[cfg(feature = "ares")]
+        {
+            self.factory_owners.permanent()
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            false
+        }
+    }
+
+    /// Independent TypeExt+321: a live building supplies all factory categories.
+    pub fn factory_has_all_plans(&self) -> bool {
+        #[cfg(feature = "ares")]
+        {
+            self.factory_owners.has_all_plans()
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn project_factory_owners(
+        &mut self,
+        state: &crate::rules::native_processing::AresFactoryOwners,
+    ) {
+        self.factory_owners.clone_from(state);
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn factory_owners_hash_state(&self) -> impl std::hash::Hash + '_ {
+        (&self.factory_owners, &self.explicit_factory)
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn project_explicit_factory(
+        &mut self,
+        state: &crate::rules::native_processing::AresExplicitFactory,
+    ) {
+        self.explicit_factory.clone_from(state);
     }
 
     pub fn armor_id(&self) -> crate::rules::armor::ArmorId {
@@ -2839,7 +2939,9 @@ impl ObjectType {
             // Constructor value; only the ordered Process owner reads it.
             image: id.to_owned(),
             power: section.read_int("Power", 0),
-            extra_power: section.read_int("ExtraPower", 0),
+            // Only the ordered Rules processor reads it: a later layer's
+            // non-negative value keeps an earlier drain.
+            extra_power: Default::default(),
             // Building ctor45DF13 initializes +EF0=0 (1x1). ReadINI461225
             // reads Foundation from ART only, never this RULES section.
             // Pass processing projects the shared reader; ART binding does not.
@@ -2958,6 +3060,10 @@ impl ObjectType {
             no_manual_fire: section.read_ares_bool("NoManualFire", false),
             #[cfg(feature = "ares")]
             keep_alive: section.read_ares_nullable_bool("KeepAlive", None),
+            #[cfg(feature = "ares")]
+            factory_owners: Default::default(),
+            #[cfg(feature = "ares")]
+            explicit_factory: Default::default(),
             // ReadINI7144AF then7144C9. The shared bool reader folds only
             // post-allocation passes retained by native_processing, preserving
             // an earlier false when a later key is missing or malformed.

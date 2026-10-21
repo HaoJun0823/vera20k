@@ -778,8 +778,10 @@ impl Simulation {
 
     /// A passenger dying with its transport: `RecordKill(attacker)` (vtable
     /// `+0xE0`) then UnInit (vtable `+0xF8`), in KillPassengers
-    /// (`0x00707CFF`/`0x00707D09`) and in a dying unit's refused escape
-    /// (`UnitClass::ReceiveDamage 0x00738188..0x0073819B`).
+    /// (`0x00707CFF`/`0x00707D09`), in a dying unit's refused escape
+    /// (`UnitClass::ReceiveDamage 0x00738188..0x0073819B`) and for an
+    /// absorbed passenger that cannot leave its building
+    /// ([`Self::eject_absorbed_passengers`]).
     pub(crate) fn record_kill_and_uninit(
         &mut self,
         victim: u64,

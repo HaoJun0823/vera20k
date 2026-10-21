@@ -330,6 +330,10 @@ impl Simulation {
                 trace.push((id, captured));
             }
         });
+        // Ares445F80 entry hook100100B0 ->100449D0 precedes the vanilla
+        // ActuallyPlaced early return, including repeated and capture calls.
+        #[cfg(feature = "ares")]
+        self.grant_factory_plans(id, rules);
         let Some(entity) = self.substrate.entities.get(id) else {
             return;
         };
@@ -356,9 +360,10 @@ impl Simulation {
             .cargo()
             .is_some_and(|cargo| !cargo.passengers().is_empty());
         // 0x00446382..0x004463B4: the built type's InfantryGainSelfHeal and
-        // UnitsGainSelfHeal join the owner's house on every reached opening
-        // (a capture counts), with the +0x6E4 test done by the entry guard
-        // above rather than per arm.
+        // UnitsGainSelfHeal join the owner's house. Natively a capture of a
+        // placed building skips this add (0x00445FD0) and ChangeOwner's tail
+        // makes it (0x00449201..0x00449223); VERA makes it here for both
+        // (`Simulation::remove_old_owner_self_heal` records the residual).
         self.grant_house_self_heal(id, rules);
         crate::sim::credit_income::produce_cash_on_grand_opening(
             &self.interner,
@@ -411,7 +416,10 @@ impl Simulation {
         // renderer rebuilds from the vision owner.
         if object.reveal_to_all && !self.house_is_human_player(owner) {
             if !captured {
-                self.reveal_sight_to_current_house(id, rules);
+                self.reveal_sight_to_current_house(
+                    id,
+                    crate::sim::world::UninitContext::new(rules, registry).with_effects(effects),
+                );
             }
             self.sound_events
                 .emit(crate::sim::world::SimSoundEvent::RadarEvent {
