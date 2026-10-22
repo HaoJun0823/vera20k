@@ -174,15 +174,87 @@ pub(crate) fn plan_team_creation(
     owner: InternedId,
     draw: impl FnMut(i32, i32) -> i32,
 ) -> TeamCreationPlan {
+    plan_team_creation_with(sim, rules, owner, TeamGates::of_house(sim, owner), draw)
+}
+
+/// [`plan_team_creation`] for a house the computer AI never plays: the same
+/// selector, with the AI-only facts supplied by the caller.
+///
+/// Auto play drives the local player's house, whose `RatioAITriggerTeam=` is
+/// whatever the map gives the player's slot (nought on a multiplayer map) and
+/// whose AI triggers the scenario never activates. Read from the house, both
+/// leave the selector's roll dead and the house raises no team — so it never
+/// has a demand for `AI_Choose_Unit` to answer and its army is never built.
+/// This is [`ChooserGates::policy_played`]'s problem again, in the team block.
+pub(crate) fn plan_team_creation_policy(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    gates: TeamGates,
+    draw: impl FnMut(i32, i32) -> i32,
+) -> TeamCreationPlan {
+    plan_team_creation_with(sim, rules, owner, gates, draw)
+}
+
+fn plan_team_creation_with(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    gates: TeamGates,
+    draw: impl FnMut(i32, i32) -> i32,
+) -> TeamCreationPlan {
     select_team_types_with(
         sim,
         rules,
         owner,
+        gates,
         |sim, trigger, enemy, defense_full| {
             is_eligible(sim, rules, trigger, owner, enemy, defense_full)
         },
         draw,
     )
+}
+
+/// The two AI-only facts the team block gates on (`0x006F0AB0`): the house's
+/// `RatioAITriggerTeam=` (`+0x565C`) and whether its AI triggers are live
+/// (`+0x1F2`).
+///
+/// A caller that plays a house the computer AI never plays supplies them the
+/// way [`ChooserGates`] supplies the chooser's, rather than reading a house
+/// whose own fields the scenario leaves unset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TeamGates {
+    pub ratio: i32,
+    pub triggers_active: bool,
+}
+
+impl TeamGates {
+    /// The gates as the house itself reports them: what the computer AI uses.
+    pub(crate) fn of_house(sim: &Simulation, owner: InternedId) -> Self {
+        let Some(house) = sim.houses.get(&owner) else {
+            return Self {
+                ratio: 0,
+                triggers_active: false,
+            };
+        };
+        Self {
+            ratio: house.team_creation().ratio,
+            triggers_active: house.ai_activation().ai_triggers_active,
+        }
+    }
+
+    /// The gates for a house a brain plays as if it were a computer house.
+    ///
+    /// The ratio is a policy choice, not a port: the retail value is the map's
+    /// own `RatioAITriggerTeam=` for the house's section, and a player's slot
+    /// has none. Every roll at or below 100 always qualifies, which is what a
+    /// computer house with `RatioAITriggerTeam=100` does.
+    pub(crate) fn policy_played() -> Self {
+        Self {
+            ratio: 100,
+            triggers_active: true,
+        }
+    }
 }
 
 /// [`update_team_creation`]'s writes for one house: the eviction, the
@@ -236,6 +308,7 @@ pub(crate) fn select_team_types_with(
     sim: &Simulation,
     rules: &RuleSet,
     owner: InternedId,
+    gates: TeamGates,
     eligible: impl FnMut(&Simulation, &TeamAiTriggerDefinition, Option<InternedId>, bool) -> bool,
     mut draw: impl FnMut(i32, i32) -> i32,
 ) -> TeamCreationPlan {
@@ -243,13 +316,12 @@ pub(crate) fn select_team_types_with(
         return TeamCreationPlan::default();
     };
     let enemy = house.enemy_house();
-    let ratio = house.team_creation().ratio;
-    let triggers_active = house.ai_activation().ai_triggers_active;
+    let triggers_active = gates.triggers_active;
     let team_cap = house.difficulty_value(&rules.general.total_ai_team_cap);
     let max_defensive = house.difficulty_value(&rules.general.maximum_ai_defensive_teams);
     let mut plan = TeamCreationPlan::default();
     let roll = draw(1, 100);
-    if roll <= ratio && triggers_active {
+    if roll <= gates.ratio && triggers_active {
         let (mut teams, defense_teams) = count_teams(sim, owner);
         let mut defense_full = false;
         if teams < team_cap || defense_teams < teams / 2 {

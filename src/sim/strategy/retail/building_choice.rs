@@ -74,10 +74,15 @@ pub(super) fn place(
             build.attempt
         };
         let placement = Placement::new(obs, rules);
-        let Some(cell) = placement
-            .cell_for(build.type_id, attempt)
-            .or_else(|| placement.cell_for(build.type_id, 0))
-        else {
+        let cell = node_cell(brain, build)
+            .filter(|cell| Some(*cell) != build.placement)
+            .filter(|cell| {
+                obs.object_type(rules, build.type_id)
+                    .is_some_and(|ty| obs.placement_admits(rules, ty, cell.0, cell.1))
+            })
+            .or_else(|| placement.cell_for(build.type_id, attempt))
+            .or_else(|| placement.cell_for(build.type_id, 0));
+        let Some(cell) = cell else {
             // No cell this map admits. Retrying forever would leave the yard
             // holding the product and the plan stopped, so past the give-up
             // window the product is abandoned and the node with it.
@@ -136,6 +141,22 @@ pub(super) fn place(
     brain.build = None;
     brain.stall_logged = None;
     None
+}
+
+/// The cell the plan itself picked for the node being built.
+///
+/// `AI_RecalcBuildOptions` (`0x005054B0`) gives every node a cell — a
+/// refinery's is by the ore the house will work — and native
+/// `Place_Production` puts the product on it. Asking the site search instead
+/// loses that, which is how a base ends up with a refinery next to no ore and
+/// an economy that never starts.
+fn node_cell(brain: &RetailBrain, build: Build) -> Option<(u16, u16)> {
+    let node = brain.plan.nodes().get(build.node)?;
+    let (x, y) = crate::sim::base_plan::unpack_base_plan_cell(node.packed_cell);
+    if x <= 0 || y <= 0 {
+        return None;
+    }
+    Some((u16::try_from(x).ok()?, u16::try_from(y).ok()?))
 }
 
 /// Queue the first open node's type, once the house may build it and nothing of

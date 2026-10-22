@@ -31,5 +31,22 @@ pub(super) fn raise(
         return None;
     }
     let plan = obs.plan_team_creation(rules, &mut |low, high| brain.draw(low, high));
+    if plan.picked.is_empty() {
+        // No team was raised, so the combat branches of `AI_Choose_Unit` have
+        // nothing to answer and the army stops being built. Say so once in a
+        // while: a headless run has nobody watching the base.
+        if obs.tick() % 600 == 0 {
+            log::info!("retail-ai: the team selector raised nothing; the army has no demand");
+        }
+        return None;
+    }
+    log::info!(
+        "retail-ai: raising {} team(s): {:?}",
+        plan.picked.len(),
+        plan.picked
+            .iter()
+            .map(|id| obs.name_of(*id).unwrap_or("?"))
+            .collect::<Vec<_>>()
+    );
     Some(Intent::RaiseTeams(plan))
 }

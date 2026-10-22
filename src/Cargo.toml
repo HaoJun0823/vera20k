@@ -24,6 +24,11 @@ path = "bin/parity-digest.rs"
 name = "sim-bench"
 path = "bin/sim-bench.rs"
 
+# Headless skirmish with auto play driving the local house (see its module doc).
+[[bin]]
+name = "autoplay-match"
+path = "bin/autoplay-match.rs"
+
 [features]
 # Compile the supported Ares behavior; INIs cannot enable an absent capability.
 ares = []

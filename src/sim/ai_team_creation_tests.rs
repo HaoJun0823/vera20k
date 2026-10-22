@@ -245,6 +245,7 @@ fn the_selector_matches_the_original() {
             &sim,
             &rules,
             owner,
+            super::TeamGates::of_house(&sim, owner),
             |_, trigger, asked_enemy, defense_full| {
                 let slot = triggers.iter().position(|&id| id == trigger.id).unwrap();
                 asked.push((slot, asked_enemy, defense_full));

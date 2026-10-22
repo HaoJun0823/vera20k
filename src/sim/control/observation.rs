@@ -200,6 +200,17 @@ impl<'a> Observation<'a> {
             || factory.queue.iter().any(|entry| entry.type_id == type_id)
     }
 
+    /// How far the factory has got on this type, in production steps — the
+    /// progress bar the sidebar draws. `None` when the factory does not hold
+    /// this type.
+    pub fn production_progress(&self, rules: &RuleSet, type_id: InternedId) -> Option<u16> {
+        let ty = self.sim.object_type(type_id, rules)?;
+        let category = crate::sim::production::category_for_object(ty);
+        let factory = self.sim.production().factories().view(self.house, category)?;
+        let object = factory.object?;
+        (object.type_id == type_id).then_some(factory.progress)
+    }
+
     /// Whether the house's team timer has expired, so `HouseClass::Update`'s
     /// team block (`sim::ai_team_creation`) would run for it now. The timer is
     /// the owner's state; the policy reads it and the host restarts it through
@@ -216,12 +227,26 @@ impl<'a> Observation<'a> {
     /// (`sim::ai_team_creation::plan_team_creation`), decided with the caller's
     /// draws. The selector is the native one: a policy-driven house never runs
     /// it, because its gate is "no human controls this house".
+    /// The TeamTypes the house's own selector would raise now for a house a
+    /// brain plays (`sim::ai_team_creation::plan_team_creation_policy`),
+    /// decided with the caller's draws. The selector is the native one.
+    ///
+    /// The gates are the policy-played ones: this house is the player's slot,
+    /// so its own `RatioAITriggerTeam=` and AI-trigger activation are the ones
+    /// the scenario leaves unset, and reading them would leave the selector
+    /// dead and the army unbuilt.
     pub(crate) fn plan_team_creation(
         &self,
         rules: &RuleSet,
         draw: &mut impl FnMut(i32, i32) -> i32,
     ) -> TeamCreationPlan {
-        crate::sim::ai_team_creation::plan_team_creation(self.sim, rules, self.house, draw)
+        crate::sim::ai_team_creation::plan_team_creation_policy(
+            self.sim,
+            rules,
+            self.house,
+            crate::sim::ai_team_creation::TeamGates::policy_played(),
+            draw,
+        )
     }
 
     /// The unit the house's teams need of `kind`, chosen the way
