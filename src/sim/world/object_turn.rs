@@ -49,6 +49,14 @@ mod teleport_anim_object_turn_tests;
 #[path = "per_cell_object_turn_tests.rs"]
 mod per_cell_object_turn_tests;
 
+#[cfg(test)]
+#[path = "airborne_cell_tag_tests.rs"]
+mod airborne_cell_tag_tests;
+
+#[cfg(test)]
+#[path = "periodic_cell_object_turn_tests.rs"]
+mod periodic_cell_object_turn_tests;
+
 #[derive(Default)]
 pub(super) struct LiveObjectPassOutcome {
     pub destroyed_structure: bool,
@@ -397,6 +405,7 @@ impl Simulation {
             Self::teleport_warp_sound(
                 &mut sim.interner,
                 &sim.substrate,
+                sim.resolved_terrain.as_ref(),
                 &mut sim.sound_events,
                 stable_id,
                 teleport_movement::WarpSound::Out,
@@ -420,6 +429,7 @@ impl Simulation {
             Self::teleport_warp_sound(
                 &mut sim.interner,
                 &sim.substrate,
+                sim.resolved_terrain.as_ref(),
                 &mut sim.sound_events,
                 stable_id,
                 teleport_movement::WarpSound::In,
@@ -895,6 +905,10 @@ impl Simulation {
             // Process. Cruise crossing itself has no PerCell promotion.
             sim.promote_balloon_playfield_membership_before_process(stable_id, rules);
             sim.refresh_high_flying_sight_before_process(stable_id, rules, object_ctx.effects);
+            sim.dispatch_airborne_cell_tag_event(
+                stable_id,
+                super::UninitContext::new(rules, overlay_registry).with_effects(object_ctx.effects),
+            );
         }
 
         // Foot4DA80C captures +538 before locomotor Process. The sound tail
@@ -1098,6 +1112,14 @@ impl Simulation {
             stable_id,
             rules,
         );
+        // Aircraft414DA8..414DB0 rereads Object+90 after the complete Foot
+        // tail. A dead aircraft returns before descent, wake draws and the
+        // remaining class suffix, regardless of which callback cleared Alive.
+        if sim.substrate.entities.get(stable_id).is_some_and(|entity| {
+            entity.category() == EntityCategory::Aircraft && !entity.lifecycle.object_alive()
+        }) {
+            return Ok(outcome);
+        }
         if sim.tick_ship_sinking(stable_id, rules, overlay_registry, object_ctx.effects) {
             return Ok(outcome);
         }
@@ -1151,6 +1173,8 @@ impl Simulation {
         if sim.remove_aircraft_off_map(stable_id, rules, overlay_registry, object_ctx.effects) {
             return Ok(outcome);
         }
+        // Aircraft414FDF..415046 follows removal, before its Ready/Commence.
+        sim.cleanup_aircraft_dummy_cells(stable_id, rules, overlay_registry, object_ctx.effects);
         // UnitClass::AI after FootClass::AI, before its second Ready/Commence.
         crate::sim::miner::miner_system::unit_ai_clear_harvesting(&mut sim.substrate, stable_id);
         // Unit7365E1 Fire_At_Target then7365E8 Facing_Update precede

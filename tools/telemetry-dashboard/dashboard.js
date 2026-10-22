@@ -221,6 +221,25 @@ function outcomeChip(session) {
     const key = session.local_outcome === "Victory" ? "hdr.victory" : "hdr.defeat";
     return session.local_owner ? `${session.local_owner} · ${t(key)}` : t(key);
 }
+/** Whether the chips currently stand in for a stream that stopped. */
+let alertsStale = true;
+/** A stopped stream carries no current reading, so each chip shows the same dash
+ *  the panels use for "no reading" — never the last match's state. The pause chip
+ *  reading "running" beside a stopped link pill is the case this rules out. */
+function markAlertsStale() {
+    if (alertsStale)
+        return;
+    alertsStale = true;
+    const tip = t("alert.stale");
+    for (const id of ALERT_IDS) {
+        const badge = document.getElementById(id);
+        if (!badge)
+            continue;
+        badge.textContent = NO_READING;
+        badge.className = "badge";
+        badge.title = tip;
+    }
+}
 /** The header's standing status chips, so a stalled or erroring match is
  *  visible from any view and the row never changes width to say so. Every
  *  criterion is a reading the engine already publishes — its tick budget line,
@@ -279,6 +298,7 @@ function updateAlerts(snapshot) {
         badge.className = chip.cls;
         badge.title = chip.tip ?? chip.text;
     }
+    alertsStale = false;
 }
 function updateCost(snapshot) {
     const timing = snapshot.timing;
@@ -2943,6 +2963,11 @@ function connect() {
         if (!Array.isArray(snapshot.houses) || !Array.isArray(snapshot.spots))
             return;
         reconnectAttempts = 0;
+        // A replaced world restarts the authoritative tick — the same boundary the
+        // server resets its live window at — so the log buffers and the error chip
+        // start over rather than carrying the previous match's count.
+        if (lastSnapshot && snapshot.tick < lastSnapshot.tick)
+            clearLogs();
         lastSnapshot = snapshot;
         updateDebugTools(snapshot, true);
         snapTicks += 1;
@@ -3032,6 +3057,10 @@ const statusTimer = window.setInterval(() => {
     snapHz = snapTicks;
     snapTicks = 0;
     renderStatus();
+    // A second without a snapshot is the same evidence the pill uses: the stream
+    // is not carrying this match any more, so nothing the chips say is current.
+    if (!statusOpen || snapHz === 0)
+        markAlertsStale();
 }, 1000);
 sessionToken = consumeSessionToken();
 connect();

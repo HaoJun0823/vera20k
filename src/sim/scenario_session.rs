@@ -637,6 +637,8 @@ pub struct ScenarioDescriptor {
     pub free_radar: bool,
     /// Map `[Basic] IgnoreGlobalAITriggers`, native Scenario+34B4.
     pub ignore_global_ai_triggers: bool,
+    /// Map Basic.TimerInherit, reset false at683875.
+    pub timer_inherit: bool,
     /// Map Basic.TrainCrate / TruckCrate, reset false by683842/68388D.
     pub train_crate: bool,
     pub truck_crate: bool,
@@ -710,6 +712,13 @@ impl ScenarioDescriptor {
 /// TechLevel. Keeping these on Session avoids a second launch-settings owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct CampaignScenarioState {
+    /// Start_Scenario683B0A writes Scenario+34CC. ScenarioSave689310 /
+    /// ScenarioLoad689470 retain it, including on a cold load of a later map.
+    campaign_index: i32,
+    /// ContentSave67D31B / ContentLoad67E804 retain the separate 8A38E0
+    /// record (4C6340 / 4C6320). Restart restores this incoming record,
+    /// not globals/difficulty changed while playing the saved mission.
+    restart_carry_over: crate::sim::campaign_carry_over::CampaignCarryOver,
     mission_counter: i32,
     player_difficulty: HouseDifficulty,
     computer_difficulty: HouseDifficulty,
@@ -853,6 +862,14 @@ pub struct ScenarioSession {
     /// the presentation viewer and cannot be rebound from selection each frame.
     /// Evidence: docs/research/PHASE3_CURRENT_HOUSE_IDENTITY_GHIDRA_REPORT.md.
     current_house: Option<InternedId>,
+    /// Process result requests A83D49/A8ECD0. HouseClass::AI @0x004F8440
+    /// clears Won at4F8657 before raising victory; later House flag/timer
+    /// writes cannot revoke it. Main_Game__Route_Scenario_Termination
+    /// @0x0055CFD0 selects victory first at55D059.
+    #[serde(default)]
+    victory_requested: bool,
+    #[serde(default)]
+    defeat_requested: bool,
     /// Scenario+34B8: saved signed Side, independent of current House and
     /// process Vox selection. SetDefaults68389F initializes0; Full_Init
     /// 687819/68782D/68792A/687938 installs the fresh value. Load67E75B
@@ -1181,15 +1198,16 @@ impl ScenarioSession {
     /// unset valid slot is (0,0); reading outside its702-slot allocation is
     /// not a deterministic malformed-map contract and is rejected here.
     pub fn waypoint_cell(&self, index: i32) -> Option<(i16, i16)> {
-        let index = u32::try_from(index).ok()?;
-        (index < crate::map::waypoints::WAYPOINT_SLOT_COUNT)
-            .then(|| self.waypoints.get(&index).copied().unwrap_or((0, 0)))
+        let index = crate::map::waypoints::waypoint_slot(index)?;
+        Some(self.waypoints.get(&index).copied().unwrap_or((0, 0)))
     }
 
     /// Scenario IsWaypointValid68BD80: a bounded slot whose packed pair is
     /// different from the initialized empty cell B05458=(0,0).
     pub(crate) fn waypoint_is_valid(&self, index: i32) -> bool {
-        self.waypoint_cell(index).is_some_and(|cell| cell != (0, 0))
+        crate::map::waypoints::waypoint_is_defined(index, |index| {
+            self.waypoints.get(&index).copied()
+        })
     }
 
     pub fn first_multiplayer_start(&self) -> Option<crate::map::waypoints::Waypoint> {
@@ -1304,6 +1322,8 @@ impl ScenarioSession {
         difficulty: i32,
         mission_counter: i32,
         game_options: Option<&GameOptions>,
+        campaign_index: i32,
+        restart_carry_over: crate::sim::campaign_carry_over::CampaignCarryOver,
     ) -> Result<(), CampaignScenarioStartupError> {
         if self.game_mode_nonzero() {
             return Err(CampaignScenarioStartupError::NonCampaignMode);
@@ -1319,8 +1339,15 @@ impl ScenarioSession {
         // existing session remains the sole live owner of per-match options.
         if let Some(options) = game_options {
             self.game_options = options.clone();
+        } else {
+            // Main_Tick55D767..55D796 forces ordinary campaigns to two
+            // 16-ms buckets, independently of the multiplayer default.
+            // Explicit external launch settings retain their selected speed.
+            self.game_options.game_speed = 2;
         }
         self.campaign = Some(CampaignScenarioState {
+            campaign_index,
+            restart_carry_over,
             mission_counter,
             player_difficulty,
             computer_difficulty,
@@ -1332,6 +1359,27 @@ impl ScenarioSession {
     /// progression input. Offline sessions do not synthesize this value.
     pub fn campaign_mission_counter(&self) -> Option<i32> {
         self.campaign.map(|campaign| campaign.mission_counter)
+    }
+
+    pub fn campaign_index(&self) -> Option<i32> {
+        self.campaign.map(|campaign| campaign.campaign_index)
+    }
+
+    pub fn campaign_restart_carry_over(
+        &self,
+    ) -> Option<crate::sim::campaign_carry_over::CampaignCarryOver> {
+        self.campaign.map(|campaign| campaign.restart_carry_over)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn initialize_campaign_for_test(
+        &mut self,
+        index: i32,
+        counter: i32,
+        record: crate::sim::campaign_carry_over::CampaignCarryOver,
+    ) {
+        self.initialize_campaign_startup(1, counter, None, index, record)
+            .expect("synthetic campaign admission");
     }
 
     /// Main_Game55D283 calls BattleControlTerminated686570 on shell exit;
@@ -1350,6 +1398,28 @@ impl ScenarioSession {
 
     pub fn current_house(&self) -> Option<InternedId> {
         self.current_house
+    }
+
+    pub(crate) const fn outcome_request(
+        &self,
+    ) -> Option<crate::sim::house_state::HouseOutcomeKind> {
+        use crate::sim::house_state::HouseOutcomeKind;
+        if self.victory_requested {
+            Some(HouseOutcomeKind::Victory)
+        } else if self.defeat_requested {
+            Some(HouseOutcomeKind::Defeat)
+        } else {
+            None
+        }
+    }
+
+    /// HouseClass::AI @0x004F8440 (4F8692/4F87B2) raises the request after
+    /// its Vox wait. Other House callbacks cannot revoke an admitted result.
+    pub(crate) fn admit_outcome(&mut self, kind: crate::sim::house_state::HouseOutcomeKind) {
+        match kind {
+            crate::sim::house_state::HouseOutcomeKind::Victory => self.victory_requested = true,
+            crate::sim::house_state::HouseOutcomeKind::Defeat => self.defeat_requested = true,
+        }
     }
 
     pub const fn scenario_side(&self) -> i32 {
@@ -1404,8 +1474,9 @@ impl ScenarioSession {
             b"scenario-waypoints-v1".hash(hasher);
             s.waypoints.hash(hasher);
         }
-        // current_house and scenario_side are persisted process inputs, absent from
-        // the shared peer hash: native64DAB0 does not fold A83D4C, and different
+        // current_house, scenario_side and result requests A83D49/A8ECD0 are
+        // persisted process inputs, absent from the shared peer hash:
+        // native64DAB0 does not fold these globals, and different
         // participants legitimately select different current houses. Gameplay
         // mutations made by current-house callbacks retain their own hash owners.
         // This is not a claim that Rust's stronger hash equals native's CRC.
@@ -1596,7 +1667,7 @@ impl ScenarioSession {
             input_locked: false,
             chrono_screen: crate::sim::superweapon::chrono_screen::ChronoScreenState::default(),
             scenario_pause: pause::ScenarioPause::default(),
-            scenario_countdown: countdown::ScenarioCountdown::default(),
+            scenario_countdown: countdown::ScenarioCountdown::new(desc.timer_inherit),
             started: false,
             no_damage: desc.no_damage,
             free_radar: desc.free_radar,
@@ -1620,6 +1691,8 @@ impl ScenarioSession {
             waypoints: BTreeMap::new(),
             start_slot_houses: BTreeMap::new(),
             current_house: None,
+            victory_requested: false,
+            defeat_requested: false,
             scenario_side: 0,
             game_options: GameOptions::default(),
             tick: 0,
@@ -1640,8 +1713,19 @@ mod tests {
             let mut sim = Simulation::from_descriptor(&ScenarioDescriptor::default());
             let hash_before = sim.state_hash();
             sim.session
-                .initialize_campaign_startup(difficulty, 7, None)
+                .initialize_campaign_startup(
+                    difficulty,
+                    7,
+                    None,
+                    0,
+                    crate::sim::campaign_carry_over::CampaignCarryOver::CLEARED,
+                )
                 .unwrap();
+            assert_eq!(
+                sim.projected_in_game_options_speed(),
+                Some(2),
+                "ordinary campaigns use Main_Tick's two-bucket speed"
+            );
             assert_eq!(sim.session.campaign_mission_counter(), Some(7));
             assert_eq!(
                 sim.session.campaign_house_difficulties(),
@@ -1660,7 +1744,13 @@ mod tests {
             assert_eq!(sim.session.current_house(), Some(current));
             assert_eq!(sim.state_hash(), hash);
             assert_eq!(
-                sim.session.initialize_campaign_startup(difficulty, 1, None),
+                sim.session.initialize_campaign_startup(
+                    difficulty,
+                    1,
+                    None,
+                    0,
+                    crate::sim::campaign_carry_over::CampaignCarryOver::CLEARED
+                ),
                 Err(CampaignScenarioStartupError::AlreadyInstalled)
             );
             sim.session.reset_campaign_mission_counter_on_shell_exit();
@@ -1684,7 +1774,13 @@ mod tests {
         });
         let hash = offline.state_hash();
         assert_eq!(
-            offline.session.initialize_campaign_startup(1, 1, None),
+            offline.session.initialize_campaign_startup(
+                1,
+                1,
+                None,
+                0,
+                crate::sim::campaign_carry_over::CampaignCarryOver::CLEARED
+            ),
             Err(CampaignScenarioStartupError::NonCampaignMode)
         );
         assert_eq!(offline.state_hash(), hash);
@@ -1698,7 +1794,13 @@ mod tests {
             let mut sim = Simulation::from_descriptor(&ScenarioDescriptor::default());
             let hash = sim.state_hash();
             assert_eq!(
-                sim.session.initialize_campaign_startup(difficulty, 1, None),
+                sim.session.initialize_campaign_startup(
+                    difficulty,
+                    1,
+                    None,
+                    0,
+                    crate::sim::campaign_carry_over::CampaignCarryOver::CLEARED
+                ),
                 Err(CampaignScenarioStartupError::InvalidDifficulty(difficulty))
             );
             assert_eq!(sim.state_hash(), hash);
@@ -1715,7 +1817,13 @@ mod tests {
             ..Default::default()
         };
         sim.session
-            .initialize_campaign_startup(1, 1, Some(&options))
+            .initialize_campaign_startup(
+                1,
+                1,
+                Some(&options),
+                0,
+                crate::sim::campaign_carry_over::CampaignCarryOver::CLEARED,
+            )
             .unwrap();
         assert_eq!(sim.projected_in_game_options_speed(), Some(5));
         assert!(!sim.session.game_options.build_off_ally);
@@ -1730,7 +1838,13 @@ mod tests {
         };
         assert!(
             sim.session
-                .initialize_campaign_startup(1, 1, Some(&other))
+                .initialize_campaign_startup(
+                    1,
+                    1,
+                    Some(&other),
+                    0,
+                    crate::sim::campaign_carry_over::CampaignCarryOver::CLEARED
+                )
                 .is_err()
         );
         assert_eq!(

@@ -314,6 +314,45 @@ fn building_on_off_line_opcodes_decode_direction_and_target() {
     assert!(!sim.substrate.entities.get(7).unwrap().building_online());
 }
 
+/// Native's last 0x01/0x02 gate (`0x004C6D2D`/`0x004C6D8A`) reads
+/// `[target+0x520]+0x16C0`, and `+0x520` is `BuildingClass::pType`
+/// (docs/ghidra-workflow.md): the target TYPE's `FirestormWall=` byte
+/// (`ObjectType.firestorm_wall`). A Firestorm Wall building is driven by the
+/// firestorm logic, so the record is dropped before GoOnline/GoOffline; stock
+/// rules leave the key unset and the gate is open.
+#[test]
+fn building_on_off_line_dropped_for_a_firestorm_wall_type() {
+    let (mut sim, owner) = game_speed_command_sim();
+    let mut building = GameEntity::test_default(7, "GAPOWR", "Local", 30, 40);
+    building.set_owner_for_test(owner);
+    building.set_type_ref_for_test(sim.interner.intern("GAPOWR"));
+    building.set_category_for_test(EntityCategory::Structure);
+    building.lifecycle.set_object_alive_for_test(true);
+    building.lifecycle.set_in_limbo_for_test(false);
+    sim.substrate.entities.insert(building);
+
+    let off = Command::SetBuildingOnLine {
+        entity_id: 7,
+        on: false,
+    };
+
+    // A `FirestormWall=yes` type is dropped; the online latch stays set.
+    let firestorm = RuleSet::from_ini(&IniFile::from_str(
+        "[BuildingTypes]\n1=GAPOWR\n[GAPOWR]\nPower=-20\nFirestormWall=yes\n",
+    ))
+    .unwrap();
+    assert!(!sim.apply_command("Local", &off, Some(&firestorm)));
+    assert!(sim.substrate.entities.get(7).unwrap().building_online());
+
+    // The stock (keyless) type passes the gate and the latch clears.
+    let stock = RuleSet::from_ini(&IniFile::from_str(
+        "[BuildingTypes]\n1=GAPOWR\n[GAPOWR]\nPower=-20\n",
+    ))
+    .unwrap();
+    assert!(sim.apply_command("Local", &off, Some(&stock)));
+    assert!(!sim.substrate.entities.get(7).unwrap().building_online());
+}
+
 /// A launch hashes every frame and a test world none until the caller asks.
 /// Then only a frame whose tick is a multiple of the interval hashes, and its
 /// hash is the state's.
@@ -3171,6 +3210,8 @@ fn walking_combat_test_rules() -> RuleSet {
 }
 
 fn combat_rules_with_keys(infantry_keys: &str, tank_keys: &str, extra: &str) -> RuleSet {
+    // Both warheads take the Die1 arm (`InfDeath=1`, retail [SA]'s): the
+    // lethal-hit tests keep their victim's corpse through its die sequence.
     let mut ini: IniFile = IniFile::from_str(&format!(
         "[InfantryTypes]\n0=E1\n\n\
          [VehicleTypes]\n0=MTNK\n1=AMCV\n\n\
@@ -3182,8 +3223,9 @@ fn combat_rules_with_keys(infantry_keys: &str, tank_keys: &str, extra: &str) -> 
          [GACNST]\nStrength=1000\nArmor=wood\nConstructionYard=yes\nUndeploysInto=AMCV\n\n\
          [M60]\nDamage=25\nROF=20\nRange=5\nWarhead=SA\n\n\
          [105mm]\nDamage=65\nROF=50\nRange=6\nWarhead=AP\n\n\
-         [SA]\nVerses=100%,100%,100%,90%,70%,25%,100%,25%,25%,0%,0%\n\n\
-         [AP]\nVerses=100%,100%,90%,75%,75%,75%,60%,30%,20%,0%,0%\n[Clear]\nBuildable=yes\n",
+         [SA]\nVerses=100%,100%,100%,90%,70%,25%,100%,25%,25%,0%,0%\nInfDeath=1\n\n\
+         [AP]\nVerses=100%,100%,90%,75%,75%,75%,60%,30%,20%,0%,0%\nInfDeath=1\n\
+         [Clear]\nBuildable=yes\n",
     ));
     ini.merge(&IniFile::from_str(extra));
     RuleSet::from_ini_with_fixed_art_for_test(
@@ -4109,7 +4151,9 @@ fn flag_to_die_destroys_owned_objects_at_frame_zero_before_defeat_gate() {
         "Flag_To_Die has no RNG call"
     );
     assert!(sim.houses[&owner].is_to_die());
-    let generated = sim.house_rung(&rules, None, false, FrameEffects::default());
+    let generated = sim
+        .house_rung(&rules, None, false, FrameEffects::default(), None)
+        .expect("headless outcome waits complete synchronously");
     assert!(generated.is_empty());
     assert!(!sim.houses[&owner].is_to_die());
     assert!(
@@ -4195,7 +4239,7 @@ fn gsi_01_04_house_rung_owns_savour_deadline_and_emits_one_transition_edge() {
         sim.houses[&winner].outcome_timer(),
         crate::sim::timer::CdTimer::started(10, 26)
     );
-    assert!(!winner_outcome.exit_ready);
+    assert!(sim.session.outcome_request().is_none());
     assert_eq!(
         sim.sound_events
             .iter()
@@ -4209,14 +4253,18 @@ fn gsi_01_04_house_rung_owns_savour_deadline_and_emits_one_transition_edge() {
     sim.session.set_tick_for_test(35);
     sim.session.set_binary_frame_for_test(35);
     check_defeat_now(&mut sim, Some(&rules));
-    assert!(!sim.houses[&winner].outcome().unwrap().exit_ready);
+    assert!(sim.ready_outcome_for_owner(winner).is_none());
     assert!(!sim.termination_frame_requested());
     assert!(sim.sound_events.is_empty(), "accepted edges never replay");
 
     sim.session.set_tick_for_test(36);
     sim.session.set_binary_frame_for_test(36);
     check_defeat_now(&mut sim, Some(&rules));
-    assert!(sim.houses[&winner].outcome().unwrap().exit_ready);
+    assert_eq!(
+        sim.ready_outcome_for_owner(winner).unwrap().kind,
+        HouseOutcomeKind::Victory
+    );
+    assert!(!sim.houses[&winner].has_won());
     assert!(sim.houses[&loser].is_defeated());
     assert!(
         sim.houses[&loser].outcome().is_none(),
@@ -6942,6 +6990,83 @@ fn spawn_tanks(sim: &mut Simulation, rules: &RuleSet, cells: &[(u16, u16)]) -> V
         .collect()
 }
 
+#[test]
+fn admitted_megamissions_drop_overflow_per_house_and_reopen_next_frame() {
+    // These are already-admitted DoList commands, not 257 local clicks:
+    // local OutList admission has its own, smaller capacity. Execute_DoList
+    // 0x64C739..0x64C743 drops the 257th MegaMission for each House, while
+    // 0x64CAA8 still marks that record processed. No retail tuning sets this cap.
+    let Some((mut sim, rules, grid)) = stacking_world(24) else {
+        return;
+    };
+    let american = spawn_tanks(&mut sim, &rules, &[(6, 6)])[0];
+    let russian = sim
+        .spawn_object("MTNK", "Russians", 8, 6, 64, &rules)
+        .unwrap();
+    let owners = [
+        sim.interner.get("Americans").unwrap(),
+        sim.interner.get("Russians").unwrap(),
+    ];
+    let guard = |owner, entity_id, tick, cell| {
+        CommandEnvelope::new(
+            owner,
+            tick,
+            Command::Guard {
+                entity_id,
+                target: Some(TargetKind::Cell(cell, cell)),
+            },
+        )
+    };
+    // Interleave Houses to exercise registration-order grouping and a fresh
+    // staging allowance for each House, independent of input storage order.
+    for _ in 0..256 {
+        sim.queue_command(guard(owners[1], russian, 1, 14));
+        sim.queue_command(guard(owners[0], american, 1, 12));
+    }
+    sim.queue_command(guard(owners[0], american, 1, 13));
+    sim.queue_command(guard(owners[1], russian, 1, 15));
+    sim.queue_command(CommandEnvelope::new(
+        owners[0],
+        1,
+        Command::LiveGameSpeed { speed: 4 },
+    ));
+    sim.queue_command(guard(owners[0], american, 2, 16));
+    let due = sim.take_due_commands();
+    let result = sim.advance_tick(&due, Some(&rules), Some(&grid), None, 67);
+
+    assert_eq!(
+        result.executed_commands, 513,
+        "512 accepted MegaMissions and one ordinary event"
+    );
+    assert_eq!(
+        sim.entities().get(american).unwrap().archive_target(),
+        Some(TargetKind::Cell(12, 12))
+    );
+    assert_eq!(
+        sim.entities().get(russian).unwrap().archive_target(),
+        Some(TargetKind::Cell(14, 14))
+    );
+    assert_eq!(
+        sim.session.game_options().game_speed,
+        4,
+        "overflow does not stop ordinary events"
+    );
+    assert_eq!(
+        sim.pending_command_snapshot().len(),
+        1,
+        "overflow is consumed, not deferred"
+    );
+
+    let due = sim.take_due_commands();
+    let result = sim.advance_tick(&due, Some(&rules), Some(&grid), None, 67);
+    assert_eq!(result.executed_commands, 1);
+    assert_eq!(
+        sim.entities().get(american).unwrap().archive_target(),
+        Some(TargetKind::Cell(16, 16))
+    );
+    assert!(sim.pending_command_snapshot().is_empty());
+}
+
 /// The longest stretch of consecutive ticks on which `id` did not change cell
 /// while it still held a movement order. A mover whose selection is refused by
 /// a predicate that nothing downstream can resolve produces a bit-identical
@@ -8787,15 +8912,16 @@ fn runtime_frame_call_order_matches_the_app_seam() {
 /// both the store and its logic membership.
 #[test]
 fn gsi_05_14_death_debris_joins_the_live_order_the_hash_and_the_snapshot() {
-    let voxel_type = crate::rules::voxel_anim_type::VoxelAnimType::from_ini_section(
-        "TIRE",
-        IniFile::from_str(
-            "[TIRE]\nElasticity=0.8\nMinAngularVelocity=12.0\nMaxAngularVelocity=24.0\n\
-             MinZVel=28.0\nMaxZVel=32.0\nMaxXYVel=10.0\nDuration=150\n",
-        )
-        .section("TIRE")
-        .unwrap(),
-    );
+    // The visits read the piece's type (its IsMeteor at expiry) from the rules
+    // they are given, so the spawn and the visits share one RuleSet.
+    let rules = RuleSet::from_ini(&IniFile::from_str(
+        "[VoxelAnims]\n0=TIRE\n\
+         [TIRE]\nElasticity=0.8\nMinAngularVelocity=12.0\nMaxAngularVelocity=24.0\n\
+         MinZVel=28.0\nMaxZVel=32.0\nMaxXYVel=10.0\nDuration=150\n",
+    ))
+    .expect("TIRE rules parse");
+    let tire = rules.voxel_anim_type_id_by_name("TIRE").unwrap();
+    let voxel_type = rules.voxel_anim_type(tire);
 
     let mut sim = Simulation::new();
     let empty_hash = sim.state_hash();
@@ -8804,8 +8930,8 @@ fn gsi_05_14_death_debris_joins_the_live_order_the_hash_and_the_snapshot() {
     let mut deferred = Vec::new();
     for _ in 0..3 {
         sim.emit_debris_voxel(
-            crate::rules::voxel_anim_type::VoxelAnimTypeId(0),
-            &voxel_type,
+            tire,
+            voxel_type,
             None,
             glam::IVec3::new(1280, 2560, 0),
             true,
@@ -8880,14 +9006,14 @@ fn gsi_05_14_death_debris_joins_the_live_order_the_hash_and_the_snapshot() {
     // order once its AI reaches Delete.
     let first = first_id;
     let before = sim.substrate.voxel_anims.get(first).unwrap().world_coord();
-    sim.visit_voxel_anim(first, crate::rules::ruleset::RuleSet::empty_for_test());
+    sim.visit_voxel_anim(first, &rules);
     let after = sim.substrate.voxel_anims.get(first).unwrap().world_coord();
     assert_ne!(before, after, "one AI visit moves the body");
     for _ in 0..200 {
         if !sim.substrate.voxel_anims.contains_key(first) {
             break;
         }
-        sim.visit_voxel_anim(first, crate::rules::ruleset::RuleSet::empty_for_test());
+        sim.visit_voxel_anim(first, &rules);
     }
     assert!(
         !sim.substrate.voxel_anims.contains_key(first),

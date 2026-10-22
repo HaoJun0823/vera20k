@@ -9,7 +9,41 @@ fn main() {
         // tests, libraries and non-Windows targets at their existing defaults.
         println!("cargo::rustc-link-arg-bin=vera20k={argument}");
     }
+    if target_os == "windows" {
+        embed_windows_resources();
+    }
 }
+
+/// The game's icon and version details, which Explorer, the Start menu and
+/// Task Manager show for vera20k.exe. `winresource` compiles them with the
+/// Windows SDK's resource compiler, which only a Windows host has; a build on
+/// another host leaves them out.
+#[cfg(windows)]
+fn embed_windows_resources() {
+    // Red Alert 2's own icon: the 32-bit images of retail game.exe's icon group.
+    const ICON: &str = r".github\release\windows\vera20k.ico";
+    println!("cargo::rerun-if-changed={ICON}");
+    let mut resource = winresource::WindowsResource::new();
+    resource
+        .set_icon(ICON)
+        .set("ProductName", "VERA20k")
+        .set("FileDescription", "VERA20k")
+        .set("OriginalFilename", "vera20k.exe")
+        .set(
+            "LegalCopyright",
+            "Free software under the GNU GPL version 3. \
+             Not affiliated with or endorsed by Electronic Arts.",
+        );
+    // Only the game, like the stack size. It runs without them, so a missing
+    // resource compiler costs a warning rather than the build; the Release
+    // workflow checks that the shipped program has them.
+    if let Err(error) = resource.compile_for("vera20k") {
+        println!("cargo::warning=vera20k.exe has no icon or version details: {error}");
+    }
+}
+
+#[cfg(not(windows))]
+fn embed_windows_resources() {}
 
 fn game_stack_link_arg(target_os: &str, target_env: &str) -> Option<String> {
     if target_os != "windows" {

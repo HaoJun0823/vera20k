@@ -190,7 +190,7 @@ pub(crate) fn anim_palette_light(
         PaletteLight::cell(grid, cell, false).with_brightness(brightness)
     } else if matches!(
         remap,
-        Some(AnimRemap::House(_) | AnimRemap::ExtraBuildingScheme(_))
+        Some(AnimRemap::House(_) | AnimRemap::ExtraBuildingScheme { .. })
     ) {
         // `0x004232A3..0x004232C9` selects the instance Convert and jumps to the
         // draw, so the `AltPalette` swap at `0x004232E2` never runs for it.
@@ -563,6 +563,7 @@ impl MatchLighting {
     /// survives even if the source registry returns to identical final values.
     pub(crate) fn apply_events(&mut self, terrain: &ResolvedTerrainGrid, events: &[LightingEvent]) {
         let mut dirty = BTreeSet::new();
+        let mut rad_centers: Vec<(u16, u16)> = Vec::new();
         for event in events {
             match event {
                 LightingEvent::Building { id, source } => {
@@ -580,6 +581,7 @@ impl MatchLighting {
                     };
                     queue_area(old.as_ref(), terrain, 2, &mut dirty);
                     queue_area(source.as_ref(), terrain, 2, &mut dirty);
+                    rad_centers.push(*center);
                 }
                 LightingEvent::Global {
                     state,
@@ -616,6 +618,18 @@ impl MatchLighting {
             }
         }
         self.commit_source_cells(terrain, &mut dirty);
+        // A radiation site's light is the only app input a mod's type can
+        // recolor, so report what the grid actually holds once the frame's
+        // area is committed.
+        for center in rad_centers {
+            let source = self.radiation.get(&center);
+            log::debug!(
+                "lighting radiation {:?}: source={:?} cell={:?}",
+                center,
+                source.map(|source| (source.tint, source.intensity)),
+                self.grid.tint_at(center),
+            );
+        }
     }
 
     fn commit_source_cells(

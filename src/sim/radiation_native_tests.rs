@@ -26,6 +26,13 @@ fn light_lifecycle_matches_original_site_and_cell_boundaries() {
     );
 }
 
+/// The retail activation on a `SNOW` scenario, where `RadSite65B5EA..65B684`
+/// substitutes signed -128 for the light's red and blue channels. A Phobos
+/// build never runs that owner: `RadSiteExt::CreateLight` replaces the whole
+/// activation and tints from the bound type's `RadColor` on every theater, so
+/// the corpus's per-frame tints cannot hold there. The capability's own tests
+/// cover the type-colored field instead.
+#[cfg(not(feature = "phobos"))]
 #[test]
 fn snow_light_lifecycle_matches_original_site_and_cell_boundaries() {
     assert_light_lifecycle(
@@ -74,6 +81,7 @@ fn assert_light_lifecycle(map: &str, packet: &'static str) {
             ry: center.1,
             rad_level: weapon.rad_level,
             spread,
+            rad_type: None,
         };
         let mut state = RadiationState::default();
         let mut events = crate::sim::light_sources::LightingSources::default();
@@ -94,10 +102,10 @@ fn assert_light_lifecycle(map: &str, packet: &'static str) {
             source.clone()
         };
         state.apply_detonation(
-            detonation,
+            detonation.clone(),
             0,
             &scene.sim().session.theater(),
-            &rules.radiation,
+            rules,
             terrain,
             &mut events,
         );
@@ -111,15 +119,15 @@ fn assert_light_lifecycle(map: &str, packet: &'static str) {
                 frame += 1;
                 if refresh == Some(frame) {
                     state.apply_detonation(
-                        detonation,
+                        detonation.clone(),
                         frame,
                         &scene.sim().session.theater(),
-                        &rules.radiation,
+                        rules,
                         terrain,
                         &mut events,
                     );
                 }
-                state.tick_decay(frame, &rules.radiation, terrain, &mut events);
+                state.tick_decay(frame, rules, terrain, &mut events);
                 current_source = publish(&mut events);
             }
             if expected["site"].is_null() {
@@ -309,14 +317,14 @@ fn field_operations_match_native_overlap_controls() {
     let terrain = scene.resolved_terrain.as_ref();
     for row in native["rows"].as_array().unwrap() {
         let name = row["name"].as_str().unwrap();
-        let mut rules = fixture.rules.radiation.clone();
+        let mut rules = fixture.rules.clone();
         if name.starts_with("zero_steps_") {
             // The corpus explicitly supplies this nonstock reader input to
             // exercise the same shared operation's masked zero divisor.
-            rules.level_delay = 600;
+            rules.radiation.level_delay = 600;
         }
         assert_eq!(
-            format!("{:016x}", rules.level_factor.to_bits()),
+            format!("{:016x}", rules.radiation.level_factor.to_bits()),
             row["factor_bits"]
         );
         let mut state = RadiationState::default();
@@ -333,6 +341,7 @@ fn field_operations_match_native_overlap_controls() {
                             ry,
                             rad_level: integer(&row["source_inputs"]["rad_level"]),
                             spread: integer(&row["source_inputs"]["spread"]),
+                            rad_type: None,
                         },
                         frame,
                         &scene.session.theater(),
@@ -349,7 +358,10 @@ fn field_operations_match_native_overlap_controls() {
                     }
                 }
                 "decay" => state.decay_step(cell(&action["cell"]), terrain),
-                "decrease" => state.decrease_site_levels(cell(&action["cell"]), terrain, &rules),
+                "decrease" => {
+                    let effective = effective_radiation(&rules, None);
+                    state.decrease_site_levels(cell(&action["cell"]), terrain, &effective)
+                }
                 other => panic!("unknown native action {other}"),
             }
             for sample in stage["samples"].as_array().unwrap() {
@@ -360,7 +372,7 @@ fn field_operations_match_native_overlap_controls() {
                     "{name} {action} {at:?}: Cell's stored bits"
                 );
                 assert_eq!(
-                    state.damaging_level(at, rules.level_max),
+                    state.damaging_level(at, rules.radiation.level_max),
                     integer(&sample["damaging_level"]),
                     "{name} {action} {at:?}: Cell487CB0 conversion"
                 );
@@ -424,10 +436,11 @@ fn restore_rejects_missing_or_duplicate_radiation_update_slots() {
             ry: 10,
             rad_level: 500,
             spread: 2,
+            rad_type: None,
         },
         0,
         &sim.session.theater(),
-        &RadiationRules::default(),
+        RuleSet::empty_for_test(),
         None,
         &mut crate::sim::light_sources::LightingSources::default(),
     );
@@ -463,10 +476,11 @@ fn equal_current_fields_with_different_update_order_hash_differently() {
                     ry,
                     rad_level: 500,
                     spread: 10,
+                    rad_type: None,
                 },
                 0,
                 &world.session.theater(),
-                &RadiationRules::default(),
+                RuleSet::empty_for_test(),
                 None,
                 &mut crate::sim::light_sources::LightingSources::default(),
             );
@@ -475,7 +489,7 @@ fn equal_current_fields_with_different_update_order_hash_differently() {
     let bits = |state: &RadiationState| {
         state
             .iter_cells()
-            .map(|(cell, level)| (*cell, level.to_bits()))
+            .map(|(cell, level)| (cell, level.to_bits()))
             .collect::<Vec<_>>()
     };
     assert_eq!(bits(&forward.radiation), bits(&reverse.radiation));
@@ -495,10 +509,11 @@ fn serialized_radius_that_changes_future_decay_is_hash_relevant() {
             ry: 24,
             rad_level: 500,
             spread: 10,
+            rad_type: None,
         },
         0,
         &original.session.theater(),
-        &RadiationRules::default(),
+        RuleSet::empty_for_test(),
         None,
         &mut crate::sim::light_sources::LightingSources::default(),
     );

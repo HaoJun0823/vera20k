@@ -654,6 +654,15 @@ pub enum ConcealOutcome {
 /// but the stream preserves the verified native relative ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleOutput {
+    /// Event OPTIONS4C7929..4C7939 requests GameState1. The app opens the
+    /// modal after MainTick returns, through its existing menu owner.
+    OptionsRequested,
+    /// Event LATENCYFUDGE4C7F35..4C7F4F writes the existing network-session
+    /// setting. Transport owns its persistent value, not Simulation.
+    LatencyFudgeChanged {
+        owner: InternedId,
+        value: i32,
+    },
     /// Building4456D0 attempts AddCameo before House4F92E2 recalculates.
     /// The retained client strip owns duplicate/capacity admission. Emit in
     /// House building/type order at the simulation phase that made the query.
@@ -972,6 +981,13 @@ impl Simulation {
         self.lifecycle_test_events.clear();
     }
 
+    /// Let client fixtures consume actual Begin/Abandon facts without running
+    /// unrelated Logic. The ordinary frame collects this same channel.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn take_lifecycle_outputs_for_test(&mut self) -> Vec<LifecycleOutput> {
+        self.lifecycle_outputs.take_for_test()
+    }
+
     /// The Location Z Object Unlimbo 0x5F4EC0 commits (SetLocation at
     /// `0x005F4FA8`), adapted from the level-based placement API. It passes its
     /// input coordinate through the type's virtual +0x6C (`0x005F4F88`):
@@ -1280,7 +1296,9 @@ impl Simulation {
         // (`0x006F6D8F`), behind its alive gate (`0x006F6D04`: a dead Techno
         // returns success before it).
         if techno_alive_on_entry {
-            Self::house_added_to_game(&self.substrate, &mut self.houses, stable_id);
+            #[cfg(feature = "phobos")]
+            self.phobos_tracking_before_unlimbo(stable_id);
+            self.house_added_to_game(stable_id, context.rules());
         }
         // Techno6F6DAA: the admitted successful Techno snaps
         // the body to this call's direction, before barrel elevation and idle.
@@ -1587,21 +1605,13 @@ impl Simulation {
             // Building440D2D, after native House building registration.
             entity.reset_building_health_sample_at_unlimbo();
         }
-        self.refresh_waypoint_edge_from_committed_structure(stable_id);
         self.mark_building_base_reservation_with_arg(stable_id, false, context);
         self.discover_building_owner_after_unlimbo(stable_id, context);
         self.construct_spotlight(stable_id, context.rules());
         // Unlimbo44119C clears this object's retained primary before
         //448070 asks the owning house for another live primary.
         self.production.clear_primary_factory(stable_id);
-        crate::sim::production::initialize_factory_primary(
-            &self.interner,
-            &mut self.production,
-            &self.substrate,
-            &self.houses,
-            stable_id,
-            context.rules(),
-        );
+        crate::sim::production::initialize_factory_primary(self, context.rules(), stable_id);
         //440E76's virtual discovery precedes the successful BasePlan
         // tail at44159D..4415B3, including a reached first opening.
         self.fill_base_plan_from_successful_building_unlimbo(stable_id);
@@ -1979,30 +1989,6 @@ impl Simulation {
                 is_base_defense,
                 session.game_mode_nonzero(),
             );
-        }
-    }
-
-    /// Refresh the owning house's navigation edge from a live, map-committed
-    /// structure. Launch base-center authority remains the assigned start cell.
-    /// Serves `HouseClass::DetermineEdge @ 0x0050DB00`'s building arm, which the
-    /// primary-factory selection calls (`0x00448070`, `0x00448160`).
-    pub(crate) fn refresh_waypoint_edge_from_committed_structure(&mut self, stable_id: u64) {
-        let Some(bounds) = self.playfield_bounds else {
-            return;
-        };
-        let Some((owner, anchor)) = self.substrate.entities.get(stable_id).and_then(|entity| {
-            (entity.category() == EntityCategory::Structure
-                && entity.type_facts.determines_waypoint_edge()
-                && entity.lifecycle.object_alive
-                && !entity.lifecycle.in_limbo
-                && entity.lifecycle.cell_marked)
-                .then_some((entity.owner(), (entity.position.rx(), entity.position.ry())))
-        }) else {
-            return;
-        };
-        let edge = crate::sim::house_state::determine_waypoint_edge(anchor, bounds);
-        if let Some(house) = self.houses.get_mut(&owner) {
-            house.assign_waypoint_edge(edge);
         }
     }
 
@@ -3712,6 +3698,8 @@ impl Simulation {
         }
         self.substrate
             .release_foot_air_tracker_before_limbo(stable_id);
+        #[cfg(feature = "ares")]
+        self.limbo_ares_attach_effects(stable_id, context.rules());
         if self
             .substrate
             .entities
@@ -3758,6 +3746,8 @@ impl Simulation {
                 context.effects(),
             );
             // 6F6BD1: Removed_From_Game, also only on the first Limbo.
+            #[cfg(feature = "phobos")]
+            self.phobos_tracking_before_limbo(stable_id);
             self.house_removed_from_game(stable_id, context.rules(), context.effects());
             // BuildingClass::Limbo 0x00445946..0x00445988: an opened
             // Helipad's docks leave its house's AirportDocks.
@@ -4353,6 +4343,11 @@ impl Simulation {
     /// VERA-only: feeds the expiry-listener index (`ExpiryListeners`) so the
     /// `0x007258D0` broadcast skips entities; the listener's fields are the truth.
     pub(super) fn entity_expiry_holds(listener: &GameEntity, mut name: impl FnMut(u64)) -> bool {
+        if let Some(anim) = listener.emp_sparkle() {
+            name(anim);
+        }
+        #[cfg(feature = "ares")]
+        listener.attached_effect_anims().for_each(&mut name);
         for target in [
             listener.attack_target.target(),
             listener.suspended_attack_target.target(),
@@ -5204,7 +5199,7 @@ impl Simulation {
     /// Anim4's dedicated holder announcement725A16..725A4C, before Anim
     /// conceal/removal (UnInit42561F, destructor422906). It does not enter
     /// the generic Object/bomb/factory/team broadcast. This dispatches the
-    /// Bullet and Parasite-holder subsets; Building receivers stay at their existing boundaries,
+    /// Bullet, Parasite and Ares EMP-holder subsets; Building receivers stay at their existing boundaries,
     /// including their distinct ordinary-UnInit versus scalar slot handling.
     pub(crate) fn notify_anim_pointer_expired(&mut self, expired_id: u64) {
         if !self.substrate.anims.contains_key(expired_id) {
@@ -5214,6 +5209,11 @@ impl Simulation {
             .expiry_listeners
             .entities_reached_by(&mut self.substrate.entities, expired_id);
         for owner in holders {
+            if let Some(entity) = self.substrate.entities.get_mut(owner) {
+                entity.emp_anim_pointer_expired(expired_id);
+                #[cfg(feature = "ares")]
+                entity.attached_effect_anim_expired(expired_id);
+            }
             self.substrate
                 .parasite_anim_pointer_expired(owner, expired_id);
         }
@@ -5857,6 +5857,8 @@ impl Simulation {
             }
 
             self.run_represented_uninit_pre_hook(stable_id);
+            #[cfg(feature = "phobos")]
+            self.phobos_tracking_begin_uninit(stable_id);
             // `ObjectClass::UnInit` kills a Techno's passengers with no attacker
             // (`0x005F660D`).
             self.kill_passengers(stable_id, None, context);
@@ -5921,6 +5923,10 @@ impl Simulation {
         self.substrate.pending_delete.queue_object(stable_id);
         #[cfg(any(test, feature = "test-support"))]
         self.trace_lifecycle_for_test(LifecycleTestEvent::PendingDeleteQueued { stable_id });
+        #[cfg(feature = "phobos")]
+        if kind == ObjectKind::Entity {
+            self.phobos_tracking_end_uninit();
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -6271,6 +6277,8 @@ impl Simulation {
             stable_id,
             context.rules(),
         );
+        #[cfg(feature = "ares")]
+        self.destroy_ares_attach_effects(stable_id, context.rules());
         // Foot4D3701 delegates to Techno6F4500 only after its own sound
         // tail. Techno6F4607 destroys the distinct voice handle via405C00,
         // before its attached/deploy Anims6F468B. Keep the disposal marker in

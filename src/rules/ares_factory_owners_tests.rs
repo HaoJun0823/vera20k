@@ -71,7 +71,7 @@ fn shared_ares_country_find_matches_native_controls_and_rules_projection() {
             .country_veterancy
             .ares
             .buildings = vec!["CONTROL".to_owned()];
-        reader.process_ares_country_veterancy(child, &IniFile::empty());
+        reader.process_ares_country(child, &IniFile::empty(), false);
         let state = &reader.families[&RulesTypeFamily::Country][child]
             .country_veterancy
             .ares;
@@ -502,6 +502,7 @@ fn retained_global_controls_match_native_constructor_and_eight_read_history_cont
         let mut state = AresGlobalControls {
             phase,
             allow_bypass_build_limit: [true; 3],
+            ..Default::default()
         };
         state.read_pass(&IniFile::from_str(
             "[GlobalControls]\nAllowBypassBuildLimit=no,bad,yes\n",

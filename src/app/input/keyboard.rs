@@ -397,7 +397,9 @@ pub(crate) fn mouse(state: &mut AppState, button: MouseButton, pressed: bool) {
     dialog.scroll.cancel();
     dialog.buttons.press(over);
     match hit {
-        Some(KeyboardControl::Button(_)) => App::play_skirmish_shell_generic_click_sound(state),
+        // Back, Assign and Reset All are owner-draw: GUIMainButtonSound
+        // (0x0061376B).
+        Some(KeyboardControl::Button(_)) => App::play_main_menu_button_sound(state),
         Some(KeyboardControl::Category) => {
             dialog.capture_focused = false;
             dialog.category_open = true;

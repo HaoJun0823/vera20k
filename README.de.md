@@ -41,6 +41,15 @@ das Projekt entwickelt.
 - **Mehrspielermodus:** Netzwerkspiel ist noch nicht verfügbar.
 - **Größenordnung:** Schlachten mit 30 Spielern und 20.000 Einheiten wurden noch nicht demonstriert.
 
+## Herunterladen und spielen
+
+Lade den Installer für Windows, macOS oder Linux von der
+[Release-Seite](https://github.com/YuriPlanet/vera20k/releases) herunter. Er findet dein
+Yuri's Revenge aus [Steam](https://store.steampowered.com/app/2229850/) oder der
+[EA app](https://www.ea.com/games/command-and-conquer/command-and-conquer-the-ultimate-collection)
+und richtet VERA20K in einem neuen Ordner ein. Dort kommen künftig auch Mods und neue Inhalte hin,
+sodass die Spieldateien nie verändert werden.
+
 ## Architektur
 
 Die Engine besteht aus drei Hauptteilen:

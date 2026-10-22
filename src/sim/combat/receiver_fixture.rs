@@ -911,11 +911,10 @@ pub(crate) fn tick_combat_with_fog_and_main_rng_with_terrain_area(
                 std::mem::take(&mut world.receiver_fixture.as_mut().unwrap().tail_effects)
             {
                 if world.receiver_fixture.as_ref().unwrap().sound_enabled {
-                    for (die_sound_id, rx, ry) in effects.death_sounds.drain(..) {
+                    for (die_sound_id, location) in effects.death_sounds.drain(..) {
                         world.sound_events.emit(SimSoundEvent::EntityDied {
                             die_sound_id,
-                            rx,
-                            ry,
+                            world: location,
                         });
                     }
                 }
@@ -927,7 +926,7 @@ pub(crate) fn tick_combat_with_fog_and_main_rng_with_terrain_area(
                             detonation,
                             binary_frame,
                             &world.session.theater(),
-                            &rules.radiation,
+                            rules,
                             world.resolved_terrain.as_ref(),
                             &mut world.lighting_sources,
                         );

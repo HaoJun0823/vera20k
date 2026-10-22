@@ -478,6 +478,10 @@ pub struct ObjectSubstrate {
     /// Plain-struct entity storage (dense, in stable_id order, + infantry registry).
     /// The authoritative object store — serialized verbatim (NOT skipped).
     pub(crate) entities: EntityStore,
+    /// Synchronous Phobos limbo hook controls; stable saves restore enabled/idle.
+    #[cfg(feature = "phobos")]
+    #[serde(skip)]
+    pub(crate) phobos_limbo_control: crate::sim::house_tracking::PhobosLimboControl,
     /// Separate AnimClass registry sharing the global object ID namespace and
     /// LogicVector with entities.
     #[serde(default)]
@@ -518,6 +522,8 @@ impl ObjectSubstrate {
             air_slots: AirSlotGrid::default(),
             base_reservations: CellReservationGrid::new(),
             entities: EntityStore::new(),
+            #[cfg(feature = "phobos")]
+            phobos_limbo_control: Default::default(),
             anims: AnimStore::default(),
             voxel_anims: VoxelAnimStore::default(),
             spotlights: Default::default(),

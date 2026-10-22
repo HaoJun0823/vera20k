@@ -7,7 +7,7 @@ use super::{
     BuildingPlacementError, ProductionCategory, ProductionPlacement, credits_for_owner,
     cycle_active_producer_for_owner_category, place_production_with_overlays,
     placement_preview_for_owner_with_overlays, producer_candidates_for_owner_category,
-    publish_production_changes, ready_building_entity_for_owner, ready_buildings_for_owner,
+    ready_building_entity_for_owner, ready_buildings_for_owner,
 };
 use crate::map::entities::EntityCategory;
 use crate::map::overlay_mark::OverlayMarkOutcome;
@@ -681,7 +681,7 @@ fn a_completed_building_waits_in_its_factory_for_placement() {
             .test_arm_ready(americans, ProductionCategory::Building)
     );
 
-    publish_production_changes(&mut sim, &rules);
+    super::publish_production_changes_for_tests(&mut sim, &rules, americans);
     let held = sim
         .production
         .factories()
@@ -699,7 +699,7 @@ fn a_completed_building_waits_in_its_factory_for_placement() {
     let held_id = held.object.unwrap().entity_id.unwrap();
     let rng = sim.scenario_rng.logical_state();
     for _ in 0..3 {
-        publish_production_changes(&mut sim, &rules);
+        super::publish_production_changes_for_tests(&mut sim, &rules, americans);
     }
     // Record_Last_Built waits for the placement (`0x004FB4B7`).
     assert_eq!(sim.houses[&americans].stats().built(), built_before);
@@ -1025,10 +1025,11 @@ fn placed_gapowr_completion(human: bool) -> (u32, Option<u32>) {
     rules.set_buildup_control_for_test("GAPOWR", [0, 26, 2]);
     let grid = PathGrid::new(64, 64);
     let americans = sim.interner.intern("Americans");
-    sim.houses
-        .register(crate::sim::house_state::HouseState::new(
-            americans, 0, None, human, 10_000, 10,
-        ));
+    let mut house = crate::sim::house_state::HouseState::new(americans, 0, None, human, 10_000, 10);
+    // Both rows exercise a player PLACE. Keep the independent IsHuman
+    // input while admitting the command through native PlayerControl.
+    house.set_player_control_for_test(true);
+    sim.houses.register(house);
     spawn_structure(&mut sim, &rules, 1, "Americans", "GACNST", 10, 10);
     let gapowr = sim.interner.intern("GAPOWR");
     sim.advance_tick(&[], Some(&rules), Some(&grid), None, 67);
@@ -2002,10 +2003,11 @@ fn gsi_04_07_command_places_authoritative_owned_wall_without_entity() {
     let category =
         super::production_tech::production_category_for_object(rules.object("GAWALL").unwrap());
     let held = super::lifecycle_tests::held_id(&sim, owner, category);
-    // A second wall waits behind the finished one, as when VERA queued it while the
-    // first was still building (gamemd never queues a building: see enqueue_by_type's
-    // building-path residual). A PRODUCE sent now would take the finished head's
-    // same-type branch instead (0x004FA5A8..0x004FA5C4), so the fixture appends it.
+    // A second wall waits behind the finished one. No PRODUCE queues a building
+    // (enqueue_by_type: StartProduction never appends a BuildingType), and one
+    // sent now would take the finished head's same-type branch instead
+    // (0x004FA5A8..0x004FA5C4), so the fixture appends it to reach Place's
+    // queued-copy removal.
     let cost = rules.object("GAWALL").unwrap().cost.max(0);
     assert!(
         !sim.production
@@ -2554,6 +2556,15 @@ fn gsi_04_07_placement_command_places_only_its_own_houses_production() {
     sim.overlay_grid = Some(OverlayGrid::new(64, 64));
     ready_building(&mut sim, &rules, "Russians", "GAWALL");
     let event_owner = sim.interner.intern("Americans");
+    sim.houses
+        .register(crate::sim::house_state::HouseState::new(
+            event_owner,
+            0,
+            None,
+            true,
+            0,
+            10,
+        ));
     let wall_type = sim.interner.get("GAWALL").expect("wall type");
 
     let tick = sim.advance_tick(

@@ -279,6 +279,25 @@ fn declared_cameo_comes_from_the_rules_image_section_before_the_type_section() {
     assert_eq!(reg.resolve_declared_cameo_id("UNKNOWN", "FOO"), "FOO");
 }
 
+#[cfg(feature = "ares")]
+#[test]
+fn pcx_cameos_read_only_the_rules_image_art_section() {
+    let ini = IniFile::from_str(
+        "[TYPE]\nCameoPCX=wrong-type.pcx\n\
+         [IMAGE]\nImage=BODY\nCameoPCX=Normal.PCX\nAltCameoPCX=Elite.PCX\n\
+         [BODY]\nCameoPCX=wrong-body.pcx\n",
+    );
+    let registry = ArtRegistry::from_ini(&ini);
+    assert_eq!(
+        registry.resolve_declared_pcx_cameos("TYPE", "IMAGE"),
+        [Some("normal.pcx"), Some("elite.pcx")]
+    );
+    assert_eq!(
+        registry.resolve_declared_pcx_cameos("TYPE", "MISSING"),
+        [None, None]
+    );
+}
+
 #[test]
 #[ignore = "slow; run when changing what it covers"]
 fn retail_sidebar_cameos_follow_the_rules_image_section() {
@@ -476,6 +495,70 @@ fn damaged_active_anim_variant_uses_own_frame_metadata() {
     assert_eq!(damaged.start_frame, 21);
     assert_eq!(damaged.loop_start, 21);
     assert_eq!(damaged.loop_end, 39);
+}
+
+/// A building slot's normal, damaged and garrisoned names.
+fn slot_names(entry: &ArtEntry, slot: u8) -> (&str, Option<&str>, Option<&str>) {
+    let config = entry
+        .building_anims
+        .iter()
+        .find(|config| config.native_slot == slot)
+        .unwrap();
+    (
+        &config.anim_type,
+        config
+            .damaged_variant
+            .as_ref()
+            .map(|v| v.anim_type.as_str()),
+        config
+            .garrisoned_variant
+            .as_ref()
+            .map(|v| v.anim_type.as_str()),
+    )
+}
+
+/// ReadINI copies a slot's normal name into its empty damaged and garrisoned
+/// fields (`parse_building_anims` cites each copy); an authored variant stays,
+/// and the PowerUp loop makes no copy.
+#[test]
+fn absent_variant_names_take_the_normal_name_except_power_ups() {
+    let ini = IniFile::from_str(
+        "[B]\n\
+         IdleAnim=IDLE\n\
+         ActiveAnim=ACT\n\
+         ActiveAnimDamaged=ACTD\n\
+         SpecialAnimGarrisoned=SPECG\n\
+         PowerUp1Anim=PUP\n",
+    );
+    let reg = ArtRegistry::from_ini(&ini);
+    let entry = reg.get("B").unwrap();
+    assert_eq!(slot_names(entry, 18), ("IDLE", Some("IDLE"), Some("IDLE")));
+    assert_eq!(slot_names(entry, 3), ("ACT", Some("ACTD"), Some("ACT")));
+    assert_eq!(slot_names(entry, 10), ("", None, Some("SPECG")));
+    assert_eq!(slot_names(entry, 0), ("PUP", None, None));
+}
+
+/// Retail refineries through the production ART reader: the Slave Miner
+/// refinery's IdleAnim, GAREFN's ore lights and both unload anims declare no
+/// variant and keep their normal names; NAREFN's authored damaged lights stay.
+#[test]
+fn retail_refinery_anims_without_variants_keep_their_normal_names() {
+    let Some(art_ini) = crate::rules::retail_ini_fixture::retail_ini("artmd.ini") else {
+        return;
+    };
+    let reg = crate::rules::retail_ini_fixture::art_registry(&art_ini);
+    let names = |section: &str, slot| slot_names(reg.get(section).unwrap(), slot);
+    let unchanged = |name| (name, Some(name), Some(name));
+    assert_eq!(names("YAREFN", 18), unchanged("YAREFN_A"));
+    for (slot, light) in (3..=6).zip(["GAREFNL1", "GAREFNL2", "GAREFNL3", "GAREFNL4"]) {
+        assert_eq!(names("GAREFN", slot), unchanged(light));
+    }
+    assert_eq!(names("GAREFN", 10), unchanged("GAREFNOR"));
+    assert_eq!(names("NAREFN", 10), unchanged("NAREFNOR"));
+    assert_eq!(
+        names("NAREFN", 3),
+        ("NAREFNL1", Some("NAREFNL1D"), Some("NAREFNL1"))
+    );
 }
 
 #[test]
@@ -1094,23 +1177,21 @@ fn techno_palette_reads_the_named_section() {
     assert_eq!(reg.techno_palette("MISSING"), None);
 }
 
-/// `RuleSet::project_art_data` reads `Palette=` under the rules `Image=`
-/// (ImageFile `+0x1F8`), not the type ID, and keeps the one extra building
-/// palette name.
+/// A reached TechnoType reader binds the ART Palette under Rules Image,
+/// not under the type's own ID. ART installation only projects other visuals.
 #[test]
 fn custom_palette_projects_through_the_rules_image() {
-    let mut rules = crate::rules::ruleset::RuleSet::from_ini(&IniFile::from_str(
+    let ini = IniFile::from_str(
         "[BuildingTypes]\n0=STATUE\n1=COPY\n2=PLAIN\n\
          [STATUE]\nStrength=10\n[COPY]\nStrength=10\nImage=STATUE\n\
          [PLAIN]\nStrength=10\nImage=OWN\n",
-    ))
-    .expect("rules");
-    rules.install_art_fixture(ArtRegistry::from_ini(&IniFile::from_str(
-        "[STATUE]\nPalette=lib\n[PLAIN]\nPalette=other\n[OWN]\n",
-    )));
-    let custom = |id: &str| rules.object(id).unwrap().custom_palette;
-    assert!(custom("STATUE"));
-    assert!(custom("COPY"), "the rules Image= names the section");
-    assert!(!custom("PLAIN"), "the type ID's section is not read");
-    assert_eq!(rules.extra_building_palette(), Some("lib"));
+    );
+    let art = IniFile::from_str("[STATUE]\nPalette=lib\n[PLAIN]\nPalette=other\n[OWN]\n");
+    let mut rules = crate::rules::ruleset::RuleSet::from_ini_with_fixed_art_for_test(&ini, &art)
+        .expect("rules");
+    rules.install_art_data(ArtRegistry::from_ini(&art));
+    let custom = |id: &str| rules.object(id).unwrap().custom_palette_name();
+    assert_eq!(custom("STATUE"), Some("lib"));
+    assert_eq!(custom("COPY"), Some("lib"), "Rules Image names the section");
+    assert_eq!(custom("PLAIN"), None, "the type ID's section is not read");
 }

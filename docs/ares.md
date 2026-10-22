@@ -13,9 +13,32 @@ cargo run --release --bin vera20k --features ares
 Ares builds identify themselves in the window title and startup log. Saves retain the build
 capability and cannot load in the other mode, even with identical retail INIs.
 
+For ordinary selected-map offline loading, Ares Country loading fields are read
+from the retained Country identity. `File.LoadScreenPAL` and the loading text
+color bind before Full_Init; the background filename and `LoadScreenText` labels
+bind after its second primary Country read and before Type reset. The loading
+attempt retains that resolved palette until it retires, instead of reopening a
+later Country palette. CnCNet's offline route admits Countries through the same
+reader without replaying cached shell settings or consuming a PortPool RNG draw.
+Campaign, observer and generated-map presentation retain their existing paths;
+this support does not certify custom participant insignia or whole-frame parity.
+
+For offline CnCNet campaign launches, both builds pass the client's explicit `Scenario`
+independently of campaign record 0, as the upstream spawner's
+`StartScenario(ScenarioName, 1, 0)` call does. The retained first record supplies its real CD,
+final movie and continuation identity even when its authored Scenario differs. `CampaignID`
+and `Side` do not select a retail array entry; an empty catalog fails before reading the seed.
+Ares builds additionally accept byte-wide campaign `Side` metadata, while default builds
+retain their existing Side 0/1 admission. This does not change named campaigns in VERA's menu.
+The [native prefix controls](../tools/input_oracle/campaign_start_prefix.md) demonstrate
+filename/index/CD independence; they do not certify the installed legacy mod spawner,
+complete mission loading or all downstream campaign extensions.
+
 Supported extensions:
 
+- [Ordinary ground and tower EMP](ares-emp.md) (bounded human Drive/Walk, unteamed AI Drive and independent powered defensive buildings)
 - [Custom armor](ares-custom-armor.md)
+- [Per-type SHP building palettes](ares-building-palettes.md)
 - [EVA voice tags and Side selection](ares-eva.md)
 - [Generic production prerequisites](ares-prerequisites.md)
 - [GenericWarhead](ares-generic-warhead.md)
@@ -25,3 +48,4 @@ Supported extensions:
 - [UnitDelivery](ares-unit-delivery.md)
 - [INI Include and inheritance](ini-directives.md). The read-only `asset ini-expand` probe works
   in every build.
+- [Extended authored House ally lists](../tools/input_oracle/ares_allies_reader.md).

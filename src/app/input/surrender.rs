@@ -89,7 +89,8 @@ pub(crate) fn mouse(state: &mut AppState, button: MouseButton, pressed: bool) {
             .surrender_buttons
             .press(over);
         if over.is_some() {
-            App::play_skirmish_shell_generic_click_sound(state);
+            // Owner-draw button-down: GUIMainButtonSound (0x0061376B).
+            App::play_main_menu_button_sound(state);
         }
     } else if let Some(button) = state
         .match_state

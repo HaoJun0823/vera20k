@@ -74,6 +74,11 @@ pub struct ArtEntry {
     pub cameo: Option<String>,
     /// Alternate sidebar cameo/image override from `AltCameo=`.
     pub alt_cameo: Option<String>,
+    /// Ares 3.0 TechnoType art read1003E81F..1003E856, from ImageFile.
+    #[cfg(feature = "ares")]
+    pub(crate) cameo_pcx: Option<String>,
+    #[cfg(feature = "ares")]
+    pub(crate) alt_cameo_pcx: Option<String>,
     /// Replace 2nd char of filename with theater-specific letter.
     pub new_theater: bool,
     /// Use theater file extension (e.g., `.tem`) instead of `.shp`.
@@ -592,9 +597,13 @@ pub struct BuildingAnimConfig {
     /// BuildingType native slot at F4C + 44 * slot (ReadINI4617C4..464727).
     pub native_slot: u8,
     pub anim_type: String,
-    /// Replacement animation for this slot when the building is damaged.
+    /// Animation for this slot when the building is damaged: `<Key>Damaged`,
+    /// or the normal name when that is empty (`parse_building_anims`). `None`
+    /// when both are empty, and for a PowerUp slot without its own damaged name.
     pub damaged_variant: Option<BuildingAnimVariantConfig>,
-    /// Replacement animation for this slot when a garrisoned building is healthy.
+    /// Animation for this slot when a garrisoned building is healthy:
+    /// `<Key>Garrisoned`, or the normal name when that is empty. Always `None`
+    /// for PowerUp slots.
     pub garrisoned_variant: Option<BuildingAnimVariantConfig>,
     pub kind: BuildingAnimKind,
     /// True for the base key (e.g., `ActiveAnim`), false for suffixed variants
@@ -1091,6 +1100,10 @@ impl ArtRegistry {
             let image: Option<String> = section.read_name("Image", 0x40).map(str::to_owned);
             let cameo: Option<String> = section.read_name("Cameo", 0x100).map(str::to_owned);
             let alt_cameo: Option<String> = section.read_name("AltCameo", 0x100).map(str::to_owned);
+            #[cfg(feature = "ares")]
+            let cameo_pcx = section.read_ares_pcx_filename("CameoPCX");
+            #[cfg(feature = "ares")]
+            let alt_cameo_pcx = section.read_ares_pcx_filename("AltCameoPCX");
             let new_theater: bool = section.read_bool("NewTheater", false);
             let theater: bool = section.read_bool("Theater", false);
             let scorch: bool = section.read_bool("Scorch", false);
@@ -1291,6 +1304,10 @@ impl ArtRegistry {
                     image,
                     cameo,
                     alt_cameo,
+                    #[cfg(feature = "ares")]
+                    cameo_pcx,
+                    #[cfg(feature = "ares")]
+                    alt_cameo_pcx,
                     new_theater,
                     theater,
                     scorch,
@@ -1843,6 +1860,23 @@ impl ArtRegistry {
             .and_then(|entry| normalize_id(entry.alt_cameo.as_deref().unwrap_or_default()))
     }
 
+    /// Normal and promoted Ares PCX filenames, including their extensions.
+    /// Ares3.0 reads the rules ImageFile section1003E81F..1003E856, without
+    /// following the art section's own Image redirect or retrying the type ID.
+    #[cfg(feature = "ares")]
+    pub fn resolve_declared_pcx_cameos(
+        &self,
+        type_id: &str,
+        rules_image: &str,
+    ) -> [Option<&str>; 2] {
+        let resolved = self.resolve_object_art(type_id, rules_image);
+        let entry = self.get(&resolved.base_art_id);
+        [
+            entry.and_then(|entry| entry.cameo_pcx.as_deref()),
+            entry.and_then(|entry| entry.alt_cameo_pcx.as_deref()),
+        ]
+    }
+
     /// Resolve the declared palette id for an asset, if any.
     pub fn resolve_declared_palette_id(&self, type_id: &str, rules_image: &str) -> Option<String> {
         let resolved: ResolvedObjectArt<'_> = self.resolve_object_art(type_id, rules_image);
@@ -2231,6 +2265,38 @@ const BUILDING_ANIM_KEYS: &[(&str, &[&str], u8)] = &[
     ("SuperLowPower", &[""], 20),
 ];
 
+/// `BuildingTypeClass::ReadINI @ 0x0045FE50` stores each slot's normal,
+/// `<Key>Damaged` and `<Key>Garrisoned` names in `char[16]` fields at
+/// `Type+0xF4C + 0x44*slot` (`+0x00`, `+0x10`, `+0x20`), copying a ReadString
+/// result only when it is non-empty. After the damaged read, and again after the
+/// garrisoned read, a field that is still empty takes a copy of the normal name
+/// (`strlen(field) == 0` → `strcpy(field, normal)`), so every consumer of the
+/// damaged or garrisoned name sees the normal animation when the art declares no
+/// variant. The copies, damaged then garrisoned, per slot:
+///
+/// - 3–6 `ActiveAnim`, `…Two`, `…Three`, `…Four`: `0x0046186E`/`0x00461908`,
+///   `0x00461B1C`/`0x00461BB6`, `0x00461DCA`/`0x00461E64`, `0x00462078`/`0x00462112`
+/// - 7 `PreProductionAnim`: `0x004642D6`/`0x00464370`
+/// - 8 `ProductionAnim`: `0x00463DF2`/`0x00463E8C`
+/// - 9 `TurretAnim`: `0x004644FD`/`0x00464594`
+/// - 10–13 `SpecialAnim`, `…Two`, `…Three`, `…Four`: `0x00462DDE`/`0x00462E78`,
+///   `0x0046308C`/`0x00463126`, `0x0046333A`/`0x004633D4`, `0x004635E8`/`0x00463682`
+/// - 14–17 `SuperAnim`, `…Two`, `…Three`, `…Four`: `0x00462326`/`0x004623C0`,
+///   `0x004625D4`/`0x0046266E`, `0x00462882`/`0x0046291C`, `0x00462B30`/`0x00462BCA`
+/// - 18 `IdleAnim`: `0x00464028`/`0x004640C2`
+/// - 19 `LowPower`: `0x00463896`/`0x00463930`
+/// - 20 `SuperLowPower`: `0x00463B44`/`0x00463BDE`
+///
+/// The PowerUp1..3 loop (`0x00464758..0x00464928`) has no such copy.
+///
+/// RESIDUAL: slot 9's names are read from the rules INI natively
+/// (`0x00464450..0x004645C9`: `TurretAnim`/`TurretAnimDamaged` from the type's
+/// section, `TurretAnimGarrisoned` from its image's), not from ART, and VERA
+/// ports none of Grand_Opening's slot-9 block (`0x00446580..0x004466D5`: for a
+/// `HasTurret @ 0x004527D0` building without `TurretAnimIsVoxel`, a `TurretAnim`
+/// or image-derived name, then a frame from the turret's facing). Dormant in
+/// retail: the eight `Turret=yes` types in RULESMD and the MP mode INIs all set
+/// `TurretAnimIsVoxel=true`, and ART declares no `TurretAnim`.
 fn parse_building_anims(section: &IniSection, ini: &IniFile) -> Vec<BuildingAnimConfig> {
     let mut anims: Vec<BuildingAnimConfig> = Vec::new();
 
@@ -2255,13 +2321,16 @@ fn parse_building_anims(section: &IniSection, ini: &IniFile) -> Vec<BuildingAnim
         };
         for (ordinal, &suffix) in suffixes.iter().enumerate() {
             let key: String = format!("{}{}", base, suffix);
-            let damaged_key = format!("{key}Damaged");
             // Each anim name reads into `char[16]` (`0x004617CF` and its 56
-            // siblings).
+            // siblings); an empty variant takes the normal name.
             let anim_type = section.read_string(&key, "", 0x10);
-            let damaged = section.read_name(&damaged_key, 0x10);
-            let garrisoned = section.read_name(&format!("{key}Garrisoned"), 0x10);
-            if anim_type.is_empty() && damaged.is_none() && garrisoned.is_none() {
+            let damaged = section
+                .read_name(&format!("{key}Damaged"), 0x10)
+                .unwrap_or(anim_type.as_str());
+            let garrisoned = section
+                .read_name(&format!("{key}Garrisoned"), 0x10)
+                .unwrap_or(anim_type.as_str());
+            if anim_type.is_empty() && damaged.is_empty() && garrisoned.is_empty() {
                 continue;
             }
 
@@ -2275,13 +2344,15 @@ fn parse_building_anims(section: &IniSection, ini: &IniFile) -> Vec<BuildingAnim
             let z_adjust: i32 = section.read_int(&z_key, 0);
 
             let base_variant = parse_building_anim_variant(anim_type.clone(), ini);
+            let variant = |name: &str| {
+                (!name.is_empty()).then(|| parse_building_anim_variant(name.to_owned(), ini))
+            };
 
             anims.push(BuildingAnimConfig {
                 native_slot: first_slot + ordinal as u8,
                 anim_type: base_variant.anim_type,
-                damaged_variant: damaged.map(|v| parse_building_anim_variant(v.to_string(), ini)),
-                garrisoned_variant: garrisoned
-                    .map(|v| parse_building_anim_variant(v.to_string(), ini)),
+                damaged_variant: variant(damaged),
+                garrisoned_variant: variant(garrisoned),
                 kind,
                 is_primary: suffix.is_empty(),
                 x,

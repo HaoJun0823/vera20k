@@ -322,16 +322,27 @@ fn admit_attacker_fire<'r>(
     match snap.category {
         // The table at `0x00737148`.
         EntityCategory::Unit => match code {
-            // Case 2 (`0x00736F78..0x0073701C`): a turretless vehicle
+            // Case 2 (`0x00736F78..0x0073701C`): a turret first sets its aim
+            // directly, before Facing_Update and without its +6AF gate.
+            // Homing projectiles can reach FACING while that latch is set.
+            // A turretless vehicle
             // (`UnitType+0xE11`, which ReadINI sets to !`Turret=` at
             // `0x00747759`) with no NavCom (`+0x5A4`, `0x00736FB6`) whose
             // locomotor's Is_Moving (ILocomotion+0x10, `0x00736FE1`) is false
             // turns its hull toward the target at its own `ROT=` (`0x00737004`)
             // and copies the hull's destination into the turret slot
-            // (`0x0073701C`). A pending order is neither. A turret follows its
-            // target through the turret sweep.
+            // (`0x0073701C`). A pending order is neither.
             fire_error::FireError::Facing => {
-                if snap.barrel_facing.is_none()
+                if let Some(barrel) = world
+                    .substrate
+                    .entities
+                    .get_mut(snap.stable_id)
+                    .and_then(|firer| firer.barrel_facing.as_mut())
+                {
+                    // Set_Desired(+3A0)736FAC retains ROT and +6AF. Apply it
+                    // now so the later Facing_Update samples this new arc.
+                    barrel.set(direction, binary_frame);
+                } else if snap.barrel_facing.is_none()
                     && world
                         .substrate
                         .entities
@@ -461,9 +472,16 @@ fn admit_attacker_fire<'r>(
         //5208FE may refuse unchanged/noninterruptible/absent actions.520912
         // raises+68D regardless of AL; the retained Doing/Stage still decides
         // when this attempt can discharge.
-        // Infantry520866..520884: an Airstrike owner firing secondary
-        // restarts only +F8, even when its existing action is noninterruptible.
-        if actor.airstrike_link().is_some() && matches!(requested, 40 | 41) {
+        // gamemd Infantry::Fire_At_Target52083E..520884 checks retained
+        // Doing40/41 before selecting a new ground firing action. FireFly
+        // precedes this ladder. The direct restart changes only Stage+F8.
+        if !fire_fly
+            && actor.airstrike_link().is_some()
+            && actor
+                .mission_leaf
+                .as_infantry()
+                .is_some_and(|leaf| matches!(leaf.doing(), 40 | 41))
+        {
             world
                 .substrate
                 .entities
@@ -1323,7 +1341,7 @@ pub(super) fn emit_admitted_fire(
     // an AreaFire shot off its own cell (`0x0051CB08`); a Unit fires it from
     // range, so a Chaos Drone's gas rises around the drone, not the victim. A
     // fixture without terrain has no cell and keeps the victim.
-    let area_fire_cell = (weapon.area_fire && !obj.spray_attack)
+    let area_fire_cell = (weapon.area_fire && combat_weapon::is_not_spray_attack(obj))
         .then(|| object_get_coords(world, snap.stable_id))
         .flatten()
         .and_then(|coord| world.packed_map_cell(coord.x, coord.y));
@@ -2695,7 +2713,7 @@ pub(crate) fn tick_combat(
                 det,
                 binary_frame,
                 &world.session.theater(),
-                &rules.radiation,
+                rules,
                 world.resolved_terrain.as_ref(),
                 &mut crate::sim::light_sources::LightingSources::default(),
             );
@@ -2720,11 +2738,10 @@ pub(crate) fn tick_combat(
     // DamageConsequences UnInits only grounded aircraft and fixture victims.
     if sound_enabled {
         let sink = &mut world.sound_events;
-        for (die_id, rx, ry) in effects.death_sounds.drain(..) {
+        for (die_id, world) in effects.death_sounds.drain(..) {
             sink.emit(SimSoundEvent::EntityDied {
                 die_sound_id: die_id,
-                rx,
-                ry,
+                world,
             });
         }
     }
@@ -2809,6 +2826,96 @@ mod reveal_on_fire_tests {
             !revealed(&sim, "Soviet", 10, 10),
             "the firer's map is untouched"
         );
+    }
+
+    /// The actual FireAt disclosure continuation after ordinary scout sight
+    /// and a powered retail GAGAP event. Shot admission/damage are separate.
+    #[test]
+    fn fire_disclosure_under_a_gap_remaps_previously_explored_ground() {
+        let Some(retail) =
+            crate::rules::retail_ini_fixture::retail_battle_rules_for_map("Hills.mmx")
+        else {
+            return;
+        };
+        let rules = retail.rules;
+        let mut sim = Simulation::with_seed(0x143);
+        crate::sim::arena_fixture::flat_ground(&mut sim, &rules);
+        sim.fog.set_width_for_test(32);
+        sim.fog.set_height_for_test(32);
+        sim.session
+            .set_game_mode(crate::sim::scenario_session::ScenarioGameMode::Skirmish);
+        for (index, name, human) in [(0, "Americans", true), (1, "French", false)] {
+            let owner = sim.interner.intern(name);
+            sim.houses.register(HouseState::new(
+                owner,
+                index,
+                Some(owner),
+                human,
+                10_000,
+                10,
+            ));
+        }
+        let viewer = sim.interner.get("Americans").unwrap();
+        sim.session.set_current_house_for_test(Some(viewer));
+        let firer = sim
+            .spawn_object("GTGCAN", "French", 20, 10, 0, &rules)
+            .unwrap();
+        let target = sim
+            .spawn_object("E1", "Americans", 10, 13, 0, &rules)
+            .unwrap();
+        assert!(sim.map_cell_in_bounds((10, 13)));
+        sim.spawn_object("GAPOWR", "French", 24, 16, 0, &rules)
+            .unwrap();
+        let scout = sim
+            .spawn_object("AMCV", "Americans", 18, 10, 0, &rules)
+            .unwrap();
+        let context = crate::sim::world::UninitContext::with_rules(&rules);
+        sim.update_object_sight_with_context(scout, 0, None, context);
+        let coord = crate::sim::movement::ground_pose::object_get_coords(
+            sim.entities().get(firer).unwrap(),
+            sim.resolved_terrain.as_ref(),
+        );
+        let cell = ((coord.x / 256) as u16, (coord.y / 256) as u16);
+        let index = usize::from(cell.1) * 32 + usize::from(cell.0);
+        assert!(sim.fog.is_cell_revealed(viewer, cell.0, cell.1));
+        sim.uninit_with_rules(scout, &rules);
+        let gap = sim
+            .spawn_object("GAGAP", "French", 20, 14, 0, &rules)
+            .unwrap();
+        crate::sim::power_system::tick_power_states(
+            &mut sim.power_states,
+            &mut sim.substrate.entities,
+            &rules,
+            &sim.interner,
+            sim.session.binary_frame(),
+        );
+        sim.visit_building_operational(gap, &rules, None, FrameEffects::default());
+        assert!(!sim.fog.is_cell_revealed(viewer, cell.0, cell.1));
+        assert_eq!(
+            sim.fog.by_owner()[&viewer].ground_flags_raw()[index] & 0x18,
+            0
+        );
+        assert!(!sim.fog.by_owner()[&viewer].shroud_knowledge_raw()[index].pending());
+        let rng = sim.rng_state();
+
+        let enabled = rules.weapon("GrandCannonWeapon").unwrap().reveal_on_fire;
+        assert!(enabled);
+        reveal_on_fire(
+            &mut sim,
+            &rules,
+            firer,
+            TargetKind::Entity(target),
+            enabled,
+            FireDisclosurePath::Shot,
+        );
+
+        assert!(sim.fog.is_cell_revealed(viewer, cell.0, cell.1));
+        assert_eq!(
+            sim.fog.by_owner()[&viewer].ground_flags_raw()[index] & 0x18,
+            0x18
+        );
+        assert!(sim.fog.by_owner()[&viewer].shroud_knowledge_raw()[index].pending());
+        assert_eq!(sim.rng_state(), rng);
     }
 
     #[test]

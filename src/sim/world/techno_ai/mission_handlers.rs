@@ -153,6 +153,11 @@ pub(crate) fn dispatch_foot_mission(
         );
     let mut infantry_guard_handled = false;
     let evaluation = match (input.category, input.mission) {
+        // Unit vtable+24C -> Mission_Repair740EF0; infantry keeps the base
+        // stub. Map placements can assign Repair through Unit ReadINI743270.
+        (EntityCategory::Unit, Some(MissionType::Repair)) => {
+            MissionHandlerEvaluation::cadence(sim.unit_mission_repair(id, rules, ctx.effects))
+        }
         // Unit vtable7F5C70+224 -> MissionHarvest73E5E0. No other mission
         // can reach this body or interpret its committed handler cursor.
         (EntityCategory::Unit, Some(MissionType::Harvest)) => {
@@ -2196,7 +2201,15 @@ pub(super) fn evaluate_foot_area_guard(
     //4D6F38..4D701F re-reads TarCom after idle and queues before the cadence
     //draw. An acquired enemy already returned above.
     sim.acquire_adjacent_tesla_coil(id, rules, ctx.overlay_registry, ctx.effects);
-    let base = mission_cadence(rules, MissionType::AreaGuard);
+    // FootClass::Mission_AreaGuard4D7025 calls MissionControl5B3A00 on
+    // the live current mission: Aircraft Idle may already have entered Enter.
+    let current = sim
+        .substrate
+        .entities
+        .get(id)
+        .and_then(|entity| entity.mission.current().known())
+        .unwrap_or(MissionType::AreaGuard);
+    let base = mission_cadence(rules, current);
     // `0x004D7040..0x004D7048`: an aircraft (What_Am_I 2) doubles the Rate
     // before the draw.
     let base = if sim
@@ -2417,10 +2430,10 @@ fn guard_queues_sabotage(sim: &Simulation, id: u64, rules: &RuleSet) -> bool {
 /// key, so `AircraftClass`'s Guard path through `0x004D5070` leaves it
 /// dormant.
 ///
-/// RESIDUAL: when the search finds no cell, native assigns `Map[(0, 0)]`,
-/// the shared Dummy cell when (0, 0) is outside the map; VERA assigns
-/// nothing. Trigger: no passable cell in reach. Effect: the native object
-/// takes that cell as its destination. Rare (a boxed-in carrier).
+/// A failed NearbyLocation still returns packed Empty(0,0). Both callers
+/// freshly look up that cell before passing the nonnull receiver to the
+/// concrete destination setter (4D4DFF/4D5217). The Jumpjet then owns its
+/// own placement search, NavCom rewrite and moving byte.
 fn hover_attack_reanchor(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -2441,9 +2454,12 @@ fn hover_attack_reanchor(
     {
         return;
     }
-    let Some((rx, ry)) = sim.techno_nearby_location(id, Some(id), rules) else {
-        return;
-    };
+    let (rx, ry) = sim
+        .techno_nearby_location(id, Some(id), rules)
+        .unwrap_or((0, 0));
+    if let Some(terrain) = sim.resolved_terrain.as_ref() {
+        terrain.native_cell_identity((rx, ry));
+    }
     if let Err(error) = sim.assign_destination_represented(
         id,
         Some(crate::sim::components::NavTargetRef::cell(

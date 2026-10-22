@@ -31,7 +31,7 @@ use crate::render::shell_text::{ShellAlign, ShellTextDraw};
 use crate::render::shell_text_reveal::PathAReveal;
 use crate::render::skirmish_shell_chrome::SkirmishShellChromeEntry;
 use crate::ui::shell::geom::{RectPx, RightPanelRects, ShellScale};
-use crate::ui::shell::slide::{ColumnDraw, PanelArt, column_draw_origin, panel_art_origin};
+use crate::ui::shell::slide::{ColumnDraw, PanelArt, panel_art_origin};
 
 /// Parent background sits behind the movie in the Z stack. Greater depth =
 /// farther back, so this must exceed `MOVIE_DEPTH`. 0xE2-only (the main-menu
@@ -359,13 +359,7 @@ pub fn paint_chrome(
     }
     if let Some(tile) = atlas.right_panel_tile_sdbtnbkgd {
         for row in 0..panel.tile_count {
-            let rect = RectPx::new(
-                panel.tile.x,
-                panel.tile.y + row * panel.tile.h,
-                panel.tile.w,
-                panel.tile.h,
-            );
-            push_entry_rect(&mut out, tile, rect, CHROME_DEPTH);
+            push_entry_rect(&mut out, tile, panel.tile_row(row), CHROME_DEPTH);
         }
     }
     if let Some(bottom) = atlas.right_panel_bottom_sdbtm {
@@ -433,20 +427,17 @@ pub(crate) fn paint_slide_column(
     draws: &[ColumnDraw],
 ) -> Vec<SpriteInstance> {
     let mut out = Vec::new();
-    let (scale_x, scale_y) = panel.stretch();
     for (index, draw) in draws.iter().enumerate() {
         let Some(entry) = atlas.button_wave_frames.get(draw.frame).copied().flatten() else {
             continue;
         };
-        // The cell the frame occupies: its native 156x42 canvas, stretched by
-        // the same factor as the column it slides in.
-        let w = (entry.pixel_size[0] * scale_x).round() as i32;
-        let h = (entry.pixel_size[1] * scale_y).round().max(1.0) as i32;
-        let (x, y) = column_draw_origin(panel, draw.row, w);
+        // The cell the frame occupies: its native 156x42 canvas, scaled like
+        // the button authored on that row.
+        let [w, h] = entry.pixel_size.map(|side| side.round() as i32);
         push_entry_rect(
             &mut out,
             entry,
-            RectPx::new(x, y, w, h),
+            panel.row_cell(draw.row as i32, w, h),
             BUTTON_DEPTH - index as f32 * 1e-7,
         );
     }

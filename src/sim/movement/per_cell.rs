@@ -317,6 +317,10 @@ impl Simulation {
                 return;
             };
             let coord = position_world_coord(&crusher.position);
+            // `0x007418AA..0x007418DC`: the CrushSound plays at the
+            // crusher's Location `[EDI+0x9C..0xA4]`.
+            let crusher_location =
+                super::ground_pose::object_location(crusher, self.resolved_terrain.as_ref());
             let capability = super::bump_crush::CrushCapability::new(
                 crusher.mover_facts.regular_crusher(),
                 crusher.mover_facts.omni_crusher(),
@@ -337,7 +341,7 @@ impl Simulation {
             if let Some(entity) = self.substrate.entities.get(victim) {
                 super::bump_crush::emit_crush_kill_sounds_at(
                     entity,
-                    (i32::from(at.0), i32::from(at.1)),
+                    crusher_location,
                     rules,
                     &mut self.interner,
                     &mut self.sound_events,
@@ -1347,11 +1351,10 @@ impl Simulation {
     /// Cell-attached 1/59 run in their original `0x004D8978..0x004D8A14`
     /// slot, followed by Map line 25/26 at `0x004D8A70..0x004D8B66`.
     /// Ordinary Fly ingress remains unproven.
-    /// Agent Infantry54 follows1/59 at4D8A14..4D8A6B;53 is explicitly
-    /// deferred. RESIDUAL: Map zone24 (`0x004D8B66..0x004D8D99`) and the
-    /// planning-waypoint upkeep (`0x004D8DFF..0x004D8F1D`) are not ported.
-    /// Trigger: every arrival. Effect: zone triggers and planning waypoints
-    /// do not fire from movement. Risk: maps with those trigger families.
+    /// Agent Infantry53 then54 follow1/59 at4D8A14..4D8A6B. Map zone24
+    /// follows line25/26 at4D8B66..4D8CA5 through the
+    /// same Tag funnel. RESIDUAL: planning-waypoint upkeep
+    /// (`0x004D8DFF..0x004D8F1D`) still needs its own movement-owner audit.
     ///
     /// The off-playfield exit at 0x004D8D67..0x004D8DA4 asks the class IsLeavingMap
     /// after Map578460(cell,1), then UnInit and returns before the tail.

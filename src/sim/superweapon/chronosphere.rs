@@ -150,11 +150,13 @@ pub(super) fn launch_source(
     let mut coords = deck_coords(sim, cell);
     coords[2] = coords[2].wrapping_add(CHRONO_ANIM_Z_LIFT);
     create_chrono_anim(sim, rules, owner, sw_type, coords);
+    // This case plays no positional cue: the target cell's centre, with no
+    // Map lookup (a lookup off the map would stamp the shared Dummy).
+    let world = crate::sim::components::DriveCoord::cell(cell.0, cell.1, 0).into();
     sim.sound_events.emit(SimSoundEvent::SuperWeaponLaunched {
         owner,
         sw_type,
-        rx: cell.0,
-        ry: cell.1,
+        world,
     });
 }
 
@@ -230,11 +232,13 @@ pub(super) fn launch_warp(
             next = live_successor(sim, id, (rx, ry), layer);
         }
     }
+    // This case plays no positional cue: the target cell's centre, with no
+    // Map lookup (a lookup off the map would stamp the shared Dummy).
+    let world = crate::sim::components::DriveCoord::cell(target.0, target.1, 0).into();
     sim.sound_events.emit(SimSoundEvent::SuperWeaponLaunched {
         owner,
         sw_type,
-        rx: target.0,
-        ry: target.1,
+        world,
     });
 }
 

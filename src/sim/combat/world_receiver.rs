@@ -18,6 +18,14 @@ mod area_rocker;
 /// enter its concrete ReceiveDamage. Unit/Infantry/Aircraft call Foot at
 /// `0x0073647B` / `0x0051BC9F` / `0x00414DA3`; buildings never reach it.
 /// Numeric/receiver controls: `tools/spatial_oracle/radiation_damage_boundary`.
+///
+/// With the Phobos capability the cell's per-site levels group by bound
+/// radiation type, as native groups `CellExt::RadLevels` by `RadTypeClass*`:
+/// each type's sites sort by level descending, the summed level caps at the
+/// type's `RadLevelMax`, and each site commits `min(level, remain) ×
+/// RadLevelFactor` through the type's own `RadSiteWarhead`. A commit that
+/// kills the target ends the whole loop, as native's `ApplyRadiationDamage`
+/// returning false does.
 pub(crate) fn apply_foot_radiation(
     world: &mut Simulation,
     rules: &RuleSet,
@@ -25,12 +33,24 @@ pub(crate) fn apply_foot_radiation(
     overlay_registry: Option<&OverlayTypeRegistry>,
     effects: FrameEffects<'_>,
 ) -> Option<crate::sim::world::damage_consequences::DamageCommitReceipt> {
-    if !radiation_enabled(world)
-        || !world
+    if !radiation_enabled(world) {
+        return None;
+    }
+    // Phobos `UseGlobalRadApplicationDelay`: when false, each bound type's
+    // own `RadApplicationDelay` gates its sites below, so the shared gate is
+    // skipped entirely (native's `!UseGlobalRadApplicationDelay` arm).
+    #[cfg(feature = "phobos")]
+    let delay_admitted = !rules.radiation.use_global_rad_application_delay
+        || world
             .session
             .binary_frame()
-            .is_multiple_of(rules.radiation.application_delay as u32)
-    {
+            .is_multiple_of(rules.radiation.application_delay as u32);
+    #[cfg(not(feature = "phobos"))]
+    let delay_admitted = world
+        .session
+        .binary_frame()
+        .is_multiple_of(rules.radiation.application_delay as u32);
+    if !delay_admitted {
         return None;
     }
     let entity = world.substrate.entities.get(stable_id)?;
@@ -56,42 +76,265 @@ pub(crate) fn apply_foot_radiation(
         coord.x / 256,
         coord.y / 256,
     );
-    let level = match cell {
-        crate::sim::cell_rect::CellRef::Real(cell) => world
-            .radiation
-            .damaging_level((cell.rx, cell.ry), rules.radiation.level_max),
-        // RadiationState has no site on the shared fallback CellClass.
-        crate::sim::cell_rect::CellRef::Dummy { .. } => 0,
-    };
-    if level <= 0 {
-        return None;
+    // Group the cell's per-site levels by bound radiation type. A type whose
+    // warhead does not resolve contributes nothing, as native's
+    // `!GetWarhead()` skip does.
+    let mut groups: Vec<(
+        Option<String>,
+        crate::rules::phobos_radiation::EffectiveRadiation<'_>,
+        Vec<((u16, u16), f64)>,
+    )> = Vec::new();
+    if let crate::sim::cell_rect::CellRef::Real(cell) = cell {
+        for (site_center, level) in world.radiation.cell_site_levels((cell.rx, cell.ry)) {
+            if !(level > 0.0) {
+                continue;
+            }
+            let Some(site) = world.radiation.site_at(site_center) else {
+                continue;
+            };
+            let effective =
+                crate::rules::phobos_radiation::effective_radiation(rules, site.rad_type());
+            if rules.warhead(effective.site_warhead).is_none() {
+                continue;
+            }
+            #[cfg(feature = "phobos")]
+            {
+                if !rules.radiation.use_global_rad_application_delay
+                    && (effective.application_delay <= 0
+                        || !world
+                            .session
+                            .binary_frame()
+                            .is_multiple_of(effective.application_delay as u32))
+                {
+                    continue;
+                }
+            }
+            let bound = site.rad_type().map(str::to_owned);
+            if let Some(group) = groups
+                .iter_mut()
+                .find(|(name, _, _)| name.as_deref() == bound.as_deref())
+            {
+                group.2.push((site_center, level));
+            } else {
+                groups.push((bound, effective, vec![(site_center, level)]));
+            }
+        }
     }
-    let warhead = rules.warhead(&rules.radiation.site_warhead)?;
-    let warhead_id = world.interner.intern(&warhead.id);
     // Foot4DA5FA..4DA60A multiplies the clamped integer by the stored double
     // factor under PC53/chop, then calls Math::ftol before its direct receiver.
-    use crate::util::native_x87::{MaskedX87Chop53 as X87, NativeF64Bits};
+    let mut last_receipt = None;
+    'groups: for (_, effective, mut sites) in groups {
+        // Native stable-sorts each type's sites by level, descending.
+        sites.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut level_sum = 0_i32;
+        for (_, level) in sites {
+            let remain = effective.level_max - level_sum;
+            let (level, damage) = rad_damage(level, remain, effective.level_factor);
+            let Some(warhead) = rules.warhead(effective.site_warhead) else {
+                continue;
+            };
+            let warhead_id = world.interner.intern(&warhead.id);
+            let receiver = EntityDamageEvent::direct_receiver(
+                stable_id,
+                damage,
+                0,
+                RAD_NO_ATTACKER,
+                None,
+                warhead_id,
+                ReceiverCallFlags {
+                    ignore_defenses: false,
+                    arg6: true,
+                },
+            );
+            // Native calls the concrete receiver directly: Apply_area_damage's
+            // marked/positive-health gates must not suppress this Foot call.
+            last_receipt = Some(world.commit_direct_damage_receiver(
+                rules,
+                overlay_registry,
+                receiver,
+                effects,
+            ));
+            if !world
+                .substrate
+                .entities
+                .get(stable_id)
+                .is_some_and(|entity| entity.lifecycle.object_alive())
+            {
+                break 'groups;
+            }
+            if level >= remain {
+                break;
+            }
+            level_sum += level;
+        }
+    }
+    last_receipt
+}
+
+/// `min(level, remain) * RadLevelFactor` with the native clamp and masked
+/// double-to-int conversions. The Foot loop (`0x004DA5FA`) and the building
+/// loop (`0x0043FB23`) scale a cell's summed level the same way.
+fn rad_damage(level: f64, remain: i32, factor: f64) -> (i32, i32) {
+    use crate::util::native_x87::{MaskedX87Chop53 as X87, MaskedX87Ordering, NativeF64Bits};
+
+    let clamped = match X87::compare(
+        X87::load_f64(NativeF64Bits::from_bits(level.to_bits())),
+        X87::load_i32(remain),
+    ) {
+        MaskedX87Ordering::Less | MaskedX87Ordering::Unordered => level,
+        MaskedX87Ordering::Equal | MaskedX87Ordering::Greater => f64::from(remain),
+    };
+    let level =
+        X87::ftol_i32_low_masked(X87::load_f64(NativeF64Bits::from_bits(clamped.to_bits())));
     let damage = X87::ftol_i32_low_masked(X87::mul(
         X87::load_i32(level),
-        X87::load_f64(NativeF64Bits::from_bits(
-            rules.radiation.level_factor.to_bits(),
-        )),
+        X87::load_f64(NativeF64Bits::from_bits(factor.to_bits())),
     ));
-    let receiver = EntityDamageEvent::direct_receiver(
-        stable_id,
-        damage,
-        0,
-        RAD_NO_ATTACKER,
-        None,
-        warhead_id,
-        ReceiverCallFlags {
-            ignore_defenses: false,
-            arg6: true,
-        },
-    );
-    // Native calls the concrete receiver directly: Apply_area_damage's
-    // marked/positive-health gates must not suppress this Foot call.
-    Some(world.commit_direct_damage_receiver(rules, overlay_registry, receiver, effects))
+    (level, damage)
+}
+
+/// Phobos `BuildingClass_AI_Radiation @ 0x0043FB23`, the branch that follows
+/// the operational edge sample at `0x0043FB20` and runs for every live
+/// building each frame: each foundation cell's sites group by bound type,
+/// each type clamps its summed level at `RadLevelMax` and applies its
+/// `RadLevelFactor` through its own `RadSiteWarhead`. Retail has no such path
+/// (Phobos labels it "Too OP"), so a build without the capability keeps
+/// buildings immune.
+///
+/// `RadBuildingDamageMaxCount` is read and retained: Phobos' hook tests a
+/// per-site counter it never increments, so the key has no observable effect
+/// there and none here.
+#[cfg(feature = "phobos")]
+pub(crate) fn apply_building_radiation(
+    world: &mut Simulation,
+    rules: &RuleSet,
+    stable_id: u64,
+    overlay_registry: Option<&OverlayTypeRegistry>,
+    effects: FrameEffects<'_>,
+) -> Option<crate::sim::world::damage_consequences::DamageCommitReceipt> {
+    if !radiation_enabled(world) {
+        return None;
+    }
+    let (origin, foundation, exempt) = {
+        let entity = world.substrate.entities.get(stable_id)?;
+        if entity.category() != EntityCategory::Structure
+            || !entity.lifecycle.object_alive()
+            || entity.lifecycle.in_limbo()
+            || entity.is_warped_out()
+            || entity.ai_frozen()
+        {
+            return None;
+        }
+        let object = world.object_type(entity.type_ref(), rules)?;
+        (
+            (entity.position.rx(), entity.position.ry()),
+            object.foundation.clone(),
+            object.immune_to_radiation,
+        )
+    };
+    if exempt {
+        return None;
+    }
+    let frame = world.session.binary_frame();
+    // The shared gate is the building-specific delay; native's `delay == 0`
+    // leaves buildings untouched even on a boundary frame.
+    if rules.radiation.use_global_rad_application_delay {
+        let delay = rules.radiation.application_delay_building;
+        if delay <= 0 || !frame.is_multiple_of(delay as u32) {
+            return None;
+        }
+    }
+    let mut last_receipt = None;
+    'cells: for cell in crate::sim::crew_survival::foundation_cells(origin.0, origin.1, &foundation)
+    {
+        let mut groups: Vec<(
+            Option<String>,
+            crate::rules::phobos_radiation::EffectiveRadiation<'_>,
+            Vec<((u16, u16), f64)>,
+        )> = Vec::new();
+        for (site_center, level) in world.radiation.cell_site_levels(cell) {
+            if !(level > 0.0) {
+                continue;
+            }
+            let Some(site) = world.radiation.site_at(site_center) else {
+                continue;
+            };
+            let effective =
+                crate::rules::phobos_radiation::effective_radiation(rules, site.rad_type());
+            if rules.warhead(effective.site_warhead).is_none() {
+                continue;
+            }
+            if !rules.radiation.use_global_rad_application_delay {
+                let delay = effective.application_delay_building;
+                if delay <= 0 || !frame.is_multiple_of(delay as u32) {
+                    continue;
+                }
+            }
+            let bound = site.rad_type().map(str::to_owned);
+            if let Some(group) = groups
+                .iter_mut()
+                .find(|(name, _, _)| name.as_deref() == bound.as_deref())
+            {
+                group.2.push((site_center, level));
+            } else {
+                groups.push((bound, effective, vec![(site_center, level)]));
+            }
+        }
+        for (_, effective, mut sites) in groups {
+            // Native stable-sorts each type's sites by level, descending.
+            sites.sort_by(|left, right| {
+                right
+                    .1
+                    .partial_cmp(&left.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut level_sum = 0_i32;
+            for (_, level) in sites {
+                let remain = effective.level_max - level_sum;
+                let (level, damage) = rad_damage(level, remain, effective.level_factor);
+                let Some(warhead) = rules.warhead(effective.site_warhead) else {
+                    continue;
+                };
+                let warhead_id = world.interner.intern(&warhead.id);
+                let receiver = EntityDamageEvent::direct_receiver(
+                    stable_id,
+                    damage,
+                    0,
+                    RAD_NO_ATTACKER,
+                    None,
+                    warhead_id,
+                    ReceiverCallFlags {
+                        ignore_defenses: false,
+                        arg6: true,
+                    },
+                );
+                last_receipt = Some(world.commit_direct_damage_receiver(
+                    rules,
+                    overlay_registry,
+                    receiver,
+                    effects,
+                ));
+                if !world
+                    .substrate
+                    .entities
+                    .get(stable_id)
+                    .is_some_and(|entity| entity.lifecycle.object_alive())
+                {
+                    break 'cells;
+                }
+                if level >= remain {
+                    break;
+                }
+                level_sum += level;
+            }
+        }
+    }
+    last_receipt
 }
 
 fn respond_to_base_attack(
@@ -224,8 +467,6 @@ pub(crate) fn apply_area_damage(
     origin: (u64, Option<InternedId>, InternedId),
     effects: FrameEffects<'_>,
 ) -> bool {
-    #[cfg(test)]
-    super::receiver_fixture::observe_area_visit(world, impact, damage, warhead, origin);
     let area = collect_area_at(
         world,
         rules,
@@ -328,6 +569,10 @@ fn collect_area_at<'r>(
     warhead: &'r WarheadType,
     origin: (u64, Option<InternedId>, InternedId),
 ) -> AreaAtImpact<'r> {
+    // Observe the shared entry, including Bullet and nested receiver calls;
+    // an external-only wrapper misses those paths and must not double-count.
+    #[cfg(test)]
+    super::receiver_fixture::observe_area_visit(world, impact, damage, warhead, origin);
     let (rx, ry, sub_x, sub_y, z_leptons) = projectile_impact_cell(impact);
     let entered = damage != 0 && !world.session.no_damage();
     let routed_wall = entered && area_routes_to_wall(world, overlay_registry, (rx, ry), warhead);
@@ -1046,6 +1291,7 @@ pub(crate) fn commit_entities(
                     target_id,
                     attacker_id,
                     rules,
+                    overlay_registry,
                     run.effects(),
                 );
             }
@@ -1392,6 +1638,7 @@ pub(crate) fn commit_entities(
                 receive_state,
                 rules,
                 overlay_registry,
+                run.effects(),
             )
         {
             under_attack_events.push(ping);
@@ -1453,7 +1700,7 @@ pub(crate) fn handle_death(
         dead_entities.len() <= 1,
         "ReceiveDamage enters one concrete fatal postlude at a time"
     );
-    let mut death_sounds: Vec<(String, u16, u16)> = Vec::new();
+    let mut death_sounds: Vec<(String, crate::sim::anim_class::AnimWorldCoord)> = Vec::new();
     let mut explosion_effects: Vec<ExplosionEffect> = Vec::new();
     let mut voxel_debris: Vec<crate::sim::voxel_anim::VoxelDebrisSpawn> = Vec::new();
     let mut under_attack_events: Vec<UnderAttackEvent> = Vec::new();
@@ -1470,19 +1717,20 @@ pub(crate) fn handle_death(
             if e.category() == EntityCategory::Structure {
                 structure_destroyed = true;
             }
-            let world_z_leptons = object_world_z_leptons(e, world.resolved_terrain.as_ref());
+            let location = crate::sim::movement::ground_pose::object_location(
+                e,
+                world.resolved_terrain.as_ref(),
+            );
             (
                 e.type_ref(),
-                e.position.rx(),
-                e.position.ry(),
-                world_z_leptons,
+                location,
                 e.owner(),
                 e.category(),
                 e.veterancy.rank(),
             )
         });
 
-        if let Some((type_id, rx, ry, world_z_leptons, owner, category, veterancy)) = dead_info {
+        if let Some((type_id, location, owner, category, veterancy)) = dead_info {
             // `0x00702050..0x00702065`: the death arm first frees a master's
             // slaves to the killing hit's source (FreeSlaves, no house).
             if callbacks_enabled(world) {
@@ -1516,8 +1764,7 @@ pub(crate) fn handle_death(
                         .get(&owner)
                         .is_some_and(|house| house.is_human()),
                     &world.main_rng,
-                    rx,
-                    ry,
+                    location.into(),
                     &mut death_sounds,
                 );
                 // 0x00702206..0x00702210: RADIO OVER_OUT to every contact and
@@ -1558,7 +1805,7 @@ pub(crate) fn handle_death(
                         obj,
                         rules,
                         owner,
-                        glam::IVec3::new(center.0, center.1, world_z_leptons),
+                        glam::IVec3::new(center.0, center.1, location.z),
                         &mut voxel_debris,
                         &mut explosion_effects,
                     );
@@ -1796,7 +2043,15 @@ fn finish_concrete_death(
         world.drop_unit_cargo_crate(dead_id, rules, overlay_registry);
     }
 
-    let inf_death = killing_warhead.as_ref().map_or(1, |(wh, _)| wh.inf_death);
+    // InfantryClass::ReceiveDamage reads the killing call's InfDeath off its
+    // warhead argument with no null test (`0x00518362..0x00518369`).
+    // commit_entities hands every production kill that call's record, whose
+    // warhead its receiver resolved (a record it cannot resolve does no
+    // damage). Only a receiver fixture without one falls back, to the
+    // constructor's InfDeath.
+    let inf_death = killing_warhead
+        .as_ref()
+        .map_or(WarheadType::DEFAULT_INF_DEATH, |(wh, _)| wh.inf_death);
     if category == EntityCategory::Infantry {
         // `InfantryClass::ReceiveDamage` on result 4 (`0x00518077..0x0051808E`):
         // a dying slave leaves its master's node (RemoveSlave).
@@ -1830,14 +2085,16 @@ fn finish_concrete_death(
             .get(dead_id)
             .is_some_and(|entity| entity.sinking.is_active())
     {
-        // Non-Infantry SHP lifetime remains on its existing path.
+        // Non-Infantry SHP lifetime remains on its existing, VERA-only path.
+        // Natively only InfantryClass::ReceiveDamage reads InfDeath; this
+        // corpse borrows the infantry table's Die1/Die2 arms.
         if let Some(entity) = world.substrate.entities.get_mut(dead_id) {
             entity.death.begin();
             if let (Some(sequence), Some(anim)) = (
-                crate::sim::animation::death_sequence_for_inf_death(inf_death),
+                crate::sim::world::InfantryDeathSequence::for_inf_death(inf_death),
                 entity.animation.as_mut(),
             ) {
-                anim.switch_to(sequence);
+                anim.switch_to(sequence.animation());
             }
         }
         // VERA-only death sequence: native's UnInit would Limbo the object
@@ -1853,16 +2110,23 @@ fn finish_concrete_death(
         // arm's OVER_OUT to every contact (`techno_death_stun`) already
         // released its dock slots.
         effects.despawned_ids.push(dead_id);
-    } else if category == EntityCategory::Aircraft
-        && callbacks_enabled(world)
-        && world.foot_crash(
+    } else if category == EntityCategory::Aircraft && callbacks_enabled(world) {
+        if !world.foot_crash(
             dead_id,
             killing_attacker(world, damage_events, dead_id),
             rules,
             overlay_registry,
             frame_effects,
-        )
-    {
+        ) {
+            // AircraftClass::ReceiveDamage4166A3 UnInits a refused Crash
+            // before returning. A later area receiver's passenger placement
+            // must see its cell cleared, rather than wait for batch delivery.
+            world.uninit_with_context(
+                dead_id,
+                crate::sim::world::UninitContext::new(rules, overlay_registry)
+                    .with_effects(frame_effects),
+            );
+        }
         // `AircraftClass::ReceiveDamage` (`0x00416694..0x004166A3`): an
         // airborne aircraft crashes instead of its UnInit. It stays alive and
         // represented, with Health 0, until its fall's impact.
@@ -2295,6 +2559,42 @@ fn continue_area_damage(
     )
 }
 
+/// Installed46920B ->100536E0's local extension-effect coordinate. The
+/// original receiver still consumes its unchanged impact argument. Kept here
+/// with the single pre-effect owner, using the shared5F6440 distance port.
+#[cfg(feature = "ares")]
+pub(crate) fn ares_warhead_effect_coordinate(
+    world: &Simulation,
+    detonation: &ProjectileDetonation,
+) -> ProjectileCoord {
+    //100536E0/10053738..70: the extension effects use a local coordinate.
+    //Ares10053660 jumps to the existing planar5F6440 Distance_To, including
+    //the target Building's foundation discount. Strict<64 snaps to+48,
+    //not Building+A4/TargetCoordOffset. Original damage retains its impact.
+    let target = match detonation.target {
+        ProjectileTarget::Entity(id) | ProjectileTarget::Terrain(id) => {
+            Some(TargetKind::Entity(id))
+        }
+        ProjectileTarget::Cell { rx, ry } => Some(TargetKind::Cell(rx, ry)),
+        ProjectileTarget::None | ProjectileTarget::DummyCell => None,
+    };
+    target
+        .filter(|target| {
+            object_distance_to(detonation.projectile_id, target, world)
+                .is_some_and(|distance| distance < 64)
+        })
+        .and_then(|target| {
+            let cells = world
+                .resolved_terrain
+                .as_ref()
+                .map(crate::map::resolved_terrain::NativeCellQuery::canonical);
+            crate::sim::movement::ground_pose::target_get_coords(target, world, cells.as_ref())
+        })
+        .map_or(detonation.impact, |coord| {
+            ProjectileCoord::new(coord.x, coord.y, coord.z)
+        })
+}
+
 /// `BulletClass::DetonateAtCoord @ 0x004690B0` up to its receivers: the
 /// radiation site, then the special-warhead chain or, in its final else, the
 /// shrapnel (`0x00469A51`) and `Apply_area_damage` (`0x00489280`) records,
@@ -2339,7 +2639,30 @@ fn emit_detonation_receivers<'r>(
                 // 46917A/469180 read Weapon+AC -> Warhead+124, which
                 // need not be the Bullet's independently constructed warhead.
                 spread: super::cell_spread::whole_cells(rad_warhead.cell_spread_f64),
+                // Phobos `WeaponTypeExt::RadType` binds the field's type.
+                rad_type: weapon.rad_type.clone(),
             });
+    }
+
+    // Installed Ares46920B ->100536E0/10052870 runs after radiation,
+    // before the exclusive special/ordinary damage arms (including Damage=0).
+    #[cfg(feature = "ares")]
+    {
+        let coordinate = ares_warhead_effect_coordinate(world, detonation);
+        // Parent100536E0 captures OwnerHouse before EMP/tag callbacks.
+        let source_house = world
+            .substrate
+            .entities
+            .get(detonation.source_id)
+            .map(|source| source.owner());
+        world.apply_ares_emp_detonation(
+            coordinate,
+            Some(detonation.source_id),
+            warhead,
+            rules,
+            effects,
+        );
+        world.apply_ares_attach_effect_detonation(coordinate, source_house, warhead, rules);
     }
 
     // `BulletClass::DetonateAtCoord @ 0x0046978e` is the chain's only
@@ -2803,6 +3126,7 @@ pub(crate) fn commit_projectile_detonations_inline(
             // The ordinary outer cluster successor still follows that return.
             if area_continuation.is_none() || area_result != AreaDamageResult::IronCurtain {
                 emit_warhead_debris(world, rules, &live_tail, warhead, emit);
+                super::airburst::emit(world, rules, &live_tail);
             }
             if cluster_draws {
                 coordinate =

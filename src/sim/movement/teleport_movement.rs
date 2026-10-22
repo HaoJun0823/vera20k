@@ -46,12 +46,16 @@ pub(crate) enum WarpSound {
 }
 
 impl crate::sim::world::Simulation {
-    /// One warp sound at the owner's cell: the type's
+    /// One warp sound at the owner's current Location: the type's
     /// ChronoOutSound/ChronoInSound (TechnoType+0x578/+0x574), else
-    /// `[AudioVisual]` (Rules+0x21C/+0x218), else silence.
+    /// `[AudioVisual]` (Rules+0x21C/+0x218), else silence. Out plays at the
+    /// departure point (`0x0071960A..0x0071962C`, state 2 `0x007198CE`), In at
+    /// the arrival point after SetHeight(0) and Mark(DOWN)
+    /// (`0x007196EE..0x00719710`, state 5 `0x00719A70`).
     pub(crate) fn teleport_warp_sound(
         interner: &mut StringInterner,
         substrate: &ObjectSubstrate,
+        terrain: Option<&ResolvedTerrainGrid>,
         sound_events: &mut FrameChannel<SimSoundEvent>,
         id: u64,
         sound: WarpSound,
@@ -60,7 +64,7 @@ impl crate::sim::world::Simulation {
         let Some(entity) = substrate.entities.get(id) else {
             return;
         };
-        let (rx, ry) = (entity.position.rx(), entity.position.ry());
+        let world = super::ground_pose::object_location(entity, terrain).into();
         let object = interner.object_type(entity.type_ref(), rules);
         let name = match sound {
             WarpSound::Out => object
@@ -72,11 +76,7 @@ impl crate::sim::world::Simulation {
         };
         if let Some(name) = name {
             let sound_id = interner.intern(&name);
-            sound_events.emit(crate::sim::world::SimSoundEvent::ChronoTeleport {
-                sound_id,
-                rx,
-                ry,
-            });
+            sound_events.emit(crate::sim::world::SimSoundEvent::ChronoTeleport { sound_id, world });
         }
     }
 
@@ -1265,10 +1265,14 @@ impl crate::sim::world::Simulation {
                 // FootClass::SetLocation (vt+0x1B4, 0x00719637 and again at
                 // 0x00719684); the retained Process adapter applies SetHeight(0)
                 // after its XY write and skips the OpenTopped rider tail. Trigger:
-                // a loaded OpenTopped transport (retail: the Drive BFRT) warped
-                // by a superweapon, whose SuperClass code gives any Foot a
-                // Teleport locomotor (0x006CC989..0x006CC999); VERA ports no such
-                // warp yet. Effect: the riders stay at the departure point.
+                // an OpenTopped Foot whose active locomotor is a Teleport taking an
+                // ordinary Move_To. No retail Teleport type carries passengers. A
+                // superweapon warp (0x006CC989..0x006CC999) sets the latch and runs
+                // the Chronosphere states, whose SetLocation keeps the rider tail
+                // (`teleport_chrono.rs`), so the only window is between that warp's
+                // state 7 and its piggyback END, which the Foot AI tail normally
+                // takes in the same frame. Effect: the riders stay at the
+                // departure point.
                 if let Some(terrain) = terrain {
                     let cell = terrain.native_cell_identity((
                         (destination.x / 256) as i16,

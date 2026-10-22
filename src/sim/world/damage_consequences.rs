@@ -174,7 +174,7 @@ impl DamageConsequences {
                 detonation,
                 world.session.binary_frame(),
                 &world.session.theater(),
-                &rules.radiation,
+                rules,
                 world.resolved_terrain.as_ref(),
                 &mut world.lighting_sources,
             );
@@ -204,11 +204,10 @@ impl DamageConsequences {
         if let DamageDelivery::Ordinary { fire_events, .. } = delivery {
             world.fire_events.emit_all(fire_events);
         }
-        for (die_sound_id, rx, ry) in effects.death_sounds.drain(..) {
+        for (die_sound_id, location) in effects.death_sounds.drain(..) {
             world.sound_events.emit(SimSoundEvent::EntityDied {
                 die_sound_id,
-                rx,
-                ry,
+                world: location,
             });
         }
         Simulation::dispatch_under_attack_events(

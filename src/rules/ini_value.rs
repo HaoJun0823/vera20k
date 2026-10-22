@@ -150,7 +150,85 @@ const ABSTRACT_TYPES: &[(&str, i32)] = &[
     ("DiskLaser", 73),
 ];
 
+/// Native `TechnoType+0x3BC` `Category=` value. Keep this enum and its name
+/// mapping with the shared `ReadCategory`-style INI reader, separate from the
+/// Rust registry family in `ObjectCategory`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(i32)]
+pub enum TechnoTypeCategory {
+    #[default]
+    Unknown = -1,
+    Soldier = 0,
+    Civilian = 1,
+    VipAgent = 2,
+    ReconVehicle = 3,
+    ArmoredFightingVehicle = 4,
+    InfantryFightingVehicle = 5,
+    LongRangeFireSupport = 6,
+    MiscSupportVehicle = 7,
+    TransportVehicle = 8,
+    AirCombatSupport = 9,
+    AirTransport = 10,
+}
+
+/// `Category_From_Name @0x00473980`, table at `0x0081B7C8`; native compares
+/// both the display label and the abbreviated token with case-insensitive
+/// `strcmpi`.
+const TECHNO_TYPE_CATEGORY_NAMES: [(&str, &str, TechnoTypeCategory); 11] = [
+    ("Soldier", "Soldier", TechnoTypeCategory::Soldier),
+    ("Civilian", "Civilian", TechnoTypeCategory::Civilian),
+    ("VIP/Agent", "VIP", TechnoTypeCategory::VipAgent),
+    ("Recon Vehicle", "Recon", TechnoTypeCategory::ReconVehicle),
+    (
+        "Armored Fighting Vehicle",
+        "AFV",
+        TechnoTypeCategory::ArmoredFightingVehicle,
+    ),
+    (
+        "Infantry Fighting Vehicle",
+        "IFV",
+        TechnoTypeCategory::InfantryFightingVehicle,
+    ),
+    (
+        "Indirect Fire Support",
+        "LRFS",
+        TechnoTypeCategory::LongRangeFireSupport,
+    ),
+    (
+        "Misc. Support Vehicle",
+        "Support",
+        TechnoTypeCategory::MiscSupportVehicle,
+    ),
+    (
+        "Transport Vehicle",
+        "Transport",
+        TechnoTypeCategory::TransportVehicle,
+    ),
+    (
+        "Air Combat Support",
+        "AirPower",
+        TechnoTypeCategory::AirCombatSupport,
+    ),
+    ("Air Transport", "AirLift", TechnoTypeCategory::AirTransport),
+];
+
 impl IniSection {
+    /// `INIClass::ReadCategory @0x004749E0`: ReadString[0x20] defaults from
+    /// the current integer's token, then Category_From_Name maps either name
+    /// column. Missing/empty therefore retains current; unknown text returns
+    /// -1. Called by `TechnoTypeClass::ReadINI @0x00712170`.
+    pub fn read_techno_type_category(&self, current: TechnoTypeCategory) -> TechnoTypeCategory {
+        self.read_string_with("Category", 0x20, current, |_, value| {
+            TECHNO_TYPE_CATEGORY_NAMES
+                .iter()
+                .find_map(|(display_name, token, category)| {
+                    (value.eq_ignore_ascii_case(display_name) || value.eq_ignore_ascii_case(token))
+                        .then_some(*category)
+                })
+                .unwrap_or(TechnoTypeCategory::Unknown)
+        })
+    }
+
     /// ReadPip4748A0: the default is a TABLE INDEX; the result is a frame.
     /// ReadString32 always runs, including missing/empty cache entries, then
     /// an11-entry case-insensitive scan returns1 for an unknown name. Returned
@@ -301,18 +379,35 @@ impl IniSection {
     /// out-of-range Ares CRT behavior is not claimed equivalent.
     pub fn read_ares_int(&self, key: &str, default: i32) -> i32 {
         self.read_string_with(key, 2048, default, |current, value| {
-            let parsed = if let Some(decimal) = value.strip_prefix('$') {
-                scan_decimal_i32(&mut decimal.as_bytes())
-            } else if value
-                .as_bytes()
-                .last()
-                .is_some_and(|last| last.eq_ignore_ascii_case(&b'h'))
-            {
-                scan_hex_u32(value.as_bytes()).map(|value| value as i32)
+            parse_ares_int(value).unwrap_or(current)
+        })
+    }
+
+    /// Ares Valueable<double>1000EB00/10076B60: the native string-sized
+    /// reader scans binary64, not ReadDouble's intermediate binary32. An
+    /// unsuccessful scan retains the old field; a percent anywhere scales it.
+    /// The shared scanner/percent kernel also serves the stock reader.
+    pub fn read_ares_double_bits(&self, key: &str, default: NativeF64Bits) -> NativeF64Bits {
+        self.read_string_with(key, 2048, default, |current, value| {
+            try_parse_leading_f64(value, FloatScanRounding::AresChop).map_or(current, |number| {
+                NativeF64Bits::from_bits(if value.contains('%') {
+                    scale_percent(number).to_bits()
+                } else {
+                    number.to_bits()
+                })
+            })
+        })
+    }
+
+    /// Ares TechnoType EMP.Threshold: inair, int TryParse, then a boolean
+    /// scratch initialized false. Missing/empty keeps the current field.
+    pub fn read_ares_emp_threshold(&self, key: &str, default: i32) -> i32 {
+        self.read_string_with(key, 2048, default, |_, value| {
+            if value.eq_ignore_ascii_case("inair") {
+                -1
             } else {
-                scan_decimal_i32(&mut value.as_bytes())
-            };
-            parsed.unwrap_or(current)
+                parse_ares_int(value).unwrap_or_else(|| i32::from(parse_read_bool(false, value)))
+            }
         })
     }
 
@@ -479,6 +574,16 @@ impl IniSection {
         Some(strtrim_ascii(truncate_native_bytes(raw, payload)))
     }
 
+    /// Ares 3.0 PCXFile reader100762C0: ReadString through the shared 2048-byte
+    /// buffer, then copy31 bytes into char[32] and lowercase. An absent/empty
+    /// read retains the previous filename (the projected read_name policy).
+    /// Original reader controls: tools/sidebar_oracle/pcx_cameos.json.
+    #[cfg(feature = "ares")]
+    pub(crate) fn read_ares_pcx_filename(&self, key: &str) -> Option<String> {
+        self.read_name(key, 0x800)
+            .map(|name| truncate_native_bytes(name, 0x1f).to_ascii_lowercase())
+    }
+
     /// [`Self::read_name`] for a name a type factory resolves: `None` also for
     /// `none` and `<none>`, which the factories answer null
     /// ([`is_native_none_type_name`]).
@@ -506,13 +611,20 @@ impl IniSection {
     /// caller's byte-exact House::FromName50C170 lookup. An unknown (-1)
     /// index sets bit31 through x86's masked shift. Missing/empty keeps the
     /// supplied mask. House array order, not token order, consumes this mask.
+    /// Ares hooks47527C/475297 expand only the buffer to0x800; lookup,
+    /// delimiters and directional bits remain with this same reader.
     pub(crate) fn read_houses_list(
         &self,
         key: &str,
         default: u32,
         mut find_house: impl FnMut(&str) -> Option<usize>,
     ) -> u32 {
-        let Some(tokens) = self.read_list(key, 0x80) else {
+        let capacity = if crate::rules::ARES_ENABLED {
+            0x800
+        } else {
+            0x80
+        };
+        let Some(tokens) = self.read_list(key, capacity) else {
             return default;
         };
         tokens.into_iter().fold(0, |mask, token| {
@@ -848,11 +960,12 @@ impl IniSection {
     }
 
     /// `ReadINIBase64BinarySectionSourceOrder @ 0x00526FB0` (IsoMapPack5,
-    /// OverlayPack, OverlayDataPack, PreviewPack): every entry's value in
-    /// source order, each cut to 127 bytes and trimmed, joined for the Base64
-    /// decoder. Entry names are not parsed or sorted.
+    /// OverlayPack, OverlayDataPack, PreviewPack, Digest): each physical entry
+    /// name queries the shared value index, including duplicate occurrences.
+    /// Values are cut to 127 bytes and trimmed, then joined for Base64Pipe.
+    /// Entry names are not parsed or sorted.
     pub fn read_packed_text(&self) -> String {
-        self.keys()
+        self.physical_keys()
             .filter_map(|key| self.get(key))
             .map(|value| strtrim_ascii(truncate_native_bytes(value, 0x7F)))
             .collect()
@@ -1216,10 +1329,100 @@ pub(crate) fn parse_leading_f32(s: &str) -> f32 {
 /// bridge_landing_inputs.json; arbitrary extreme CRT rounding/range behavior
 /// is not certified here.
 pub(crate) fn parse_leading_f64(s: &str) -> f64 {
+    try_parse_leading_f64(s, FloatScanRounding::Nearest).unwrap_or(0.0)
+}
+
+#[derive(Clone, Copy)]
+enum FloatScanRounding {
+    /// Keep the existing stock atof projection independently of Ares %lf.
+    Nearest,
+    AresChop,
+}
+
+fn try_parse_leading_f64(s: &str, rounding: FloatScanRounding) -> Option<f64> {
     let s = s.trim_start_matches(['\t', '\n', '\x0b', '\x0c', '\r', ' ']);
-    leading_float_token(s)
-        .and_then(|token| token.parse::<f64>().ok())
-        .unwrap_or(0.0)
+    let token = leading_float_token(s)?;
+    let nearest = token.parse::<f64>().ok()?;
+    Some(match rounding {
+        FloatScanRounding::Nearest => nearest,
+        FloatScanRounding::AresChop => chop_decimal_f64(token, nearest),
+    })
+}
+
+/// Ares ValueableDouble1000EB00 ->10076B60 ->CRT10010040/10083A57
+/// retains ambient PC53/chop (WinMain6BBFB7..6BBFCE; canonical startup
+/// producer tools/rules_oracle/read_double_percent.py). Reuse the one lexical
+/// prefix and binary64 parser, comparing its nearest result exactly against
+/// the decimal magnitude before adjusting toward zero. This deterministic
+/// numerical policy matches the bounded native EMP reader corpus; arbitrary
+/// long-decimal/legacy CRT intermediate double rounding is not certified.
+/// It deliberately does not change the existing stock atof reader mode.
+fn chop_decimal_f64(token: &str, nearest: f64) -> f64 {
+    use num_bigint::BigUint;
+    if !nearest.is_finite() || nearest == 0.0 {
+        // Native scanner overflow remains infinity (not maximum finite),
+        // and a signed zero must retain its original sign bit.
+        return nearest;
+    }
+    let unsigned = token.trim_start_matches(['+', '-']);
+    let (mantissa, exponent) =
+        unsigned
+            .split_once(['e', 'E'])
+            .map_or((unsigned, 0), |(mantissa, exponent)| {
+                // A nonzero finite parse bounds this exponent by the token's
+                // digit count plus the binary64 range. It fits the native scanner.
+                (
+                    mantissa,
+                    scan_decimal_i32(&mut exponent.as_bytes()).expect("valid float exponent"),
+                )
+            });
+    let fractional_digits = mantissa.find('.').map_or(0, |dot| mantissa.len() - dot - 1);
+    let digits: Vec<u8> = mantissa.bytes().filter(|byte| *byte != b'.').collect();
+    let mut decimal = BigUint::parse_bytes(&digits, 10).expect("validated float mantissa");
+    let decimal_exponent = exponent - fractional_digits as i32;
+    let ten = BigUint::from(10u8);
+    let denominator = if decimal_exponent < 0 {
+        ten.pow(decimal_exponent.unsigned_abs())
+    } else {
+        decimal *= ten.pow(decimal_exponent as u32);
+        BigUint::from(1u8)
+    };
+    let bits = nearest.to_bits();
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1u64 << 52) - 1);
+    let (significand, binary_exponent) = if exponent_bits == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1u64 << 52), exponent_bits - 1023 - 52)
+    };
+    let mut binary = BigUint::from(significand) * denominator;
+    if binary_exponent >= 0 {
+        binary <<= binary_exponent as usize;
+    } else {
+        decimal <<= binary_exponent.unsigned_abs() as usize;
+    }
+    if binary > decimal {
+        // Decreasing the magnitude bits moves either sign toward zero,
+        // including a subnormal's transition to its signed zero.
+        f64::from_bits(bits - 1)
+    } else {
+        nearest
+    }
+}
+
+/// The single Ares Parser<int> core, also used by compound int/bool readers.
+fn parse_ares_int(value: &str) -> Option<i32> {
+    if let Some(decimal) = value.strip_prefix('$') {
+        scan_decimal_i32(&mut decimal.as_bytes())
+    } else if value
+        .as_bytes()
+        .last()
+        .is_some_and(|last| last.eq_ignore_ascii_case(&b'h'))
+    {
+        scan_hex_u32(value.as_bytes()).map(|value| value as i32)
+    } else {
+        scan_decimal_i32(&mut value.as_bytes())
+    }
 }
 
 fn leading_float_token(s: &str) -> Option<&str> {
@@ -1483,11 +1686,12 @@ mod tests {
     }
 
     #[test]
-    fn read_houses_list_matches_original_exact_lookup_and_default_controls() {
-        let native: serde_json::Value = serde_json::from_str(crate::test_fixture::text(
-            "tools/input_oracle/campaign_start_houses.json",
-        ))
-        .unwrap();
+    fn read_houses_list_matches_native_exact_lookup_and_default_controls() {
+        let native = crate::test_fixture::json(if crate::rules::ARES_ENABLED {
+            "tools/input_oracle/ares_allies_reader.json"
+        } else {
+            "tools/input_oracle/campaign_start_houses.json"
+        });
         let controls = &native["allies_reader_controls"];
         assert_eq!(controls["delimiter_hex"], "2c00");
         let names: Vec<_> = controls["registry"]
@@ -1510,6 +1714,35 @@ mod tests {
                 |name| names.iter().position(|candidate| *candidate == name),
             );
             assert_eq!(actual, row["result"].as_u64().unwrap() as u32, "{row}");
+        }
+    }
+
+    #[test]
+    fn read_houses_list_matches_extended_native_buffer_controls() {
+        let native = crate::test_fixture::json("tools/input_oracle/ares_allies_reader.json");
+        let feature = if crate::rules::ARES_ENABLED {
+            "ares"
+        } else {
+            "stock"
+        };
+        for row in native["extended_controls"].as_array().unwrap() {
+            // Exercise ReadString's buffer limit directly. Physical INI line
+            // admission belongs to the lexer, independently of this reader.
+            let mut ini = IniFile::empty();
+            let section = ini.projection_section_mut("Control");
+            section.set("Allies", row["value"].as_str().unwrap());
+            let names = row["registry"].as_array().unwrap();
+            let actual = section.read_houses_list("Allies", 0, |name| {
+                names
+                    .iter()
+                    .position(|candidate| candidate.as_str() == Some(name))
+            });
+            assert_eq!(
+                actual,
+                row["observations"][feature]["result"].as_u64().unwrap() as u32,
+                "{} ({feature})",
+                row["name"],
+            );
         }
     }
 
@@ -1714,5 +1947,32 @@ mod tests {
             [0xA741, 0x41, 0x42]
         );
         assert_eq!(s.read_comma_hex_utf16("MISSING", &[1, 2, 0, 3], 8), [1, 2]);
+    }
+}
+
+#[cfg(all(test, feature = "ares"))]
+mod pcx_cameo_tests {
+    #[test]
+    fn filename_projection_matches_original_ares_reader_controls() {
+        let corpus: serde_json::Value = serde_json::from_str(crate::test_fixture::text(
+            "tools/sidebar_oracle/pcx_cameos.json",
+        ))
+        .unwrap();
+        for control in corpus["readers"].as_array().unwrap() {
+            let value = control["value"].as_str().unwrap_or("");
+            let ini = crate::rules::ini_parser::IniFile::from_str(&format!(
+                "[SYNTHETIC]\nDummy=1\nCameoPCX={value}\n"
+            ));
+            let section = ini.section("SYNTHETIC").unwrap();
+            let projected = section
+                .read_ares_pcx_filename("CameoPCX")
+                .unwrap_or_else(|| "prior.pcx".to_owned());
+            assert_eq!(
+                projected,
+                control["filename"].as_str().unwrap(),
+                "{}",
+                control["name"]
+            );
+        }
     }
 }

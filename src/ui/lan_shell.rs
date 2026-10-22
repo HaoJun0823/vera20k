@@ -424,9 +424,34 @@ impl LanLobbyState {
         })
     }
 
+    /// The roster rebuild `0x005DAFE0`. Before `LB_RESETCONTENT` it saves the
+    /// selected row's name (`0x005E5F10`); after re-adding the rows it selects
+    /// the first row with that name, ignoring case (`0x005E6230`: list message
+    /// `0x4CA`, `_wcsicmp`), or none.
     pub(crate) fn replace_players(&mut self, players: Vec<LanPlayerRow>) {
+        let selected = self
+            .player_list
+            .selected
+            .and_then(|index| self.players.get(index))
+            .map(|row| row.name.clone());
         self.players = players;
         self.player_list.reconcile(self.players.len());
+        self.player_list.selected = selected.and_then(|name| {
+            self.players
+                .iter()
+                .position(|row| row.name.eq_ignore_ascii_case(&name))
+        });
+    }
+
+    /// A press on a player row (`0x53E`, style `0x50000151`: single-select,
+    /// no `LBS_NOSEL`). `OwnerDraw_ListBox` selects it (`LB_SETCURSEL`,
+    /// `0x0061AA3E..0x0061AA69`); the caller plays its GenericClick.
+    pub(crate) fn select_player(&mut self, index: usize) -> bool {
+        if index >= self.players.len() {
+            return false;
+        }
+        self.player_list.selected = Some(index);
+        true
     }
 
     pub(crate) fn set_enabled(&mut self, enabled: bool) {
@@ -445,6 +470,7 @@ impl LanLobbyState {
         self.player_list.scroll.cancel();
         self.chat.list.scroll.cancel();
         self.game_list.last_press = None;
+        self.player_list.last_press = None;
     }
 
     pub(crate) fn focus(&mut self, control: u16) {
@@ -477,8 +503,8 @@ impl LanLobbyState {
         }
         let changed = self.game_list.selected != Some(index);
         self.game_list.selected = Some(index);
-        self.players.clear();
-        self.player_list.reconcile(0);
+        // The roster follows through `replace_players` (the 0x549 LBN_SELCHANGE
+        // handler's `0x005DAFE0`), which keeps the selected player by name.
         Some(LanLobbyAction::SelectGame {
             game_id: self.selected_game().map(|row| row.id),
             changed,
@@ -678,6 +704,28 @@ mod tests {
 
     fn native() -> serde_json::Value {
         crate::test_fixture::json("tools/storage_oracle/lan_lobby.json").clone()
+    }
+
+    /// A press selects a player row (`0x0061AA3E`); a roster rebuild
+    /// (`0x005DAFE0`) moves the selection to the same name, or clears it.
+    #[test]
+    fn a_player_press_selection_follows_its_name_across_rebuilds() {
+        let player = |name: &str| LanPlayerRow {
+            name: name.to_owned(),
+            color: None,
+            side_icon: None,
+            host: false,
+            accepted: false,
+        };
+        let mut lobby = LanLobbyState::new("Tester", false);
+        lobby.replace_players(vec![player("A"), player("B")]);
+        assert!(lobby.select_player(1));
+        assert!(!lobby.select_player(2));
+        assert_eq!(lobby.player_list.selected, Some(1));
+        lobby.replace_players(vec![player("b"), player("A")]);
+        assert_eq!(lobby.player_list.selected, Some(0));
+        lobby.replace_players(vec![player("A")]);
+        assert_eq!(lobby.player_list.selected, None);
     }
 
     #[test]

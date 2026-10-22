@@ -164,15 +164,12 @@ pub enum HouseOutcomeKind {
     Defeat,
 }
 
-/// Persistent HouseClass result transition.
-///
-/// The countdown is the existing private House+298 CdTimer, shared with
-/// AllowWin-tag teardown. This is a result/exit latch, never a second timer.
-/// The wall-clock Vox drain that follows `exit_ready` belongs to the app.
+/// Read-only result projection. House flags describe a pending result;
+/// ScenarioSession owns the independent request after House's Vox wait.
+/// The countdown remains the sole private House+298 CdTimer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct HouseOutcomeState {
     pub kind: HouseOutcomeKind,
-    pub exit_ready: bool,
 }
 
 /// Persistent HouseClass strategy-emergency state.
@@ -572,10 +569,6 @@ pub struct HouseState {
     has_won: bool,
     /// Defeat flag. Note: Flag_To_Lose clears HasWon first.
     has_lost: bool,
-    /// Accepted win/loss transition plus the deterministic SavourDelay target.
-    /// App-owned wall waits and audio teardown are intentionally excluded.
-    #[serde(default)]
-    outcome_state: Option<HouseOutcomeState>,
     /// HouseClass+0x241 map-clear byte folded by the retail multiplayer
     /// checksum. Distinct from the fog owner's+0x240 reveal guard, which
     /// TAction17 reads (6E0FE8) and gap re-admission clears independently.
@@ -592,6 +585,12 @@ pub struct HouseState {
     /// warp-out clears the latch; otherwise that provider sets it.
     #[serde(default)]
     spy_sat_active: bool,
+    /// House+24B: Constructor4F57A7 arms the first local Update's full
+    /// Map4ADCD0 sight pass. Update4F9353 clears it before the callback;
+    /// Fill_In_Data's earlier mobile-only pass leaves it armed. Save/Load
+    /// retains this byte with the House. Executed: house_initial_sight.
+    #[serde(default)]
+    initial_sight_refresh_pending: bool,
     /// The object counts the defeat gate reads (`house_tracking`), written by
     /// the lifecycle authority at construction, deletion, Limbo, Unlimbo and
     /// owner change.
@@ -684,9 +683,10 @@ pub struct HouseState {
     /// House selected by `HouseClass::UpdateAngerNodes`, or native `-1` as None.
     #[serde(default)]
     enemy_house: Option<InternedId>,
-    /// Edge of the playfield where this house spawns paradrop carriers.
-    /// Encoding: 0=N, 1=E, 2=S, 3=W. Launch setup seeds it from the assigned
-    /// start anchor; committed structures refresh it through lifecycle authority.
+    /// House+0x577C, the map edge this house's aircraft come from and leave
+    /// by. Encoding: 0=N, 1=E, 2=S, 3=W. The constructor writes North
+    /// (`0x004F5C79`); only DetermineEdge
+    /// ([`crate::sim::world::Simulation::determine_house_edge`]) changes it.
     waypoint_edge: u8,
     /// End-of-match score-screen statistics (Kills / Losses / Built columns).
     ///
@@ -1385,6 +1385,14 @@ impl HouseState {
 
     pub const fn spy_sat_active(&self) -> bool {
         self.spy_sat_active
+    }
+
+    pub(crate) const fn initial_sight_refresh_pending(&self) -> bool {
+        self.initial_sight_refresh_pending
+    }
+
+    pub(super) fn take_initial_sight_refresh(&mut self) -> bool {
+        std::mem::take(&mut self.initial_sight_refresh_pending)
     }
 
     pub const fn tracking(&self) -> &crate::sim::house_tracking::HouseTracking {
@@ -2272,8 +2280,8 @@ impl HouseState {
             .unwrap_or(0)
     }
 
-    /// Active offline EventClass house-scan eligibility.
-    #[cfg(any(test, feature = "test-support"))]
+    /// `Execute_DoList 0x0064C4FB..0x0064C50D` admits a registered House
+    /// when either IsHuman or PlayerControl is set, in every session mode.
     pub const fn event_dispatch_eligible(&self) -> bool {
         self.is_human || self.player_control
     }
@@ -2408,7 +2416,14 @@ impl HouseState {
     }
 
     pub const fn outcome(&self) -> Option<HouseOutcomeState> {
-        self.outcome_state
+        let kind = if self.has_won {
+            HouseOutcomeKind::Victory
+        } else if self.has_lost {
+            HouseOutcomeKind::Defeat
+        } else {
+            return None;
+        };
+        Some(HouseOutcomeState { kind })
     }
 
     /// Read the sole House+298 countdown in the native signed frame domain.
@@ -2427,10 +2442,6 @@ impl HouseState {
         if !skip_timer {
             self.allow_win_timer.start(frame, savour_frames);
         }
-        self.outcome_state = Some(HouseOutcomeState {
-            kind: HouseOutcomeKind::Victory,
-            exit_ready: false,
-        });
         true
     }
 
@@ -2450,10 +2461,6 @@ impl HouseState {
         if !skip_timer {
             self.allow_win_timer.start(frame, savour_frames);
         }
-        self.outcome_state = Some(HouseOutcomeState {
-            kind: HouseOutcomeKind::Defeat,
-            exit_ready: false,
-        });
         true
     }
 
@@ -2462,33 +2469,31 @@ impl HouseState {
         self.allow_win_timer.resume(frame);
     }
 
-    /// House4F85BE/4F86FE: exact zero on+298 admits the result's Vox wait.
-    /// Campaign Win also requires AllowWin-tags+27C<=0; Lose does not.
-    pub(crate) fn advance_outcome_savour(&mut self, frame: i32, game_mode_nonzero: bool) -> bool {
-        let Some(outcome) = self.outcome_state.as_mut() else {
-            return false;
-        };
-        if self.allow_win_timer.expired(frame)
-            && (outcome.kind == HouseOutcomeKind::Defeat
-                || game_mode_nonzero
-                || self.allow_win_tags <= 0)
-        {
-            outcome.exit_ready = true;
+    /// HouseClass::Update4F85BE/4F86FE admits the whole-Vox wait on
+    /// exact zero of+298. Campaign victory also requires AllowWin+27C<=0.
+    pub(crate) fn pending_outcome(
+        &self,
+        frame: i32,
+        game_mode_nonzero: bool,
+    ) -> Option<HouseOutcomeKind> {
+        let kind = self.outcome()?.kind;
+        (self.allow_win_timer.expired(frame)
+            && (kind == HouseOutcomeKind::Defeat || game_mode_nonzero || self.allow_win_tags <= 0))
+            .then_some(kind)
+    }
+
+    /// House4F8657 clears Won only after the Vox wait. The defeat path
+    /// 4F8780..4F87BB deliberately retains Lost; neither owns session flags.
+    pub(crate) fn complete_outcome(&mut self, kind: HouseOutcomeKind) {
+        if kind == HouseOutcomeKind::Victory {
+            self.has_won = false;
         }
-        outcome.exit_ready
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn supply_outcome_state_for_test(
-        &mut self,
-        won: bool,
-        lost: bool,
-        state: Option<HouseOutcomeState>,
-        timer: CdTimer,
-    ) {
+    pub(crate) fn supply_result_flags_for_test(&mut self, won: bool, lost: bool, timer: CdTimer) {
         self.has_won = won;
         self.has_lost = lost;
-        self.outcome_state = state;
         self.allow_win_timer = timer;
     }
 
@@ -2523,11 +2528,11 @@ impl HouseState {
             to_die: false,
             has_won: false,
             has_lost: false,
-            outcome_state: None,
             allow_win_tags: 0,
             allow_win_timer: CdTimer::default(),
             map_is_clear: false,
             spy_sat_active: false,
+            initial_sight_refresh_pending: true,
             tracking: Default::default(),
             tech_recheck: true,
             self_heal_infantry: 0,
@@ -2734,21 +2739,18 @@ pub fn house_state_for_owner_mut<'a>(
     houses.get_mut(&id)
 }
 
-/// Resolve an owner's ore-income `IncomeMult` (parts-per-million; 1_000_000 = 1.0×) by
-/// routing through its country: `HouseState.country` (InternedId) -> country name ->
-/// `RuleSet::country_income_ppm`. An owner with no house, no country, or an unknown
-/// country resolves to the neutral 1.0 (no income change) — so stock YR (all countries
-/// 1.0, the key commented out) is the identity.
-pub fn income_ppm_for_owner(
+/// Resolve the live owner's HouseType+148 float through its current country.
+/// Unknown diagnostic owners/countries use the constructor's neutral1.0.
+pub fn income_mult_for_owner(
     houses: &crate::sim::houses::Houses,
     interner: &crate::sim::intern::StringInterner,
     rules: &crate::rules::ruleset::RuleSet,
     owner: &str,
-) -> i64 {
+) -> crate::util::native_x87::NativeF32Bits {
     house_state_for_owner(houses, owner, interner)
         .and_then(|h| h.country)
-        .map(|c| rules.country_income_ppm(interner.resolve(c)))
-        .unwrap_or(crate::rules::ruleset::INCOME_PPM_SCALE)
+        .map(|c| rules.country_income_mult(interner.resolve(c)))
+        .unwrap_or(crate::util::native_x87::NativeF32Bits::ONE)
 }
 
 /// Map side name string to numeric index.
@@ -2817,7 +2819,9 @@ fn native_edge_distance(anchor: (u16, u16), reference: (i32, i32)) -> i32 {
     ])
 }
 
-/// HouseClass-style playfield edge selection for a committed anchor cell.
+/// `HouseClass::DetermineEdge`'s edge choice (`0x0050DCAF..0x0050DEC1`) from
+/// its anchor cell; [`crate::sim::world::Simulation::determine_house_edge`]
+/// finds the anchor.
 ///
 /// The four asymmetric reference points live in the map's LocalSize frame and
 /// must be skewed into cell-grid coordinates before comparison. Strictly-better
@@ -3035,10 +3039,9 @@ mod outcome_tests {
             if row["initial"][0] == 1 {
                 house.flag_to_die(frame);
             }
-            house.supply_outcome_state_for_test(
+            house.supply_result_flags_for_test(
                 row["initial"][1] == 1,
                 row["initial"][2] == 1,
-                None,
                 CdTimer::started(
                     row["initial_timer"][0].as_i64().unwrap() as i32,
                     row["initial_timer"][1].as_i64().unwrap() as i32,
@@ -3098,8 +3101,8 @@ mod outcome_tests {
     fn gsi_01_04_savour_gates_exact_frame_and_defeat_restarts_pending_victory() {
         let mut house = HouseState::new(Default::default(), 0, None, true, 0, 10);
         assert!(house.accept_win_result(100, 90, false));
-        assert!(!house.advance_outcome_savour(189, true));
-        assert!(house.advance_outcome_savour(190, true));
+        assert!(!house.pending_outcome(189, true).is_some());
+        assert!(house.pending_outcome(190, true).is_some());
 
         let mut replaced = HouseState::new(Default::default(), 0, None, true, 0, 10);
         assert!(replaced.accept_win_result(100, 90, false));
@@ -3107,7 +3110,7 @@ mod outcome_tests {
         assert!(!replaced.has_won);
         assert!(replaced.has_lost);
         assert_eq!(
-            replaced.outcome_state.expect("defeat outcome").kind,
+            replaced.outcome().expect("defeat outcome").kind,
             HouseOutcomeKind::Defeat
         );
         assert_eq!(
@@ -3129,22 +3132,22 @@ mod outcome_tests {
         house.supply_allow_win_tag_state(1, paused);
         assert!(house.accept_win_result(100, 90, true));
         assert_eq!(house.outcome_timer(), paused, "67 must not write a timer");
-        assert!(!house.advance_outcome_savour(1000, false));
+        assert!(!house.pending_outcome(1000, false).is_some());
         house.resume_result_timer(1000);
         assert_eq!(house.outcome_timer().duration(), 60);
         assert!(
-            !house.advance_outcome_savour(1060, false),
+            !house.pending_outcome(1060, false).is_some(),
             "AllowWin count blocks Win"
         );
         house.removed_allow_win_tag(1060);
-        assert!(!house.advance_outcome_savour(1119, false));
-        assert!(house.advance_outcome_savour(1120, false));
+        assert!(!house.pending_outcome(1119, false).is_some());
+        assert!(house.pending_outcome(1120, false).is_some());
 
         let mut loss = HouseState::new(Default::default(), 0, None, true, 0, 10);
         loss.supply_allow_win_tag_state(5, crate::sim::timer::CdTimer::default());
         assert!(loss.accept_lose_result(0, 90, true));
         assert!(
-            loss.advance_outcome_savour(0, false),
+            loss.pending_outcome(0, false).is_some(),
             "68 preserves expired ctor timer; no AllowWin gate"
         );
     }

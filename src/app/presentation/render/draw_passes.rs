@@ -756,6 +756,30 @@ pub(super) fn dispatch_draw_passes(
         "super_timer_text",
     );
 
+    // --- Step 10.7: build description ---
+    // GScreenClass_DrawText's Phobos VersionDescription (`0x4F4583`): the
+    // black box and red text at the tactical view's top right, same
+    // screen-fixed tactical clip as the timer lines above.
+    draw_pooled_ui_passthrough(
+        &mut pass,
+        &state.renderer.batch_renderer,
+        pool,
+        state
+            .match_state
+            .match_presentation
+            .selection_overlay
+            .as_ref()
+            .map(|o| o.white_texture()),
+        "build_text_fill",
+    );
+    draw_pooled_ui_passthrough(
+        &mut pass,
+        &state.renderer.batch_renderer,
+        pool,
+        Some(state.renderer.bit_font.atlas()),
+        "build_text_text",
+    );
+
     // TacticalDraw6D4B25->6D4E20 is its last battlefield draw: centred
     // GRFXTXT frame, or white text if the shape/converter is unavailable.
     // Keep the tactical clip and draw before sidebar copy/Chrono capture.

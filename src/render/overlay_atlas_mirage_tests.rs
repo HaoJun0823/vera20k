@@ -93,9 +93,9 @@ fn retail_mirage_catalog_loads_without_placed_terrain() {
             "{name}: actual original InitTheater-loaded header"
         );
         let shape = ShpFile::from_bytes(bytes).unwrap();
-        let (body, shadow) = atlas
-            .native_terrain_pair(name, 0)
-            .unwrap_or_else(|| panic!("paired Unit body/stencil source for {name}"));
+        let (Some(body), Some(shadow)) = atlas.terrain_pieces(name, 0) else {
+            panic!("paired Unit body/stencil source for {name}");
+        };
         for (entry, index) in [(body, 0), (shadow, shape.frames.len() / 2)] {
             let frame = &shape.frames[index];
             assert_eq!(

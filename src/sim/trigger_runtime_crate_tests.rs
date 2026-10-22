@@ -621,7 +621,15 @@ fn retail_all07_elapsed_crates_and_money_survive_save_and_notify_logic() {
     sim.resolve_type_handles(&rules);
     sim.session
         .set_game_mode(crate::sim::scenario_session::ScenarioGameMode::from_legacy_nonzero(false));
-    sim.session.initialize_campaign_startup(1, 7, None).unwrap();
+    sim.session
+        .initialize_campaign_startup(
+            1,
+            7,
+            None,
+            0,
+            crate::sim::campaign_carry_over::CampaignCarryOver::CLEARED,
+        )
+        .unwrap();
     sim.session.game_options_mut_for_test().crates = false;
     sim.session.set_binary_frame_for_test(0);
     crate::sim::scenario_bootstrap::initialize_map_roster_houses(

@@ -309,14 +309,15 @@ pub struct SidebarChromeAtlas {
     pub tabs: Option<SidebarChromeEntry>,
     /// Tab buttons: per-tab × 5-frame SHP state table.
     /// Outer index: tab number (0..=3). Inner index: SHP frame (0..=4).
-    /// Frame meanings (from SBGadgetClass::Draw, gamemd 0x0069DEB0):
-    ///   0 = idle, 1 = active-tab, 2 = disabled, 3 = pressed-idle, 4 = pressed-active.
+    /// Frame meanings (`ShapeButtonClass::Draw @ 0x0069DEB0`):
+    ///   0 = idle, 1 = active-tab, 2 = disabled, 3 = flash-idle, 4 = flash-active.
     pub tab_frames: [[Option<SidebarChromeEntry>; 5]; 4],
     pub side2: SidebarChromeEntry,
     pub side3: SidebarChromeEntry,
-    /// Repair button — 5-frame SHP state table (same convention as `tab_frames`).
+    /// Repair button — same frame convention as `tab_frames`; it never
+    /// flashes, and retail art has only frames 0 (off) and 1 (on).
     pub repair_frames: [Option<SidebarChromeEntry>; 5],
-    /// Sell button — 5-frame SHP state table (same convention as `tab_frames`).
+    /// Sell button — same as `repair_frames`.
     pub sell_frames: [Option<SidebarChromeEntry>; 5],
     /// Strip scroll-up (R-UP.SHP, −page) — 3-frame convention:
     /// 0 = idle, 1 = pressed, 2 = disabled. Missing frames fall back to
@@ -781,8 +782,8 @@ fn build_theme_atlas(
 
     // Tab buttons: 4 tabs × 5 frames each. Missing frames in retail fall
     // back to None; the renderer skips that frame's draw if not present.
-    // Frame 0 = idle, 1 = active-tab, 2 = disabled, 3 = pressed-idle,
-    // 4 = pressed-active. See SIDEBAR_REPAIR_SELL_BUTTON §5.
+    // Frame 0 = idle, 1 = active-tab, 2 = disabled, 3 = flash-idle,
+    // 4 = flash-active (`ui::sidebar::gadget_flash::shape_button_frame`).
     let mut tab_frame_entries: [[Option<RenderedChromeEntry>; 5]; 4] = Default::default();
     for (tab, tab_entries) in tab_frame_entries.iter_mut().enumerate() {
         for (frame, slot) in tab_entries.iter_mut().enumerate() {

@@ -301,26 +301,18 @@ pub(crate) fn build_sidebar_view_with_spec(
                 h,
             },
             disabled: false,
-            frame_index: u8::from(gadget_state.top_pressed[i]),
+            frame_index: gadget_state.top_button_frame(i),
         }
     });
     let scroll_down_button = SidebarScrollButton {
         rect: scroll_down_rect,
         disabled: scroll_disabled,
-        frame_index: if scroll_disabled {
-            2
-        } else {
-            gadget_state.scroll_down_frame()
-        },
+        frame_index: gadget_state.scroll_down_frame(scroll_disabled),
     };
     let scroll_up_button = SidebarScrollButton {
         rect: scroll_up_rect,
         disabled: scroll_disabled,
-        frame_index: if scroll_disabled {
-            2
-        } else {
-            gadget_state.scroll_up_frame()
-        },
+        frame_index: gadget_state.scroll_up_frame(scroll_disabled),
     };
 
     // Cameo grid positioning.
@@ -541,12 +533,12 @@ fn collect_build_entries(
     let mut sw_entries: Vec<BuildEntry> = Vec::new();
     if category == ProductionCategory::Defense {
         for sw in sw_views {
-            // Use sidebar_image (e.g. "INTICON") as the type_id for cameo atlas lookup.
-            let type_id = sw
-                .sidebar_image
-                .as_deref()
-                .unwrap_or(&sw.display_name)
-                .to_string();
+            // The existing type identity selects its own atlas namespace. An
+            // image filename cannot identify two types with different fallbacks.
+            let type_id = interner.map_or_else(
+                || sw.display_name.clone(),
+                |interner| interner.resolve(sw.type_id).to_owned(),
+            );
             sw_entries.push(BuildEntry {
                 identity: CameoId::SuperWeapon(sw.type_id),
                 type_id,
@@ -665,7 +657,6 @@ mod tests {
                 is_online: online,
                 can_fire: online,
                 can_afford: affordable,
-                sidebar_image: None,
             }];
             let entries = super::collect_build_entries(
                 ProductionCategory::Defense,

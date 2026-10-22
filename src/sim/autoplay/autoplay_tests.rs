@@ -270,12 +270,19 @@ fn the_two_switches_split_building_from_troops() {
         forces: false,
     });
     host.step(&mut sim, &rules);
-    let queued = sim.take_due_commands();
+    let queued = sim.pending_command_snapshot();
     assert_eq!(queued.len(), 1, "only the base's command survives");
     assert!(
         matches!(queued[0].payload, Command::QueueProduction { .. }),
         "the survivor is the production command, got {:?}",
         queued[0].payload
+    );
+    // The frame's DoList scan runs what the board admitted, so the next step
+    // starts from an empty queue.
+    sim.advance_tick(&[], Some(&rules), None, None, 33);
+    assert!(
+        sim.pending_command_snapshot().is_empty(),
+        "the frame consumed what the board queued"
     );
 
     // Production off: the troops may still be ordered, the base is the player's.
@@ -285,7 +292,7 @@ fn the_two_switches_split_building_from_troops() {
         forces: true,
     });
     host.step(&mut sim, &rules);
-    let queued = sim.take_due_commands();
+    let queued = sim.pending_command_snapshot();
     assert_eq!(queued.len(), 1, "only the troops' command survives");
     assert!(
         matches!(queued[0].payload, Command::Guard { .. }),
@@ -358,7 +365,7 @@ fn the_scripted_policy_releases_each_step_once_at_its_frame() {
 /// everything due at `execute_tick <= tick + 1`. Which frame's drain picks it
 /// up is easy to state wrongly, so pin it on a real frame loop.
 #[test]
-fn a_host_issued_command_is_drained_by_the_frame_that_follows_its_step() {
+fn a_host_issued_command_runs_in_the_frame_that_issues_it() {
     let Some((mut sim, rules)) = arena(0xA17) else {
         return;
     };
@@ -375,18 +382,19 @@ fn a_host_issued_command_is_drained_by_the_frame_that_follows_its_step() {
         usize::MAX,
     );
 
-    let mut drained_per_frame = Vec::new();
+    // Gameplay commands stay in the queue until the frame's DoList scan, so
+    // what the host issued shows up as an executed command of that same frame.
+    let mut executed_per_frame = Vec::new();
     for _ in 0..8 {
         host.step(&mut sim, &rules);
-        let due = sim.take_due_commands();
-        drained_per_frame.push(due.len());
-        sim.advance_tick(&due, Some(&rules), None, None, 33);
+        let result = sim.advance_tick(&[], Some(&rules), None, None, 33);
+        executed_per_frame.push(result.executed_commands);
     }
 
     assert_eq!(
-        drained_per_frame,
+        executed_per_frame,
         [0, 0, 0, 0, 0, 1, 0, 0],
-        "the step on tick 5 is drained by that same frame, not the next one"
+        "the step on tick 5 runs in that frame, not in a later one"
     );
 }
 
@@ -1223,10 +1231,14 @@ fn advance_to(sim: &mut Simulation, rules: &RuleSet, tick: u64) {
 // The order funnel, managed mode, and the reserved external seam.
 // ---------------------------------------------------------------------------
 
-/// Every command this frame would queue, without advancing the frame.
-fn frame_issued(host: &mut AutoPlayHost, sim: &mut Simulation, rules: &RuleSet) -> Vec<Command> {
+/// Every command this frame admitted, without advancing the frame.
+///
+/// The board's output is the queue: gameplay commands stay in it until the
+/// frame's DoList scan runs them, so the queue — not the frame's drained
+/// ingress — is what a step produced.
+fn frame_queued(host: &mut AutoPlayHost, sim: &mut Simulation, rules: &RuleSet) -> Vec<Command> {
     host.step(sim, rules);
-    sim.take_due_commands()
+    sim.pending_command_snapshot()
         .into_iter()
         .map(|envelope| envelope.payload)
         .collect()
@@ -1274,7 +1286,7 @@ fn a_managed_object_is_driven_by_its_routine_and_keeps_its_phase() {
         "a second attach must not reset a phase"
     );
 
-    let issued = frame_issued(&mut host, &mut sim, &rules);
+    let issued = frame_queued(&mut host, &mut sim, &rules);
 
     let attacks: Vec<&Command> = issued
         .iter()
@@ -1326,7 +1338,7 @@ fn the_forces_switch_stops_managed_stepping() {
     });
     assert!(host.attach(tank, MicroKind::Kite, MicroParams::default(), None));
 
-    let issued = frame_issued(&mut host, &mut sim, &rules);
+    let issued = frame_queued(&mut host, &mut sim, &rules);
 
     assert!(
         !issued.iter().any(

@@ -529,7 +529,7 @@ fn house_directive_target_kind_reaches_first_own_team_threat_scan_and_real_super
         Some(&registry),
         FrameEffects::default(),
     );
-    assert!(sim.sound_events.iter().any(|e| matches!(e,crate::sim::world::SimSoundEvent::SuperWeaponLaunched { owner,sw_type,rx:17,ry:15 } if *owner==houses[0] && *sw_type==sw)), "the closer third House is excluded by native arg3=true");
+    assert!(sim.sound_events.iter().any(|e| matches!(e,crate::sim::world::SimSoundEvent::SuperWeaponLaunched { owner,sw_type,world } if *owner==houses[0] && *sw_type==sw && world.to_cell_sub_z().0==17 && world.to_cell_sub_z().1==15)), "the closer third House is excluded by native arg3=true");
     assert!(
         !crate::sim::superweapon::superweapon_views_for_owner(&sim, &rules, &houses[0])
             .iter()
@@ -555,7 +555,8 @@ fn house_directive_target_kind_reaches_first_own_team_threat_scan_and_real_super
     );
     assert!(sim.sound_events.iter().any(|e| matches!(
         e,
-        crate::sim::world::SimSoundEvent::SuperWeaponLaunched { rx: 16, ry: 15, .. }
+        crate::sim::world::SimSoundEvent::SuperWeaponLaunched { world, .. }
+            if world.to_cell_sub_z().0 == 16 && world.to_cell_sub_z().1 == 15
     )));
     sim.houses
         .get_mut(&houses[0])

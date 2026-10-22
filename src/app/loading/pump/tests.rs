@@ -106,7 +106,7 @@ fn prepared_startup(
     crate::app::match_bootstrap::prepare_match_startup(correlation, accepted, &mut TestClock(seed))
 }
 
-fn prepared_campaign() -> crate::app::match_bootstrap::PreparedCampaignStartup {
+pub(super) fn prepared_campaign() -> crate::app::match_bootstrap::PreparedCampaignStartup {
     let ini = crate::rules::ini_parser::IniFile::from_str(
         "[Battles]\n0=ALL1\n[ALL1]\nCD=2\nScenario=ALL01UMD.MAP\n",
     );
@@ -297,7 +297,7 @@ fn test_audio() -> crate::app::audio_runtime::AppAudioRuntime {
         sfx_player: None,
         launcher_audio_available: true,
         theme_startup_suppressed: false,
-        movie_audio: Default::default(),
+        master_groups: Default::default(),
     }
 }
 
@@ -541,7 +541,8 @@ fn loading_preparation_consumes_real_source_and_returns_lease_on_initial_and_adm
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let map_path = dir.join("mp01t4.map");
-    let retail_assets = AssetManager::new(
+    #[allow(unused_mut)]
+    let mut retail_assets = AssetManager::new(
         &ra2_dir,
         crate::assets::asset_manager::MediaArchiveMode::STOCK_DIGITAL,
     )
@@ -550,6 +551,15 @@ fn loading_preparation_consumes_real_source_and_returns_lease_on_initial_and_adm
         std::fs::write(
             dir.join(name),
             retail_assets.get_ref(name).expect("retail INI"),
+        )
+        .unwrap();
+    }
+    #[cfg(feature = "ares")]
+    {
+        retail_assets.register_loading_archives().unwrap();
+        std::fs::write(
+            dir.join("mplsa.pal"),
+            retail_assets.get_ref("mplsa.pal").unwrap(),
         )
         .unwrap();
     }
@@ -574,6 +584,12 @@ fn loading_preparation_consumes_real_source_and_returns_lease_on_initial_and_adm
     let mut session = LoadingSession::from_request(request);
     session.job.asset_manager = assets.lease_for_loading();
     let mut retention = crate::app::shell_random_map::RandomMapGenerationRetention::default();
+    #[cfg(feature = "ares")]
+    {
+        ensure_session_job_asset_manager(&mut assets, &mut session, Some(ra2_dir.clone())).unwrap();
+        assets.read_multiplayer_country(&crate::rules::ini_parser::IniFile::empty(), 0);
+        assets.refresh_multiplayer_country_bodies();
+    }
     let session = prepare_loading_session(
         &mut assets,
         &mut retention,
@@ -597,7 +613,7 @@ fn loading_preparation_consumes_real_source_and_returns_lease_on_initial_and_adm
     );
     assert_eq!(prepared.context.signed_new_ini_format(), 4);
     assert!(!prepared.initial.map_data().waypoints.is_empty());
-    session.job.retire(&mut assets);
+    session.retire(&mut assets);
 
     for (selected, expected_error) in [
         (map_path.to_string_lossy().into_owned(), "Generic startup"),
@@ -1571,7 +1587,7 @@ fn saved_load_retires_fresh_receipt_and_admits_restored_exact_steps() {
     // A cold menu and an outgoing accepted match reach the same successful
     // saved-world commit. Neither may expose the prior map's L0 afterward.
     for mut authority in [MatchStartup::default(), warm] {
-        authority.acknowledge_saved_load();
+        authority.acknowledge_saved_load(None);
         assert!(authority.startup().is_none());
         assert!(authority.receipt().is_none());
         assert!(authority.admits_ordinary_tick());
@@ -1589,7 +1605,7 @@ fn saved_load_retires_fresh_receipt_and_admits_restored_exact_steps() {
         );
         authority.clear();
         assert!(!authority.admits_exact_step());
-        authority.acknowledge_saved_load();
+        authority.acknowledge_saved_load(None);
         authority.begin(Some(prior.correlation));
         assert!(
             !authority.admits_exact_step(),

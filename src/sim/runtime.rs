@@ -188,10 +188,72 @@ impl SimRuntime {
             effects,
         )
     }
+    pub fn resume_outcome_wait(
+        &mut self,
+        effects: crate::sim::world::FrameEffects<'_>,
+    ) -> Result<crate::sim::world::SimFrameOutput, crate::sim::world::FrameAdvanceError> {
+        self.simulation.resume_outcome_wait(
+            &self.resources.rules,
+            Some(&self.resources.overlay_registry),
+            effects,
+        )
+    }
+
+    /// Complete a frame suspended by a checksum modal, using the same bound
+    /// resources and without re-entering Logic or synchronized dispatch.
+    pub fn resume_after_network_failure(
+        &mut self,
+        effects: crate::sim::world::FrameEffects<'_>,
+    ) -> Result<crate::sim::world::SimFrameOutput, crate::sim::world::FrameAdvanceError> {
+        self.simulation.resume_after_network_failure(
+            &self.resources.rules,
+            Some(&self.resources.overlay_registry),
+            effects,
+        )
+    }
+
+    pub fn resume_network_wait(
+        &mut self,
+        effects: crate::sim::world::FrameEffects<'_>,
+    ) -> Result<crate::sim::world::SimFrameOutput, crate::sim::world::FrameAdvanceError> {
+        self.simulation.resume_network_wait(
+            &self.resources.rules,
+            Some(&self.resources.overlay_registry),
+            effects,
+        )
+    }
+
+    pub fn leave_network_wait(
+        &mut self,
+        effects: crate::sim::world::FrameEffects<'_>,
+    ) -> Result<crate::sim::world::SimFrameOutput, crate::sim::world::FrameAdvanceError> {
+        self.simulation.leave_network_wait(
+            &self.resources.rules,
+            Some(&self.resources.overlay_registry),
+            effects,
+        )
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl SimRuntime {
+    /// Call the existing command receiver with this runtime's bound resources.
+    /// Component fixtures can exercise an AI receiver without originating a
+    /// player event; this deliberately bypasses EventClass queue admission.
+    pub fn apply_command_for_test(
+        &mut self,
+        owner: &str,
+        command: &crate::sim::command::Command,
+    ) -> bool {
+        self.simulation.apply_command_with_overlays(
+            owner,
+            command,
+            &self.resources.rules,
+            Some(&self.resources.overlay_registry),
+            crate::sim::world::FrameEffects::default(),
+        )
+    }
+
     /// Replace a same-content restored simulation in place. Resource ownership
     /// never changes and callers must already have a running match.
     pub fn replace_simulation(&mut self, simulation: Simulation) {
@@ -919,6 +981,10 @@ pub fn finalize_and_populate_staged_authored_scenario<F>(
 where
     F: FnOnce(&mut Simulation, &RuleSet),
 {
+    // ReadMap4AD0C5 materializes Home only after the earlier start-slot pass.
+    // The updated map feeds the single Scenario waypoint table, camera and
+    // later trigger/Team consumers below. Generated and saved worlds bypass it.
+    map_data.initialize_authored_home_waypoint();
     // Immutable load parameters, never republished as runtime owners. Only ART
     // can change in the scoped hosts below; these small snapshots let Recalc
     // retain its inputs across both sweeps while constructors borrow current
@@ -1210,7 +1276,7 @@ pub fn finalize_constructed_scenario(
     }
     // The caller submits one immutable initialization command; Simulation owns
     // every match-affecting write and Scenario RNG draw in the post-map tail.
-    let campaign_new_game_map = sim
+    let campaign_map = sim
         .session
         .campaign_mission_counter()
         .filter(|_| !sim.session.game_mode_nonzero())
@@ -1224,7 +1290,7 @@ pub fn finalize_constructed_scenario(
             overlay_registry,
             house_roster,
             skirmish_session,
-            campaign_new_game_map,
+            campaign_map,
         });
     sim.lighting_sources.discard_pending();
     output

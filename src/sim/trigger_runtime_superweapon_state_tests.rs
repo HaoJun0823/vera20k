@@ -174,6 +174,13 @@ fn all03_authored_nuke_order_preserves_current_timer_and_recharges_at_override()
         let silo = sim
             .spawn_object("NAMISL", "YuriCountry", 48, 89, 0, &rules)
             .unwrap();
+        // The control writes its silo into memory without Added_To_Game, so
+        // its House holds no drain, and it grants with low power off (Grant
+        // 0x006CB560's third argument). Spawning counted the silo's drain at
+        // once (0x00502B48..0x00502B52); clear it to match.
+        let power = sim.power_states.house_mut(owner);
+        power.set_total_drain_for_test(0);
+        power.set_is_low_power_for_test(false);
         let tag_type = sim.trigger_runtime.definitions.tag_type(tag_name).unwrap();
         let tag = sim.shared_trigger_tag(tag_type);
         let live = sim.trigger_runtime.tag(tag).unwrap().triggers[0];

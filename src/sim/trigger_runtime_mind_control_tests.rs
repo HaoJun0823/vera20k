@@ -96,6 +96,8 @@ fn retail_all02_mind_control_attack_starts_the_authored_stallone_script() {
                 difficulty: 1,
                 mission_counter: 2,
                 game_options: None,
+                campaign_index: 0,
+                restart_carry_over: crate::sim::campaign_carry_over::CampaignCarryOver::CLEARED,
             },
         )
         .unwrap();

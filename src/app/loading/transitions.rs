@@ -48,6 +48,7 @@ pub(crate) fn sync_in_game_options_speed_from_sim(state: &mut AppState) {
 pub(crate) fn fallback_map_load_result() -> init::MapLoadResult {
     init::MapLoadResult {
         scenario: init::ScenarioLoadInputs {
+            campaign_names: None,
             startup: crate::app::match_bootstrap::LoadingStartup::Generic {
                 selected_map_file: "fallback".to_string(),
             },
@@ -99,6 +100,7 @@ pub(crate) fn fallback_map_load_result() -> init::MapLoadResult {
 /// App-only projections transferred with a new runtime. This bundle has no
 /// gameplay authority: its source values belong to the loaded map/resources.
 pub(crate) struct MapPresentationInputs {
+    pub(crate) campaign_names: Option<crate::rules::campaign_loading::CampaignScenarioNames>,
     pub(crate) basic: BasicSection,
     pub(crate) ranking: crate::map::ranking::RankingSection,
     pub(crate) source: crate::map::source::LoadedMapSource,
@@ -122,6 +124,9 @@ pub(crate) fn install_world_presentation(
     map: MapPresentationInputs,
     assets: init::PresentationLoadAssets,
 ) {
+    if let Some(names) = map.campaign_names {
+        state.match_state.campaign_names = names;
+    }
     state.match_state.map_basic = map.basic;
     state.match_state.map_ranking = map.ranking;
     state.match_state.loaded_map_source = Some(map.source);
@@ -406,6 +411,7 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
     install_world_presentation(
         state,
         MapPresentationInputs {
+            campaign_names: result.scenario.campaign_names,
             basic: result.scenario.basic,
             ranking: result.scenario.ranking,
             source: result.scenario.map_source,
@@ -480,8 +486,6 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
         crate::ui::messages::MESSAGE_MAX_VISIBLE_RETAIL,
         0,
     );
-    state.match_state.match_presentation.message_clock =
-        crate::ui::messages::PauseAwareClock::default();
     state.match_state.match_presentation.chat = Default::default();
     state.match_state.input.minimap_dragging = false;
     state.match_state.input.tactical_mouse.reset_for_new_view();
@@ -560,7 +564,7 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
                     .simulation
                     .restore_campaign_carry_over(record, &runtime.resources.rules);
             }
-            Ok(())
+            crate::app::lan_service::install_gameplay(state).map_err(|error| error.to_string())
         }
         crate::app::match_bootstrap::LoadingStartup::UnverifiedLegacy { .. }
         | crate::app::match_bootstrap::LoadingStartup::Generic { .. } => {

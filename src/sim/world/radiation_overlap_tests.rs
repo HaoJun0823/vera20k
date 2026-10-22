@@ -221,7 +221,7 @@ fn overlapping_stock_fields_preserve_serialized_bits_hash_and_decay() {
         for world in [&mut reference, &mut restored] {
             world.radiation.tick_decay(
                 frame,
-                &rules.radiation,
+                &rules,
                 scene.resolved_terrain.as_ref(),
                 &mut crate::sim::light_sources::LightingSources::default(),
             );

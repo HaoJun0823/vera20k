@@ -27,6 +27,7 @@
 
 use glam::IVec3;
 
+pub use crate::rules::ini_parser::ini_value::TechnoTypeCategory;
 use crate::rules::ini_parser::{IniSection, is_native_none_type_name};
 use crate::rules::jumpjet_params::JumpjetParams;
 use crate::rules::locomotor_type::{LocomotorKind, MovementZone, SpeedType};
@@ -316,6 +317,9 @@ pub struct ObjectType {
     pub id: String,
     /// Which type registry this object belongs to.
     pub category: ObjectCategory,
+    /// Native `TechnoTypeClass::ReadINI @ 0x00712170` `Category=` result at
+    /// `+0x3BC`, separate from the Rust registry family above.
+    pub techno_category: TechnoTypeCategory,
     /// BuildingType+EBC, world leptons added by Building4500A0 to GetCoords.
     /// Constructor45DEBC..45DEC8 clears it; ReadINI460F87 uses ReadCoord529CA0
     /// with the current triple as default. Other type classes do not read it.
@@ -910,6 +914,9 @@ pub struct ObjectType {
     pub super_weapon: Option<String>,
     /// Secondary superweapon type ID, typically from an upgrade (SuperWeapon2= in rules.ini).
     pub super_weapon2: Option<String>,
+    /// BuildingTypeExt+178, ordered lookup-only `SuperWeapons=` references.
+    #[cfg(feature = "ares")]
+    additional_super_weapons: Vec<String>,
     /// `NukeSilo=` (BuildingType `+0x16BA`, ReadBool at `0x00460A45`,
     /// constructor clear at `0x0045E127`): `SuperClass::Launch @ 0x006CC390`
     /// fires a `MultiMissile` weapon from the first such type granting it,
@@ -1294,6 +1301,7 @@ pub struct ObjectType {
     pub immune: bool,
     /// Nullifies damage from an exact same-type, same-owner source object.
     pub type_immune: bool,
+    emp: Option<crate::rules::ares_emp::EmpTypeRules>,
     /// Psychedelic/mind-control immunity. Buildings default true natively.
     pub immune_to_psionics: bool,
     /// `Warpable=` (`TechnoTypeClass+0xD3A`, ReadINI `0x00714F65..0x00714F79`;
@@ -1800,12 +1808,14 @@ pub struct ObjectType {
     /// false; only eligible buildings can convert a fatal result to PostMortem.
     pub eligible_for_delay_kill: bool,
 
-    /// `Invisible=yes` on BuildingType. Live building rejection checks this
-    /// plain invisible byte separately from `InvisibleInGame`.
+    /// TechnoType+0xC9A `Invisible=`. BuildingType ReadINI460E09 also forces
+    /// it true while InvisibleInGame is set; the ordered Rules owner retains
+    /// that write across layers. Live rejection can test both bytes separately.
     pub invisible: bool,
 
     /// `InvisibleInGame=yes` on BuildingType. Logical-only buildings (e.g., bridge
     /// anchors) that should not receive C4 or other interaction cursors.
+    /// ReadINI460E09/460E10 also forces Invisible=true and RadarVisible=false.
     pub invisible_in_game: bool,
     /// BuildingType+0x1703, the immediate placement admission read by
     /// 0x464AC0; the constructor clears it at 0x45E212 and ReadINI
@@ -1907,13 +1917,11 @@ pub struct ObjectType {
     /// Gates the Behind indicator (`TechnoClass::AI_Update @ 0x006FA2A2`).
     pub can_be_hidden: bool,
 
-    /// Whether the type draws from the scenario's extra building palette
-    /// ([`RuleSet::extra_building_palette`](crate::rules::ruleset::RuleSet::extra_building_palette)):
-    /// art `Palette=` named one, so ReadINI (`0x00715852`, `0x00717820`)
-    /// pointed `+0xDF0` at its generated colour schemes. Set by
-    /// `RuleSet::project_art_data` from
-    /// [`ArtRegistry::techno_palette`](crate::rules::art_data::ArtRegistry::techno_palette).
-    pub custom_palette: bool,
+    /// Last nonempty Palette request from the reached TechnoType ReadINI
+    /// passes. This is binding metadata, not proof that its asset loaded:
+    /// native717820 stores null if6263D0 cannot load the named group.
+    /// The registered type's Image/reference owner supplies this projection.
+    custom_palette: Option<String>,
 
     /// `RevealToAll=` (TechnoType `+0x5EE`): constructor `0x00710FFC` writes
     /// false; ReadINI (`0x00714382..0x00714396`) reads it with ReadBool
@@ -2118,6 +2126,22 @@ fn native_minutes_to_ticks(value: f64) -> u32 {
 }
 
 impl ObjectType {
+    #[cfg(feature = "ares")]
+    pub(crate) fn additional_super_weapons(&self) -> &[String] {
+        &self.additional_super_weapons
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn project_additional_super_weapons(&mut self, names: &[String]) {
+        self.additional_super_weapons = names.to_vec();
+    }
+    pub(crate) fn emp_rules(&self) -> Option<&crate::rules::ares_emp::EmpTypeRules> {
+        self.emp.as_ref()
+    }
+    pub(crate) fn bind_emp_rules(&mut self, rules: Option<&crate::rules::ares_emp::EmpTypeRules>) {
+        self.emp = rules.cloned();
+    }
+
     /// Retained TechnoType+C9E; building crew admission reads this input
     /// separately from the constructed Infantry's survivor marker.
     pub const fn nominal(&self) -> bool {
@@ -2221,6 +2245,16 @@ impl ObjectType {
         {
             false
         }
+    }
+
+    /// Retained custom palette request; the asset loader remains responsible
+    /// for resolving it. Empty ART Palette reads retain this name (717820).
+    pub fn custom_palette_name(&self) -> Option<&str> {
+        self.custom_palette.as_deref()
+    }
+
+    pub(crate) fn project_custom_palette(&mut self, name: Option<&str>) {
+        self.custom_palette = name.map(str::to_owned);
     }
 
     #[cfg(feature = "ares")]
@@ -2822,6 +2856,7 @@ impl ObjectType {
         Self {
             id: id.to_string(),
             category,
+            techno_category: section.read_techno_type_category(TechnoTypeCategory::Unknown),
             // The process-resident Building reader publishes this below the
             // projection; merged text must not perform a second coordinate read.
             target_coord_offset: [0; 3],
@@ -3084,6 +3119,8 @@ impl ObjectType {
             death_weapon_damage_modifier: section.read_float("DeathWeaponDamageModifier", 1.0),
             super_weapon: section.read_name("SuperWeapon", 0x20).map(str::to_owned),
             super_weapon2: section.read_name("SuperWeapon2", 0x20).map(str::to_owned),
+            #[cfg(feature = "ares")]
+            additional_super_weapons: Vec::new(),
             nuke_silo: section.read_bool("NukeSilo", false),
             charged_anim_time: section.read_float("ChargedAnimTime", 999.0),
             spy_sat: section.read_bool("SpySat", false),
@@ -3258,6 +3295,7 @@ impl ObjectType {
             damage_self: section.read_bool("DamageSelf", false),
             immune: section.read_bool("Immune", false),
             type_immune: section.read_bool("TypeImmune", false),
+            emp: None,
             immune_to_psionics: section
                 .read_bool("ImmuneToPsionics", category == ObjectCategory::Building),
             warpable: section.read_bool("Warpable", true),
@@ -3476,7 +3514,7 @@ impl ObjectType {
             is_selectable_combatant: section.read_bool("IsSelectableCombatant", false),
             // The constructor's value; ART supplies the key (`project_art_data`).
             can_be_hidden: true,
-            custom_palette: false,
+            custom_palette: None,
             reveal_to_all: section.read_bool("RevealToAll", false),
 
             // Naval flags
@@ -3730,6 +3768,54 @@ mod absorber_pip_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invisible_in_game_forces_building_flags_and_retains_them_across_layers() {
+        use crate::rules::ini_parser::IniFile;
+        use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+        use crate::rules::ruleset::RuleSet;
+
+        let mut layers = RulesLayerStack::new(IniFile::from_str(
+            "[BuildingTypes]\n0=HIDDEN\n[VehicleTypes]\n0=VISIBLE\n\
+             [HIDDEN]\nInvisible=no\nInvisibleInGame=yes\nRadarVisible=yes\n\
+             [VISIBLE]\nInvisible=no\nInvisibleInGame=yes\nRadarVisible=yes\n",
+        ));
+        let flags = |layers: &RulesLayerStack, name: &str| {
+            let rules = RuleSet::from_rules_layers(layers).unwrap();
+            let object = rules.object(name).unwrap();
+            (
+                object.invisible_in_game,
+                object.invisible,
+                object.radar_visible,
+            )
+        };
+        assert_eq!(flags(&layers, "HIDDEN"), (true, true, false));
+        assert_eq!(flags(&layers, "VISIBLE"), (true, false, true));
+
+        // Clearing the building-only key does not undo earlier derived writes.
+        // Invalid base-reader values retain those writes as their defaults.
+        layers.push(
+            RulesLayerKind::GameMode,
+            IniFile::from_str(
+                "[HIDDEN]\nInvisibleInGame=no\nInvisible=invalid\nRadarVisible=invalid\n",
+            ),
+        );
+        assert_eq!(flags(&layers, "HIDDEN"), (false, true, false));
+        layers.push(
+            RulesLayerKind::Scenario,
+            IniFile::from_str("[HIDDEN]\nInvisible=no\nRadarVisible=yes\n"),
+        );
+        assert_eq!(flags(&layers, "HIDDEN"), (false, false, true));
+
+        let Some(retail) =
+            crate::rules::retail_ini_fixture::retail_battle_rules_for_map("XMP03T4.MAP")
+        else {
+            return;
+        };
+        let lamp = retail.rules.object("INGALITE").unwrap();
+        assert!(lamp.invisible_in_game && lamp.invisible);
+        assert!(!lamp.radar_visible);
+    }
+
     /// `RevealToAll=` through the production reader on the retail layers.
     #[test]
     #[ignore = "slow; run when changing what it covers"]
@@ -5425,6 +5511,91 @@ mod tests {
             (jumpjet_sections, ini_spelling),
             (8, 16),
             "8 stock sections author Jumpjet* keys and all 8 carry both mis-cased keys"
+        );
+    }
+
+    #[test]
+    fn techno_category_retains_stock_battle_values() {
+        let Some(battle) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+            return;
+        };
+
+        assert_eq!(
+            battle.rules.object("E1").expect("stock E1").techno_category,
+            TechnoTypeCategory::Soldier
+        );
+        assert_eq!(
+            battle
+                .rules
+                .object("MTNK")
+                .expect("stock MTNK")
+                .techno_category,
+            TechnoTypeCategory::ArmoredFightingVehicle
+        );
+    }
+
+    #[test]
+    fn techno_category_uses_native_names_and_current_default_per_pass() {
+        use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+        use crate::rules::ruleset::RuleSet;
+
+        let Some(battle) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+            return;
+        };
+        let mut layers = RulesLayerStack::new((*battle.authored_rules).clone());
+        layers.push(
+            RulesLayerKind::GameMode,
+            IniFile::from_str("[E1]\nCategory=Armored Fighting Vehicle\n[MTNK]\nCategory=AFV\n"),
+        );
+        let named = RuleSet::from_rules_layers(&layers).expect("production Category pass");
+        assert_eq!(
+            named.object("E1").expect("registered E1").techno_category,
+            TechnoTypeCategory::ArmoredFightingVehicle
+        );
+        assert_eq!(
+            named
+                .object("MTNK")
+                .expect("registered MTNK")
+                .techno_category,
+            TechnoTypeCategory::ArmoredFightingVehicle
+        );
+
+        layers.push(
+            RulesLayerKind::Scenario,
+            IniFile::from_str("[E1]\nCost=1\n[MTNK]\nCategory=not-a-native-category\n"),
+        );
+        let missing_and_unknown =
+            RuleSet::from_rules_layers(&layers).expect("production Category boundaries");
+        assert_eq!(
+            missing_and_unknown
+                .object("E1")
+                .expect("registered E1")
+                .techno_category,
+            TechnoTypeCategory::ArmoredFightingVehicle
+        );
+        assert_eq!(
+            missing_and_unknown
+                .object("MTNK")
+                .expect("registered MTNK")
+                .techno_category,
+            TechnoTypeCategory::Unknown
+        );
+
+        layers.push(
+            RulesLayerKind::Scenario,
+            IniFile::from_str("[E1]\nCategory=not-a-native-category\n[MTNK]\nCost=1\n"),
+        );
+        let unknown = RuleSet::from_rules_layers(&layers).expect("production layered Category");
+        assert_eq!(
+            unknown.object("E1").expect("registered E1").techno_category,
+            TechnoTypeCategory::Unknown
+        );
+        assert_eq!(
+            unknown
+                .object("MTNK")
+                .expect("registered MTNK")
+                .techno_category,
+            TechnoTypeCategory::Unknown
         );
     }
 }

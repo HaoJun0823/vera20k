@@ -346,8 +346,9 @@ pub(crate) fn mouse(state: &mut AppState, button: MouseButton, pressed: bool) {
             .button
             .press(target);
         if target.is_some() {
-            // Common type2 button 0x0061374B..0x00613771: click at button-down.
-            App::play_skirmish_shell_generic_click_sound(state);
+            // Owner-draw button-down: GUIMainButtonSound (Rules+0x188,
+            // 0x0061374B..0x00613771).
+            App::play_main_menu_button_sound(state);
         }
         match over {
             Some(DiplomacyControl::Chat(row)) => toggle_chat_box(state, row),

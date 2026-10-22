@@ -72,6 +72,7 @@ pub struct SavedSidebarOrder {
     flash_deadlines: [Vec<i32>; 4],
     redraw_until: i32,
     request_states: [Vec<u8>; 4],
+    factory_links: [Vec<Option<crate::sim::production::ProductionFactoryVisit>>; 4],
     prediction_categories: Vec<crate::sim::production::ProductionCategory>,
 }
 
@@ -79,6 +80,7 @@ impl SavedSidebarOrder {
     pub fn new(owner: InternedId, strips: [Vec<SavedCameoId>; 4], scroll_rows: [usize; 4]) -> Self {
         let flash_deadlines = std::array::from_fn(|index| vec![0; strips[index].len()]);
         let request_states = std::array::from_fn(|index| vec![0; strips[index].len()]);
+        let factory_links = std::array::from_fn(|index| vec![None; strips[index].len()]);
         Self {
             owner,
             strips,
@@ -86,6 +88,7 @@ impl SavedSidebarOrder {
             flash_deadlines,
             redraw_until: 0,
             request_states,
+            factory_links,
             prediction_categories: Vec::new(),
         }
     }
@@ -107,6 +110,24 @@ impl SavedSidebarOrder {
 
     pub fn requests(&self) -> &[Vec<u8>; 4] {
         &self.request_states
+    }
+
+    /// Mouse Save5BE6D0 retains each entry's Factory pointer (+64), including
+    /// associations to a Factory whose current product differs from the cameo.
+    /// VERA saves that foreign identity; the app validates it against the loaded
+    /// registry before installing the retained strips.
+    pub fn with_factory_links(
+        mut self,
+        links: [Vec<Option<crate::sim::production::ProductionFactoryVisit>>; 4],
+    ) -> Self {
+        self.factory_links = links;
+        self
+    }
+
+    pub fn factory_links(
+        &self,
+    ) -> &[Vec<Option<crate::sim::production::ProductionFactoryVisit>>; 4] {
+        &self.factory_links
     }
 
     /// HouseSave504080/Load503040 retain the independent category gates;
@@ -281,10 +302,19 @@ pub enum SnapshotError {
 /// Structural failures found before a deserialized simulation is admitted.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SnapshotRestoreError {
+    #[cfg(feature = "ares")]
+    #[error("object {object_id} has invalid attached speed: {reason}")]
+    InvalidAttachedSpeedState {
+        object_id: u64,
+        reason: &'static str,
+    },
     #[error("invalid UnitDelivery snapshot state: {0}")]
     InvalidUnitDelivery(&'static str),
     #[error("invalid paid two-stage selection: {0}")]
     InvalidPaidSuperWeaponSelection(&'static str),
+    #[cfg(feature = "ares")]
+    #[error("invalid superweapon launch history: {0}")]
+    InvalidSuperWeaponLaunchHistory(&'static str),
     #[error("invalid detached Particle {object_id}: {reason}")]
     InvalidDetachedParticleState {
         object_id: u64,
@@ -337,6 +367,8 @@ pub enum SnapshotRestoreError {
     InvalidCurrentHouse {
         owner: crate::sim::intern::InternedId,
     },
+    #[error("invalid saved frame continuation: {reason}")]
+    InvalidFrameContinuation { reason: &'static str },
     #[error("invalid saved multiplayer session: {reason}")]
     InvalidMultiplayerSession { reason: &'static str },
     #[cfg(feature = "ares")]
@@ -1638,6 +1670,10 @@ impl Simulation {
         }
         self.validate_paid_super_weapon_selections()
             .map_err(SnapshotRestoreError::InvalidPaidSuperWeaponSelection)?;
+        #[cfg(feature = "ares")]
+        self.super_weapons
+            .validate_ares_launch_history()
+            .map_err(SnapshotRestoreError::InvalidSuperWeaponLaunchHistory)?;
         self.unit_deliveries
             .validate(self)
             .map_err(SnapshotRestoreError::InvalidUnitDelivery)?;
@@ -1661,6 +1697,13 @@ impl Simulation {
         {
             return Err(SnapshotRestoreError::InvalidCurrentHouse { owner });
         }
+        if self.session.outcome_request().is_some() && self.session.current_house().is_none() {
+            return Err(SnapshotRestoreError::InvalidFrameContinuation {
+                reason: "scenario result request has no current House",
+            });
+        }
+        self.validate_frame_continuation_for_restore()
+            .map_err(|reason| SnapshotRestoreError::InvalidFrameContinuation { reason })?;
         if let Some(observer) = self.session.observer_house()
             && !self.houses.contains_key(&observer)
         {
@@ -1703,51 +1746,20 @@ impl Simulation {
             house.validate_production_history().map_err(|reason| {
                 SnapshotRestoreError::InvalidHouseProductionHistory { owner, reason }
             })?;
-            if house.is_to_die()
-                && (house.has_won() || house.has_lost() || house.outcome().is_some())
-            {
+            if house.is_to_die() && (house.has_won() || house.has_lost()) {
                 return Err(SnapshotRestoreError::InvalidHouseOutcomeState {
                     owner,
                     reason: "Flag_To_Die conflicts with a terminal result",
                 });
             }
-            // MPlayer_Defeated flags only PlayerPtr (4FC5AA..6B7); every other
-            // defeated House, and a local one still watching, has no result.
-            let Some(outcome) = house.outcome() else {
-                if house.has_won() || house.has_lost() {
-                    return Err(SnapshotRestoreError::InvalidHouseOutcomeState {
-                        owner,
-                        reason: "terminal flags require serialized outcome authority",
-                    });
-                }
-                continue;
-            };
-            let flags_match = match outcome.kind {
-                crate::sim::house_state::HouseOutcomeKind::Victory => {
-                    //FlagWin4FC9EE guards Won/FlagToDie/Lost, not Defeated.
-                    house.has_won() && !house.has_lost()
-                }
-                crate::sim::house_state::HouseOutcomeKind::Defeat => {
-                    house.has_lost() && !house.has_won()
-                }
-            };
-            if !flags_match {
+            // FlagWin4FC9EE refuses Lost, and FlagLose4FCBDE clears Won.
+            // House4F8657 also clears Won after its wait, independently of
+            // the sticky process result requests. A later Action2 may change
+            // the House flags and restart +298 after victory was admitted.
+            if house.has_won() && house.has_lost() {
                 return Err(SnapshotRestoreError::InvalidHouseOutcomeState {
                     owner,
-                    reason: "kind disagrees with terminal house flags",
-                });
-            }
-            // A pending result can legally have an expired timer: campaign
-            // AllowWin Tags still block it, or this frame's House rung has not
-            // visited it yet. Only the admitted exit latch requires zero.
-            if outcome.exit_ready
-                && !house
-                    .outcome_timer()
-                    .expired(self.session.binary_frame() as i32)
-            {
-                return Err(SnapshotRestoreError::InvalidHouseOutcomeState {
-                    owner,
-                    reason: "shared result timer disagrees with expiry latch",
+                    reason: "Won and Lost flags conflict",
                 });
             }
         }
@@ -1944,6 +1956,14 @@ impl Simulation {
         prepare_terrain_assets: Option<&mut SnapshotTerrainAssetPreparation<'_>>,
     ) -> Result<SnapshotMapRestoreOutput, SnapshotRestoreError> {
         self.validate_type_tech_levels(rules)?;
+        #[cfg(feature = "ares")]
+        self.validate_attached_speed_after_restore(rules)
+            .map_err(
+                |(object_id, reason)| SnapshotRestoreError::InvalidAttachedSpeedState {
+                    object_id,
+                    reason,
+                },
+            )?;
         #[cfg(feature = "ares")]
         self.validate_factory_country_references(rules)
             .map_err(|reason| SnapshotRestoreError::InvalidFactoryCountry { reason })?;
@@ -3178,6 +3198,8 @@ mod tests {
         header.compatibility = match RulesCompatibility::default() {
             RulesCompatibility::Retail => RulesCompatibility::Ares,
             RulesCompatibility::Ares => RulesCompatibility::Retail,
+            RulesCompatibility::Phobos => RulesCompatibility::AresPhobos,
+            RulesCompatibility::AresPhobos => RulesCompatibility::Phobos,
         };
         // A complete header with no body proves capability admission runs before
         // Simulation deserialization, even without bound scenario resources.
@@ -5198,7 +5220,7 @@ mod tests {
         let restored_house = restored.houses.get(&owner).expect("restored house");
         let outcome = restored_house.outcome().expect("accepted outcome");
         assert_eq!(outcome.kind, HouseOutcomeKind::Victory);
-        assert!(!outcome.exit_ready);
+        assert!(restored.session().outcome_request().is_none());
         assert_eq!(
             restored_house
                 .outcome_timer()
@@ -5206,34 +5228,29 @@ mod tests {
             45
         );
 
-        let mut boundary = restored_house.clone();
-        assert!(!boundary.advance_outcome_savour(189, true));
-        assert!(boundary.advance_outcome_savour(190, true));
+        assert_eq!(restored_house.pending_outcome(189, true), None);
+        assert_eq!(
+            restored_house.pending_outcome(190, true),
+            Some(HouseOutcomeKind::Victory)
+        );
     }
 
     #[test]
-    fn gsi_01_04_malformed_current_snapshot_naked_terminal_flags_are_rejected() {
+    fn gsi_01_04_conflicting_native_house_result_flags_are_rejected() {
         use crate::sim::house_state::HouseState;
 
-        for terminal_flag in ["has_won", "has_lost"] {
+        for (won, lost, to_die) in [
+            (true, true, false),
+            (true, false, true),
+            (false, true, true),
+        ] {
             let mut malformed = Simulation::new();
             let owner = malformed.interner.intern("Americans");
             let mut house = HouseState::new(owner, 0, None, true, 10_000, 10);
-            match terminal_flag {
-                "has_won" => house.supply_outcome_state_for_test(
-                    true,
-                    false,
-                    None,
-                    crate::sim::timer::CdTimer::default(),
-                ),
-                "has_lost" => house.supply_outcome_state_for_test(
-                    false,
-                    true,
-                    None,
-                    crate::sim::timer::CdTimer::default(),
-                ),
-                _ => unreachable!(),
+            if to_die {
+                assert!(house.flag_to_die(0));
             }
+            house.supply_result_flags_for_test(won, lost, crate::sim::timer::CdTimer::default());
             malformed.houses.register(house);
 
             let bytes = GameSnapshot::save(&malformed, 11, 22, "", 33);
@@ -5242,9 +5259,13 @@ mod tests {
                 restored.restore_after_snapshot_load(),
                 Err(SnapshotRestoreError::InvalidHouseOutcomeState {
                     owner,
-                    reason: "terminal flags require serialized outcome authority",
+                    reason: if to_die {
+                        "Flag_To_Die conflicts with a terminal result"
+                    } else {
+                        "Won and Lost flags conflict"
+                    },
                 }),
-                "naked {terminal_flag} must not enter a world whose app bridge can only consume outcome_state"
+                "FlagWin/FlagLose cannot produce conflicting House flags"
             );
         }
     }
@@ -6262,53 +6283,6 @@ mod tests {
                 .type_facts
                 .building_hidden_occupancy(),
             Some(profile)
-        );
-        assert_eq!(restored.state_hash(), expected_hash);
-    }
-
-    #[test]
-    fn gsi_04_16_waypoint_edge_factory_profile_roundtrips_and_hashes() {
-        use crate::map::entities::EntityCategory;
-        use crate::sim::game_entity::GameEntity;
-
-        let mut sim = Simulation::new();
-        let entity_id = sim.substrate.allocate_stable_id();
-        let conyard = GameEntity::test_default_of_category(
-            entity_id,
-            "GACNST",
-            "AMERICANS",
-            10,
-            10,
-            EntityCategory::Structure,
-        );
-        sim.substrate.entities.insert(conyard);
-        // Native in-scenario load restarts Scenario RNG from Seed0; isolate
-        // waypoint-edge profile persistence on that same post-load cursor.
-        sim.scenario_rng = crate::sim::rng::SimRng::new(0);
-        let without_profile = sim.state_hash();
-        sim.substrate
-            .entities
-            .get_mut(entity_id)
-            .unwrap()
-            .type_facts
-            .set_determines_waypoint_edge_for_test(true);
-        let expected_hash = sim.state_hash();
-        assert_ne!(expected_hash, without_profile);
-
-        let bytes = GameSnapshot::save(&sim, 0, 0, "gsi_04_16_edge_profile", 0);
-        assert_eq!(
-            GameSnapshot::read_header(&bytes).unwrap().layout,
-            super::snapshot_layout()
-        );
-        let restored = GameSnapshot::load(&bytes).expect("current snapshot").sim;
-        assert!(
-            restored
-                .substrate
-                .entities
-                .get(entity_id)
-                .unwrap()
-                .type_facts
-                .determines_waypoint_edge()
         );
         assert_eq!(restored.state_hash(), expected_hash);
     }

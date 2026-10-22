@@ -3,6 +3,39 @@
 use super::*;
 use crate::util::save_codec;
 
+#[cfg(feature = "ares")]
+#[test]
+fn ares_emp_ai_named_mission_reader_matches_native_histories() {
+    let corpus = crate::test_fixture::json("tools/rules_oracle/ares_emp.json");
+    for row in corpus["ai_mission_readers"].as_array().unwrap() {
+        let mut controls = AresGlobalControls::default();
+        assert!(controls.emp_ai_recover_mission().is_none());
+        for (raw, result) in row["fixture"]["raw_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(row["result"].as_array().unwrap())
+        {
+            let text = raw
+                .as_str()
+                .map_or(String::new(), |raw| format!("EMPAIRecoverMission={raw}\n"));
+            controls.read_before_type_data(&IniFile::from_str(&format!("[CombatDamage]\n{text}")));
+            let expected = result["present"]
+                .as_bool()
+                .unwrap()
+                .then(|| result["value"].as_i64().unwrap() as i32);
+            assert_eq!(
+                controls
+                    .emp_ai_recover_mission()
+                    .map(|mission| mission as i32),
+                expected,
+                "{}: {result}",
+                row["name"]
+            );
+        }
+    }
+}
+
 #[test]
 fn cold_root_colors_exist_without_langrule_or_rules_process() {
     let native = crate::test_fixture::json("tools/rules_oracle/cold_colors.json");
@@ -2153,6 +2186,37 @@ fn fixed_art_and_member_major_type_data_follow_live_native_order() {
     assert!(actual.iter().all(|(_, id)| *id != "TOO_LATE"));
 }
 
+/// Native46C2B9 stores the factory answer but never revisits the earlier
+/// Weapon sweep. Empty retains the pointer, none clears it, and a map-only
+/// factory allocation must not retroactively read that map's orphan body.
+#[test]
+fn airburst_reference_retains_rebinds_and_keeps_native_factory_timing() {
+    use crate::rules::ruleset::RuleSet;
+    let root = IniFile::from_str(
+        "[VehicleTypes]\n0=CARRIER\n[CARRIER]\nPrimary=ROOT\nSecondary=CHILD\n\
+         [ROOT]\nProjectile=SHOT\nWarhead=WH\n\
+         [CHILD]\nProjectile=FRAGMENT\nWarhead=WH\nDamage=37\n\
+         [SHOT]\nAirburst=yes\nAirburstWeapon=CHILD\n[FRAGMENT]\n\
+         [Warheads]\n0=WH\n[WH]\n",
+    );
+    for (value, expected) in [("", Some("CHILD")), ("none", None), ("LATE", Some("LATE"))] {
+        let mut layers = RulesLayerStack::new(root.clone());
+        layers.push(RulesLayerKind::Scenario, IniFile::from_str(&format!(
+            "[SHOT]\nAirburstWeapon={value}\n[LATE]\nDamage=99\nProjectile=FRAGMENT\nWarhead=WH\n",
+        )));
+        let processed = layers.process().unwrap();
+        let rules = RuleSet::from_processed_rules(&processed).unwrap();
+        assert_eq!(
+            rules.projectile("SHOT").unwrap().airburst_weapon.as_deref(),
+            expected
+        );
+        if value == "LATE" {
+            assert_eq!(rules.weapon("LATE").unwrap().damage, 0);
+            assert!(rules.weapon("LATE").unwrap().projectile.is_none());
+        }
+    }
+}
+
 #[test]
 fn techno_weapon_bank_uses_effective_native_gates_and_elite_slot_order() {
     let mut layers = RulesLayerStack::new(IniFile::from_str(
@@ -2530,6 +2594,92 @@ fn warhead_particle_system_and_voxel_children_obey_passed_family_timing() {
             "TOO_LATE_WARHEAD_BODY" | "TOO_LATE_PARTICLE_SYSTEM_BODY"
         )
     }));
+}
+
+#[test]
+fn warhead_retained_fields_match_stock_and_constructor_defaults() {
+    use crate::rules::ruleset::RuleSet;
+
+    let defaults = RulesLayerStack::new(IniFile::from_str("[Warheads]\n0=DEFAULT\n[DEFAULT]\n"))
+        .process()
+        .expect("default warhead process");
+    let default_rules = RuleSet::from_processed_rules(&defaults).unwrap();
+    let default = default_rules.warhead("DEFAULT").unwrap();
+    assert_eq!(default.particle_system, None);
+    assert_eq!(default.deform_f64, 0.0);
+    assert_eq!(default.deform_threshold, 0);
+    assert!(!default.bullets);
+    assert!(!default.veinhole);
+
+    let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+        return;
+    };
+    let he = retail.rules.warhead("HE").expect("stock HE warhead");
+    assert!((he.deform_f64 - 0.1).abs() < 1.0e-7);
+    assert_eq!(he.deform_threshold, 300);
+    assert_eq!(
+        retail
+            .rules
+            .warhead("Gas")
+            .expect("stock Battle Gas warhead")
+            .particle_system
+            .as_deref(),
+        Some("GasCloudSys")
+    );
+    assert!(
+        retail
+            .rules
+            .warhead("SA")
+            .expect("stock Battle SA warhead")
+            .bullets
+    );
+    assert!(
+        retail
+            .rules
+            .warhead("VeinholeWH")
+            .expect("stock VeinholeWH warhead")
+            .veinhole
+    );
+}
+
+#[test]
+fn warhead_particle_pointer_retains_on_empty_and_clears_on_native_none() {
+    use crate::rules::ruleset::RuleSet;
+
+    let root = "[Warheads]\n0=WH\n[ParticleSystems]\n0=PS\n[WH]\nParticle=PS\n";
+    let retained = process_rules_passes(root, "[WH]\nParticle=\n");
+    let retained = RuleSet::from_processed_rules(&retained)
+        .unwrap()
+        .warhead("WH")
+        .unwrap()
+        .particle_system
+        .clone();
+    assert_eq!(retained.as_deref(), Some("PS"));
+
+    let cleared = process_rules_passes(root, "[WH]\nParticle=none\n");
+    let cleared = RuleSet::from_processed_rules(&cleared)
+        .unwrap()
+        .warhead("WH")
+        .unwrap()
+        .particle_system
+        .clone();
+    assert_eq!(cleared, None);
+}
+
+#[test]
+fn warhead_retained_scalars_follow_native_layer_order_and_parser() {
+    use crate::rules::ruleset::RuleSet;
+
+    let processed = process_rules_passes(
+        "[Warheads]\n0=WH\n[WH]\nDeform=10%\nDeformThreshhold=300\nBullets=yes\nVeinhole=no\n",
+        "[WH]\nDeform=15%\nDeformThreshhold=-7\nBullets=no\nVeinhole=yes\n",
+    );
+    let rules = RuleSet::from_processed_rules(&processed).unwrap();
+    let wh = rules.warhead("WH").unwrap();
+    assert!((wh.deform_f64 - 0.15).abs() < 1.0e-7);
+    assert_eq!(wh.deform_threshold, -7);
+    assert!(!wh.bullets);
+    assert!(wh.veinhole);
 }
 
 #[test]
@@ -3303,6 +3453,40 @@ fn waypoint_cue_drop_zone_rules_keep_native_defaults_layers_and_saved_state() {
 }
 
 #[test]
+fn warhead_cell_inset_uses_layered_float_reader_and_stock_battle_value() {
+    use crate::rules::ruleset::RuleSet;
+
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[Warheads]\n0=WH\n[WH]\nCellInset=1.25\n",
+    ));
+    let first = RuleSet::from_processed_rules(&layers.process().unwrap()).unwrap();
+    assert_eq!(first.warhead("WH").unwrap().cell_inset_f32, 1.25);
+
+    layers.push(
+        RulesLayerKind::GameMode,
+        IniFile::from_str("[WH]\nCellInset=2.5\n"),
+    );
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[WH]\nCellSpread=4\n"),
+    );
+    let layered = RuleSet::from_processed_rules(&layers.process().unwrap()).unwrap();
+    assert_eq!(layered.warhead("WH").unwrap().cell_inset_f32, 2.5);
+
+    let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+        return;
+    };
+    assert_eq!(
+        retail
+            .rules
+            .warhead("RadEruptionWarhead")
+            .expect("stock Battle RadEruptionWarhead")
+            .cell_inset_f32,
+        3.0
+    );
+}
+
+#[test]
 fn spotlight_rules_keep_constructor_bits_native_parser_and_retained_pass_defaults() {
     use crate::rules::ruleset::{RuleSet, SpotlightRules};
     let mut layers = RulesLayerStack::new(IniFile::from_str("[General]\n"));
@@ -3382,5 +3566,168 @@ fn spotlight_type_flag_retains_the_native_current_default_across_rules_layers() 
             .object("LIGHT")
             .unwrap()
             .has_spotlight
+    );
+}
+
+/// Control-flow regression for71582B/717820 and the active repeated
+/// ReadTypeData679A10 path; see tools/rules_oracle/techno_palette_binding.md.
+#[test]
+fn palette_binding_survives_image_changes_handoff_and_asset_refresh() {
+    use crate::assets::asset_manager::{AssetManager, test_support::TestDirectory};
+    use crate::rules::{art_data::ArtRegistry, ruleset::RuleSet};
+
+    let art = IniFile::from_str("[FIRST]\nPalette= LiB \n[EMPTY]\nPalette= \n");
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[BuildingTypes]\n0=TYPE\n[TYPE]\nImage=FIRST\nStrength=10\n",
+    ));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[TYPE]\nImage=EMPTY\n"),
+    );
+    let processed = layers.process_with_fixed_art(&art).unwrap();
+    let (_, trace) = processed.into_ini_and_native_type_construction_trace();
+    let state = trace.into_registry_state_discarding_events();
+    let state = save_codec::deserialize(&save_codec::serialize(&state).unwrap()).unwrap();
+    // No [TYPE] in this further pass: it must not reread its final Image.
+    let continued = RulesLayerStack::new(IniFile::empty())
+        .process_with_fixed_art_and_registry_state(&art, state)
+        .unwrap();
+    let mut rules = RuleSet::from_processed_rules(&continued).unwrap();
+    rules.install_art_data(ArtRegistry::from_ini(&art));
+    assert_eq!(rules.object("TYPE").unwrap().image, "EMPTY");
+    assert_eq!(
+        rules.object("TYPE").unwrap().custom_palette_name(),
+        Some("lib")
+    );
+
+    let root = TestDirectory::new("palette-binding-refresh");
+    let assets = AssetManager::from_loose_root_for_test(root.path());
+    rules.bind_effect_assets(&assets, "tem", "TEMPERATE");
+    assert!(
+        rules
+            .loaded_custom_palette_name(rules.object("TYPE").unwrap())
+            .is_none()
+    );
+    assert!(
+        rules
+            .load_extra_building_palette(&assets, "tem", None)
+            .is_none()
+    );
+    std::fs::write(root.path().join("LIBTEM.PAL"), [0u8; 768]).unwrap();
+    let assets = AssetManager::from_loose_root_for_test(root.path());
+    rules.bind_effect_assets(&assets, "tem", "TEMPERATE");
+    assert_eq!(
+        rules.loaded_custom_palette_name(rules.object("TYPE").unwrap()),
+        Some("lib")
+    );
+    assert!(
+        rules
+            .load_extra_building_palette(&assets, "tem", None)
+            .is_some()
+    );
+    // A new theater binding replaces the entire capability catalog.
+    rules.bind_effect_assets(&assets, "sno", "SNOW");
+    assert!(
+        rules
+            .loaded_custom_palette_name(rules.object("TYPE").unwrap())
+            .is_none()
+    );
+
+    let (_, trace) = continued.into_ini_and_native_type_construction_trace();
+    let reset = RulesLayerStack::new(IniFile::from_str(
+        "[BuildingTypes]\n0=TYPE\n[TYPE]\nImage=EMPTY\nStrength=10\n",
+    ))
+    .process_with_fixed_art_and_registry_state(
+        &art,
+        trace
+            .into_registry_state_discarding_events()
+            .destructive_reset(),
+    )
+    .unwrap();
+    let mut rules = RuleSet::from_processed_rules(&reset).unwrap();
+    rules.install_art_data(ArtRegistry::from_ini(&art));
+    assert_eq!(rules.object("TYPE").unwrap().custom_palette_name(), None);
+}
+
+#[test]
+fn palette_binding_requires_a_reached_type_read_and_replaces_nonempty_names() {
+    use crate::rules::{art_data::ArtRegistry, ruleset::RuleSet};
+    let art = IniFile::from_str(
+        "[FIRST]\nPalette=one\n[SECOND]\nPalette=none\n[UNREAD]\nPalette=orphan\n",
+    );
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[BuildingTypes]\n0=TYPE\n1=UNREAD\n[TYPE]\nImage=FIRST\nStrength=10\n",
+    ));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[TYPE]\nImage=SECOND\n"),
+    );
+    let processed = layers.process_with_fixed_art(&art).unwrap();
+    let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
+    // Installation cannot run a second Palette reader, even with a different
+    // ART snapshot or with a constructor-only [UNREAD] entry in that snapshot.
+    rules.install_art_data(ArtRegistry::from_ini(&IniFile::from_str(
+        "[SECOND]\nPalette=wrong\n[UNREAD]\nPalette=orphan\n",
+    )));
+    assert_eq!(
+        rules.object("TYPE").unwrap().custom_palette_name(),
+        Some("none")
+    );
+    assert_eq!(rules.object("UNREAD").unwrap().custom_palette_name(), None);
+}
+
+/// The optional Ares limit hook changes group admission, not the retained
+/// Image/Palette reader or missing-file fallback (715857 ->715876).
+#[test]
+fn ares_palette_requests_use_retained_names_and_resolve_each_loaded_group() {
+    use crate::assets::asset_manager::{AssetManager, test_support::TestDirectory};
+    use crate::rules::{art_data::ArtRegistry, ruleset::RuleSet};
+    let art = IniFile::from_str(
+        "[FIRST]\nPalette=first\n[EMPTY]\n[A]\nPalette=wrong\n[B]\nPalette=second\n[MISS]\nPalette=absent\n",
+    );
+    let mut layers = RulesLayerStack::new(IniFile::from_str(
+        "[BuildingTypes]\n0=A\n1=B\n2=MISS\n[A]\nImage=FIRST\nStrength=10\n[B]\nStrength=10\n[MISS]\nStrength=10\n",
+    ));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[A]\nImage=EMPTY\n"),
+    );
+    let processed = layers.process_with_fixed_art(&art).unwrap();
+    let mut rules = RuleSet::from_processed_rules(&processed).unwrap();
+    rules.install_art_data(ArtRegistry::from_ini(&art));
+    assert_eq!(rules.object("A").unwrap().image, "EMPTY");
+    assert_eq!(
+        rules.object("A").unwrap().custom_palette_name(),
+        Some("first")
+    );
+    assert_eq!(
+        rules.object("B").unwrap().custom_palette_name(),
+        Some("second")
+    );
+    let root = TestDirectory::new("ares-per-type-palette");
+    std::fs::write(root.path().join("FIRSTTEM.PAL"), [1u8; 768]).unwrap();
+    std::fs::write(root.path().join("SECONDTEM.PAL"), [2u8; 768]).unwrap();
+    let assets = AssetManager::from_loose_root_for_test(root.path());
+    let (first_name, first) = rules
+        .load_extra_building_palette(&assets, "tem", Some("first"))
+        .unwrap();
+    assert_eq!(first_name, "first");
+    let second = rules.load_extra_building_palette(&assets, "tem", Some("second"));
+    assert_eq!(second.is_some(), crate::rules::ARES_ENABLED);
+    if let Some((name, palette)) = second {
+        assert_eq!(name, "second");
+        assert_ne!(palette.to_rgba_bytes(), first.to_rgba_bytes());
+    }
+    assert!(
+        rules
+            .load_extra_building_palette(&assets, "tem", Some("absent"))
+            .is_none()
+    );
+    assert_eq!(
+        rules
+            .load_extra_building_palette(&assets, "tem", None)
+            .unwrap()
+            .0,
+        "first"
     );
 }

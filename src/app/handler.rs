@@ -18,6 +18,57 @@ fn launcher_options_consumes_escape<T>(dialog: &Option<T>, is_escape: bool) -> b
 }
 
 impl App {
+    /// Route the physical keyboard edge before any underlying shell input.
+    /// This owns main-menu modal admission; the existing message-box owner
+    /// owns its result and teardown.
+    /// Native source: gamemd.exe's modal pump5D4D50 and MessageBoxProc5D36A0;
+    /// [Win32 dialog key dispatch](https://learn.microsoft.com/en-us/windows/win32/dlgbox/dlgbox-programming-considerations#dialog-box-keyboard-interface).
+    pub(crate) fn handle_main_menu_dialog_key(
+        state: &mut AppState,
+        code: KeyCode,
+        pressed: bool,
+        repeat: bool,
+    ) -> bool {
+        if !Self::main_menu_dialog_open(state) {
+            return false;
+        }
+        let is_escape = code == KeyCode::Escape && pressed && !repeat;
+        if state.frontend.shell_message_box.is_some() {
+            // IsDialogMessage in the native modal pump5D4D50 admits Enter
+            // as IDOK1 and Escape as IDCANCEL2. MessageBoxProc5D36A0 maps
+            // both to result1; GameExitDefeat6860EA returns to the shell.
+            // Keep retained launcher dialogs on their separate Escape path.
+            // The native message pump forwards repeated WM_KEYDOWN too;
+            // its IsDialogMessage path has no previous-key-state filter.
+            if pressed
+                && let Some(key @ (ShellKey::Enter | ShellKey::Escape)) =
+                    Self::shell_key_for_code(code)
+                // Alt+Enter is WM_SYSKEYDOWN, not the IDOK-producing
+                // WM_KEYDOWN path. Winit combines them; retain the native
+                // distinction using the existing modifier owner.
+                && (key != ShellKey::Enter || !state.platform.live_modifiers.alt_key())
+                && !Self::route_shell_message_box_key(state, key)
+            {
+                // Preserve the existing empty-controller-route fallback.
+                Self::resolve_shell_message_box(
+                    state,
+                    crate::ui::shell::modal::ModalResult::MessageBox(1),
+                );
+                state.platform.window.request_redraw();
+            }
+        } else if is_escape {
+            if launcher_options_consumes_escape(&state.frontend.options_dialog, is_escape) {
+                // `0xD5` ignores IDCANCEL=2. Preserve the same
+                // dialog instance and emit no Apply/write/event.
+                state.platform.window.request_redraw();
+            } else {
+                Self::close_main_menu_dialogs(state);
+                state.platform.window.request_redraw();
+            }
+        }
+        true
+    }
+
     /// Drop every sticky in-game pointer byte.
     ///
     /// gamemd's capture-changed case drops the button-held byte and tears the
@@ -125,11 +176,25 @@ impl App {
     /// `initialize`). The resize that follows re-fits the menus and the zoom.
     /// The window's new state reaches the profile through
     /// `follow_window_full_screen`.
+    ///
+    /// Full screen covers the Display list's screen, not whichever one the
+    /// window happens to touch, so entering full screen never changes screens.
+    /// The window is centred on that screen first: `winit` saves the placement
+    /// it restores on leaving full screen while it enters, so the windowed
+    /// window then comes back on the same screen the choice names
+    /// ([`crate::app::display_target`]).
     pub(crate) fn set_full_screen(state: &mut AppState, full_screen: bool) {
-        state
-            .platform
-            .window
-            .set_fullscreen(full_screen.then_some(winit::window::Fullscreen::Borderless(None)));
+        let window = state.platform.window.clone();
+        if !full_screen {
+            window.set_fullscreen(None);
+            return;
+        }
+        let displays = crate::app::display_target::current_displays(&window);
+        let target = state.persistence.options_profile.display.clone();
+        crate::app::display_target::center_windowed(&window, &displays, &target);
+        window.set_fullscreen(Some(crate::app::display_target::fullscreen_for(
+            &displays, &target,
+        )));
     }
 
     /// The window owns full screen while the game runs, and can change it by
@@ -138,6 +203,12 @@ impl App {
     /// next launch agree with what the player sees. A resize alone would miss
     /// leaving full screen on macOS: winit clears the state only after the
     /// exit animation's last resize.
+    ///
+    /// Leaving full screen also re-asserts the Display choice's screen: winit
+    /// puts the window back at the placement it saved on entry, which is not
+    /// the chosen screen when the choice changed while the window was full
+    /// screen. That restore lands on winit's own thread, so the placement is
+    /// re-asserted every pass until the window really is on that screen.
     fn follow_window_full_screen(state: &mut AppState) {
         if state.platform.capture_client_size.is_some() {
             return;
@@ -146,6 +217,26 @@ impl App {
         #[cfg(target_os = "macos")]
         if !full_screen {
             show_menu_bar_and_dock_after_full_screen();
+        }
+        if full_screen {
+            state.platform.recenter_windowed = false;
+        } else {
+            let leaving_full_screen = state.persistence.options_profile.full_screen;
+            let displays = crate::app::display_target::current_displays(&state.platform.window);
+            let on_choice = crate::app::display_target::window_is_on(
+                &state.platform.window,
+                &displays,
+                &state.persistence.options_profile.display,
+            );
+            let pending = leaving_full_screen || state.platform.recenter_windowed;
+            if pending && !on_choice {
+                crate::app::display_target::center_windowed(
+                    &state.platform.window,
+                    &displays,
+                    &state.persistence.options_profile.display,
+                );
+            }
+            state.platform.recenter_windowed = pending && !on_choice;
         }
         state.persistence.options_profile.full_screen = full_screen;
         if let Some(dialog) = state.frontend.options_dialog.as_mut() {
@@ -616,6 +707,18 @@ impl ApplicationHandler for App {
                 // recorded before screen-specific dispatch own this state.
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if Self::house_outcome_wait_pending(state) {
+                    if !event.state.is_pressed()
+                        && let PhysicalKey::Code(code) = event.physical_key
+                    {
+                        state.match_state.input.keys_held.remove(&code);
+                    }
+                    return;
+                }
+                if crate::app::match_runtime::network_failure::pending(state) {
+                    crate::app::match_runtime::network_failure::key(state, &event);
+                    return;
+                }
                 // Host delivery adaptation: dialogs may consume ordinary keys,
                 // but a release for an admitted planning gesture must still
                 // end that gesture. Opening a menu itself never commits it.
@@ -773,36 +876,15 @@ impl ApplicationHandler for App {
                         return;
                     }
 
-                    // A main-menu modal dialog (exit confirm, options, movies,
-                    // campaign select) takes ESC first: close it and stay,
-                    // never propagating to the shell-close handlers below.
-                    // The exit-confirm modal routes through the controller
-                    // (on_key → LIFO pop, D-B3); the retained child dialogs are
-                    // not on the stack and keep the direct close.
-                    if Self::main_menu_dialog_open(state) {
-                        if is_escape {
-                            if state.frontend.shell_message_box.is_some() {
-                                if !Self::route_shell_message_box_key(state, ShellKey::Escape) {
-                                    // Defensive: on_key only fails with an
-                                    // empty route — still answer IDCANCEL.
-                                    Self::resolve_shell_message_box(
-                                        state,
-                                        crate::ui::shell::modal::ModalResult::MessageBox(1),
-                                    );
-                                    state.platform.window.request_redraw();
-                                }
-                            } else if launcher_options_consumes_escape(
-                                &state.frontend.options_dialog,
-                                is_escape,
-                            ) {
-                                // `0xD5` ignores IDCANCEL=2. Preserve the same
-                                // dialog instance and emit no Apply/write/event.
-                                state.platform.window.request_redraw();
-                            } else {
-                                Self::close_main_menu_dialogs(state);
-                                state.platform.window.request_redraw();
-                            }
-                        }
+                    if Self::handle_main_menu_dialog_key(
+                        state,
+                        code,
+                        event.state.is_pressed(),
+                        event.repeat,
+                    ) {
+                        return;
+                    }
+                    if Self::handle_main_menu_typed_code_key(state, &event) {
                         return;
                     }
 
@@ -1004,6 +1086,13 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 state.set_cursor_from_window(position.x as f32, position.y as f32);
+                if Self::house_outcome_wait_pending(state) {
+                    return;
+                }
+                if crate::app::match_runtime::network_failure::pending(state) {
+                    crate::app::match_runtime::network_failure::cursor_moved(state);
+                    return;
+                }
                 // Shared tooltip service: every move restarts the show delay
                 // and hides a visible tip (study S1).
                 crate::app::input::tooltips::on_mouse_move(state);
@@ -1095,6 +1184,20 @@ impl ApplicationHandler for App {
                 button,
                 ..
             } => {
+                if Self::house_outcome_wait_pending(state) {
+                    if !btn_state.is_pressed() {
+                        Self::release_in_game_pointer_state(state);
+                    }
+                    return;
+                }
+                if crate::app::match_runtime::network_failure::pending(state) {
+                    crate::app::match_runtime::network_failure::mouse(
+                        state,
+                        button,
+                        btn_state.is_pressed(),
+                    );
+                    return;
+                }
                 // Any button press/release kills a visible tooltip + pending
                 // timer (all buttons incl. middle — study S1).
                 crate::app::input::tooltips::on_button_event(state);
@@ -1266,6 +1369,12 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                if Self::house_outcome_wait_pending(state) {
+                    return;
+                }
+                if crate::app::match_runtime::network_failure::pending(state) {
+                    return;
+                }
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(pos) => (pos.y as f32 / 30.0).clamp(-3.0, 3.0),
@@ -1400,7 +1509,7 @@ impl ApplicationHandler for App {
                     // edge reaches first. macOS stops presenting to an occluded
                     // layer, so this loop cannot ride on redraws; it wakes at
                     // half the pacer bucket to hold the cadence.
-                    if Self::service_match_runtime(state, event_loop, true) {
+                    if Self::service_match_runtime(state, event_loop, true).quit_requested {
                         return;
                     }
                     event_loop.set_control_flow(ControlFlow::WaitUntil(

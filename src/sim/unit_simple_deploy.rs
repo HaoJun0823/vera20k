@@ -207,6 +207,7 @@ impl Simulation {
         Self::emit_deploy_action_sound(
             &mut self.interner,
             &self.substrate,
+            self.resolved_terrain.as_ref(),
             &mut self.sound_events,
             id,
             if deploying { 27 } else { 31 },

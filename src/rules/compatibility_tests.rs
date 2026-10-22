@@ -1,8 +1,9 @@
-use crate::rules::ARES_ENABLED;
+use crate::rules::compatibility::RulesCompatibility;
 use crate::rules::ini_parser::IniFile;
 use crate::rules::native_processing::{ProcessedRulesLayers, RulesLayerStack};
 use crate::rules::ruleset::RuleSet;
 use crate::rules::superweapon_type::SuperWeaponKind;
+use crate::rules::{ARES_ENABLED, PHOBOS_ENABLED};
 
 fn processed() -> ProcessedRulesLayers {
     RulesLayerStack::new(IniFile::from_str(
@@ -63,12 +64,16 @@ fn retained_rules_reject_foreign_capability_before_projection() {
         mode.is_string(),
         "the wire fixture must reach the retained owner"
     );
-    *mode = serde_json::Value::String(if ARES_ENABLED { "Retail" } else { "Ares" }.into());
+    *mode = serde_json::to_value(match RulesCompatibility::default() {
+        RulesCompatibility::Retail => RulesCompatibility::Ares,
+        _ => RulesCompatibility::Retail,
+    })
+    .unwrap();
     let restored: ProcessedRulesLayers = serde_json::from_value(wire).unwrap();
     assert!(matches!(
         RuleSet::from_processed_rules(&restored),
         Err(crate::rules::error::RulesError::InvalidSavedState(
-            "saved Rules require a different compiled Ares capability"
+            "saved Rules require a different compiled extension capability"
         ))
     ));
 }
@@ -76,10 +81,10 @@ fn retained_rules_reject_foreign_capability_before_projection() {
 #[test]
 fn stock_rules_hash_records_the_compiled_capability() {
     let rules = RuleSet::from_ini(&IniFile::from_str("[General]\nBuildSpeed=.7\n")).unwrap();
-    // The two build configurations' validation receipts compare this actual
-    // production hash for identical stock input. No Ares tags decide the mode.
+    // Each build configuration's validation receipts compare this actual
+    // production hash for identical stock input. No extension tags decide the mode.
     println!(
-        "BUILD_CAPABILITY_HASH ares={ARES_ENABLED} hash={}",
+        "BUILD_CAPABILITY_HASH ares={ARES_ENABLED} phobos={PHOBOS_ENABLED} hash={}",
         rules.simulation_config_hash()
     );
 }

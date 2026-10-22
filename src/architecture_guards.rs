@@ -1262,16 +1262,16 @@ fn mutable_handouts_and_setters_are_owner_operations() {
     // lives in the cited native caller, which the Rust caller ports.
     const PINNED_SETTERS: &[(&str, &str, &str)] = &[
         (
-            "sim/control/board.rs",
-            "set_domains",
-            "the player's two-key switch: L2 owns which halves auto play may touch, and the \
-             hotkey (app/input/dispatch.rs) is its only writer",
+            "net/global.rs",
+            "set_timing",
+            "Set_Timing (0x00540C60) forwards its timing to the global channel's +0x28..+0x30 \
+             through vt+0x38 (0x00540D10) only when its bool argument is set",
         ),
         (
-            "sim/control/budget.rs",
-            "set_rotation_start",
-            "the micro rotation resumes past the last object stepped this frame; only \
-             ControlBoard::step_managed writes it",
+            "net/reliable.rs",
+            "set_timing",
+            "Set_Timing (0x00540C60) stores the manager's +0x58..+0x60 and copies them into \
+             every private connection's +0x28..+0x30 (0x00540CBE..0x00540CE1)",
         ),
         (
             "rules/object_type.rs",
@@ -1287,6 +1287,18 @@ fn mutable_handouts_and_setters_are_owner_operations() {
             "sim/ai_base_building.rs",
             "set_mode",
             "AI_Manage_Build_Queue's mode: 2 for a harvester (0x004FE109), 1 for a building (0x004FE3AB)",
+        ),
+        (
+            "sim/control/board.rs",
+            "set_domains",
+            "the player's two-key switch: L2 owns which halves auto play may touch, and the \
+             hotkey (app/input/dispatch.rs) is its only writer",
+        ),
+        (
+            "sim/control/budget.rs",
+            "set_rotation_start",
+            "the micro rotation resumes past the last object stepped this frame; only \
+             ControlBoard::step_managed writes it",
         ),
         (
             "sim/ai_team_creation.rs",
@@ -1416,6 +1428,12 @@ fn mutable_handouts_and_setters_are_owner_operations() {
             "set_fixed_alliance",
             "Scenario flag 0x400: Apply_Squad_Alliances clears it in GameMode 4 (0x0069B19B) \
              and sets it after the squad alliances (0x0069B4E2)",
+        ),
+        (
+            "sim/snapshot/scenario_resources.rs",
+            "set_elapsed_buckets",
+            "ScenarioSave stops +0x614 into the +0x61C accumulator (0x00689360..0x0068936F) \
+             before its stream write (0x00689378); the save boundary stores that value",
         ),
         (
             "sim/stage.rs",

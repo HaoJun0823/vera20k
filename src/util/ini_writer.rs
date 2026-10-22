@@ -114,7 +114,13 @@ pub fn set_ini_byte_values(content: &[u8], section: &str, values: &[(&str, &[u8]
             out.extend_from_slice(key.as_bytes());
             out.push(b'=');
             out.extend_from_slice(value);
-            out.extend_from_slice(terminator);
+            // A replaced last line gains a CRLF: the loader discards a last
+            // line without LF (`IniFile::from_bytes`).
+            out.extend_from_slice(if terminator.is_empty() {
+                CRLF
+            } else {
+                terminator
+            });
         } else {
             out.extend_from_slice(text);
             out.extend_from_slice(terminator);
@@ -329,6 +335,20 @@ ScoreVolume=0.600000\r\nInGameMusic=yes\r\n[Network]\r\nNetID=ffff,ffff,ffff,\r\
             &[("ScoreVolume", "0.4")],
         ));
         assert_eq!(out, "[Audio]\r\nScoreVolume=0.4\r\n");
+    }
+
+    /// A replaced unterminated last line gains a CRLF, so it survives the
+    /// loader's discard of a last line without LF.
+    #[test]
+    fn replaces_an_unterminated_last_line_with_a_terminated_one() {
+        let out = set_ini_values(
+            b"[Audio]\r\nScoreVolume=0.1",
+            "Audio",
+            &[("ScoreVolume", "0.4")],
+        );
+        assert_eq!(s(out.clone()), "[Audio]\r\nScoreVolume=0.4\r\n");
+        let reloaded = crate::rules::ini_parser::IniFile::from_bytes(&out).unwrap();
+        assert!(reloaded.section_or_empty("Audio").is_present("ScoreVolume"));
     }
 
     /// With a duplicated section header, a missing key is appended into the

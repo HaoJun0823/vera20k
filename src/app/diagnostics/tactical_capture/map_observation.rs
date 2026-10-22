@@ -1689,9 +1689,9 @@ impl MapCommandBarThumbState {
             local_player_defeated: sim.local_player_defeated(),
             input_locked: sim.session().input_locked(),
             has_lost: house.map(|house| house.has_lost()),
-            exit_ready: house
-                .and_then(|house| house.outcome())
-                .map(|outcome| outcome.exit_ready),
+            exit_ready: owner
+                .zip(house)
+                .map(|(owner, _)| sim.ready_outcome_for_owner(owner).is_some()),
         })
     }
 }
@@ -2080,8 +2080,10 @@ fn disguise_inputs(
                     .match_presentation
                     .overlay_atlas
                     .as_ref()
-                    .and_then(|atlas| atlas.native_terrain_pair(&chosen, frame))
-                    .is_some()
+                    .is_some_and(|atlas| {
+                        let (body, shadow) = atlas.terrain_pieces(&chosen, frame);
+                        body.is_some() || shadow.is_some()
+                    })
             });
         let decision = crate::render::draw_state::DrawState::for_entity(
             entity,

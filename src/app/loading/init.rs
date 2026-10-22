@@ -143,7 +143,7 @@ mod map_wall_owner_candidate_tests {
     fn detonate_radiation(
         sim: &mut Simulation,
         detonation: RadDetonation,
-        rules: &crate::rules::ruleset::RadiationRules,
+        rules: &crate::rules::ruleset::RuleSet,
     ) {
         let theater = sim.session().theater().to_owned();
         let mut lights = std::mem::take(sim.lighting_sources_mut_for_test());
@@ -362,10 +362,10 @@ mod map_wall_owner_candidate_tests {
             Some(neutral),
             "native47D210 measures Building→Cell without a Building-target foundation discount"
         );
-        // Delivered Computer PRODUCE is admitted by native Event4C7130 /
-        // House4FA350 without a Human flag. This is a supplied normal event,
-        // not a claim that autonomous AI selects this wall and site.
-        use crate::sim::command::{Command, CommandEnvelope};
+        // Exercise the existing production receivers for this synthetic AI
+        // setup. Execute_DoList64C4FB does not admit player events from this
+        // computer House; keep its AI flags and the wall-ownership assertions.
+        use crate::sim::command::Command;
         use crate::sim::world::{FrameEffects, TickLane};
         let wall_type = scene.runtime.simulation.intern("GAWALL");
         let rules = &scene.runtime.resources.rules;
@@ -375,21 +375,17 @@ mod map_wall_owner_candidate_tests {
         let cost = scene
             .sim()
             .cost_of(computer, rules.object("GAWALL").unwrap(), rules);
+        let computer_name = scene.sim().interner().resolve(computer).to_owned();
+        assert!(scene.runtime.apply_command_for_test(
+            &computer_name,
+            &Command::QueueProduction { type_id: wall_type },
+        ));
         let mut ready = None;
         for step in 0..4096 {
-            let commands = if step == 0 {
-                vec![CommandEnvelope::new(
-                    computer,
-                    scene.sim().session().tick(),
-                    Command::QueueProduction { type_id: wall_type },
-                )]
-            } else {
-                Vec::new()
-            };
             scene
                 .runtime
                 .advance_frame(
-                    &commands,
+                    &[],
                     crate::app::types::SIM_TICK_MS,
                     TickLane::Ordinary,
                     FrameEffects::default(),
@@ -418,19 +414,18 @@ mod map_wall_owner_candidate_tests {
             scene.sim().houses()[&computer].economy().spent_credits(),
             spent_before + cost
         );
-        let command = CommandEnvelope::new(
-            computer,
-            scene.sim().session().tick(),
-            Command::PlaceReadyBuilding {
+        assert!(!scene.runtime.apply_command_for_test(
+            &computer_name,
+            &Command::PlaceReadyBuilding {
                 type_id: wall_type,
                 rx: 90,
                 ry: 44,
             },
-        );
+        ));
         scene
             .runtime
             .advance_frame(
-                &[command],
+                &[],
                 crate::app::types::SIM_TICK_MS,
                 TickLane::Ordinary,
                 FrameEffects::default(),
@@ -455,18 +450,17 @@ mod map_wall_owner_candidate_tests {
             0x10,
             "refusal keeps damaged material"
         );
-        let command = CommandEnvelope::new(
-            computer,
-            scene.sim().session().tick(),
-            Command::CancelProductionByType {
+        assert!(scene.runtime.apply_command_for_test(
+            &computer_name,
+            &Command::CancelProductionByType {
                 type_id: wall_type,
                 all: false,
             },
-        );
+        ));
         scene
             .runtime
             .advance_frame(
-                &[command],
+                &[],
                 crate::app::types::SIM_TICK_MS,
                 TickLane::Ordinary,
                 FrameEffects::default(),
@@ -830,8 +824,9 @@ mod map_wall_owner_candidate_tests {
                 ry: 120,
                 rad_level: 500,
                 spread: 1,
+                rad_type: None,
             },
-            &rules.radiation,
+            &rules,
         );
         assert!(matches!(
             sim.lighting_sources().pending().last(),
@@ -1194,8 +1189,9 @@ mod map_wall_owner_candidate_tests {
             ry: 15,
             rad_level: 500,
             spread: 1,
+            rad_type: None,
         };
-        detonate_radiation(&mut sim, radiation, &rules.radiation);
+        detonate_radiation(&mut sim, radiation.clone(), &rules);
         sim.session_mut_for_test()
             .lighting_mut()
             .set_current_ambient_for_test(250);
@@ -1204,7 +1200,7 @@ mod map_wall_owner_candidate_tests {
         ));
         sim.lighting_sources_mut_for_test()
             .set_building_light_active(41, true);
-        detonate_radiation(&mut sim, radiation, &rules.radiation);
+        detonate_radiation(&mut sim, radiation, &rules);
         assert!(matches!(
             sim.lighting_sources().pending(),
             [
@@ -1355,18 +1351,20 @@ mod map_wall_owner_candidate_tests {
              LightRedTint=.1\nLightGreenTint=.2\nLightBlueTint=.3\n",
         ))
         .expect("lighting rules");
-        rules.radiation = crate::rules::ruleset::RadiationRules {
-            duration_multiple: 1,
-            application_delay: 16,
-            level_max: 500,
-            level_delay: 90,
-            light_delay: 90,
-            level_factor: 0.2,
-            light_factor: crate::util::fixed_math::SimFixed::from_num(0.1_f32),
-            tint_factor: crate::util::fixed_math::SimFixed::from_num(1.0_f32),
-            color: (0, 255, 0),
-            site_warhead: "RadSite".to_string(),
-        };
+        // Field-by-field from the reader defaults: the Phobos catalog is a
+        // core-crate type the client never constructs.
+        let mut radiation = crate::rules::ruleset::RadiationRules::default();
+        radiation.duration_multiple = 1;
+        radiation.application_delay = 16;
+        radiation.level_max = 500;
+        radiation.level_delay = 90;
+        radiation.light_delay = 90;
+        radiation.level_factor = 0.2;
+        radiation.light_factor = crate::util::fixed_math::SimFixed::from_num(0.1_f32);
+        radiation.tint_factor = crate::util::fixed_math::SimFixed::from_num(1.0_f32);
+        radiation.color = (0, 255, 0);
+        radiation.site_warhead = "RadSite".to_string();
+        rules.radiation = radiation;
         rules
     }
 
@@ -1521,8 +1519,9 @@ mod map_wall_owner_candidate_tests {
                 ry: 5,
                 rad_level: 500,
                 spread: 10,
+                rad_type: None,
             },
-            &rules.radiation,
+            &rules,
         );
 
         let terrain = flat_terrain(10, 10);
@@ -1565,12 +1564,13 @@ mod map_wall_owner_candidate_tests {
             ry: 11,
             rad_level: 500,
             spread: 10,
+            rad_type: None,
         };
-        detonate_radiation(&mut sim, detonation, &rules.radiation);
+        detonate_radiation(&mut sim, detonation.clone(), &rules);
         let first = derive_lighting_view(&LightingConfig::default(), Some(&sim), 2);
         assert_eq!(first.point_lights.len(), 1);
 
-        detonate_radiation(&mut sim, detonation, &rules.radiation);
+        detonate_radiation(&mut sim, detonation, &rules);
         let merged = derive_lighting_view(&LightingConfig::default(), Some(&sim), 2);
         assert_eq!(merged.point_lights.len(), 1);
         assert_ne!(first, merged);
@@ -1585,6 +1585,7 @@ mod map_wall_owner_candidate_tests {
 /// sim runtime and match view facts consume. The constructed Simulation
 /// already holds the trigger runtime's definitions.
 pub struct ScenarioLoadInputs {
+    pub(crate) campaign_names: Option<crate::rules::campaign_loading::CampaignScenarioNames>,
     pub(crate) startup: LoadingStartup,
     pub(crate) map_source: LoadedMapSource,
     /// Digest of the parsed source map INI used for strict save compatibility.
@@ -1674,6 +1675,8 @@ pub(crate) struct MapLoadInitial {
     retained_process_mapgen: Option<crate::rng_continuation::MapGenRngContinuation>,
     /// Inactive current-bit defaults from the outgoing Scenario's owners.
     retained_campaign_special_flags: Option<crate::map::basic::SpecialFlagsSection>,
+    /// ClearScene retains local values across fresh Scenario reads.
+    retained_local_variables: Option<crate::sim::trigger_runtime::RetainedLocalVariables>,
     /// Ordered launch-generation Building constructor effects. Preview traces
     /// never reach this owner; fixed maps carry none.
     generated_construction_trace: Option<crate::map::rmg::RmgConstructionTrace>,
@@ -1684,7 +1687,9 @@ impl MapLoadInitial {
     /// the one process owner for this inactive attempt. Authored loading does
     /// not reset or advance MapGen before installation (ReadScenario684620 ->
     /// Full_Init/Fill); failures can discard this snapshot without losing it.
-    pub(super) fn retain_process_mapgen(
+    /// The same inactive transfer retains current SpecialFlags and local values;
+    /// ClearScene clears global variables, but leaves ReadLocal's prior values.
+    pub(super) fn retain_process_state(
         &mut self,
         retention: &mut crate::app::shell_random_map::RandomMapGenerationRetention,
         mut resident: Option<&mut crate::sim::world::Simulation>,
@@ -1692,6 +1697,9 @@ impl MapLoadInitial {
         self.retained_campaign_special_flags = resident
             .as_deref()
             .map(crate::sim::world::Simulation::retained_campaign_special_flags);
+        self.retained_local_variables = resident
+            .as_deref()
+            .map(crate::sim::world::Simulation::retain_local_variables_for_fresh_load);
         if let Some(generated) = self.mapgen_rng_continuation.take() {
             retention.publish_mapgen_continuation(resident.as_deref_mut(), generated);
             self.mapgen_rng_continuation =
@@ -1722,6 +1730,7 @@ impl MapLoadInitial {
             mapgen_rng_continuation: None,
             retained_process_mapgen: None,
             retained_campaign_special_flags: None,
+            retained_local_variables: None,
             generated_construction_trace: None,
         }
     }
@@ -1773,6 +1782,54 @@ fn construction_trace_after_fill(
 #[cfg(test)]
 mod fresh_transport_tests {
     use super::*;
+
+    #[test]
+    fn fresh_load_retains_local_values_without_mutating_the_outgoing_world() {
+        let map = |variables: &str| {
+            let mut map = crate::map::rmg::emit::empty_map_file(
+                &crate::map::rmg::RmgOptions::default(),
+                16,
+                16,
+            );
+            map.local_variables = crate::map::variable_names::parse_local_variables(
+                &IniFile::from_str(&format!("[VariableNames]\n{variables}")),
+            );
+            map
+        };
+        let mut resident = Simulation::new();
+        resident.initialize_trigger_definitions(
+            &map("7=Prior,1\n8=ClearLater,1\n"),
+            &Default::default(),
+            None,
+            None,
+        );
+        let resident_hash = resident.state_hash();
+        let mut initial = MapLoadInitial::from_test_map_source(
+            map("7=Renamed\n8=Explicit,0\n"),
+            LoadedMapSource::Loose {
+                path: PathBuf::from("LOCAL.MAP"),
+                payload_len: 1,
+                source_sha256: crate::util::sha256::sha256_hex(b"local retention control"),
+            },
+        );
+        initial.retain_process_state(&mut Default::default(), Some(&mut resident));
+        // A failed attempt may discard this initial state; the resident is
+        // unchanged until a successful load installs the replacement.
+        assert_eq!(resident.state_hash(), resident_hash);
+        let mut staged = Simulation::new();
+        staged.inherit_local_variables_for_fresh_load(
+            initial.retained_local_variables.take().unwrap(),
+        );
+        staged.initialize_trigger_definitions(&initial.map_data, &Default::default(), None, None);
+        let mut cold = Simulation::new();
+        cold.initialize_trigger_definitions(&initial.map_data, &Default::default(), None, None);
+        assert_ne!(
+            staged.state_hash(),
+            cold.state_hash(),
+            "retained local state is installed"
+        );
+        assert_eq!(resident.state_hash(), resident_hash);
+    }
 
     #[test]
     fn generated_missing_journal_stays_generated_until_its_post_fill_error() {
@@ -1940,6 +1997,7 @@ impl MapLoadInitial {
             mapgen_rng_continuation,
             retained_process_mapgen: _,
             retained_campaign_special_flags: _,
+            retained_local_variables: _,
             generated_construction_trace,
         } = self;
         assert_eq!(fresh_scenario_context.physical_source(), &map_source);
@@ -2090,6 +2148,7 @@ impl MapLoadInitial {
             harvester_immune: match_launch_descriptor.session().options.harvester_truce,
             free_radar: map_data.basic.free_radar.unwrap_or(false),
             ignore_global_ai_triggers: map_data.basic.ignore_global_ai_triggers.unwrap_or(false),
+            timer_inherit: map_data.basic.timer_inherit.unwrap_or(false),
             train_crate: map_data.basic.train_crate.unwrap_or(false),
             truck_crate: map_data.basic.truck_crate.unwrap_or(false),
             ice_growth_enabled: map_data.basic.ice_growth_enabled,
@@ -2503,6 +2562,7 @@ pub(crate) fn load_map_initial_with_assets(
             mapgen_rng_continuation: Some(mapgen_rng_continuation),
             retained_process_mapgen: None,
             retained_campaign_special_flags: None,
+            retained_local_variables: None,
             generated_construction_trace: Some(generated_construction_trace),
         });
     }
@@ -2565,6 +2625,7 @@ pub(crate) fn load_map_initial_with_assets(
         mapgen_rng_continuation: None,
         retained_process_mapgen: None,
         retained_campaign_special_flags: None,
+        retained_local_variables: None,
         generated_construction_trace: None,
     })
 }
@@ -2677,6 +2738,9 @@ pub(crate) fn load_map_from_initial(
     theater_cache_mismatch: bool,
     runtime_color_scheme_count: usize,
     native_rules_owner: &mut crate::rules::process_owner::NativeRulesProcessOwner,
+    #[cfg(feature = "ares")] prepared_noncampaign_prefix: &mut Option<
+        crate::rules::process_owner::NativeNonCampaignPrefixPreparation,
+    >,
     audio: Option<&crate::app::process_assets::ProcessAudioCatalog>,
     shared_cell_dummy: crate::map::resolved_terrain::SharedCellDummy,
     tile_variant_selector_cache: &mut crate::map::tile_variant_selector::TileVariantSelectorCache,
@@ -2688,6 +2752,7 @@ pub(crate) fn load_map_from_initial(
         mapgen_rng_continuation,
         retained_process_mapgen,
         retained_campaign_special_flags,
+        retained_local_variables,
         generated_construction_trace,
     } = initial;
     let signed_new_ini_format = map_data.basic.new_ini_format.unwrap_or(0);
@@ -2802,15 +2867,39 @@ pub(crate) fn load_map_from_initial(
     } else {
         None
     };
+    #[cfg(feature = "ares")]
+    let prepared_prefix = prepared_noncampaign_prefix.take();
     let rules_prefix = if materialization == FreshMapMaterialization::AcceptedGenerated {
+        #[cfg(feature = "ares")]
+        assert!(
+            prepared_prefix.is_none(),
+            "generated loading cannot consume an ordinary prefix"
+        );
         crate::rules::process_owner::NativeScenarioRulesPrefix::RandomMap(
             mode_override_ini.as_ref(),
         )
     } else if game_mode_nonzero {
+        #[cfg(feature = "ares")]
+        if let Some(preparation) = prepared_prefix {
+            crate::rules::process_owner::NativeScenarioRulesPrefix::PreparedNonCampaign {
+                preparation,
+                mode_rules_override: mode_override_ini.as_ref(),
+            }
+        } else {
+            crate::rules::process_owner::NativeScenarioRulesPrefix::NonCampaign(
+                mode_override_ini.as_ref(),
+            )
+        }
+        #[cfg(not(feature = "ares"))]
         crate::rules::process_owner::NativeScenarioRulesPrefix::NonCampaign(
             mode_override_ini.as_ref(),
         )
     } else {
+        #[cfg(feature = "ares")]
+        assert!(
+            prepared_prefix.is_none(),
+            "campaign loading cannot consume an ordinary prefix"
+        );
         crate::rules::process_owner::NativeScenarioRulesPrefix::Campaign(
             campaign_named_ini.as_ref(),
         )
@@ -2889,6 +2978,11 @@ pub(crate) fn load_map_from_initial(
             difficulty: campaign.difficulty(),
             mission_counter: campaign.mission_counter(),
             game_options: campaign_game_options.as_ref(),
+            campaign_index: i32::try_from(campaign.campaign_index())?,
+            restart_carry_over: campaign
+                .carry_over()
+                .copied()
+                .unwrap_or(crate::sim::campaign_carry_over::CampaignCarryOver::CLEARED),
         }
     };
     let scenario_descriptor = crate::sim::scenario_session::ScenarioDescriptor {
@@ -2921,6 +3015,7 @@ pub(crate) fn load_map_from_initial(
         },
         free_radar: map_data.basic.free_radar.unwrap_or(false),
         ignore_global_ai_triggers: map_data.basic.ignore_global_ai_triggers.unwrap_or(false),
+        timer_inherit: map_data.basic.timer_inherit.unwrap_or(false),
         train_crate: map_data.basic.train_crate.unwrap_or(false),
         truck_crate: map_data.basic.truck_crate.unwrap_or(false),
         ice_growth_enabled: map_data.basic.ice_growth_enabled,
@@ -2952,6 +3047,9 @@ pub(crate) fn load_map_from_initial(
     install_startup_session_mode(&mut staged_simulation, &startup);
     staged_simulation.bind_shared_cell_dummy(shared_cell_dummy.clone());
     staged_simulation.install_waypoints(&map_data.waypoints);
+    if let Some(prior) = retained_local_variables {
+        staged_simulation.inherit_local_variables_for_fresh_load(prior);
+    }
     staged_simulation.initialize_trigger_definitions(
         &map_data,
         &team_ai_registry,
@@ -3599,6 +3697,7 @@ pub(crate) fn load_map_from_initial(
     let theater_name = map_data.header.theater;
     Ok(MapLoadResult {
         scenario: ScenarioLoadInputs {
+            campaign_names: None,
             startup,
             map_source,
             map_hash,

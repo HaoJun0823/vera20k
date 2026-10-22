@@ -2,8 +2,17 @@
 //! linear-falloff level over a square of cells, step it back down on a
 //! per-site countdown, and self-delete when their lifetime expires. Foot
 //! units standing on irradiated cells take periodic damage through the
-//! `[Radiation] RadSiteWarhead=` warhead (applied during each Foot AI, not
-//! here — this module owns the field, sites and their retained light sources).
+//! bound radiation type's `RadSiteWarhead=` warhead (applied during each
+//! Foot AI, not here — this module owns the field, sites and their retained
+//! light sources).
+//!
+//! With the Phobos capability each site carries its bound `[RadiationTypes]`
+//! entry (`sim::combat::world_receiver` reads the weapon's `RadType=`), and
+//! every per-site parameter — duration, decay cadence, light and the damage
+//! warhead — resolves through that entry over the `[Radiation]` globals
+//! ([`crate::rules::phobos_radiation::effective_radiation`]. Cell levels are
+//! attributed per contributing site so the damage path can group a cell's
+//! sites by type, as native `CellExt::RadLevels` does.
 //!
 //! Depends on `rules/` ([Radiation] constants), `map/resolved_terrain`
 //! (cell ground height for 3D falloff distance) and `util/lepton`.
@@ -23,7 +32,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::map::lighting::{self, LIGHT_CLAMP_MAX, LIGHT_UNIT, PointLight};
 use crate::map::resolved_terrain::ResolvedTerrainGrid;
-use crate::rules::ruleset::RadiationRules;
+use crate::rules::phobos_radiation::{EffectiveRadiation, effective_radiation};
+use crate::rules::ruleset::RuleSet;
 use crate::sim::light_sources::{LightingEvent, LightingSources};
 use crate::sim::timer::CdTimer;
 use crate::util::native_x87::sqrt_approx_length;
@@ -41,6 +51,13 @@ const FALLBACK_BOUNDS: (u16, u16) = (512, 512);
 /// One radiation site, keyed by its center cell. A second detonation on the
 /// same center MERGES into the existing site (level/duration reset); different
 /// centers stack additively per cell.
+///
+/// RESIDUAL — native `BulletClass::ApplyRadiation @ 0x46ADE0` creates a second
+/// `RadSiteClass` when the spread or the bound radiation type differs, so two
+/// fields of different types can cover one center. This model keeps one site
+/// per center: a differing type merges into the existing site, which retains
+/// its own type. Trigger: two weapons with different `RadType=` detonating on
+/// one cell. Effect: the second type's parameters do not apply there.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RadSite {
     /// Center cell.
@@ -72,6 +89,11 @@ pub struct RadSite {
     /// A before-AI activation decrements lifetime on its creation frame but
     /// does not advance this timer. Neither rendering nor load restarts it.
     light: RadiationLight,
+    /// Phobos `RadSiteExt::Type`: the bound `[RadiationTypes]` entry's
+    /// canonical name, resolved from the detonating weapon's `RadType=`.
+    /// `None` in builds without the capability, where every parameter is the
+    /// global `[Radiation]` value.
+    rad_type: Option<String>,
 }
 
 impl RadSite {
@@ -113,9 +135,20 @@ impl RadSite {
         self.light.source.clone()
     }
 
-    fn activate_light(&mut self, frame: u32, theater: &str, rules: &RadiationRules) -> bool {
+    /// The bound `[RadiationTypes]` entry's canonical name, when the build
+    /// carries the capability and the detonating weapon bound one.
+    pub fn rad_type(&self) -> Option<&str> {
+        self.rad_type.as_deref()
+    }
+
+    fn activate_light(
+        &mut self,
+        frame: u32,
+        theater: &str,
+        effective: &EffectiveRadiation,
+    ) -> bool {
         let light = &mut self.light;
-        light.timer = CdTimer::started(frame as i32, rules.light_delay);
+        light.timer = CdTimer::started(frame as i32, effective.light_delay);
         if self.duration < 1 {
             return light.source.take().is_some();
         }
@@ -127,23 +160,25 @@ impl RadSite {
             (i64::from(value) * i64::from(factor.to_bits()) / 65_536)
                 .clamp(i64::from(i32::MIN), i64::from(LIGHT_CLAMP_MAX)) as i32
         };
-        let intensity = scaled(self.level, rules.light_factor);
-        // RadSite65B5EA..65B684: Scenario+1258 == SNOW1 substitutes signed
-        // -128 for red/blue before the signed channel normalization. Theater
-        // comes from ScenarioSession; Rules still owns the configured bytes.
-        // Original activation/refresh/decay and Snow Cell/TMP controls:
-        // tools/spatial_oracle/radiation_snow_light_lifecycle.json.
-        let channels = if theater.eq_ignore_ascii_case("SNOW") {
-            [-128, i32::from(rules.color.1), -128]
+        let intensity = scaled(self.level, effective.light_factor);
+        // Retail `RadSite65B5EA..65B684` substitutes signed -128 for red and
+        // blue when `Scenario+1258 == SNOW1`, so the theater decides which
+        // channels a retail field uses. Phobos never reaches that code: it
+        // replaces the whole activation with `RadSiteExt::CreateLight`, which
+        // tints from the bound type's `RadColor` alone (all three channels,
+        // clamped at 2000) with no theater test anywhere in `Ext/RadSite`.
+        // The compiled capability decides which owner runs.
+        let channels = if !crate::rules::PHOBOS_ENABLED && theater.eq_ignore_ascii_case("SNOW") {
+            [-128, i32::from(effective.color.1), -128]
         } else {
-            [rules.color.0, rules.color.1, rules.color.2].map(i32::from)
+            [effective.color.0, effective.color.1, effective.color.2].map(i32::from)
         };
         light.base_tint =
-            channels.map(|channel| scaled(channel * LIGHT_UNIT / 255, rules.tint_factor));
+            channels.map(|channel| scaled(channel * LIGHT_UNIT / 255, effective.tint_factor));
         // The selected retail levels have at least one light step. Preserve
         // the previous defensive handling of shorter custom lifetimes; this
         // does not claim native divide-fault equivalence for that domain.
-        light.decrement = intensity / (self.duration / rules.light_delay.max(1)).max(1);
+        light.decrement = intensity / (self.duration / effective.light_delay.max(1)).max(1);
         match &mut light.source {
             Some(source) => source.update_parameters(intensity, light.base_tint),
             None => {
@@ -170,6 +205,7 @@ impl RadSite {
         self.level_timer.start_frame().hash(hasher);
         self.level_timer.duration().hash(hasher);
         self.light.hash(hasher);
+        self.rad_type.hash(hasher);
     }
 }
 
@@ -189,12 +225,12 @@ impl RadiationLight {
         frame: u32,
         remaining: i32,
         duration: i32,
-        rules: &RadiationRules,
+        effective: &EffectiveRadiation,
     ) -> bool {
         if !self.timer.expired(frame as i32) {
             return false;
         }
-        self.timer.start(frame as i32, rules.light_delay);
+        self.timer.start(frame as i32, effective.light_delay);
         let Some(source) = &mut self.source else {
             return false;
         };
@@ -213,12 +249,36 @@ fn fade_rad_tint(base: [i32; 3], remaining: i32, duration: i32) -> [i32; 3] {
     base.map(|channel| channel.wrapping_mul(remaining) / duration)
 }
 
+/// Resolve a detonating weapon's `RadType=` to the bound catalog entry's
+/// canonical name. Absent and unknown names bind the default `Radiation`
+/// entry, as native `Valueable<RadTypeClass*>::Read<true>` keeps the
+/// constructor's `FindOrAllocate(GameStrings::Radiation)`. `None` means no
+/// catalog exists (every build without the Phobos capability).
+fn bound_radiation_type(rules: &RuleSet, requested: Option<&str>) -> Option<String> {
+    #[cfg(feature = "phobos")]
+    {
+        rules
+            .radiation
+            .radiation_types
+            .bound_entry(requested)
+            .map(|entry| entry.name().to_owned())
+    }
+    #[cfg(not(feature = "phobos"))]
+    {
+        let _ = (rules, requested);
+        None
+    }
+}
+
 /// The per-cell radiation field + site registry. Persisted and state-hashed.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RadiationState {
-    /// Sparse per-cell radiation level. Entries are removed when they decay
-    /// to exactly 0 (the subtraction clamps negative results to 0).
-    cells: BTreeMap<(u16, u16), f64>,
+    /// Sparse per-cell radiation level, attributed per contributing site:
+    /// cell -> (site center -> level), mirroring native `CellExt::RadLevels`
+    /// so the damage path can group a cell's sites by radiation type. The
+    /// cell's total is the sum. Entries are removed when they decay to
+    /// exactly 0 (the subtraction clamps negative results to 0).
+    cells: BTreeMap<(u16, u16), BTreeMap<(u16, u16), f64>>,
     /// One site per center cell. For canonical real Cells, membership is the
     /// Cell487C70/487C80 center marker; deletion clears it while residual F0
     /// levels remain. This does not model arbitrary off-map/Dummy pointers.
@@ -231,7 +291,7 @@ pub struct RadiationState {
 
 /// A weapon detonation that emits radiation, recorded by the Bullet transaction and
 /// folded into `RadiationState` the same tick.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RadDetonation {
     pub rx: u16,
     pub ry: u16,
@@ -239,6 +299,11 @@ pub struct RadDetonation {
     pub rad_level: i32,
     /// Truncated warhead `CellSpread=` in whole cells.
     pub spread: i32,
+    /// The detonating weapon's `RadType=` as written; the site resolves and
+    /// retains the bound catalog entry's canonical name. `None` binds the
+    /// default `Radiation` type, and is the only value a build without the
+    /// capability ever carries.
+    pub rad_type: Option<String>,
 }
 
 /// The distance a radiation site measures from its centre cell to a cell
@@ -328,6 +393,7 @@ impl RadiationState {
             remaining,
             level_timer: CdTimer::default(),
             light: RadiationLight::default(),
+            rad_type: None,
         };
         Self {
             creation_order: vec![site.center],
@@ -336,13 +402,33 @@ impl RadiationState {
         }
     }
 
-    /// Raw level of one cell (un-clamped, may exceed `RadLevelMax`).
+    /// Raw level of one cell (un-clamped, may exceed `RadLevelMax`): the sum
+    /// over the cell's contributing sites.
     pub fn cell_level(&self, cell: (u16, u16)) -> f64 {
-        self.cells.get(&cell).copied().unwrap_or(0.0)
+        self.cells
+            .get(&cell)
+            .map(|sites| sites.values().sum())
+            .unwrap_or(0.0)
+    }
+
+    /// Per-site levels of one cell, in site-center order: the input the
+    /// damage path groups by radiation type, as native `CellExt::RadLevels`
+    /// is.
+    pub(crate) fn cell_site_levels(
+        &self,
+        cell: (u16, u16),
+    ) -> impl Iterator<Item = ((u16, u16), f64)> {
+        self.cells
+            .get(&cell)
+            .into_iter()
+            .flatten()
+            .map(|(&site, &level)| (site, level))
     }
 
     /// The level a cell DAMAGES as: `trunc(min(level, RadLevelMax))`. The
     /// clamp caps damage only — the stored level itself is unbounded.
+    /// Single-type consumers keep this total; the Foot damage path groups
+    /// per site by type and clamps per group instead.
     pub fn damaging_level(&self, cell: (u16, u16), level_max: i32) -> i32 {
         // Cell487CB0 keeps the stored operand for less-than or unordered;
         // otherwise it converts the cap. Math::ftol owns masked conversion.
@@ -354,7 +440,6 @@ impl RadiationState {
         };
         X87::ftol_i32_low_masked(clamped)
     }
-
     pub fn site_at(&self, center: (u16, u16)) -> Option<&RadSite> {
         self.sites.get(&center)
     }
@@ -393,8 +478,10 @@ impl RadiationState {
 
     /// Deterministic iteration over irradiated cells (sorted by coord), for
     /// state hashing and the render glow layer.
-    pub fn iter_cells(&self) -> impl Iterator<Item = (&(u16, u16), &f64)> {
-        self.cells.iter()
+    pub fn iter_cells(&self) -> impl Iterator<Item = ((u16, u16), f64)> {
+        self.cells
+            .iter()
+            .map(|(cell, sites)| (*cell, sites.values().sum()))
     }
 
     /// True when nothing is irradiated and no site is alive.
@@ -413,26 +500,44 @@ impl RadiationState {
         site.remaining.wrapping_mul(site.level) / site.duration
     }
 
-    fn add_cell(&mut self, cell: (u16, u16), amount: f64) {
+    fn add_cell(&mut self, cell: (u16, u16), site: (u16, u16), amount: f64) {
         // Cell487CE0: FLD incoming, FADD stored, FSTP stored.
         let value = X87::store_f64_masked_chop(X87::add(
             X87::load_f64(NativeF64Bits::from_bits(amount.to_bits())),
-            X87::load_f64(NativeF64Bits::from_bits(self.cell_level(cell).to_bits())),
+            X87::load_f64(NativeF64Bits::from_bits(
+                self.cells
+                    .get(&cell)
+                    .and_then(|sites| sites.get(&site))
+                    .copied()
+                    .unwrap_or(0.0)
+                    .to_bits(),
+            )),
         ));
+        let entry = self.cells.entry(cell).or_default();
         if value == NativeF64Bits::POSITIVE_ZERO {
-            self.cells.remove(&cell);
+            entry.remove(&site);
+            if entry.is_empty() {
+                self.cells.remove(&cell);
+            }
         } else {
-            self.cells.insert(cell, f64::from_bits(value.bits()));
+            entry.insert(site, f64::from_bits(value.bits()));
         }
     }
 
     /// Subtract clamping at exactly 0 (negative results store 0; the entry is
     /// then dropped to keep the map sparse).
-    fn sub_cell(&mut self, cell: (u16, u16), amount: f64) {
+    fn sub_cell(&mut self, cell: (u16, u16), site: (u16, u16), amount: f64) {
         // Cell487D00 compares the register result with zero after its first
         // store; only a negative result clamps. Unordered is retained.
         let difference = X87::sub(
-            X87::load_f64(NativeF64Bits::from_bits(self.cell_level(cell).to_bits())),
+            X87::load_f64(NativeF64Bits::from_bits(
+                self.cells
+                    .get(&cell)
+                    .and_then(|sites| sites.get(&site))
+                    .copied()
+                    .unwrap_or(0.0)
+                    .to_bits(),
+            )),
             X87::load_f64(NativeF64Bits::from_bits(amount.to_bits())),
         );
         let value = if X87::compare(X87::load_i32(0), difference) == MaskedX87Ordering::Greater {
@@ -440,10 +545,14 @@ impl RadiationState {
         } else {
             X87::store_f64_masked_chop(difference)
         };
+        let entry = self.cells.entry(cell).or_default();
         if value == NativeF64Bits::POSITIVE_ZERO {
-            self.cells.remove(&cell);
+            entry.remove(&site);
+            if entry.is_empty() {
+                self.cells.remove(&cell);
+            }
         } else {
-            self.cells.insert(cell, f64::from_bits(value.bits()));
+            entry.insert(site, f64::from_bits(value.bits()));
         }
     }
 
@@ -458,7 +567,7 @@ impl RadiationState {
             .unwrap_or(FALLBACK_BOUNDS);
         for_each_square_cell(site.center, site.spread, bounds, |cell| {
             let stored = X87::store_f64_masked_chop(falloff_at(&site, terrain, cell));
-            self.add_cell(cell, f64::from_bits(stored.bits()));
+            self.add_cell(cell, center, f64::from_bits(stored.bits()));
         });
     }
 
@@ -471,7 +580,7 @@ impl RadiationState {
         &mut self,
         center: (u16, u16),
         terrain: Option<&ResolvedTerrainGrid>,
-        rules: &RadiationRules,
+        effective: &EffectiveRadiation,
     ) {
         let Some(site) = self.sites.get(&center).cloned() else {
             return;
@@ -479,7 +588,7 @@ impl RadiationState {
         let bounds = terrain
             .map(|t| (t.width(), t.height()))
             .unwrap_or(FALLBACK_BOUNDS);
-        let steps_ahead = X87::load_i32((site.remaining / rules.level_delay).wrapping_add(1));
+        let steps_ahead = X87::load_i32((site.remaining / effective.level_delay).wrapping_add(1));
         for_each_square_cell(site.center, site.spread, bounds, |cell| {
             let falloff = falloff_at(&site, terrain, cell);
             // 65BC92..65BCA3: divide and multiply the still-live falloff
@@ -490,6 +599,7 @@ impl RadiationState {
             );
             self.sub_cell(
                 cell,
+                center,
                 f64::from_bits(X87::store_f64_masked_chop(amount).bits()),
             );
         });
@@ -501,12 +611,12 @@ impl RadiationState {
         center: (u16, u16),
         frame: u32,
         theater: &str,
-        rules: &RadiationRules,
+        effective: &EffectiveRadiation,
     ) -> bool {
         if let Some(site) = self.sites.get_mut(&center) {
-            site.level_steps = site.duration / rules.level_delay;
-            site.level_timer = CdTimer::started(frame as i32, rules.level_delay);
-            site.activate_light(frame, theater, rules)
+            site.level_steps = site.duration / effective.level_delay;
+            site.level_timer = CdTimer::started(frame as i32, effective.level_delay);
+            site.activate_light(frame, theater, effective)
         } else {
             false
         }
@@ -543,24 +653,54 @@ impl RadiationState {
         det: RadDetonation,
         frame: u32,
         theater: &str,
-        rules: &RadiationRules,
+        rules: &RuleSet,
         terrain: Option<&ResolvedTerrainGrid>,
         lights: &mut LightingSources,
     ) {
         let center = (det.rx, det.ry);
+        // A merge keeps the existing site's bound type; a fresh site binds
+        // the detonating weapon's `RadType=`, resolved to the catalog
+        // entry's canonical name (absent and unknown names bind the default
+        // `Radiation` entry, as native `Read<true>` keeps the constructor's).
+        let bound = self
+            .sites
+            .get(&center)
+            .and_then(|site| site.rad_type.clone())
+            .or_else(|| bound_radiation_type(rules, det.rad_type.as_deref()));
+        let effective = effective_radiation(rules, bound.as_deref());
         let merged = self.sites.get(&center).map(|site| {
             // Merge65B534..65B541 multiplies before dividing, without the
             // signed-dword overflow of the distinct Guard query65B510.
-            let effective = X87::ftol_i32_low_masked(X87::div(
+            let current = X87::ftol_i32_low_masked(X87::div(
                 X87::mul(X87::load_i32(site.level), X87::load_i32(site.remaining)),
                 X87::load_i32(site.duration),
             ));
-            effective.wrapping_add(det.rad_level)
+            current.wrapping_add(det.rad_level)
         });
         match merged {
             None => {
-                let level = det.rad_level;
-                let duration = rules.duration_multiple.wrapping_mul(level);
+                // RadSiteExt::CreateInstance clamps with
+                // `min(radLevel, GetLevelMax())`.
+                let level = det.rad_level.min(effective.level_max);
+                let duration = effective.duration_multiple.wrapping_mul(level);
+                // A site's bound type is the only input that changes every
+                // one of its parameters, so record the resolved values once
+                // per creation. Stock play binds the default type and the
+                // line then matches the `[Radiation]` globals.
+                #[cfg(feature = "phobos")]
+                log::info!(
+                    "radiation site ({}, {}) type={:?} level={} duration={} color={:?} \
+                     level_factor={} light_factor={} tint_factor={}",
+                    center.0,
+                    center.1,
+                    bound.as_deref().unwrap_or("<no catalog>"),
+                    level,
+                    duration,
+                    effective.color,
+                    effective.level_factor,
+                    effective.light_factor.to_num::<f64>(),
+                    effective.tint_factor.to_num::<f64>(),
+                );
                 self.sites.insert(
                     center,
                     RadSite {
@@ -571,25 +711,26 @@ impl RadiationState {
                         level_steps: 0,
                         duration,
                         remaining: duration,
-                        level_timer: CdTimer::started(frame as i32, rules.level_delay),
+                        level_timer: CdTimer::started(frame as i32, effective.level_delay),
                         light: RadiationLight::default(),
+                        rad_type: bound,
                     },
                 );
                 self.creation_order.push(center);
             }
             Some(merged) => {
-                self.decrease_site_levels(center, terrain, rules);
+                self.decrease_site_levels(center, terrain, &effective);
                 let site = self
                     .sites
                     .get_mut(&center)
                     .expect("site present in merge branch");
                 site.level = merged;
-                let duration = rules.duration_multiple.wrapping_mul(merged);
+                let duration = effective.duration_multiple.wrapping_mul(merged);
                 site.duration = duration;
                 site.remaining = duration;
             }
         }
-        let light_changed = self.activate_site(center, frame, theater, rules);
+        let light_changed = self.activate_site(center, frame, theater, &effective);
         self.spread_site(center, terrain);
         // RadSite activation65B7CA/65B7E8 publishes source changes in this
         // interval, even if another change later returns to the same inputs.
@@ -606,7 +747,7 @@ impl RadiationState {
     pub(crate) fn tick_decay(
         &mut self,
         frame: u32,
-        rules: &RadiationRules,
+        rules: &RuleSet,
         terrain: Option<&ResolvedTerrainGrid>,
         lights: &mut LightingSources,
     ) {
@@ -629,18 +770,21 @@ impl RadiationState {
             if expired {
                 self.decay_step(center, terrain);
                 if let Some(site) = self.sites.get_mut(&center) {
-                    site.level_timer = CdTimer::started(frame as i32, rules.level_delay);
+                    let effective = effective_radiation(rules, site.rad_type.as_deref());
+                    site.level_timer = CdTimer::started(frame as i32, effective.level_delay);
                 }
             }
-            if let Some(site) = self.sites.get_mut(&center)
-                && site
+            if let Some(site) = self.sites.get_mut(&center) {
+                let effective = effective_radiation(rules, site.rad_type.as_deref());
+                if site
                     .light
-                    .advance(frame, site.remaining, site.duration, rules)
-            {
-                lights.publish(LightingEvent::Radiation {
-                    center,
-                    source: site.light_source(),
-                });
+                    .advance(frame, site.remaining, site.duration, &effective)
+                {
+                    lights.publish(LightingEvent::Radiation {
+                        center,
+                        source: site.light_source(),
+                    });
+                }
             }
             if dead {
                 self.sites.remove(&center);
@@ -669,6 +813,7 @@ impl RadiationState {
             let amount = X87::div(falloff, X87::load_i32(site.level_steps));
             self.sub_cell(
                 cell,
+                center,
                 f64::from_bits(X87::store_f64_masked_chop(amount).bits()),
             );
         });
@@ -757,19 +902,14 @@ mod tests {
         assert_eq!(rows.len(), 4);
     }
 
-    fn stock_rules() -> RadiationRules {
-        RadiationRules {
-            duration_multiple: 1,
-            application_delay: 16,
-            level_max: 500,
-            level_delay: 90,
-            light_delay: 90,
-            level_factor: 0.2,
-            light_factor: crate::util::fixed_math::SimFixed::from_num(0.1_f32),
-            tint_factor: crate::util::fixed_math::SimFixed::from_num(1.0_f32),
-            color: (0, 255, 0),
-            site_warhead: "RadSite".to_string(),
-        }
+    /// The stock [Radiation] values the DESO field uses. Every parameter a
+    /// site resolves comes from the globals here: the default `Radiation`
+    /// type reads no keys of its own.
+    fn stock_rules() -> crate::rules::ruleset::RuleSet {
+        crate::rules::ruleset::RuleSet::from_ini(&crate::rules::ini_parser::IniFile::from_str(
+            "[Radiation]\nRadLevelFactor=0.2\nRadColor=0,255,0\nRadSiteWarhead=RadSite\n",
+        ))
+        .expect("stock radiation rules")
     }
 
     fn desolator_det(rx: u16, ry: u16) -> RadDetonation {
@@ -779,6 +919,7 @@ mod tests {
             ry,
             rad_level: 500,
             spread: 10,
+            rad_type: None,
         }
     }
 
@@ -823,10 +964,10 @@ mod tests {
         let bytes = crate::util::save_codec::serialize(&rad).expect("serialize");
         let restored: RadiationState =
             crate::util::save_codec::deserialize(&bytes).expect("deserialize");
-        let a: Vec<_> = rad.iter_cells().map(|(c, v)| (*c, v.to_bits())).collect();
+        let a: Vec<_> = rad.iter_cells().map(|(c, v)| (c, v.to_bits())).collect();
         let b: Vec<_> = restored
             .iter_cells()
-            .map(|(c, v)| (*c, v.to_bits()))
+            .map(|(c, v)| (c, v.to_bits()))
             .collect();
         assert_eq!(a, b);
         assert_eq!(

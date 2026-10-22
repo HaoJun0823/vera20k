@@ -28,6 +28,9 @@ pub struct BasicSection {
     pub briefing: Option<String>,
     /// Post-read movie catalog name (Scenario+1444, Basic.Action).
     pub action: Option<String>,
+    /// Scenario+0x143C: ReadMovie4757D0 at68A048, reset to -1 at6837F4.
+    /// GameExit::Victory685928 plays it before testing SkipScore.
+    pub win: Option<String>,
     /// Scenario+0x1440 movie (`ReadMovie` at `0x0068A066`), which campaign
     /// defeat plays before its retry prompt (`0x0068606B`).
     pub lose: Option<String>,
@@ -59,6 +62,10 @@ pub struct BasicSection {
     /// 0x0068A271..0x0068A289`, `Set_Defaults` false at `0x00683899`): the
     /// AI triggers of `AIMD.INI` never qualify (`sim::ai_team_creation`).
     pub ignore_global_ai_triggers: Option<bool>,
+    /// gamemd ScenarioClass::Read_INI_Basic @0x00689E90, Scenario+34AD:
+    /// ReadBool68A0E9..68A101 uses the current value;
+    /// fresh SetDefaults683875 clears it. The receiving map owns inheritance.
+    pub timer_inherit: Option<bool>,
     /// Scenario+0x34AE `SkipScore`, read from map `[Basic]` at
     /// `0x0068A1BD..0x0068A1D5`; a fresh Scenario defaults this byte to false
     /// (`Set_Defaults` `0x0068387B`). Campaign Victory uses it to bypass only
@@ -169,6 +176,9 @@ pub fn parse_basic_section(ini: &IniFile) -> BasicSection {
         action: section
             .is_present("Action")
             .then(|| section.read_string("Action", "", 128)),
+        win: section
+            .is_present("Win")
+            .then(|| section.read_string("Win", "", 128)),
         lose: section
             .is_present("Lose")
             .then(|| section.read_string("Lose", "", 128)),
@@ -193,6 +203,7 @@ pub fn parse_basic_section(ini: &IniFile) -> BasicSection {
         fill_silos: section.read_bool_value("FillSilos"),
         // ReadBool with the current Scenario+0x34B4 as default (`0x0068A284`).
         ignore_global_ai_triggers: section.read_bool_value("IgnoreGlobalAITriggers"),
+        timer_inherit: section.read_bool_value("TimerInherit"),
         // ReadBool with the current Scenario+0x34AE as default. A fresh map
         // load resets that byte to false in Set_Defaults.
         skip_score: section.read_bool_value("SkipScore"),
@@ -244,7 +255,9 @@ mod tests {
             inert: Some(word & 0x20 != 0),
             tiberium_grows: Some(word & 0x40 != 0),
             tiberium_spreads: Some(word & 0x80 != 0),
-            destroyable_bridges: Some(word & 0x08 != 0),
+            // ReadSpecialFlags6B8E19..6B8E39 reads/writes bit15. The
+            // ApplyAreaDamage489EB2 consumer independently tests CH,0x80.
+            destroyable_bridges: Some(word & 0x8000 != 0),
             harvester_immune: Some(word & 0x800 != 0),
             ..SpecialFlagsSection::default()
         };

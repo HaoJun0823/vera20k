@@ -3863,6 +3863,13 @@ fn history_state(
     let mut state = json!({ "returned": returned, "tags": tags, "actions": runtime.action_trace,
         "rng_draws": draws, "pending_count": sim.substrate.pending_delete.len(), "pending_tags": pending_tags,
         "globals": runtime.globals_set, "locals": runtime.locals_set, "changed": i32::from(runtime.dirty[0]) });
+    if input["scenario_timer"].as_bool().unwrap_or(false) {
+        let timer = sim.session.scenario_timer_view();
+        state["scenario_timer"] = json!({
+            "running": timer.is_some(),
+            "remaining": timer.map_or(0, |(remaining, _)| remaining),
+        });
+    }
     if input["lifecycle"].as_bool().unwrap_or(false) {
         let tags = runtime.tag_order.len();
         let triggers = runtime.trigger_order.len();
@@ -3997,7 +4004,7 @@ fn live_instances_match_all_native_supplied_histories_and_serialization() {
     assert_eq!(destruction.len(), 3);
     assert_eq!(
         replay_native_histories(rows().into_iter().chain(destruction.iter().cloned())),
-        65
+        69
     );
 }
 
@@ -4043,6 +4050,31 @@ pub(super) fn replay_native_histories(rows: impl Iterator<Item = Value>) -> usiz
         sim.trigger_runtime.map_cursor = input.get("map_cursor").map_or(0, integer);
         let house = supplied_house(&mut sim, input);
         let rules = supplied_rules();
+        let periodic_actor = input.get("periodic_height").map(|height| {
+            sim.session.set_game_mode(
+                crate::sim::scenario_session::ScenarioGameMode::from_game_mode(integer(
+                    &input["game_mode"],
+                )),
+            );
+            // Same supplied unregistered Infantry prior as execute(); this
+            // exercises the periodic caller, not physical construction.
+            let id = sim.substrate.allocate_stable_id();
+            let mut actor = crate::sim::game_entity::GameEntity::test_default_of_category(
+                id,
+                "E1",
+                "Americans",
+                50,
+                60,
+                crate::map::entities::EntityCategory::Infantry,
+            );
+            actor.set_owner_for_test(house);
+            actor.lifecycle.set_cell_marked_for_test(true);
+            actor
+                .position
+                .set_exact_z_leptons_for_test(Some(integer(height)));
+            sim.substrate.entities.insert(actor);
+            id
+        });
         let flags = input.get("live_flags").cloned().unwrap_or(json!([0, 0]));
         let default_operations = json!([["shared"], ["dispatch", 0, 13], ["dispatch", 0, 13]]);
         let operations = input
@@ -4180,6 +4212,10 @@ pub(super) fn replay_native_histories(rows: impl Iterator<Item = Value>) -> usiz
                             FrameEffects::default(),
                         )));
                     }
+                    "periodic_cell" => sim.dispatch_airborne_cell_tag_event(
+                        periodic_actor.unwrap(),
+                        crate::sim::world::UninitContext::new(&rules, None),
+                    ),
                     "global" | "local" => {
                         returned = Some(i32::from(
                             crate::sim::world::Simulation::set_trigger_variable(
@@ -4202,7 +4238,7 @@ pub(super) fn replay_native_histories(rows: impl Iterator<Item = Value>) -> usiz
                             reference: Some(DefinitionReference::Trigger(
                                 integer(&args[2]) as usize
                             )),
-                            value: Some(0),
+                            value: Some(args.get(3).map_or(0, integer)),
                             sound: None,
                         };
                         returned = Some(i32::from(sim.apply_live_trigger_action(
@@ -4271,11 +4307,40 @@ pub(super) fn replay_native_histories(rows: impl Iterator<Item = Value>) -> usiz
             );
             draws += trace.len();
             sim.substrate.pending_delete.assert_consistent_for_test();
-            assert_eq!(
-                history_state(&sim, input, &identities, &objects, returned, draws, house),
-                row["history"][step],
-                "{name}/{step}: {operation}"
-            );
+            let mut actual =
+                history_state(&sim, input, &identities, &objects, returned, draws, house);
+            let mut expected = row["history"][step].clone();
+            if periodic_actor.is_some() {
+                // Native's Cell registry retains the visited Cell after its
+                // +3C attachment clears; Rust stores only live attachments.
+                // Compare the attachment itself at each periodic visit below.
+                actual["registry_counts"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("cell_tags");
+                expected["registry_counts"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("cell_tags");
+                if args[0] == "periodic_cell" {
+                    let ordinal = operations[..=step]
+                        .iter()
+                        .filter(|op| op[0] == "periodic_cell")
+                        .count()
+                        - 1;
+                    let expected_attached = row["native_dispatch_states"][ordinal]["cell_tag"]
+                        .as_u64()
+                        .unwrap()
+                        != 0;
+                    let cell = Simulation::trigger_cell_identity(&sim.resolved_terrain, (50, 60));
+                    assert_eq!(
+                        sim.trigger_runtime.cell_tags.contains_key(&cell),
+                        expected_attached,
+                        "{name}/{step} attachment"
+                    );
+                }
+            }
+            assert_eq!(actual, expected, "{name}/{step}: {operation}");
             let bytes =
                 save_codec::serialize(&(&sim.trigger_runtime, &sim.substrate.pending_delete))
                     .unwrap();

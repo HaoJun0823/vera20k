@@ -16,7 +16,7 @@ if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
   exit 1
 fi
 object="$(jq -n --arg tag "$tag" --arg sha "$commit" '{
-    tag: $tag, object: $sha, type: "commit", message: "VERA20k \($tag)",
+    tag: $tag, object: $sha, type: "commit", message: "VERA20K \($tag)",
     tagger: {name: "github-actions[bot]",
              email: "41898282+github-actions[bot]@users.noreply.github.com",
              date: (now | todate)}}' \

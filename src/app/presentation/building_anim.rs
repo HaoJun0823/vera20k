@@ -43,6 +43,19 @@ pub(crate) fn refresh_coordinate_sound_gains(state: &mut AppState) {
     }
 }
 
+/// The cell test `VocClass::CalcVolumeAndPan` makes for a `Type=SHROUD`
+/// sound (`0x00750B51..0x00750B9B`): the null cell `(0,0)` (the static
+/// `[0x00B1D310]` pair) is always silent, and any other cell is silent while
+/// both of the local player's ground bits `CellClass+0x12C & 0x18` are clear.
+fn shroud_cell_silences(
+    fog: &crate::sim::vision::FogState,
+    owner: crate::sim::intern::InternedId,
+    rx: u16,
+    ry: u16,
+) -> bool {
+    (rx, ry) == (0, 0) || !fog.has_ground_bits(owner, rx, ry)
+}
+
 /// Borrowed process sources and listener for one synchronous sound delivery.
 /// The simulation is supplied only for the duration of `consume`.
 pub(crate) struct SoundPlaybackInputs<'a> {
@@ -74,13 +87,9 @@ impl<'a> SoundSpatialContext<'a> {
         }
     }
 
-    /// `CellClass+0x12C & 0x18 == 0`: unrevealed or gap-covered.
     fn shrouded(&self, rx: u16, ry: u16) -> bool {
         match (self.sim, self.local_owner_id) {
-            (Some(sim), Some(owner)) => {
-                !sim.fog().is_cell_revealed(owner, rx, ry)
-                    || sim.fog().is_cell_gap_covered(owner, rx, ry)
-            }
+            (Some(sim), Some(owner)) => shroud_cell_silences(sim.fog(), owner, rx, ry),
             _ => false,
         }
     }
@@ -139,6 +148,20 @@ impl SoundPlaybackInputs<'_> {
         let assets = self.assets;
         let spatial = self.spatial_context(sim, local_owner);
         let gain_for = |sound_id: &str, source| spatial.gain_for(sound_id, source);
+        // RulesClass::ReadAudioVisual @ 0x006691E0 (CloakSound) and
+        // ObjectTypeClass::ReadINI @ 0x005F93B5 (CrushSound) store only the
+        // VocClass::FindByName @ 0x007514D0 result, and PlayAtPos 0x00750920
+        // indexes the same catalog. An invalid name is silent; it must not
+        // enter the generic raw audio-bag fallback.
+        let play_voc = |sfx: &mut crate::audio::sfx::SfxPlayer,
+                        sound_id: &str,
+                        source: Option<crate::audio::events::SoundSource>| {
+            if registry.get(sound_id).is_some()
+                && let Some(gain) = gain_for(sound_id, source)
+            {
+                sfx.play_registered_sound_spatial(sound_id, gain, registry);
+            }
+        };
         for event in events {
             match event {
                 GameSoundEvent::UnitVoiceVisit { owner } => sfx.visit_unit_voice(*owner, registry),
@@ -178,6 +201,11 @@ impl SoundPlaybackInputs<'_> {
                         assets,
                         audio_indices,
                     );
+                }
+                GameSoundEvent::VocIndex { index } => {
+                    if let Some(entry) = registry.entry_by_index(*index) {
+                        play_voc(sfx, &entry.id, None);
+                    }
                 }
                 GameSoundEvent::EvaRemove { event: eva_event } => {
                     sfx.remove_eva(eva_event, eva_registry);
@@ -224,16 +252,7 @@ impl SoundPlaybackInputs<'_> {
                 GameSoundEvent::CloakSound { sound_id, source }
                 | GameSoundEvent::WallCrushed { sound_id, source }
                 | GameSoundEvent::VocAt { sound_id, source } => {
-                    // RulesClass::ReadAudioVisual @ 0x006691E0 (CloakSound) and
-                    // ObjectTypeClass::ReadINI @ 0x005F93B5 (CrushSound) store only
-                    // the VocClass::FindByName @ 0x007514D0 result. An invalid name
-                    // is silent; it must not enter the generic raw audio-bag fallback.
-                    if registry.get(sound_id).is_none() {
-                        continue;
-                    }
-                    if let Some(gain) = gain_for(sound_id, *source) {
-                        sfx.play_registered_sound_spatial(sound_id, gain, registry);
-                    }
+                    play_voc(sfx, sound_id, *source);
                 }
                 GameSoundEvent::VocAtCoord {
                     sound_id,
@@ -394,6 +413,8 @@ pub(crate) fn update_radar_state(state: &mut AppState) {
         .and_then(|radar| radar.set_has_radar(new_has_radar));
     if let Some(cue) = cue {
         use crate::render::radar::anim::RadarAvailabilityCue;
+        //656BE0 ends the radar's movie loop before either cue.
+        crate::app::radar_movie::end_radar_sound_loop(state);
         let sound = state.rules().and_then(|rules| match cue {
             RadarAvailabilityCue::On => rules.general.radar_on.as_ref(),
             RadarAvailabilityCue::Off => rules.general.radar_off.as_ref(),
@@ -437,7 +458,7 @@ pub(crate) fn drain_sound_events(state: &mut AppState) {
 }
 
 /// Admit pending input effects before the frame's derived voice-interest
-/// view. This does not redrive positional owners or service EVA a second time.
+/// view. This does not redrive positional owners.
 pub(crate) fn drain_pending_sound_events(state: &mut AppState) {
     drain_sound_events_inner(state, false);
 }
@@ -464,11 +485,13 @@ fn drain_sound_events_inner(state: &mut AppState, redrive_owners: bool) {
         return;
     };
     let registry = catalog.sounds();
-    let audio_indices = catalog.index();
-    if redrive_owners {
-        sfx.advance_voice_queue(catalog.eva(), assets, audio_indices);
-    }
 
+    // The EVA queue's dequeue is not driven here. `VoxClass::PlayNextQueued
+    // @ 0x00752760` has three callers: the gated audio service (`0x00406FC1`),
+    // admission (`0x0075257A`) and `PumpAndCheckActive` (`0x007529E0`), which
+    // the blocking waits call. RESIDUAL: its radar caller (`0x00657A0C`, on the
+    // draw where a queued sidebar clip starts or ends) is not ported; a line
+    // queued on that frame starts up to one 33 ms service pass later.
     let inputs = SoundPlaybackInputs {
         assets,
         catalog,
@@ -569,4 +592,22 @@ fn registry_facts_for_owner(
         || crate::audio::sfx::SpatialSource::from_registry_defaults(registry),
         crate::audio::sfx::SpatialSource::from_entry,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Either ground bit keeps a SHROUD cue audible, even where the shroud
+    /// knowledge is closed; none, or the null cell, silences it.
+    #[test]
+    fn shroud_cues_follow_the_cell_ground_bits() {
+        let owner = crate::sim::intern::test_intern("Americans");
+        let mut fog = crate::sim::vision::FogState::new(32, 32);
+        assert!(shroud_cell_silences(&fog, owner, 5, 5));
+        fog.set_ground_bits_for_test(owner, 5, 5, 0x10);
+        assert!(!shroud_cell_silences(&fog, owner, 5, 5));
+        fog.set_ground_bits_for_test(owner, 0, 0, 0x18);
+        assert!(shroud_cell_silences(&fog, owner, 0, 0));
+    }
 }

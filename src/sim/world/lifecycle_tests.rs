@@ -4782,15 +4782,7 @@ fn gsi_04_16_dustbowl_conyard_unlimbo_uses_local_size_edge() {
     let conyard = sim
         .spawn_object("GACNST", "Americans", 69, 115, 0, &rules)
         .expect("GACNST reveals");
-    assert!(
-        sim.substrate
-            .entities
-            .get(conyard)
-            .unwrap()
-            .type_facts
-            .determines_waypoint_edge(),
-        "Factory=BuildingType must freeze onto the entity before Reveal"
-    );
+    assert!(sim.production.is_primary_factory(conyard));
     let house = sim.houses.get(&owner).expect("launch house");
     assert_eq!(house.base_center(), Some((70, 116)));
     assert_eq!(house.waypoint_edge(), 2);
@@ -4812,8 +4804,9 @@ fn gsi_04_16_committed_structure_owner_change_refreshes_new_house_edge() {
         .spawn_object("GACNST", "Americans", 69, 115, 0, &rules)
         .expect("GACNST reveals");
 
-    sim.change_owner(conyard, new_owner);
+    sim.change_owner_with_rules(conyard, new_owner, &rules, None, Default::default());
 
+    assert!(sim.production.is_primary_factory(conyard));
     let new_house = sim.houses.get(&new_owner).expect("new owner house");
     assert_eq!(new_house.base_center(), Some((68, 114)));
     assert_eq!(new_house.waypoint_edge(), 2);
@@ -4836,18 +4829,9 @@ fn gsi_04_16_caoild_reveal_and_owner_change_preserve_waypoint_edges() {
     let oil = sim
         .spawn_object("CAOILD", "Americans", 69, 115, 0, &rules)
         .expect("CAOILD reveals");
-    assert!(
-        !sim.substrate
-            .entities
-            .get(oil)
-            .unwrap()
-            .type_facts
-            .determines_waypoint_edge(),
-        "missing Factory= must freeze as an ineligible edge profile"
-    );
     assert_eq!(sim.houses.get(&old_owner).unwrap().waypoint_edge(), 1);
 
-    sim.change_owner(oil, new_owner);
+    sim.change_owner_with_rules(oil, new_owner, &rules, None, Default::default());
 
     assert_eq!(sim.houses.get(&new_owner).unwrap().waypoint_edge(), 3);
 }
@@ -5217,9 +5201,9 @@ fn deposits_and_kills_feed_the_one_score() {
     // (Cost=900) plus one veteran GI (Cost=200, doubled).
     use crate::rules::ini_parser::IniFile;
     use crate::rules::object_type::{ObjectCategory, ObjectType};
-    use crate::rules::ruleset::INCOME_PPM_SCALE;
     use crate::sim::combat::veterancy::{VeterancyRank, kill_award_points};
     use crate::sim::economy::Economy;
+    use crate::util::native_x87::NativeF32Bits;
 
     let of = |body: &str, category| {
         let ini = IniFile::from_str(&format!(
@@ -5245,7 +5229,11 @@ fn deposits_and_kills_feed_the_one_score() {
 
     let mut economy = Economy::new(0);
     // 240 bales of ore deposited at the x5.0 score rate.
-    economy.add_tiberium_credits(240 * 25, 240, INCOME_PPM_SCALE, INCOME_PPM_SCALE);
+    economy.add_tiberium_credits(
+        25,
+        NativeF32Bits::from_bits(240_f32.to_bits()),
+        NativeF32Bits::ONE,
+    );
     economy.add_score(kill_points);
     assert_eq!(economy.score(), 2_500);
 }
@@ -9362,6 +9350,63 @@ fn fly_cross_level_move_lands_on_destination_surface_after_restore() {
         }
         assert!(landed, "Fly must finish its actual descent");
     }
+}
+
+#[test]
+fn pre_logic_save_observes_input_and_ground_order_before_first_tick() {
+    use super::{FrameEffects, TickLane, display_layers::DisplayLayer};
+    use crate::sim::command::{Command, CommandEnvelope};
+
+    let mut sim = Simulation::new();
+    let owner = sim.interner.intern("Player");
+    sim.houses
+        .register(HouseState::new(owner, 0, None, true, 0, 10));
+    for id in 1..=4 {
+        insert_entity(&mut sim, id, EntityCategory::Unit);
+        assert!(matches!(
+            sim.try_reveal_entity(id, common_raw_request(2 + id as u16, 3, 0, 128, 128)),
+            RevealOutcome::Revealed { .. }
+        ));
+    }
+    assert_eq!(
+        sim.substrate.display.members(DisplayLayer::GROUND),
+        [1, 2, 3, 4]
+    );
+    for id in 1..=4 {
+        sim.remove_entity_occupancy(id);
+        sim.substrate
+            .entities
+            .get_mut(id)
+            .unwrap()
+            .position
+            .set_rx_for_test(7 - id as u16);
+        sim.add_entity_occupancy(id);
+    }
+    let mut runtime = crate::sim::runtime::SimRuntime::from_simulation(sim);
+    let saved = std::cell::RefCell::new(None);
+    let save = |sim: &Simulation| {
+        *saved.borrow_mut() = Some(GameSnapshot::save_validated(sim, 0, 0, "initial", 0));
+    };
+    runtime
+        .advance_frame(
+            &[CommandEnvelope::new(
+                owner,
+                1,
+                Command::SetGameSpeed { speed: 2 },
+            )],
+            67,
+            TickLane::Ordinary,
+            FrameEffects::default().with_before_logic(&save),
+        )
+        .unwrap();
+    let loaded = GameSnapshot::load(&saved.into_inner().expect("reached pre-Logic save")).unwrap();
+    assert_eq!(loaded.sim.session().tick(), 0);
+    assert_eq!(loaded.sim.session().game_options().game_speed, 2);
+    assert_eq!(
+        loaded.sim.substrate.display.members(DisplayLayer::GROUND),
+        [2, 3, 4, 1]
+    );
+    assert_eq!(runtime.simulation.session().tick(), 1);
 }
 
 #[test]

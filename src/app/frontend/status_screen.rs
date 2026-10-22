@@ -16,16 +16,12 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
-use crate::app::{App, AppState, GameScreen};
+use crate::app::{App, AppState, BUILD_STAMP, GameScreen};
 use crate::render::batch::{BatchRenderer, BatchTexture, DepthAxis, SpriteInstance};
 use crate::render::gpu::GpuContext;
 use crate::render::status_font::StrokeFace;
 use crate::ui::pause_menu::{InGameMenuState, ModalOutcome};
 use crate::ui::shell::geom::RectPx;
-
-/// Identity line: the bottom-right status screen and the dashboard's header
-/// share this one stamp. Not a retail build string.
-pub(crate) const BUILD_STAMP: &str = concat!("VERA20K ", env!("CARGO_PKG_VERSION"));
 
 #[derive(Clone, Copy)]
 enum Action {

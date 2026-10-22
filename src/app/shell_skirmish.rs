@@ -137,7 +137,6 @@ impl App {
             .skirmish_shell_state
             .pressed_owner_draw_button = None;
         crate::ui::skirmish_shell::blur_player_name_edit(&mut state.frontend.skirmish_shell_state);
-        state.frontend.skirmish_shell_last_painted_pressed_button = None;
         state.frontend.skirmish_preview_texture = None;
     }
 
@@ -175,7 +174,6 @@ impl App {
             .frontend
             .skirmish_shell_state
             .pressed_owner_draw_button = None;
-        state.frontend.skirmish_shell_last_painted_pressed_button = None;
         // GameMode stays 5 through the game, so the shell resumes on a new
         // `0x102` afterwards (`App::resume_shell_after_match`).
         state.frontend.shell_route = crate::app::shell_route::ShellRoute::Skirmish;
@@ -347,7 +345,6 @@ impl App {
         state.frontend.skirmish_shell_state.dropdown_scroll_drag = None;
         state.frontend.skirmish_shell_state.dropdown_scroll_press = None;
         state.frontend.skirmish_shell_state.trackbar_hold = None;
-        state.frontend.skirmish_shell_last_painted_pressed_button = None;
         crate::ui::skirmish_shell::blur_player_name_edit(&mut state.frontend.skirmish_shell_state);
     }
 
@@ -469,7 +466,6 @@ impl App {
             .frontend
             .skirmish_shell_state
             .pressed_owner_draw_button = None;
-        state.frontend.skirmish_shell_last_painted_pressed_button = None;
     }
 
     pub(super) fn commit_choose_map_selection(
@@ -1198,7 +1194,6 @@ impl App {
             .skirmish_shell_state
             .pressed_owner_draw_button
             .take();
-        state.frontend.skirmish_shell_last_painted_pressed_button = None;
         if pressed_button.is_some()
             && pressed_button == released_button
             && let Some(button) = released_button
@@ -1274,6 +1269,7 @@ impl App {
         let layout = Self::skirmish_shell_layout(state);
         let (x, y) = state.match_state.input.cursor_px();
         Self::update_skirmish_shell_status_help(state, &layout, x, y);
+        let dropdown_before = state.frontend.skirmish_shell_state.open_combo_dropdown;
         crate::ui::skirmish_shell::handle_option_mouse_move(
             &mut state.frontend.skirmish_shell_state,
             &layout,
@@ -1281,6 +1277,9 @@ impl App {
             x,
             y,
         );
+        if state.frontend.skirmish_shell_state.open_combo_dropdown != dropdown_before {
+            state.platform.window.request_redraw();
+        }
         Self::drain_skirmish_shell_ui_sounds(state);
     }
 
@@ -1354,7 +1353,7 @@ impl App {
         }
     }
 
-    fn play_skirmish_shell_ui_sound(
+    pub(super) fn play_skirmish_shell_ui_sound(
         state: &mut AppState,
         sound: crate::ui::skirmish_shell::SkirmishShellUiSound,
     ) {

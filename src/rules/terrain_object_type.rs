@@ -37,6 +37,11 @@ pub struct TerrainObjectType {
     pub immune: bool,
     /// Inherited `LegalTarget=`. `IsVeinhole=yes` force-enables it in gamemd.
     pub legal_target: bool,
+    /// `IsFlammable`: `TerrainTypeClass::ReadINI @ 0x0071DEA0` passes the
+    /// current `+0x2B2` byte to `CCINIClass::ReadBool @ 0x005295F0` at
+    /// `0x0071DF56`; `TerrainTypeClass::Constructor @ 0x0071DA80` defaults it
+    /// to false.
+    pub is_flammable: bool,
     /// Inherited `Bombable=` (`+0x22E`): ObjectTypeClass::ReadINI's
     /// ReadBool over the constructor's 1 (`0x005F9417..0x005F9431`). No
     /// retail TerrainType sets it, so a Crazy Ivan may bomb every one.
@@ -104,6 +109,7 @@ impl TerrainObjectType {
             },
             immune: section.read_bool("Immune", false),
             legal_target: section.read_bool("LegalTarget", false) || is_veinhole,
+            is_flammable: section.read_bool("IsFlammable", false),
             bombable: section.read_bool("Bombable", true),
             insignificant: section.read_bool("Insignificant", true),
             radar_invisible: section.read_bool("RadarInvisible", true),
@@ -154,6 +160,7 @@ mod tests {
         );
         assert!(!t.immune);
         assert!(!t.legal_target);
+        assert!(!t.is_flammable);
         assert!(t.insignificant);
         assert!(t.radar_invisible);
         assert!(!t.water_bound);
@@ -241,5 +248,47 @@ mod tests {
             ),
             row["strength"].as_i64().unwrap()
         );
+    }
+
+    #[test]
+    fn terrain_flammability_retains_stock_battle_tree01_value() {
+        let Some(battle) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+            return;
+        };
+        let tree = battle
+            .rules
+            .terrain_object_type_case_insensitive("TREE01")
+            .expect("stock Battle rules register TREE01");
+
+        assert!(!tree.is_flammable);
+    }
+
+    #[test]
+    fn terrain_flammability_retains_native_bool_across_rule_passes() {
+        use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+        use crate::rules::ruleset::RuleSet;
+
+        let Some(battle) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+            return;
+        };
+        let mut layers = RulesLayerStack::new((*battle.authored_rules).clone());
+        layers.push(
+            RulesLayerKind::GameMode,
+            IniFile::from_str("[TREE01]\nIsFlammable=yes\n"),
+        );
+        layers.push(
+            RulesLayerKind::Scenario,
+            IniFile::from_str("[TREE01]\nIsFlammable=invalid\n"),
+        );
+        layers.push(
+            RulesLayerKind::Scenario,
+            IniFile::from_str("[TREE01]\nSpawnsTiberium=yes\n"),
+        );
+        let rules = RuleSet::from_rules_layers(&layers).expect("production layered rules parse");
+        let tree = rules
+            .terrain_object_type_case_insensitive("TREE01")
+            .expect("retail root registers TREE01");
+
+        assert!(tree.is_flammable);
     }
 }

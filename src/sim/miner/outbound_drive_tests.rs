@@ -1342,8 +1342,9 @@ fn cmin_full_close_return_warps_onto_the_pad_and_deposits() {
             let chrono: Vec<_> = sim.sound_events[sounds_before..]
                 .iter()
                 .filter_map(|event| match event {
-                    crate::sim::world::SimSoundEvent::ChronoTeleport { rx, ry, .. } => {
-                        Some((*rx, *ry))
+                    crate::sim::world::SimSoundEvent::ChronoTeleport { world, .. } => {
+                        let (rx, ry, ..) = world.to_cell_sub_z();
+                        Some((rx, ry))
                     }
                     _ => None,
                 })

@@ -66,7 +66,10 @@ fn frame(s: &mut Scene) -> Sample {
         chrono_sounds: s.sim.sound_events[sounds_before..]
             .iter()
             .filter_map(|event| match event {
-                SimSoundEvent::ChronoTeleport { rx, ry, .. } => Some((*rx, *ry)),
+                SimSoundEvent::ChronoTeleport { world, .. } => {
+                    let (rx, ry, ..) = world.to_cell_sub_z();
+                    Some((rx, ry))
+                }
                 _ => None,
             })
             .collect(),

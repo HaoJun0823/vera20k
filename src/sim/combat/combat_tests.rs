@@ -1876,11 +1876,14 @@ fn make_structure_entity(
     entity
 }
 
+/// `damage_events` holds each killing call's record; an infantryman's death
+/// arm reads its warhead's InfDeath.
 fn run_combat_death_handoff(
     entities: &mut EntityStore,
     rules: &RuleSet,
     interner: &mut crate::sim::intern::StringInterner,
     dead_entities: &[u64],
+    damage_events: &[EntityDamageEvent],
 ) -> DeathEffects {
     let mut occupancy = OccupancyGrid::new();
     let mut houses = crate::sim::houses::Houses::default();
@@ -1900,7 +1903,7 @@ fn run_combat_death_handoff(
         &mut scenario_rng,
         &mut handled_deaths,
         dead_entities,
-        &[],
+        damage_events,
         None,
         None,
         None,
@@ -1979,7 +1982,7 @@ fn lifecycle_authority_immediate_combat_death_reaches_uninit_without_precleanup(
     store.insert(observer);
 
     let mut interner = test_interner();
-    let result = run_combat_death_handoff(&mut store, &rules, &mut interner, &[1]);
+    let result = run_combat_death_handoff(&mut store, &rules, &mut interner, &[1], &[]);
 
     assert_eq!(result.immediate_uninit_ids, vec![1]);
     assert_eq!(result.despawned_ids, vec![1]);
@@ -2042,7 +2045,7 @@ fn lifecycle_authority_combat_leaves_transport_cargo_for_carrier_uninit() {
     store.insert(make_entity(3, "MTNK", 6, 5, 300));
 
     let mut interner = test_interner();
-    let result = run_combat_death_handoff(&mut store, &rules, &mut interner, &[1]);
+    let result = run_combat_death_handoff(&mut store, &rules, &mut interner, &[1], &[]);
 
     assert_eq!(result.immediate_uninit_ids, vec![1]);
     let carrier = store.get(1).unwrap();
@@ -2061,7 +2064,7 @@ fn lifecycle_authority_combat_leaves_transport_cargo_for_carrier_uninit() {
 
 #[test]
 fn lifecycle_authority_animated_combat_handoff_changes_only_health_and_sequence() {
-    let rules = infantry_fire_frame_rules();
+    let rules = infantry_fire_frame_rules_with("[SA]\nInfDeath=1\n");
     let mut store = EntityStore::new();
 
     let mut dead = make_infantry_entity(1, "E1", 5, 5, 0);
@@ -2082,7 +2085,9 @@ fn lifecycle_authority_animated_combat_handoff_changes_only_health_and_sequence(
     store.insert(observer);
 
     let mut interner = test_interner();
-    let result = run_combat_death_handoff(&mut store, &rules, &mut interner, &[1]);
+    // The killing call's record: its InfDeath=1 warhead takes the Die1 arm.
+    let killing = EntityDamageEvent::area(1, 125, 0, RAD_NO_ATTACKER, None, interner.intern("SA"));
+    let result = run_combat_death_handoff(&mut store, &rules, &mut interner, &[1], &[killing]);
 
     assert!(result.immediate_uninit_ids.is_empty());
     assert_eq!(result.despawned_ids, vec![1]);
@@ -5163,7 +5168,7 @@ fn selected_death_sounds_for(
     effects
         .death_sounds
         .into_iter()
-        .map(|(sound, _, _)| sound)
+        .map(|(sound, _)| sound)
         .collect()
 }
 
@@ -5189,6 +5194,11 @@ fn a_building_with_no_die_sound_falls_back_to_the_global_building_die_sound() {
     ))
     .expect("building die-sound rules parse");
 
+    const HERE: crate::sim::anim_class::AnimWorldCoord = crate::sim::anim_class::AnimWorldCoord {
+        x: 1152,
+        y: 1920,
+        z: 104,
+    };
     let selected = |type_name: &str, category: EntityCategory| -> Vec<String> {
         let rng = MainRng::new(11);
         let rng_before = rng.state();
@@ -5199,8 +5209,7 @@ fn a_building_with_no_die_sound_falls_back_to_the_global_building_die_sound() {
             rules.general.building_die_sound.as_deref(),
             true,
             &rng,
-            4,
-            7,
+            HERE,
             &mut sounds,
         );
         assert_eq!(
@@ -5210,8 +5219,8 @@ fn a_building_with_no_die_sound_falls_back_to_the_global_building_die_sound() {
         );
         sounds
             .into_iter()
-            .map(|(sound, rx, ry)| {
-                assert_eq!((rx, ry), (4, 7), "played at the building's own cell");
+            .map(|(sound, location)| {
+                assert_eq!(location, HERE, "played at the building's own Location");
                 sound
             })
             .collect()
@@ -5250,8 +5259,7 @@ fn a_building_with_no_die_sound_falls_back_to_the_global_building_die_sound() {
         bare.general.building_die_sound.as_deref(),
         true,
         &rng,
-        4,
-        7,
+        HERE,
         &mut sounds,
     );
     assert!(sounds.is_empty());
@@ -5664,6 +5672,11 @@ fn fatal_sound_selection_uses_human_voice_then_die_sound_main_draws() {
     let mut entities = EntityStore::new();
     entities.insert(make_entity_owned(1, "MTNK", 5, 5, 100, "Soviet"));
     entities.insert(make_entity_owned(2, "E1", 8, 5, 1, "Americans"));
+    const HERE: crate::sim::anim_class::AnimWorldCoord = crate::sim::anim_class::AnimWorldCoord {
+        x: 2176,
+        y: 1408,
+        z: 0,
+    };
     let mut interner = test_interner();
     install_entity_attack_target_for_test(&mut entities, 1, 2);
     let owner = test_intern("Americans");
@@ -5713,13 +5726,15 @@ fn fatal_sound_selection_uses_human_voice_then_die_sound_main_draws() {
         sounds
             .iter()
             .filter_map(|event| match event {
-                SimSoundEvent::EntityDied { die_sound_id, .. } => {
-                    Some(die_sound_id.as_str())
-                }
+                SimSoundEvent::EntityDied {
+                    die_sound_id,
+                    world,
+                } => Some((die_sound_id.as_str(), *world)),
                 _ => None,
             })
             .collect::<Vec<_>>(),
-        ["VoiceC", "DieA"]
+        // Both play at the victim's Location (`[ESI+0x9C..0xA4]`), cell (8, 5).
+        [("VoiceC", HERE), ("DieA", HERE)]
     );
     assert_eq!(
         scenario_rng.state(),
@@ -8062,16 +8077,29 @@ fn irradiate(
     rad_level: i32,
     spread: i32,
 ) {
+    irradiate_bound(sim, rules, (rx, ry), rad_level, spread, None);
+}
+
+/// A radiation detonation bound to a Phobos `[RadiationTypes]` entry by name.
+fn irradiate_bound(
+    sim: &mut crate::sim::world::Simulation,
+    rules: &RuleSet,
+    (rx, ry): (u16, u16),
+    rad_level: i32,
+    spread: i32,
+    rad_type: Option<&str>,
+) {
     sim.radiation.apply_detonation(
         crate::sim::radiation::RadDetonation {
             rx,
             ry,
             rad_level,
             spread,
+            rad_type: rad_type.map(str::to_owned),
         },
         0,
         sim.session.theater(),
-        &rules.radiation,
+        rules,
         sim.resolved_terrain.as_ref(),
         &mut sim.lighting_sources,
     );
@@ -8475,6 +8503,9 @@ fn gsi_04_07_damage_hostile_building_hit_latches_was_attacked_for_ai_repair() {
 
 /// Buildings never take radiation damage; an ImmuneToRadiation unit on the
 /// same cell is also exempt.
+/// Retail has no building radiation path; Phobos adds one, so this retail
+/// guarantee only holds without the capability.
+#[cfg(not(feature = "phobos"))]
 #[test]
 fn buildings_take_no_rad_damage() {
     let rules = radiation_rules();
@@ -8502,6 +8533,169 @@ fn buildings_take_no_rad_damage() {
         sim.substrate.entities.get(deso).unwrap().health.current(),
         200,
         "ImmuneToRadiation units are exempt"
+    );
+}
+
+/// Phobos custom radiation: the stock scene plus a `[RadiationTypes]` entry
+/// with its own level cap, factor and warhead, bound by `RadType=`.
+#[cfg(feature = "phobos")]
+fn phobos_radiation_rules() -> RuleSet {
+    let ini = crate::sim::arena_fixture::clear_ground_ini(
+        "\
+[InfantryTypes]\n0=DESO\n1=E2\n\n\
+[DESO]\nStrength=200\nArmor=plate\nSpeed=4\nPrimary=RadBeamWeapon\nSecondary=RadEruptionWeapon\nDeployer=yes\nDeployFire=yes\nImmuneToRadiation=yes\n\n\
+[E2]\nStrength=300\nArmor=none\nSpeed=4\n\n\
+[RadEruptionWeapon]\nDamage=1\nROF=60\nRange=4\nAreaFire=yes\nWarhead=RadEruptionWarhead\nRadLevel=500\nRadType=ToxicField\nReport=DesolatorDeploy\n\n\
+[RadEruptionWarhead]\nVerses=100%,100%,100%,20%,10%,10%,0%,0%,0%,100%,100%\nInfDeath=7\nRadiation=yes\nCellSpread=10\n\n\
+[BuildingTypes]\n0=GAPOWR\n1=RADBLDG\n2=IRONBLDG\n\n\
+[GAPOWR]\nStrength=750\nArmor=wood\n\n\
+[RADBLDG]\nStrength=750\nArmor=none\n\n\
+[IRONBLDG]\nStrength=750\nArmor=none\nImmuneToRadiation=yes\n\n\
+[Radiation]\nRadDurationMultiple=1\nRadApplicationDelay=16\nRadApplicationDelay.Building=16\nRadLevelMax=500\nRadLevelDelay=90\nRadLevelFactor=.2\nRadSiteWarhead=RadSite\n\n\
+[Warheads]\n0=RadSite\n1=RadSiteToxic\n\n\
+[RadiationTypes]\n0=ToxicField\n1=OtherField\n2=VioletField\n3=DemoPurple\n\n\
+[ToxicField]\nRadLevelFactor=1.0\nRadLevelMax=250\nRadSiteWarhead=RadSiteToxic\n\n\
+[OtherField]\nRadLevelFactor=0.1\n\n\
+[VioletField]\nRadColor=255,0,255\nRadLightFactor=1.0\nRadTintFactor=1.0\n\n\
+[DemoPurple]\nRadColor=255,0,255\nRadLightFactor=0.6\nRadTintFactor=2.0\nRadDurationMultiple=6\nRadLevelMax=400\n\n\
+[RadSiteToxic]\nVerses=100%,100%,100%,50%,10%,10%,0%,0%,0%,100%,100%\nInfDeath=7\nRadiation=yes\n",
+    );
+    RuleSet::from_ini(&ini).expect("phobos radiation rules should parse")
+}
+
+/// A bound radiation type drives the site's level clamp, its damage factor
+/// and its own warhead; the default-type path on the same scene keeps the
+/// globals.
+#[cfg(feature = "phobos")]
+#[test]
+fn phobos_custom_radiation_type_damage_uses_the_bound_types_parameters() {
+    let rules = phobos_radiation_rules();
+    let mut sim = radiation_scene(&rules);
+    let bound = sim
+        .spawn_object("E2", "Americans", 5, 5, 0, &rules)
+        .expect("bound victim spawns");
+    irradiate_bound(&mut sim, &rules, (5, 5), 500, 2, Some("ToxicField"));
+    rad_frame(&mut sim, &rules, 16);
+    assert_eq!(
+        i64::from(sim.substrate.entities.get(bound).unwrap().health.current()),
+        50,
+        "RadLevelMax=250 clamps the site level and RadLevelFactor=1.0 applies it"
+    );
+
+    let mut stock = radiation_scene(&rules);
+    let default = stock
+        .spawn_object("E2", "Americans", 5, 5, 0, &rules)
+        .expect("default victim spawns");
+    irradiate(&mut stock, &rules, (5, 5), 500, 2);
+    rad_frame(&mut stock, &rules, 16);
+    assert_eq!(
+        i64::from(
+            stock
+                .substrate
+                .entities
+                .get(default)
+                .unwrap()
+                .health
+                .current()
+        ),
+        200,
+        "the default Radiation entry keeps the global 500 level and 0.2 factor"
+    );
+}
+
+/// A bound type's `RadColor`, `RadLightFactor` and `RadTintFactor` shape the
+/// site's published light, so two types on the same scene light differently.
+#[cfg(feature = "phobos")]
+#[test]
+fn phobos_a_bound_types_color_drives_the_site_light() {
+    let rules = phobos_radiation_rules();
+    let mut sim = radiation_scene(&rules);
+    irradiate_bound(&mut sim, &rules, (6, 6), 500, 2, Some("VioletField"));
+    let light = sim
+        .radiation
+        .site_at((6, 6))
+        .expect("site at the detonation center")
+        .light_source()
+        .expect("a live site publishes its light");
+    assert!(light.intensity > 0, "RadLightFactor=1.0 lights the field");
+    assert_eq!(light.tint[1], 0, "no green channel in 255,0,255");
+    assert_eq!(light.tint[0], light.tint[2], "red and blue match: purple");
+    assert!(light.tint[0] > 0);
+}
+
+/// `UseGlobalRadApplicationDelay=false` moves the admission gate to each
+/// bound type's own `RadApplicationDelay`.
+#[cfg(feature = "phobos")]
+#[test]
+fn phobos_per_type_application_delay_gates_damage_when_the_global_gate_is_off() {
+    let mut rules = phobos_radiation_rules();
+    rules.radiation.use_global_rad_application_delay = false;
+    // Rebind the type's own delay by editing its retained entry through the
+    // catalog the projection carries.
+    let mut sim = radiation_scene(&rules);
+    let inf = sim
+        .spawn_object("E2", "Americans", 5, 5, 0, &rules)
+        .expect("infantry spawns");
+    irradiate_bound(&mut sim, &rules, (5, 5), 500, 2, Some("ToxicField"));
+    // The global 16-frame gate is off and the type's delay is the global 16
+    // only because the entry reads none; damage still lands on frame 16.
+    rad_frame(&mut sim, &rules, 16);
+    let after_16 = i64::from(sim.substrate.entities.get(inf).unwrap().health.current());
+    assert!(
+        after_16 < 300,
+        "the type's own 16-frame delay admits frame 16"
+    );
+
+    // A type whose own delay is 32 skips the 16 boundary.
+    let mut slow = phobos_radiation_rules();
+    slow.radiation.use_global_rad_application_delay = false;
+    slow.radiation
+        .radiation_types
+        .apply_pass(&crate::rules::ini_parser::IniFile::from_str(
+            "[ToxicField]\nRadApplicationDelay=32\n",
+        ));
+    let mut sim = radiation_scene(&slow);
+    let inf = sim
+        .spawn_object("E2", "Americans", 5, 5, 0, &slow)
+        .expect("infantry spawns");
+    irradiate_bound(&mut sim, &slow, (5, 5), 500, 2, Some("ToxicField"));
+    rad_frame(&mut sim, &slow, 16);
+    assert_eq!(
+        i64::from(sim.substrate.entities.get(inf).unwrap().health.current()),
+        300,
+        "the type's own 32-frame delay skips frame 16"
+    );
+    rad_frame(&mut sim, &slow, 32);
+    assert_eq!(
+        i64::from(sim.substrate.entities.get(inf).unwrap().health.current()),
+        50,
+        "and admits frame 32"
+    );
+}
+
+/// Native keeps concurrent sites of different types at one center; this
+/// model's one-site-per-center merges and retains the existing binding.
+#[cfg(feature = "phobos")]
+#[test]
+fn phobos_merge_at_one_center_keeps_the_existing_bound_type() {
+    let rules = phobos_radiation_rules();
+    let mut sim = radiation_scene(&rules);
+    irradiate_bound(&mut sim, &rules, (5, 5), 500, 2, Some("ToxicField"));
+    irradiate_bound(&mut sim, &rules, (5, 5), 500, 2, Some("OtherField"));
+    let site = sim.radiation.site_at((5, 5)).expect("site present");
+    assert_eq!(
+        site.rad_type(),
+        Some("ToxicField"),
+        "the existing site keeps its bound type on merge"
+    );
+    let inf = sim
+        .spawn_object("E2", "Americans", 5, 5, 0, &rules)
+        .expect("infantry spawns");
+    rad_frame(&mut sim, &rules, 16);
+    assert_eq!(
+        i64::from(sim.substrate.entities.get(inf).unwrap().health.current()),
+        50,
+        "the merged site still damages through the first type's parameters"
     );
 }
 
@@ -8602,7 +8796,7 @@ fn deployed_desolator_self_irradiates_and_refires_below_third() {
     // drops below 166 once remaining < 167.
     for frame in 3..=340 {
         sim.radiation
-            .tick_decay(frame, &rules.radiation, None, &mut sim.lighting_sources);
+            .tick_decay(frame, &rules, None, &mut sim.lighting_sources);
     }
     let site = sim.radiation.site_at((10, 10)).expect("site still alive");
     assert!(crate::sim::radiation::RadiationState::current_site_level(site) < 500 / 3);
@@ -10832,7 +11026,7 @@ fn a_dying_buildings_debris_leaves_from_its_centre() {
     store.insert(building);
     let mut interner = test_interner();
 
-    let effects = run_combat_death_handoff(&mut store, &rules, &mut interner, &[2]);
+    let effects = run_combat_death_handoff(&mut store, &rules, &mut interner, &[2], &[]);
 
     let debris = interner.intern("DBRIS1LG");
     let spawns: Vec<_> = effects
@@ -11253,5 +11447,161 @@ fn a_drive_crusher_without_crusherall_leaves_a_plain_wall_standing() {
     assert!(
         !wall_present(&fortress),
         "the Battle Fortress is CrusherAll, so the same wall falls to it"
+    );
+}
+
+/// The demo mod's own values: `RadColor=255,0,255`, `RadLightFactor=0.6`,
+/// `RadTintFactor=2.0`, duration x6 and a 400 level cap.
+#[cfg(feature = "phobos")]
+#[test]
+fn phobos_demo_purple_values_reach_the_light() {
+    let rules = phobos_radiation_rules();
+    let mut sim = radiation_scene(&rules);
+    irradiate_bound(&mut sim, &rules, (7, 7), 500, 2, Some("DemoPurple"));
+    let site = sim.radiation.site_at((7, 7)).expect("site");
+    let light = site.light_source().expect("published light");
+    println!(
+        "DEMO light tint={:?} intensity={} level={} duration={}",
+        light.tint,
+        light.intensity,
+        site.level(),
+        site.duration()
+    );
+    assert_eq!(site.level(), 400, "RadLevelMax clamps 500");
+    assert_eq!(site.duration(), 2400, "six frames per level");
+    assert!(light.tint[0] > 0, "red must add: {:?}", light.tint);
+    assert_eq!(light.tint[0], light.tint[2]);
+    assert_eq!(light.tint[1], 0);
+}
+
+/// The compiled capability decides which owner colors the light. Phobos
+/// replaces the retail activation with `RadSiteExt::CreateLight`, which tints
+/// from the bound type's `RadColor` with no theater test, so a purple field
+/// stays purple on a SNOW scenario.
+#[cfg(feature = "phobos")]
+#[test]
+fn phobos_radiation_color_ignores_the_theater() {
+    let rules = phobos_radiation_rules();
+    for theater in ["SNOW", "TEMPERATE"] {
+        let mut sim = radiation_scene(&rules);
+        sim.session_mut_for_test()
+            .set_theater_for_test(theater.to_owned());
+        irradiate_bound(&mut sim, &rules, (8, 8), 500, 2, Some("DemoPurple"));
+        let light = sim
+            .radiation
+            .site_at((8, 8))
+            .expect("site")
+            .light_source()
+            .expect("published light");
+        assert_eq!(
+            light.tint,
+            [2000, 0, 2000],
+            "{theater} keeps the type's three channels"
+        );
+    }
+}
+
+/// The retail owner keeps native `RadSite65B5EA..65B684`: on SNOW the light
+/// substitutes signed -128 for red and blue and keeps only `RadColor`'s
+/// green, so the theater decides which channels the field uses.
+#[cfg(not(feature = "phobos"))]
+#[test]
+fn retail_snow_theater_substitutes_red_and_blue() {
+    let rules = radiation_rules();
+    let mut sim = radiation_scene(&rules);
+    sim.session_mut_for_test()
+        .set_theater_for_test("SNOW".to_owned());
+    irradiate(&mut sim, &rules, (8, 8), 500, 2);
+    let light = sim
+        .radiation
+        .site_at((8, 8))
+        .expect("site")
+        .light_source()
+        .expect("published light");
+    assert_eq!(
+        light.tint,
+        [-501, 0, -501],
+        "red and blue take the snow -128 channel, green keeps [Radiation] RadColor"
+    );
+}
+
+/// Phobos `BuildingClass_AI_Radiation @ 0x43FB23`: a building takes its
+/// foundation's radiation on `RadApplicationDelay.Building` boundaries, and
+/// each type clamps its level at `RadLevelMax` and scales it by its own
+/// `RadLevelFactor` through its own warhead.
+#[cfg(feature = "phobos")]
+#[test]
+fn phobos_buildings_take_radiation_on_the_building_delay() {
+    let rules = phobos_radiation_rules();
+    let mut sim = radiation_scene(&rules);
+    let building = sim
+        .spawn_object("RADBLDG", "Americans", 5, 5, 0, &rules)
+        .expect("building spawns");
+    irradiate_bound(&mut sim, &rules, (5, 5), 500, 2, Some("ToxicField"));
+
+    rad_frame(&mut sim, &rules, 15);
+    assert_eq!(
+        sim.substrate
+            .entities
+            .get(building)
+            .unwrap()
+            .health
+            .current(),
+        750,
+        "off the building's application-delay boundary"
+    );
+    rad_frame(&mut sim, &rules, 16);
+    assert_eq!(
+        sim.substrate
+            .entities
+            .get(building)
+            .unwrap()
+            .health
+            .current(),
+        500,
+        "RadLevelMax 250 x RadLevelFactor 1.0 reaches the building"
+    );
+}
+
+/// The branch is opt-in: with no `RadApplicationDelay.Building` the shared
+/// gate's building delay is 0, which native treats as "skip". Immune
+/// buildings and a warhead that verses the armor at 0% stay untouched.
+#[cfg(feature = "phobos")]
+#[test]
+fn phobos_building_radiation_respects_the_delay_key_immunity_and_verses() {
+    let mut rules = phobos_radiation_rules();
+    rules.radiation.application_delay_building = 0;
+    let mut sim = radiation_scene(&rules);
+    let plain = sim
+        .spawn_object("RADBLDG", "Americans", 5, 5, 0, &rules)
+        .expect("building spawns");
+    irradiate_bound(&mut sim, &rules, (5, 5), 500, 2, Some("ToxicField"));
+    rad_frame(&mut sim, &rules, 16);
+    assert_eq!(
+        sim.substrate.entities.get(plain).unwrap().health.current(),
+        750,
+        "delay 0 disables building radiation"
+    );
+
+    let rules = phobos_radiation_rules();
+    let mut sim = radiation_scene(&rules);
+    let immune = sim
+        .spawn_object("IRONBLDG", "Americans", 5, 5, 0, &rules)
+        .expect("immune building spawns");
+    let wood = sim
+        .spawn_object("GAPOWR", "Americans", 9, 9, 0, &rules)
+        .expect("wood building spawns");
+    irradiate_bound(&mut sim, &rules, (5, 5), 500, 2, Some("ToxicField"));
+    irradiate_bound(&mut sim, &rules, (9, 9), 500, 2, Some("ToxicField"));
+    rad_frame(&mut sim, &rules, 16);
+    assert_eq!(
+        sim.substrate.entities.get(immune).unwrap().health.current(),
+        750,
+        "ImmuneToRadiation buildings are exempt"
+    );
+    assert_eq!(
+        sim.substrate.entities.get(wood).unwrap().health.current(),
+        750,
+        "the type's warhead verses wood at 0%"
     );
 }

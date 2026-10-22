@@ -841,11 +841,15 @@ impl Simulation {
             let Some(owner) = self.substrate.entities.get(id) else {
                 return;
             };
-            let location = crate::sim::movement::ground_pose::position_world_coord(&owner.position);
+            // `0x0054CCDE..0x0054CD14`: at the crashing jumpjet's Location.
+            let location = crate::sim::movement::ground_pose::object_location(
+                owner,
+                self.resolved_terrain.as_ref(),
+            );
             if let Some(entity) = self.substrate.entities.get(victim) {
                 crate::sim::movement::bump_crush::emit_crush_kill_sounds_at(
                     entity,
-                    (location.x / 256, location.y / 256),
+                    location,
                     rules,
                     &mut self.interner,
                     &mut self.sound_events,

@@ -142,7 +142,8 @@ fn fixture_clip(name: &str) -> Option<DecodedAudio> {
         samples,
         sample_rate: clip["rate"].as_u64().unwrap() as u32,
         channels: 2,
-        native_frame_bytes: 2,
+        native_channels: 1,
+        native_sample_bytes: 2,
     })
 }
 
@@ -611,14 +612,12 @@ fn replay(name: &str) {
                         &json!({"rng": fill["rng_before"]}),
                         label,
                     );
-                    let rate = shifts[&pointer]
-                        .shifted_sample_rate(loaded.clips[&initial.unwrap()].sample_rate);
                     let (source, control) = RingSource::new(
                         loaded,
                         cursor,
                         initial.unwrap(),
                         observer.draws.clone(),
-                        rate,
+                        shifts[&pointer],
                         PAN_CENTRE,
                         Some(&entry.sounds),
                     )
@@ -850,13 +849,12 @@ fn start_sim_ring(
     );
     cursor.prepare(&mut draws, true).unwrap();
     let initial = cursor.prepare(&mut draws, true).unwrap();
-    let rate = shifts.shifted_sample_rate(loaded.clips[&initial].sample_rate);
     let (source, control) = RingSource::new(
         loaded,
         cursor,
         initial,
         draws,
-        rate,
+        shifts,
         PAN_CENTRE,
         Some(&entry.sounds),
     )
@@ -1301,16 +1299,12 @@ impl PlaybackService for OneShotService<'_> {
         assert_eq!(event, pending.token.event);
         let loaded = pending.loaded.take().unwrap();
         let initial = pending.initial.unwrap();
-        let rate = pending
-            .shifts
-            .unwrap()
-            .shifted_sample_rate(loaded.clips[&initial].sample_rate);
         pending.source = RingSource::new(
             loaded,
             pending.cursor.take().unwrap(),
             initial,
             self.draws.clone(),
-            rate,
+            pending.shifts.unwrap(),
             pan,
             Some(&self.entry.sounds),
         );
@@ -1329,6 +1323,10 @@ impl PlaybackService for OneShotService<'_> {
                 self.stops += 1;
             }
         }
+    }
+
+    fn channel_volume(&self, _: EventId) -> i32 {
+        0
     }
 }
 
@@ -1683,13 +1681,12 @@ fn native_uniform_consumer_continues_across_first_ring_quarter() {
             loaded.selected.attack
         );
         let initial = cursor.prepare(&mut observer.draws, true).unwrap();
-        let rate = shifts.shifted_sample_rate(loaded.clips[&initial].sample_rate);
         let (source, control) = RingSource::new(
             loaded,
             cursor,
             initial,
             observer.draws.clone(),
-            rate,
+            shifts,
             PAN_CENTRE,
             None,
         )
@@ -1776,7 +1773,14 @@ fn retail_gattling_registry_and_all_executed_pcm_clips_match_native() {
             u64::from(decoded.sample_rate),
             clip["rate"].as_u64().unwrap()
         );
-        assert_eq!((decoded.channels, decoded.native_frame_bytes), (2, 2));
+        assert_eq!(
+            (
+                decoded.channels,
+                decoded.native_channels,
+                decoded.native_sample_bytes
+            ),
+            (2, 1, 2)
+        );
         assert_eq!(
             mono_bytes(decoded.samples.into_iter()),
             bytes_from_hex(clip["pcm_hex"].as_str().unwrap()),

@@ -353,6 +353,22 @@ pub(crate) fn weapon_for_index(
     Some((weapon_id, slot))
 }
 
+/// `TechnoClass::IsNotSprayAttack @ 0x0070DD70`: the type's `SprayAttack`
+/// byte at `+0x691`, negated. `GetDeployWeapon @ 0x0070E120` consumes this
+/// full 0/1 result as its `GetWeapon @ 0x0070E140` index.
+pub(crate) fn is_not_spray_attack(obj: &ObjectType) -> bool {
+    !obj.spray_attack
+}
+
+/// `TechnoClass::GetDeployWeapon @ 0x0070E120`: choose slot 1 unless the type
+/// is `SprayAttack`, then forward that index through the sole `GetWeapon`
+/// owner above. The index remains available when the selected WeaponStruct's
+/// WeaponType pointer is null, as it is in native's fixed slot array.
+pub(crate) fn deploy_weapon(obj: &ObjectType, veterancy: u16) -> (i32, Option<(&str, WeaponSlot)>) {
+    let index = if is_not_spray_attack(obj) { 1 } else { 0 };
+    (index, weapon_for_index(obj, veterancy, index))
+}
+
 /// Whether `TechnoClass::GetWeapon @ 0x0070E140` answers slot `index` with the
 /// elite record: an elite object (`VeterancyClass::IsElite`) whose
 /// `EliteWeapon[index]` names a weapon. Callers that read the record's other

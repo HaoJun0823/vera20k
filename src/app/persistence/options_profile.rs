@@ -34,8 +34,16 @@ const WONLINE_SECTION: &str = "WOnline";
 const NETWORK_SECTION: &str = "Network";
 /// VERA's own display preferences. gamemd never reads this section.
 const VERA_SECTION: &str = "VERA";
+/// `[VERA] SoundDefaultsApplied=`: written `yes` by every profile save. A
+/// profile without it, such as one the original game or an older VERA20k
+/// wrote, opens at the default sound settings once.
+const SOUND_DEFAULTS_APPLIED_KEY: &str = "SoundDefaultsApplied";
 /// Destination units `OptionsClass__ReadFromINI` passes for NetID (`push 0xC8`).
 const NET_ID_UNITS: usize = 0xC8;
+/// Destination units `[VERA] Display=`'s ReadString copies into. A VERA key, so
+/// the capacity is ours: a device name is at most `\\.\DISPLAY` plus a few
+/// digits, and 64 leaves room for a backend that names screens differently.
+const DISPLAY_CAPACITY: usize = 64;
 const SCREEN_SIZE_UNSET: i32 = -1;
 const DEFAULT_SCREEN_WIDTH: i32 = 800;
 const DEFAULT_SCREEN_HEIGHT: i32 = 600;
@@ -70,10 +78,11 @@ pub(crate) struct RetailOptionsProfile {
     pub(crate) screen_width: i32,
     pub(crate) screen_height: i32,
     pub(crate) stretch_movies: bool,
-    /// Read and retained, but deliberately omitted by the native writer.
+    /// Read and retained, but deliberately omitted by the native writer. The
+    /// main-menu code HIRES toggles it.
     pub(crate) allow_hi_res_modes: bool,
-    /// Native stores this outside the contiguous Options object. It remains a
-    /// read-only retained profile value here and is never serialized.
+    /// Native stores this outside the contiguous Options object. The main-menu
+    /// code TOGGLE toggles it; it is never serialized.
     pub(crate) allow_mode_toggle: bool,
     /// Read and retained, but deliberately omitted by the native writer.
     pub(crate) allow_vram_sidebar: bool,
@@ -141,6 +150,12 @@ pub(crate) struct RetailOptionsProfile {
     /// service instead of showing `TXT_APIMISSING`: the Options page's
     /// developer box. Off by default; no real service exists yet.
     pub(crate) wol_test_service: bool,
+    /// `[VERA] Display=`: the screen the game opens on, by the window system's
+    /// own name (`\\.\DISPLAY1`). Absent or empty means the system's choice,
+    /// which is how every earlier build behaved. A name no longer attached
+    /// stays here and opens on the system's choice, like [`Self::zoom`]'s
+    /// unknown steps.
+    pub(crate) display: crate::ui::main_menu_dialogs::options::DisplayTarget,
 }
 
 /// The two process-start products obtained from one physical `RA2MD.INI`
@@ -202,6 +217,7 @@ impl Default for RetailOptionsProfile {
             shift_queue: false,
             shift_queue_count: DEFAULT_SHIFT_QUEUE_COUNT,
             wol_test_service: false,
+            display: crate::ui::main_menu_dialogs::options::DisplayTarget::Auto,
         }
     }
 }
@@ -218,7 +234,7 @@ pub(crate) struct FormattedProfileSections {
     pub(crate) audio: [(&'static str, String); 7],
     pub(crate) network: [(&'static str, String); 4],
     /// VERA's own section, written after the native ones.
-    pub(crate) vera: [(&'static str, String); 9],
+    pub(crate) vera: [(&'static str, String); 11],
 }
 
 impl RetailOptionsLoad {
@@ -305,6 +321,15 @@ impl RetailOptionsLoad {
         // a second filesystem authority.
         if let Some(ini) = ini {
             retained_profile.apply_ini(ini);
+            // VERA's first start with this profile opens at the default sound
+            // settings, for a good first impression; the next save records it,
+            // and the player's choices persist from then on, as in gamemd.
+            let sound_defaults_applied = ini
+                .section(VERA_SECTION)
+                .is_some_and(|vera| vera.read_bool(SOUND_DEFAULTS_APPLIED_KEY, false));
+            if !sound_defaults_applied {
+                retained_profile.reset_audio();
+            }
         }
 
         Self {
@@ -320,6 +345,18 @@ impl RetailOptionsProfile {
     /// negative and unordered inputs instead of copying the output clamp.
     pub(crate) fn set_score_volume(&mut self, value: f64) {
         self.score_volume = upper_only_volume(value);
+    }
+
+    /// Put every `[Audio]` field back to its constructor default.
+    fn reset_audio(&mut self) {
+        let defaults = Self::default();
+        self.sound_volume = defaults.sound_volume;
+        self.voice_volume = defaults.voice_volume;
+        self.score_volume = defaults.score_volume;
+        self.is_score_repeat = defaults.is_score_repeat;
+        self.is_score_shuffle = defaults.is_score_shuffle;
+        self.sound_latency = defaults.sound_latency;
+        self.in_game_music = defaults.in_game_music;
     }
 
     /// Seed native constructor defaults with the screen fields already chosen
@@ -424,6 +461,10 @@ impl RetailOptionsProfile {
                 vera.read_int("ShiftQueueCount", self.shift_queue_count as i32),
             );
             self.wol_test_service = vera.read_bool("WolTestService", self.wol_test_service);
+            if let Some(value) = vera.read_name("Display", DISPLAY_CAPACITY) {
+                self.display =
+                    crate::ui::main_menu_dialogs::options::DisplayTarget::from_ini_value(value);
+            }
         }
     }
 
@@ -519,6 +560,8 @@ impl RetailOptionsProfile {
                     "RenderInterpolation",
                     format_bool(self.render_interpolation).to_string(),
                 ),
+                ("Display", self.display.ini_value().to_owned()),
+                (SOUND_DEFAULTS_APPLIED_KEY, format_bool(true).to_owned()),
             ],
         }
     }
@@ -1091,6 +1134,37 @@ mod tests {
     }
 
     #[test]
+    fn first_start_opens_at_default_sound_then_keeps_saved_choices() {
+        let audio = |p: &RetailOptionsProfile| {
+            (
+                p.sound_volume,
+                p.voice_volume,
+                p.score_volume,
+                p.is_score_repeat,
+                p.is_score_shuffle,
+                p.sound_latency,
+                p.in_game_music,
+            )
+        };
+        let startup = RetailStartupOptions::default();
+        // A profile the original game or an older VERA20k wrote.
+        let old = b"[Options]\nGameSpeed=5\n[Audio]\nSoundVolume=0.5\nVoiceVolume=0.6\n\
+ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoom=150\n";
+        let first = load_snapshot(&startup, old).retained_profile;
+        assert_eq!(audio(&first), audio(&RetailOptionsProfile::default()));
+        assert_eq!(first.game_speed, 5, "only the sound settings reset");
+
+        // Any save records it, so the player's choices survive restarts.
+        let chosen = RetailOptionsProfile {
+            sound_volume: 0.25,
+            ..first
+        };
+        let saved = chosen.transform_ra2md(old);
+        let second = load_snapshot(&startup, &saved).retained_profile;
+        assert_eq!(audio(&second), audio(&chosen));
+    }
+
+    #[test]
     fn width_only_snapshot_uses_fallback_window_then_rereads_retained_width() {
         let reads = Cell::new(0);
         let load = RetailOptionsLoad::from_ra2md_with(
@@ -1339,6 +1413,53 @@ mod tests {
         assert!(reread.retained_profile.shift_queue);
         assert!(reread.retained_profile.wol_test_service);
         assert_eq!(reread.retained_profile.shift_queue_count, 7);
+    }
+
+    #[test]
+    fn display_preference_round_trips_through_the_vera_section() {
+        use crate::ui::main_menu_dialogs::options::DisplayTarget;
+        let startup = RetailStartupOptions::default();
+        // Absent and empty both mean Auto: the system chooses, as every
+        // earlier build did.
+        for input in [
+            b"".as_slice(),
+            b"[VERA]\n".as_slice(),
+            b"[VERA]\nDisplay=\n".as_slice(),
+        ] {
+            assert_eq!(
+                load_snapshot(&startup, input).retained_profile.display,
+                DisplayTarget::Auto
+            );
+        }
+        // A named screen survives a restart even when it is unplugged now; the
+        // window layer falls back at use, never at read.
+        let named = load_snapshot(&startup, b"[VERA]\nDisplay=\\\\.\\DISPLAY2\n");
+        assert_eq!(
+            named.retained_profile.display,
+            DisplayTarget::Fixed("\\\\.\\DISPLAY2".to_owned())
+        );
+        // The writer emits the key in the VERA block, and a re-read agrees.
+        let profile = RetailOptionsProfile {
+            display: DisplayTarget::Fixed("\\\\.\\DISPLAY1".to_owned()),
+            ..RetailOptionsProfile::default()
+        };
+        let output = profile.transform_ra2md(b"[Video]\r\nScreenWidth=800\r\n");
+        assert!(
+            String::from_utf8_lossy(&output).contains("Display=\\\\.\\DISPLAY1\r\n"),
+            "{}",
+            String::from_utf8_lossy(&output)
+        );
+        assert_eq!(
+            load_snapshot(&startup, &output).retained_profile.display,
+            DisplayTarget::Fixed("\\\\.\\DISPLAY1".to_owned())
+        );
+        // Auto writes an empty value, which reads back as Auto.
+        let auto =
+            RetailOptionsProfile::default().transform_ra2md(b"[VERA]\nDisplay=\\\\.\\DISPLAY1\n");
+        assert_eq!(
+            load_snapshot(&startup, &auto).retained_profile.display,
+            DisplayTarget::Auto
+        );
     }
 
     #[test]

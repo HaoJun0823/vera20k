@@ -9,8 +9,8 @@ use crate::app::persistence::options_profile::{RetailOptionsLoad, RetailOptionsP
 
 use super::{
     ActiveEventLoop, App, AppState, Arc, AssetManager, BTreeMap, BasicSection, BatchRenderer,
-    BitFont, Fullscreen, GameConfig, GameScreen, GpuContext, HashMap, HouseRoster, Instant,
-    MusicPlayer, PhysicalSize, PlatformState, RandomMapGenerationRetention, Result, SfxPlayer,
+    BitFont, GameConfig, GameScreen, GpuContext, HashMap, HouseRoster, Instant, MusicPlayer,
+    PhysicalSize, PlatformState, RandomMapGenerationRetention, Result, SfxPlayer,
     SidebarChromeLayoutSpec, SidebarTab, StartupAudioDisposition, Window, WindowAttributes,
     frontend::startup_splash,
 };
@@ -118,15 +118,11 @@ trait StartupAudioProfileOperations {
 
 impl StartupAudioProfileOperations for crate::app::audio_runtime::AppAudioRuntime {
     fn set_sound_volume(&mut self, volume: f64) {
-        if let Some(player) = self.sfx_player.as_mut() {
-            player.set_sound_volume(volume);
-        }
+        crate::app::audio_runtime::AppAudioRuntime::set_sound_volume(self, volume);
     }
 
     fn set_voice_volume(&mut self, volume: f64) {
-        if let Some(player) = self.sfx_player.as_mut() {
-            player.set_voice_volume(volume);
-        }
+        crate::app::audio_runtime::AppAudioRuntime::set_voice_volume(self, volume);
     }
 
     fn set_score_volume(&mut self, volume: f32) {
@@ -208,16 +204,33 @@ impl App {
         // The saved Full Screen choice goes in at creation: macOS retries it
         // only then, when the first attempt fails (a launch from an app that
         // is itself full screen). The resize that ends the animation re-fits
-        // the surface.
+        // the surface. The saved screen is resolved here too, so full screen
+        // covers it and a windowed launch opens on it; a screen that is no
+        // longer attached leaves both to the system.
+        let displays = if capture {
+            Vec::new()
+        } else {
+            crate::app::display_target::current_displays_for(event_loop)
+        };
+        let wanted_display = super::display_target::screen_for(&displays, &options_profile.display);
+        let fullscreen = (!capture && options_profile.full_screen)
+            .then(|| super::display_target::fullscreen_for(&displays, &options_profile.display));
         let mut window_attrs: WindowAttributes = WindowAttributes::default()
             .with_title(super::WINDOW_TITLE)
             .with_inner_size(inner_size)
             .with_resizable(!capture)
-            .with_fullscreen(
-                (!capture && options_profile.full_screen).then_some(Fullscreen::Borderless(None)),
-            )
+            .with_fullscreen(fullscreen)
             .with_visible(window_visible)
             .with_active(window_visible);
+        // The Wayland app ID and X11 class, which the AppImage's desktop entry
+        // names (StartupWMClass), so docks show its icon for the window.
+        // Unset, Wayland has none and X11 takes the name the program was
+        // started by: an AppImage's own file name, version included.
+        #[cfg(target_os = "linux")]
+        {
+            use winit::platform::wayland::WindowAttributesExtWayland as _;
+            window_attrs = window_attrs.with_name("vera20k", "vera20k");
+        }
         // macOS full screen hides the menu bar and Dock instead of revealing
         // them at the edges the player scrolls against, where the system would
         // draw its own cursor over the game's. winit applies this to its own
@@ -236,6 +249,16 @@ impl App {
             window_attrs = icon.apply(window_attrs);
         }
         let window: Arc<Window> = Arc::new(event_loop.create_window(window_attrs)?);
+        // A windowed launch on a saved screen: the window opens centred there.
+        // Full screen already covers it from the attributes above.
+        if let Some(monitor) = wanted_display
+            .as_ref()
+            .filter(|_| !options_profile.full_screen)
+        {
+            window.set_outer_position(super::display_target::centered_outer_position(
+                &window, monitor,
+            ));
+        }
         // gamemd's WinMain builds WWMouse (`0x006BDF1C`), whose constructor hides
         // the cursor, before the startup splash; from the first frame after it,
         // `show_os_cursor_only_without_game_cursor` owns the cursor.
@@ -470,6 +493,9 @@ impl App {
                 },
             )
             .unwrap_or_default();
+        if let Some(assets) = startup_asset_manager.as_ref() {
+            process_assets.install_native_ini_hashes(assets, &skirmish_modes);
+        }
         let mut skirmish_shell_state = crate::ui::skirmish_shell::SkirmishShellState::default();
         // Seed the Credits/Unit Count slider ranges from rulesmd's
         // [MultiplayerDialogSettings] so a mod that changes the money/unit bounds
@@ -575,7 +601,7 @@ impl App {
             sfx_player,
             launcher_audio_available,
             theme_startup_suppressed: false,
-            movie_audio: Default::default(),
+            master_groups: Default::default(),
         };
         if let Some(assets) = startup_asset_manager.as_ref() {
             startup_audio_runtime.initialize_theme(assets);
@@ -591,8 +617,12 @@ impl App {
                 capture_dimensions.map(|(w, h)| PhysicalSize::new(w, h)),
             ),
             match_state: crate::app::match_runtime::state::MatchState {
+                campaign_names: Default::default(),
                 session: Default::default(),
                 network_wait: Default::default(),
+                network_failure: None,
+                live_network: None,
+                lan_service: None,
                 auto_play: None,
                 startup: Default::default(),
                 sim_runtime: None,
@@ -621,7 +651,6 @@ impl App {
                         crate::ui::messages::MESSAGE_MAX_VISIBLE_RETAIL,
                         0,
                     ),
-                    message_clock: crate::ui::messages::PauseAwareClock::default(),
                     chat: Default::default(),
                     in_game_menu: crate::ui::pause_menu::InGameMenuState::default(),
                     modal_latch: true,
@@ -735,7 +764,6 @@ impl App {
                 skirmish_shell_state,
                 choose_map_last_mode_row: None,
                 multiplayer_shell_runtime,
-                skirmish_shell_last_painted_pressed_button: None,
                 skirmish_shell_chrome,
                 main_menu_shell_state: crate::ui::main_menu_shell::MainMenuShellState::default(),
                 single_player_shell_state:
@@ -853,6 +881,11 @@ impl App {
             // the unverified legacy Battle loader. It has no artificial AI
             // opponent or starting forces; this is not campaign admission.
             let session = quickplay_launch_session(quickplay);
+            #[cfg(feature = "ares")]
+            crate::app::frontend::skirmish_session::prepare_external_skirmish_countries(
+                &mut state.process_assets,
+                &session,
+            );
             let mut clock = crate::app::match_bootstrap::OrdinaryMatchSeedClock;
             let seed = crate::app::match_bootstrap::read_match_seed(&mut clock);
             let request = crate::app::loading::pump::LoadingRequest::unverified_legacy_skirmish(

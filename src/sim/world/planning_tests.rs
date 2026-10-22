@@ -166,19 +166,30 @@ fn append(sim: &mut Simulation, rules: &RuleSet, owner: InternedId, actor: u64, 
 }
 
 #[test]
-fn stop_or_uninit_detaches_only_its_actor_from_shared_nodes() {
-    for uninit in [false, true] {
+fn stop_repair_or_uninit_detaches_only_its_actor_from_shared_nodes() {
+    for action in ["stop", "repair_dead", "uninit"] {
         let (mut sim, rules, owner) = fixture();
         for actor in [1, 2] {
             append(&mut sim, &rules, owner, actor, (12, 15));
         }
-        if uninit {
+        if action == "uninit" {
             sim.uninit(1);
+        } else if action == "repair_dead" {
+            sim.substrate
+                .entities
+                .get_mut(1)
+                .unwrap()
+                .lifecycle
+                .set_object_alive_for_test(false);
+            // Event4C6EE0 detaches before the target's +90/alive refusal.
+            let record = sim.encode_repair_record(owner, 1).unwrap();
+            let envelope = sim.decode_native_command_record(&record, 0).unwrap();
+            assert!(!sim.apply_command("Americans", &envelope.payload, Some(&rules)));
         } else {
             assert!(sim.apply_command("Americans", &Command::Stop { entity_id: 1 }, Some(&rules)));
         }
-        assert!(!sim.planning.paths.contains_key(&1), "uninit={uninit}");
-        assert!(sim.planning.paths.contains_key(&2), "uninit={uninit}");
+        assert!(!sim.planning.paths.contains_key(&1), "{action}");
+        assert!(sim.planning.paths.contains_key(&2), "{action}");
         assert_eq!(
             sim.planning.nodes[&0]
                 .orders
@@ -186,7 +197,7 @@ fn stop_or_uninit_detaches_only_its_actor_from_shared_nodes() {
                 .map(|(id, _)| *id)
                 .collect::<Vec<_>>(),
             vec![2],
-            "uninit={uninit}"
+            "{action}"
         );
     }
 }
@@ -384,11 +395,13 @@ fn guard_commit_consumes_first_node_stages_deliberate_and_retains_next_node() {
     assert_eq!(mission.queued(), crate::sim::mission::MissionId::NONE);
     assert!(sim.take_due_commands().is_empty());
     sim.session.set_tick_for_test(sim.session.tick() + 1);
-    let due = sim.take_due_commands();
+    sim.session
+        .set_binary_frame_for_test(sim.session.binary_frame().wrapping_add(1));
+    let due = sim.take_frame_commands_for_test();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].execute_tick, sim.session.tick() + 1);
     assert!(matches!(&due[0].payload, Command::PlanningRecord { record }
-        if record.payload()[22] == 2 && record.frame_stamp() == sim.session.binary_frame() as i32 + 1));
+        if record.payload()[22] == 2 && record.frame_stamp() == sim.session.binary_frame() as i32));
 }
 
 #[test]
@@ -472,7 +485,9 @@ fn ownership_transfer_detaches_path_preserves_generated_event_and_restores_snaps
     assert!(!restored.planning.paths.contains_key(&1));
     assert_eq!(restored.planning_paths(owner)[0].cells, vec![(20, 15)]);
     sim.session.set_tick_for_test(sim.session.tick() + 1);
-    let due = sim.take_due_commands();
+    sim.session
+        .set_binary_frame_for_test(sim.session.binary_frame().wrapping_add(1));
+    let due = sim.take_frame_commands_for_test();
     assert_eq!(due, generated);
     sim.apply_due_commands(
         &due,
@@ -536,7 +551,9 @@ fn same_batch_commit_precedes_staged_edit_and_next_batch_commit_starts_path() {
     assert!(sim.planning.paths[&1].executing);
     assert!(sim.take_due_commands().is_empty());
     sim.session.set_tick_for_test(sim.session.tick() + 1);
-    let due = sim.take_due_commands();
+    sim.session
+        .set_binary_frame_for_test(sim.session.binary_frame().wrapping_add(1));
+    let due = sim.take_frame_commands_for_test();
     assert_eq!(due.len(), 1);
     assert!(
         matches!(&due[0].payload, Command::PlanningRecord { record } if record.payload()[22] == 2)
@@ -1003,7 +1020,9 @@ fn planned_force_attack_preserves_admitted_friendly_target_through_native_dispat
     let commit = sim.encode_plan_commit_record(owner).unwrap();
     apply(&mut sim, &rules, commit);
     sim.session.set_tick_for_test(sim.session.tick() + 1);
-    let due = sim.take_due_commands();
+    sim.session
+        .set_binary_frame_for_test(sim.session.binary_frame().wrapping_add(1));
+    let due = sim.take_frame_commands_for_test();
     assert_eq!(due.len(), 1);
     assert!(
         matches!(&due[0].payload, Command::PlanningRecord { record } if record.payload()[22] == 2)
@@ -1080,7 +1099,9 @@ fn captured_actor_path_commits_for_current_house_and_preserves_original_issuer()
     sim.planning = save_codec::deserialize(&bytes).unwrap();
     sim.validate_planning_references().unwrap();
     sim.session.set_tick_for_test(sim.session.tick() + 1);
-    let due = sim.take_due_commands();
+    sim.session
+        .set_binary_frame_for_test(sim.session.binary_frame().wrapping_add(1));
+    let due = sim.take_frame_commands_for_test();
     assert!(sim.apply_command("Americans", &due[0].payload, Some(&rules)));
     assert_eq!(
         sim.substrate.entities.get(1).unwrap().navigation.nav_com(),

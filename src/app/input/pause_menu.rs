@@ -212,8 +212,9 @@ pub(crate) fn mouse(state: &mut AppState, button: MouseButton, pressed: bool) {
     if pressed {
         interaction.press(over);
         if over.is_some() {
-            // Common type2 button61374B..613771: generic cue at button-down.
-            App::play_skirmish_shell_generic_click_sound(state);
+            // Owner-draw button-down: GUIMainButtonSound (Rules+0x188,
+            // 0x0061374B..0x00613771).
+            App::play_main_menu_button_sound(state);
         }
     } else if let Some(button) = interaction.release(over) {
         activate(state, button);
@@ -315,20 +316,23 @@ fn resume_internet_events(state: &mut AppState) {
         state.match_state.session.pause_event_limiters_mut(),
         now_bucket,
     );
-    if let Some(fudge) = resume.latency_fudge {
-        state.match_state.session.set_latency_fudge(fudge);
-    }
-    if let Some(speed) = resume.game_speed
-        && let Some(owner) = crate::app::input::commands::preferred_local_owner(state)
-    {
-        // EVENT_GAMESPEED with `6 - position`, the existing speed command.
-        // Residual: it rides the shared command schedule rather than native
-        // ingress timing, and the remote-sender message (format 0x00820DF0)
-        // belongs to the transport.
+    let Some(owner) = crate::app::input::commands::preferred_local_owner(state) else {
+        return;
+    };
+    // Resume4F1595..4F167A emits latency first, then speed. The limiters above
+    // have already advanced even when OutList refuses either event.
+    if let Some(value) = resume.latency_fudge {
         crate::app::input::commands::schedule_command(
             state,
             &owner,
-            crate::sim::command::Command::SetGameSpeed { speed: speed as u8 },
+            crate::sim::command::Command::SetLatencyFudge { value },
+        );
+    }
+    if let Some(speed) = resume.game_speed {
+        crate::app::input::commands::schedule_command(
+            state,
+            &owner,
+            crate::sim::command::Command::LiveGameSpeed { speed: speed as u8 },
         );
     }
 }

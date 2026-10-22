@@ -18,6 +18,12 @@ const _: () = assert!(
     cfg!(feature = "ares") == rules::ARES_ENABLED,
     "enable Ares through the vera20k package's ares feature"
 );
+// The same boundary for Phobos: the capability is independent of Ares and is
+// likewise enabled through the client package.
+const _: () = assert!(
+    cfg!(feature = "phobos") == rules::PHOBOS_ENABLED,
+    "enable Phobos through the vera20k package's phobos feature"
+);
 
 // Opaque process-RNG cursor receipt shared by map generation and simulation.
 use vera20k_core::rng_continuation;

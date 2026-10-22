@@ -38,6 +38,7 @@ const en: Record<string, string> = {
   "alert.pathTip": "the latest batch pass left these registrations unanswered",
   "alert.errors": "{n} errors",
   "alert.errorsGo": "open the log at error level",
+  "alert.stale": "no stream — no current reading",
 
   "status.connecting": "connecting",
   "status.live": "live",
@@ -377,6 +378,7 @@ const zh: Record<string, string> = {
   "alert.pathTip": "最近一次寻路批次未应答这些登记",
   "alert.errors": "{n} 条错误",
   "alert.errorsGo": "按 error 级别打开日志",
+  "alert.stale": "没有推流，无当前读数",
 
   "status.connecting": "连接中",
   "status.live": "实时",
@@ -716,6 +718,7 @@ const de: Record<string, string> = {
   "alert.pathTip": "Der letzte Batchlauf ließ diese Registrierungen unbeantwortet",
   "alert.errors": "{n} Fehler",
   "alert.errorsGo": "Protokoll auf Fehlerstufe öffnen",
+  "alert.stale": "Kein Stream — kein aktueller Messwert",
 
   "status.connecting": "verbinde",
   "status.live": "live",
@@ -1055,6 +1058,7 @@ const fr: Record<string, string> = {
   "alert.pathTip": "la dernière passe de lot a laissé ces demandes sans réponse",
   "alert.errors": "{n} erreurs",
   "alert.errorsGo": "ouvrir le journal au niveau erreur",
+  "alert.stale": "pas de flux — aucune lecture actuelle",
 
   "status.connecting": "connexion",
   "status.live": "en direct",

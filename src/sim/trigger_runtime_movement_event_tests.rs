@@ -791,7 +791,13 @@ fn all03_needle_garrison_runs_the_authored_difficulty_specific_reveal() {
             crate::sim::scenario_session::ScenarioGameMode::from_legacy_nonzero(false),
         );
         sim.session
-            .initialize_campaign_startup(difficulty, 3, None)
+            .initialize_campaign_startup(
+                difficulty,
+                3,
+                None,
+                0,
+                crate::sim::campaign_carry_over::CampaignCarryOver::CLEARED,
+            )
             .unwrap();
         sim.session.game_options_mut_for_test().short_game = false;
         sim.intern_rule_type_ids(&rules);

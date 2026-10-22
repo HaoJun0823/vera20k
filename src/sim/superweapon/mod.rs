@@ -17,6 +17,8 @@ mod chronosphere;
 pub use chronosphere::CHRONO_WARP_SELECTION_INDEX;
 pub mod airstrike_tint;
 #[cfg(all(test, feature = "ares"))]
+mod ares_super_anims_tests;
+#[cfg(all(test, feature = "ares"))]
 mod building_requirements_tests;
 #[cfg(test)]
 mod can_fire_tests;
@@ -44,6 +46,8 @@ pub(crate) mod nuke;
 #[cfg(test)]
 mod nuke_tests;
 pub mod paradrop;
+#[cfg(all(test, feature = "phobos"))]
+mod phobos_techno_requirements_tests;
 pub mod psychic_dominator;
 #[cfg(test)]
 mod psychic_dominator_tests;
@@ -291,6 +295,24 @@ impl SuperWeapons {
         self.by_house.is_empty()
     }
 
+    /// Native 100226D0 always writes the count and frame together. A restored
+    /// nonzero count cannot omit the frame used to hash that retained pair.
+    /// Signed counts may wrap; their sign is not an admission constraint.
+    #[cfg(feature = "ares")]
+    pub(crate) fn validate_ares_launch_history(&self) -> Result<(), &'static str> {
+        if self
+            .by_house
+            .values()
+            .flat_map(|weapons| weapons.values())
+            .any(|instance| {
+                instance.ares_launch_count != 0 && instance.ares_last_launch_frame.is_none()
+            })
+        {
+            return Err("nonzero successful-launch count without a last frame");
+        }
+        Ok(())
+    }
+
     /// The HouseClass constructor's Supers vector: each House's set, once.
     fn install_house(&mut self, house: InternedId, supers: HouseSuperWeapons) {
         assert!(
@@ -395,6 +417,13 @@ pub struct SuperWeaponInstance {
     paid_sequence: u64,
     #[serde(default)]
     paid_selection: Option<PaidSuperWeaponSelection>,
+    /// HouseExt's per-definition successful-launch pair (+88 vector).
+    /// Each House already retains exactly one Super per definition, so this
+    /// pair shares that owner and survives grant/revoke/charge changes.
+    #[cfg(feature = "ares")]
+    ares_launch_count: i32,
+    #[cfg(feature = "ares")]
+    ares_last_launch_frame: Option<i32>,
 }
 
 fn idle_fade() -> i32 {
@@ -410,6 +439,22 @@ fn default_can_lose() -> bool {
 }
 
 impl SuperWeaponInstance {
+    /// 100226D0: called only after an admitted Ares Activate returned true.
+    #[cfg(feature = "ares")]
+    fn record_ares_launch(&mut self, frame: i32) {
+        self.ares_launch_count = self.ares_launch_count.wrapping_add(1);
+        self.ares_last_launch_frame = Some(frame);
+    }
+
+    pub(crate) fn hash_ares_launch_history(&self, hasher: &mut impl std::hash::Hasher) {
+        #[cfg(not(feature = "ares"))]
+        let _ = hasher;
+        #[cfg(feature = "ares")]
+        if let Some(frame) = self.ares_last_launch_frame {
+            std::hash::Hash::hash(b"ares-super-launch-history-v1", hasher);
+            std::hash::Hash::hash(&(self.ares_launch_count, frame), hasher);
+        }
+    }
     /// The SuperWeaponType this instance represents.
     pub fn type_id(&self) -> InternedId {
         self.type_id
@@ -569,6 +614,10 @@ impl SuperWeaponInstance {
             timer_place: None,
             paid_sequence: 0,
             paid_selection: None,
+            #[cfg(feature = "ares")]
+            ares_launch_count: 0,
+            #[cfg(feature = "ares")]
+            ares_last_launch_frame: None,
         }
     }
 
@@ -999,6 +1048,7 @@ pub(crate) fn charge_nearly_full(remaining: i32, recharge: i32, percent: NativeF
 /// the two name the same weapon. A Super the house was never granted keeps
 /// the constructor's timer, started with no duration
 /// (`SuperClass::SuperClass @ 0x006CAF90`): nothing remains.
+#[cfg(not(feature = "ares"))]
 pub(crate) fn supers_of_kind_remaining(
     sim: &Simulation,
     rules: &RuleSet,
@@ -1129,7 +1179,6 @@ pub struct SuperWeaponView {
     pub can_fire: bool,
     /// Derived from the same wallet predicate used at launch, not readiness.
     pub can_afford: bool,
-    pub sidebar_image: Option<String>,
 }
 
 /// Query active superweapons for a specific owner (for sidebar rendering).
@@ -1175,7 +1224,6 @@ pub fn superweapon_views_for_owner(
                     true
                 }
             },
-            sidebar_image: sw_type.sidebar_image.clone(),
         });
     }
     views
@@ -1334,7 +1382,8 @@ fn owned_live_buildings(
 /// none, or the house has a building of that type on the map
 /// (`HouseClass+0x5550`). The provider test (`0x00457630`) and the
 /// detection EVA (`0x004468FA..0x00446935`) read it. Retail names none.
-pub fn aux_building_present(
+#[cfg(not(feature = "ares"))]
+fn aux_building_present(
     sim: &Simulation,
     rules: &RuleSet,
     owner: InternedId,
@@ -1360,36 +1409,141 @@ fn owned_building_present(sim: &Simulation, rules: &RuleSet, owner: InternedId, 
         })
 }
 
-/// Shared grant/hold, detection and command availability decision. The Ares
-/// lists supplement (never replace) native AuxBuilding. Like Ares's
-/// SWTypeExt::ExtData::IsAvailable, presence is owned-and-on-map, not power.
-pub fn building_requirements_met(
+/// Shared grant/hold, detection, command and building-Anim availability owner.
+/// Phobos `SWTypeExt::IsAvailable` opens with the owner's TechLevel against
+/// `SW.TechLevel`; Ares100329E0 then tests retained shot count, mode-aware
+/// controller, native Aux, actual Country mask and extension Aux/Neg lists,
+/// and Phobos closes with `SW.AuxTechnos`/`SW.NegTechnos`. Presence is owned,
+/// present or limboed, not power. A build without either capability keeps the
+/// stock Aux-only gate.
+pub fn super_weapon_available(
     sim: &Simulation,
     rules: &RuleSet,
     owner: InternedId,
-    sw: &SuperWeaponType,
+    name: &str,
 ) -> bool {
-    let native = aux_building_present(sim, rules, owner, sw);
-    #[cfg(feature = "ares")]
-    {
-        native
-            && sw
-                .building_requirements
-                .as_ref()
-                .is_none_or(|requirements| {
-                    requirements.allows(|id| owned_building_present(sim, rules, owner, id))
-                })
+    #[cfg(feature = "phobos")]
+    if !phobos_tech_level_allows(sim, rules, owner, name) {
+        return false;
     }
+
     #[cfg(not(feature = "ares"))]
-    {
-        native
-    }
+    let allowed = rules
+        .super_weapon(name)
+        .is_some_and(|sw| aux_building_present(sim, rules, owner, sw));
+
+    #[cfg(feature = "ares")]
+    let allowed = {
+        let Some(metadata) = rules.super_weapon_metadata(name) else {
+            return false;
+        };
+        let policy = metadata.availability();
+        let count = sim
+            .interner
+            .get(name)
+            .and_then(|id| sim.super_weapons.get(&owner)?.get(&id))
+            .map_or(0, |instance| instance.ares_launch_count);
+        if !policy.allows_shots(count) {
+            return false;
+        }
+        let Some(house) = sim.houses.get(&owner) else {
+            return false;
+        };
+        if !policy.allows_controller(house.is_controlled_by_human(sim.session.game_mode_nonzero()))
+        {
+            return false;
+        }
+        if metadata
+            .native_auxiliary()
+            .is_some_and(|aux| !owned_building_present(sim, rules, owner, aux))
+        {
+            return false;
+        }
+        let country = house
+            .country()
+            .map(|id| sim.interner.resolve(id))
+            .and_then(|id| rules.country_index(id))
+            .map_or(0, |index| i32::from(index.0));
+        policy.allows_country(country)
+            && metadata.building_requirements().is_none_or(|requirements| {
+                requirements.allows(|id| owned_building_present(sim, rules, owner, id))
+            })
+    };
+
+    #[cfg(feature = "phobos")]
+    let allowed = allowed && phobos_technos_allow(sim, rules, owner, name);
+
+    allowed
+}
+
+/// `SW.TechLevel`: the owner's current TechLevel must reach the weapon's. The
+/// value is a plain minimum (`-1` is not special); `pHouse->TechLevel <
+/// SW_TechLevel` is the native test.
+#[cfg(feature = "phobos")]
+fn phobos_tech_level_allows(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    name: &str,
+) -> bool {
+    let Some(availability) = rules.phobos_super_weapon_metadata(name) else {
+        return true;
+    };
+    sim.houses
+        .get(&owner)
+        .is_some_and(|house| availability.allows_tech_level(house.tech_level()))
+}
+
+/// `SW.AuxTechnos`/`SW.NegTechnos`: owned technos that are present or in
+/// limbo (`HouseExt::CountOwnedPresentAndLimboed`), across every techno
+/// category.
+#[cfg(feature = "phobos")]
+fn phobos_technos_allow(sim: &Simulation, rules: &RuleSet, owner: InternedId, name: &str) -> bool {
+    let Some(availability) = rules.phobos_super_weapon_metadata(name) else {
+        return true;
+    };
+    availability.allows_technos(|id| owned_techno_present(sim, rules, owner, id))
+}
+
+/// Whether `owner` owns a `id` techno that is present on the map or in limbo.
+/// Read HouseTracking's active plus Phobos limbo counters. Add_Tracking's
+/// owned count also includes unfinished factory products and omits present
+/// Insignificant types, so it cannot supply this predicate.
+#[cfg(feature = "phobos")]
+fn owned_techno_present(sim: &Simulation, rules: &RuleSet, owner: InternedId, id: &str) -> bool {
+    use crate::map::entities::EntityCategory;
+    use crate::rules::object_type::ObjectCategory;
+
+    [
+        (ObjectCategory::Infantry, EntityCategory::Infantry),
+        (ObjectCategory::Vehicle, EntityCategory::Unit),
+        (ObjectCategory::Aircraft, EntityCategory::Aircraft),
+        (ObjectCategory::Building, EntityCategory::Structure),
+    ]
+    .into_iter()
+    .any(|(object_category, entity_category)| {
+        let Some(object) = rules.object_in_category(object_category, id) else {
+            return false;
+        };
+        // SWTypeExt::IsAvailable uses GetUpgradesAmount for upgrades; the
+        // temporary Building's counters cease to represent the installed type.
+        if object_category == ObjectCategory::Building
+            && let Some(count) = sim.count_owned_building_upgrades(owner, object, rules)
+        {
+            return count > 0;
+        }
+        sim.interner.get(&object.id)
+            .zip(sim.houses.get(&owner))
+            .is_some_and(|(type_id, house)| {
+                house.tracking().count_owned_present_and_limboed(entity_category, type_id) > 0
+            })
+    })
 }
 
 /// The Supers `building` provides: its type's `SuperWeapon=` and
 /// `SuperWeapon2=` (`BuildingClass @ 0x00457630`, `0x00457690`), each only
 /// while its owner meets the Super's native and optional Ares building gates
-/// ([`building_requirements_met`]). The grant pass, the hold pass and the
+/// ([`super_weapon_available`]). The grant pass, the hold pass and the
 /// building destructor (`0x0043BE47..0x0043BEEA`) share it.
 ///
 /// RESIDUAL: the passes also count the `SuperWeapon=`/`SuperWeapon2=` of a
@@ -1397,23 +1551,68 @@ pub fn building_requirements_met(
 /// `0x0050AFF2..0x0050B02A`), without the `AuxBuilding=` test. Retail has
 /// no upgrade building (`PowersUpBuilding=`), so it never decides.
 pub(crate) fn provided_supers<'r>(
-    sim: &Simulation,
+    sim: &'r Simulation,
     rules: &'r RuleSet,
     building: &crate::sim::game_entity::GameEntity,
 ) -> impl Iterator<Item = &'r str> + use<'r> {
     let object = sim.object_type(building.type_ref(), rules);
-    let provides = |sw_id: &str| {
-        rules
-            .super_weapon(sw_id)
-            .is_some_and(|sw| building_requirements_met(sim, rules, building.owner(), sw))
-    };
-    [
+    let owner = building.owner();
+    let provides = move |sw_id: &str| super_weapon_available(sim, rules, owner, sw_id);
+    let primary = [
         object.and_then(|object| object.super_weapon.as_deref()),
         object.and_then(|object| object.super_weapon2.as_deref()),
     ]
-    .map(|sw_id| sw_id.filter(|sw_id| provides(sw_id)))
     .into_iter()
-    .flatten()
+    .flatten();
+    #[cfg(feature = "ares")]
+    let names = primary.chain(
+        object
+            .into_iter()
+            .flat_map(|object| object.additional_super_weapons().iter().map(String::as_str)),
+    );
+    #[cfg(not(feature = "ares"))]
+    let names = primary;
+    names.filter(move |name| provides(name))
+}
+
+/// BuildingTypeExt::GetSuperWeapon1000D610: primary, secondary and additional
+/// definitions, first available instance; no granted/charge admission and no
+/// second Super store. The House constructor owns every retained instance.
+#[cfg(feature = "ares")]
+pub(crate) fn first_available_building_super<'a>(
+    sim: &'a Simulation,
+    rules: &RuleSet,
+    building: &crate::sim::game_entity::GameEntity,
+) -> Option<&'a SuperWeaponInstance> {
+    let name = provided_supers(sim, rules, building).next()?;
+    let id = sim.interner.get(name)?;
+    sim.super_weapons.get(&building.owner())?.get(&id)
+}
+
+/// Accepted Ares handler -> HouseExt100226D0. Do not call this for merely
+/// selected, refused or unsupported stock-redirected Activate paths.
+#[cfg(feature = "ares")]
+fn record_ares_launch(sim: &mut Simulation, rules: &RuleSet, owner: InternedId, typ: InternedId) {
+    let frame = sim.session.binary_frame() as i32;
+    let recheck = if let Some(instance) = sim.super_weapons.instance_mut(&owner, &typ) {
+        instance.record_ares_launch(frame);
+        instance.one_time
+            || rules
+                .super_weapon_metadata(sim.interner.resolve(typ))
+                .is_some_and(|metadata| {
+                    !metadata
+                        .availability()
+                        .allows_shots(instance.ares_launch_count)
+                })
+    } else {
+        false
+    };
+    // Common Launch10032F54..10032F8F dirties House+1FC when one-time or
+    // the successful write reaches its limit; normal provider/hold ownership
+    // performs revocation at the reached House tail.
+    if recheck && let Some(house) = sim.houses.get_mut(&owner) {
+        house.request_tech_recheck();
+    }
 }
 
 /// Shared provider facts for one reached House pass. Source authority is the

@@ -37,6 +37,7 @@ use super::techno_ai::ObjectAiCtx;
 use crate::rules::ini_parser::IniFile;
 use crate::rules::locomotor_type::LocomotorKind;
 use crate::rules::ruleset::RuleSet;
+use crate::sim::anim_class::AnimWorldCoord;
 use crate::sim::components::{DriveCoord, NavTargetRef};
 use crate::sim::miner::{CargoBale, MinerState, ResourceType};
 use crate::sim::movement::fresh_oracle_seam::{self, FreshCallRecord};
@@ -780,8 +781,9 @@ fn teleport_warp_matches_the_original_process() {
             };
             let events = tick["events"].as_array().unwrap();
             let context = format!("{context} frame {now}");
-            // ChronoOut at the old location, then ChronoIn at the new one.
-            let expected_sounds: Vec<(String, (u16, u16))> = events
+            // ChronoOut at the old Location, then ChronoIn at the new one,
+            // at the PlayAt coordinate the original passed.
+            let expected_sounds: Vec<(String, AnimWorldCoord)> = events
                 .iter()
                 .filter(|e| e[0] == "sound")
                 .map(|e| {
@@ -790,15 +792,14 @@ fn teleport_warp_matches_the_original_process() {
                         0x42 => "CminOut",
                         other => panic!("sound {other}"),
                     };
-                    let at = coord(&e[2]);
-                    (name.to_string(), ((at.x >> 8) as u16, (at.y >> 8) as u16))
+                    (name.to_string(), coord(&e[2]).into())
                 })
                 .collect();
-            let sounds: Vec<(String, (u16, u16))> = s.sim.sound_events[sounds_before..]
+            let sounds: Vec<(String, AnimWorldCoord)> = s.sim.sound_events[sounds_before..]
                 .iter()
                 .filter_map(|event| match event {
-                    SimSoundEvent::ChronoTeleport { sound_id, rx, ry } => {
-                        Some((s.sim.interner.resolve(*sound_id).to_string(), (*rx, *ry)))
+                    SimSoundEvent::ChronoTeleport { sound_id, world } => {
+                        Some((s.sim.interner.resolve(*sound_id).to_string(), *world))
                     }
                     _ => None,
                 })

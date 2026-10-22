@@ -1,36 +1,33 @@
-//! Starting VERA20k from its macOS app bundle.
+//! Starting VERA20k from its macOS app bundle or its Linux AppImage.
 //!
 //! Finder starts an app in `/`, and the bundle can be read-only: a mounted disk
 //! image, or a downloaded copy that macOS runs from a randomized location (App
-//! Translocation). A launch from `VERA20k.app` therefore works in
-//! `~/Library/Application Support/VERA20k`, the way the Windows shortcuts start
-//! the game in its install folder: config.toml, RA2MD.INI, logs, saves and
-//! replays all live there.
+//! Translocation). An AppImage runs from a read-only mount, started from
+//! wherever the player opened it. A launch from either therefore works in the
+//! app's data folder, `~/Library/Application Support/VERA20k` on macOS and
+//! `~/.local/share/VERA20k` on Linux, the way the Windows shortcuts start the
+//! game in its install folder: config.toml, RA2MD.INI, logs, saves and replays
+//! all live there.
 //!
 //! Until config.toml names a Yuri's Revenge folder, each launch sets one up
-//! ([`ensure_game_folder`]). It first looks where Mac players keep the game,
-//! inside a Wine prefix, and offers the folder it finds in one question; only
-//! when there is none, or the player wants another, does the system folder
-//! chooser open.
+//! ([`ensure_game_folder`]). It first looks where players keep the game, and
+//! offers the folder it finds in one question; only when there is none, or the
+//! player wants another, does a folder chooser open.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-/// The data folder, below the home folder.
-const DATA_FOLDER: &str = "Library/Application Support/VERA20k";
+/// The macOS data folder, below the home folder.
+const MACOS_DATA_FOLDER: &str = "Library/Application Support/VERA20k";
 
-/// When this process runs from a macOS app bundle, make the app's data folder
-/// the working directory and return true. Call it before anything opens a file
-/// relative to the working directory, the log first.
+/// When this process runs from the macOS app bundle or the Linux AppImage,
+/// make the app's data folder the working directory and return true. Call it
+/// before anything opens a file relative to the working directory, the log
+/// first.
 pub fn enter_data_folder() -> bool {
-    if !cfg!(target_os = "macos") {
-        return false;
-    }
-    let in_bundle = std::env::current_exe().is_ok_and(|executable| in_app_bundle(&executable));
-    let Some(home) = std::env::var_os("HOME").filter(|_| in_bundle) else {
+    let Some(folder) = data_folder() else {
         return false;
     };
-    let folder = PathBuf::from(home).join(DATA_FOLDER);
     match std::fs::create_dir_all(&folder).and_then(|()| std::env::set_current_dir(&folder)) {
         Ok(()) => true,
         Err(error) => {
@@ -41,7 +38,23 @@ pub fn enter_data_folder() -> bool {
     }
 }
 
-/// Whether `executable` is `<name>.app/Contents/MacOS/<executable>`.
+/// The app's data folder, when this process runs from the app bundle or the
+/// AppImage.
+fn data_folder() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    if cfg!(target_os = "macos") {
+        in_app_bundle(&executable).then(|| home.join(MACOS_DATA_FOLDER))
+    } else if cfg!(target_os = "linux") {
+        let app_dir = PathBuf::from(std::env::var_os("APPDIR")?);
+        in_app_image(&executable, &app_dir)
+            .then(|| linux_data_home(std::env::var_os("XDG_DATA_HOME"), &home).join("VERA20k"))
+    } else {
+        None
+    }
+}
+
+/// Whether `executable` is inside `<name>.app/Contents/MacOS/<executable>`.
 fn in_app_bundle(executable: &Path) -> bool {
     let mut folders = executable.ancestors().skip(1);
     let (Some(macos), Some(contents), Some(bundle)) =
@@ -54,25 +67,44 @@ fn in_app_bundle(executable: &Path) -> bool {
         && bundle.extension() == Some(OsStr::new("app"))
 }
 
-#[cfg(target_os = "macos")]
+/// Whether `executable` runs from the mounted AppImage at `app_dir`, which the
+/// AppImage runtime names in APPDIR. A program started from another AppImage,
+/// such as a terminal, inherits that one's APPDIR without being inside it.
+fn in_app_image(executable: &Path, app_dir: &Path) -> bool {
+    app_dir.is_absolute() && executable.starts_with(app_dir)
+}
+
+/// `$XDG_DATA_HOME`, or `~/.local/share` when it is unset, empty or relative,
+/// as the XDG Base Directory specification says.
+fn linux_data_home(xdg_data_home: Option<OsString>, home: &Path) -> PathBuf {
+    xdg_data_home
+        .map(PathBuf::from)
+        .filter(|folder| folder.is_absolute())
+        .unwrap_or_else(|| home.join(".local/share"))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub use first_launch::ensure_game_folder;
 
-/// Only the macOS app bundle sets up a game folder.
-#[cfg(not(target_os = "macos"))]
+/// Only the macOS app bundle and the Linux AppImage set up a game folder.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn ensure_game_folder() -> bool {
     true
 }
 
-/// The app bundle's game folder setup. Its questions run in the event loop's
-/// first `resumed`, before any window exists: macOS brings forward only the app
-/// it launched, once that app is running. A chooser shown earlier by a helper
-/// process (`osascript`) stayed hidden behind the app the player was using.
-#[cfg(target_os = "macos")]
+/// The app bundle's and the AppImage's game folder setup. Its questions run in
+/// the event loop's first `resumed`, before any window exists: macOS brings
+/// forward only the app it launched, once that app is running. A chooser shown
+/// earlier by a helper process (`osascript`) stayed hidden behind the app the
+/// player was using.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod first_launch {
+    #[cfg(any(target_os = "macos", test))]
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
     use anyhow::{Context, Result};
+    #[cfg(target_os = "macos")]
     use objc2::MainThreadMarker;
 
     use crate::assets::asset_manager::holds_master_archives;
@@ -84,6 +116,10 @@ mod first_launch {
     /// How deep below a Wine prefix's `drive_c` the search looks. Yuri's
     /// Revenge sits five folders down in The First Decade and Steam installs.
     const SEARCH_DEPTH: usize = 6;
+    /// Where Steam installs Red Alert 2 and Yuri's Revenge, app 2229850, in a
+    /// library: `steamapps/common/` and the app's installdir.
+    #[cfg(any(target_os = "linux", test))]
+    const STEAM_GAME: &str = "steamapps/common/Command & Conquer Red Alert II";
     /// The most folders the search reads in one prefix, so a large Steam
     /// library cannot stall a first launch.
     const SEARCH_LIMIT: usize = 20_000;
@@ -117,12 +153,11 @@ mod first_launch {
             let executable = std::env::current_exe()?;
             let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
             let mut dialogs = SystemDialogs::new()?;
-            ensure_game_folder_with(
-                &data_folder,
-                &executable,
-                || find_game_folders(&home, Path::new("/Applications")),
-                &mut dialogs,
-            )
+            #[cfg(target_os = "macos")]
+            let find = || find_mac_game_folders(&home, Path::new("/Applications"));
+            #[cfg(target_os = "linux")]
+            let find = || find_linux_game_folders(&home);
+            ensure_game_folder_with(&data_folder, &executable, find, &mut dialogs)
         })();
         asked.unwrap_or_else(|error| {
             // The startup error screen still says which game files are missing.
@@ -199,7 +234,8 @@ mod first_launch {
     /// or ~/Applications, CrossOver bottles and ~/.wine. None of these places
     /// makes macOS ask the player for file access, and the search follows no
     /// link out of them. Sorted, so the offer is stable.
-    pub(super) fn find_game_folders(home: &Path, applications: &Path) -> Vec<PathBuf> {
+    #[cfg(any(target_os = "macos", test))]
+    pub(super) fn find_mac_game_folders(home: &Path, applications: &Path) -> Vec<PathBuf> {
         let mut drives = Vec::new();
         let app_folders = [
             Some(applications.to_path_buf()),
@@ -226,9 +262,71 @@ mod first_launch {
         found
     }
 
+    /// Yuri's Revenge folders on Linux: Steam's copy in each library of the
+    /// native, Flatpak and Snap Steam clients, which run it with Proton, and
+    /// the EA app's inside the Wine prefixes of ~/.wine, Lutris (~/Games),
+    /// Bottles, PlayOnLinux and CrossOver. Sorted, so the offer is stable.
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn find_linux_game_folders(home: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for steam in [
+            ".local/share/Steam",
+            ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+            "snap/steam/common/.local/share/Steam",
+        ] {
+            for library in steam_libraries(&home.join(steam)) {
+                let game = library.join(STEAM_GAME);
+                if holds_master_archives(&game) {
+                    found.push(game);
+                }
+            }
+        }
+        let mut prefixes = vec![home.join(".wine")];
+        for folder in [
+            "Games",
+            ".local/share/bottles/bottles",
+            ".var/app/com.usebottles.bottles/data/bottles/bottles",
+            ".PlayOnLinux/wineprefix",
+            ".cxoffice",
+        ] {
+            prefixes.extend(subfolders(&home.join(folder)));
+        }
+        for drive in prefixes.iter().map(|prefix| prefix.join("drive_c")) {
+            if drive.is_dir() {
+                game_folders_below(&drive, &mut found);
+            }
+        }
+        found.sort();
+        // Steam's own folder is usually also its first listed library.
+        found.dedup();
+        found
+    }
+
+    /// Steam's own folder, then each library its
+    /// `steamapps/libraryfolders.vdf` lists.
+    #[cfg(any(target_os = "linux", test))]
+    fn steam_libraries(steam: &Path) -> Vec<PathBuf> {
+        let mut libraries = vec![steam.to_path_buf()];
+        if let Ok(list) = std::fs::read_to_string(steam.join("steamapps/libraryfolders.vdf")) {
+            libraries.extend(list.lines().filter_map(steam_library_path));
+        }
+        libraries
+    }
+
+    /// The folder of a `"path"  "<folder>"` line of libraryfolders.vdf, with
+    /// its doubled backslashes undone.
+    #[cfg(any(target_os = "linux", test))]
+    pub(super) fn steam_library_path(line: &str) -> Option<PathBuf> {
+        let value = line.trim().strip_prefix("\"path\"")?.trim_start();
+        let value = value.strip_prefix('"')?;
+        let end = value.find('"').filter(|&end| end > 0)?;
+        Some(PathBuf::from(value[..end].replace("\\\\", "\\")))
+    }
+
     /// `below` inside `folder`, when each folder on the way is a real folder.
     /// A link, such as a ~/.wine moved to an external drive or into Documents,
     /// could lead to a place macOS asks the player about.
+    #[cfg(any(target_os = "macos", test))]
     fn real_folder(folder: &Path, below: &str) -> Option<PathBuf> {
         let mut path = folder.to_path_buf();
         for name in below.split('/') {
@@ -312,11 +410,13 @@ mod first_launch {
     };
 
     /// The system's alert and folder chooser, run modally by this process.
+    #[cfg(target_os = "macos")]
     struct SystemDialogs {
         mtm: MainThreadMarker,
         text: &'static Text,
     }
 
+    #[cfg(target_os = "macos")]
     impl SystemDialogs {
         fn new() -> Result<Self> {
             let mtm = MainThreadMarker::new()
@@ -331,6 +431,7 @@ mod first_launch {
         }
     }
 
+    #[cfg(target_os = "macos")]
     impl Player for SystemDialogs {
         fn offer(&mut self, folder: &Path) -> Result<Offer> {
             use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn};
@@ -390,6 +491,156 @@ mod first_launch {
                 .map(Some)
         }
     }
+
+    /// The desktop's question and folder chooser, from zenity (GNOME and most
+    /// desktops) or kdialog (KDE), run as child processes. Without either,
+    /// nothing can ask: the first folder found is used, and without one the
+    /// startup error screen names the missing files.
+    #[cfg(target_os = "linux")]
+    struct SystemDialogs {
+        tool: Option<DialogTool>,
+        text: &'static Text,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[derive(Clone, Copy)]
+    enum DialogTool {
+        Zenity,
+        Kdialog,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl SystemDialogs {
+        fn new() -> Result<Self> {
+            let installed = |program: &str| {
+                std::env::var_os("PATH").is_some_and(|path| {
+                    std::env::split_paths(&path).any(|folder| folder.join(program).is_file())
+                })
+            };
+            let kde = std::env::var("XDG_CURRENT_DESKTOP")
+                .is_ok_and(|desktops| desktops.split(':').any(|desktop| desktop == "KDE"));
+            let tool = if kde && installed("kdialog") {
+                Some(DialogTool::Kdialog)
+            } else if installed("zenity") {
+                Some(DialogTool::Zenity)
+            } else if installed("kdialog") {
+                Some(DialogTool::Kdialog)
+            } else {
+                log::warn!("Neither zenity nor kdialog is installed to ask for the game folder");
+                None
+            };
+            // gettext's order: the first of LANGUAGE's list, then the locale.
+            let language = ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
+                .into_iter()
+                .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()));
+            let chinese = language.is_some_and(|language| language.starts_with("zh"));
+            Ok(Self {
+                tool,
+                text: if chinese { &CHINESE } else { &ENGLISH },
+            })
+        }
+    }
+
+    /// The folder a chooser printed, without its line break.
+    #[cfg(target_os = "linux")]
+    fn printed_folder(mut stdout: Vec<u8>) -> PathBuf {
+        use std::os::unix::ffi::OsStringExt;
+
+        if stdout.last() == Some(&b'\n') {
+            stdout.pop();
+        }
+        PathBuf::from(std::ffi::OsString::from_vec(stdout))
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Player for SystemDialogs {
+        fn offer(&mut self, folder: &Path) -> Result<Offer> {
+            use std::process::Command;
+
+            let text = self.text;
+            let question = format!("{}\n\n{}\n{}", text.found, text.found_at, folder.display());
+            Ok(match self.tool {
+                None => Offer::Use,
+                // The extra button prints its label and exits 1, as Quit and
+                // closing the window do.
+                Some(DialogTool::Zenity) => {
+                    let output = Command::new("zenity")
+                        .args(["--question", "--no-wrap", "--no-markup", "--title=VERA20k"])
+                        .arg(format!("--text={question}"))
+                        .arg(format!("--ok-label={}", text.use_folder))
+                        .arg(format!("--cancel-label={}", text.quit))
+                        .arg(format!("--extra-button={}", text.choose_another))
+                        .output()
+                        .context("Could not run zenity")?;
+                    match output.status.code() {
+                        Some(0) => Offer::Use,
+                        Some(1) if output.stdout.trim_ascii() == text.choose_another.as_bytes() => {
+                            Offer::ChooseAnother
+                        }
+                        Some(1) => Offer::Quit,
+                        _ => anyhow::bail!("zenity failed: {}", output.status),
+                    }
+                }
+                Some(DialogTool::Kdialog) => {
+                    let status = Command::new("kdialog")
+                        .args(["--title", "VERA20k", "--yes-label", text.use_folder])
+                        .args([
+                            "--no-label",
+                            text.choose_another,
+                            "--cancel-label",
+                            text.quit,
+                        ])
+                        .arg("--yesnocancel")
+                        .arg(question)
+                        .status()
+                        .context("Could not run kdialog")?;
+                    match status.code() {
+                        Some(0) => Offer::Use,
+                        Some(1) => Offer::ChooseAnother,
+                        Some(2) => Offer::Quit,
+                        _ => anyhow::bail!("kdialog failed: {status}"),
+                    }
+                }
+            })
+        }
+
+        fn choose(&mut self, start: Option<&Path>, retry: bool) -> Result<Option<PathBuf>> {
+            use std::process::Command;
+
+            let message = if retry {
+                self.text.retry
+            } else {
+                self.text.choose
+            };
+            let (program, output) = match self.tool {
+                None => anyhow::bail!("There is no folder chooser to ask for the game folder"),
+                Some(DialogTool::Zenity) => {
+                    let mut command = Command::new("zenity");
+                    command
+                        .args(["--file-selection", "--directory"])
+                        .arg(format!("--title={message}"));
+                    if let Some(start) = start {
+                        // A trailing slash opens the folder itself.
+                        command.arg(format!("--filename={}/", start.display()));
+                    }
+                    ("zenity", command.output())
+                }
+                Some(DialogTool::Kdialog) => {
+                    let mut command = Command::new("kdialog");
+                    command
+                        .args(["--title", message, "--getexistingdirectory"])
+                        .args(start);
+                    ("kdialog", command.output())
+                }
+            };
+            let output = output.with_context(|| format!("Could not run {program}"))?;
+            match output.status.code() {
+                Some(0) => Ok(Some(printed_folder(output.stdout))),
+                Some(1) => Ok(None),
+                _ => anyhow::bail!("{program} failed: {}", output.status),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -402,19 +653,51 @@ mod tests {
             "/Applications/VERA20k.app/Contents/MacOS/VERA20k"
         )));
         assert!(!in_app_bundle(Path::new(
-            "/Users/me/vera20k/target/release/vera20k"
+            "/Users/<you>/vera20k/target/release/vera20k"
         )));
         assert!(!in_app_bundle(Path::new("/Contents/MacOS/vera20k")));
     }
 
-    #[cfg(target_os = "macos")]
+    // Linux paths, which Windows does not take as absolute.
+    #[cfg(unix)]
+    #[test]
+    fn only_an_executable_inside_its_own_app_image_counts() {
+        let mount = Path::new("/tmp/.mount_VERA20kXyZ");
+        assert!(in_app_image(&mount.join("usr/bin/vera20k"), mount));
+        // A terminal AppImage's APPDIR, inherited by a program started from it.
+        assert!(!in_app_image(
+            Path::new("/home/<you>/vera20k/vera20k"),
+            Path::new("/tmp/.mount_TerminalAbC")
+        ));
+        assert!(!in_app_image(Path::new("usr/bin/vera20k"), Path::new("")));
+    }
+
+    // Linux paths, which Windows does not take as absolute.
+    #[cfg(unix)]
+    #[test]
+    fn the_linux_data_folder_follows_xdg_data_home() {
+        let home = Path::new("/home/<you>");
+        assert_eq!(
+            linux_data_home(Some("/data/me".into()), home),
+            Path::new("/data/me")
+        );
+        for unusable in [None, Some(OsString::new()), Some("relative/data".into())] {
+            assert_eq!(
+                linux_data_home(unusable, home),
+                Path::new("/home/<you>/.local/share")
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     mod first_launch {
         use std::path::{Path, PathBuf};
 
         use anyhow::Result;
 
         use super::super::first_launch::{
-            Offer, Player, ensure_game_folder_with, find_game_folders,
+            Offer, Player, ensure_game_folder_with, find_linux_game_folders, find_mac_game_folders,
+            steam_library_path,
         };
         use crate::util::config::GameConfig;
 
@@ -610,7 +893,7 @@ mod tests {
             write_masters(&wine.join("a/b/c/d/e/f/g"), ["ra2md.mix", "ra2.mix"]);
 
             assert_eq!(
-                find_game_folders(&home, &applications),
+                find_mac_game_folders(&home, &applications),
                 [
                     porting_kit.join("YuriRevenge"),
                     old_wineskin.join("Westwood/RA2"),
@@ -618,7 +901,7 @@ mod tests {
                 ]
             );
             assert!(
-                find_game_folders(&fixture.root.join("nobody"), &fixture.root.join("none"))
+                find_mac_game_folders(&fixture.root.join("nobody"), &fixture.root.join("none"))
                     .is_empty()
             );
         }
@@ -648,9 +931,82 @@ mod tests {
             symlink(&elsewhere, home.join(".wine")).unwrap();
 
             assert_eq!(
-                find_game_folders(&home, &applications),
+                find_mac_game_folders(&home, &applications),
                 [wrapper.join("drive_c/RA2")]
             );
+        }
+
+        #[test]
+        fn the_linux_search_finds_steam_libraries_and_wine_prefixes() {
+            let fixture = Fixture::new();
+            let home = fixture.root.join("home");
+            let steam = home.join(".local/share/Steam");
+            let library = fixture.root.join("Games drive/Steam Library 游戏");
+            let in_library = library.join("steamapps/common/Command & Conquer Red Alert II");
+            let flatpak = home.join(
+                ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/\
+                 Command & Conquer Red Alert II",
+            );
+            let lutris = home.join("Games/ea-app/drive_c/Program Files/EA Games/RA2");
+            let bottle = home.join(".local/share/bottles/bottles/EA/drive_c/Games/YR");
+            write_masters(&in_library, ["RA2MD.MIX", "ra2.mix"]);
+            write_masters(&flatpak, ["ra2md.mix", "ra2.mix"]);
+            write_masters(&lutris, ["ra2md.mix", "ra2.mix"]);
+            write_masters(&bottle, ["ra2md.mix", "ra2.mix"]);
+            // Steam lists its own folder too, so its copy is offered once.
+            std::fs::create_dir_all(steam.join("steamapps")).unwrap();
+            std::fs::write(
+                steam.join("steamapps/libraryfolders.vdf"),
+                format!(
+                    "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n\
+                     \t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n",
+                    steam.display(),
+                    library.display()
+                ),
+            )
+            .unwrap();
+            write_masters(
+                &steam.join("steamapps/common/Command & Conquer Red Alert II"),
+                ["ra2md.mix", "ra2.mix"],
+            );
+            // Not the game: a Steam folder of another name, and a prefix
+            // without drive_c.
+            write_masters(
+                &steam.join("steamapps/common/RA2"),
+                ["ra2md.mix", "ra2.mix"],
+            );
+            write_masters(&home.join("Games/loose/RA2"), ["ra2md.mix", "ra2.mix"]);
+
+            let mut expected = vec![
+                steam.join("steamapps/common/Command & Conquer Red Alert II"),
+                in_library,
+                flatpak,
+                lutris,
+                bottle,
+            ];
+            expected.sort();
+            assert_eq!(find_linux_game_folders(&home), expected);
+            assert!(find_linux_game_folders(&fixture.root.join("nobody")).is_empty());
+        }
+
+        #[test]
+        fn steam_library_lines_give_their_folder() {
+            assert_eq!(
+                steam_library_path("\t\t\"path\"\t\t\"/mnt/games/SteamLibrary\""),
+                Some(PathBuf::from("/mnt/games/SteamLibrary"))
+            );
+            assert_eq!(
+                steam_library_path(r#""path" "D:\\Steam Library""#),
+                Some(PathBuf::from(r"D:\Steam Library"))
+            );
+            for other in [
+                "\t\t\"label\"\t\t\"\"",
+                "\t\t\"path\"\t\t\"\"",
+                "\"pathname\" \"/x\"",
+                "\"path\"",
+            ] {
+                assert_eq!(steam_library_path(other), None, "{other}");
+            }
         }
     }
 }

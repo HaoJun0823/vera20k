@@ -24,19 +24,30 @@ const TAG: &str = "0BE0AB4C";
 const TRIGGER: &str = "061FF03C";
 const WAYPOINT: (u16, u16) = (53, 69);
 
-fn campaign_scene() -> HeadlessScenario {
+fn campaign_scene(map_name: &str, remove_home: bool) -> HeadlessScenario {
     let (root, mut assets) = crate::rules::retail_ini_fixture::retail_assets()
         .expect("run with RA2_DIR and VERA20K_REQUIRE_RETAIL_ASSETS=1");
-    let mut map = crate::map::source::load_map_by_name_or_path_with_assets(&root, MAP, &assets)
-        .expect("physical ALL01 map")
-        .map;
+    let mut map =
+        crate::map::source::load_map_by_name_or_path_with_assets(&root, map_name, &assets)
+            .expect("physical campaign map")
+            .map;
+    if remove_home {
+        let home = map.basic.home_cell.unwrap_or(699);
+        map.ini = map
+            .ini
+            .without_entry_for_test("Waypoints", &home.to_string());
+        map.waypoints = crate::map::waypoints::parse_waypoints(&map.ini);
+        assert!(!map.waypoints.contains_key(&(home as u32)));
+    }
     let audio = crate::rules::audio_sources::AudioDefinitions::select(&assets);
     let mut native_rules = crate::rules::retail_ini_fixture::retail_rules_owner(&assets);
-    let named = assets.resolve_ref("ALL01UMD.INI").map(|_| {
-        crate::rules::retail_sources::select_ini(&assets, "ALL01UMD.INI")
-            .expect("optional campaign basename INI")
-            .ini
-    });
+    let named = assets
+        .resolve_ref(&map_name.replace(".MAP", ".INI"))
+        .map(|_| {
+            crate::rules::retail_sources::select_ini(&assets, &map_name.replace(".MAP", ".INI"))
+                .expect("optional campaign basename INI")
+                .ini
+        });
     let (mut rules, rules_ini, art_ini, native_rules_receipt) = native_rules
         .load_scenario(
             crate::rules::process_owner::NativeScenarioRulesPrefix::Campaign(named.as_ref()),
@@ -58,7 +69,7 @@ fn campaign_scene() -> HeadlessScenario {
     map.special_flags.resolve_campaign_defaults(None);
     let descriptor = ScenarioDescriptor {
         seed: 0x44A1_EF,
-        map_name: MAP.into(),
+        map_name: map_name.into(),
         theater: map.header.theater.clone(),
         game_mode_nonzero: false,
         free_radar: map.basic.free_radar.unwrap_or(false),
@@ -86,6 +97,8 @@ fn campaign_scene() -> HeadlessScenario {
                 difficulty: 1,
                 mission_counter: 1,
                 game_options: None,
+                campaign_index: 0,
+                restart_carry_over: crate::sim::campaign_carry_over::CampaignCarryOver::CLEARED,
             },
         )
         .expect("actual campaign House and current-player construction");
@@ -183,6 +196,10 @@ fn campaign_scene() -> HeadlessScenario {
         None,
     );
     assert!(post.navigation_published && sim.path_grid().is_some());
+    if remove_home {
+        assert_eq!((map.header.width, map.header.height), (65, 120));
+        assert_eq!(post.opening_view_cell, Some((92, 92)));
+    }
     sim.session.publish_started();
     sim.hash_state_every(std::num::NonZeroU64::new(10_000).unwrap());
     HeadlessScenario {
@@ -198,10 +215,35 @@ fn campaign_scene() -> HeadlessScenario {
     }
 }
 
+/// The common authored finalizer must publish the fallback into the same
+/// waypoint table used by the opening view, trigger coordinates and saves.
+#[test]
+#[ignore = "physical retail ALL01 campaign and missing-Home map variant"]
+fn campaign_missing_home_reaches_opening_and_waypoint_consumers() {
+    let original = campaign_scene(MAP, false);
+    let missing = campaign_scene(MAP, true);
+    assert_eq!(original.sim().session().waypoint_cell(14), Some((100, 110)));
+    let waypoint = missing.map.waypoints.get(&14).unwrap();
+    assert_eq!((waypoint.rx, waypoint.ry), (92, 92));
+    assert_eq!(missing.sim().session().waypoint_cell(14), Some((92, 92)));
+    assert_eq!(
+        &missing.sim().trigger_waypoint_ground_coord(14).unwrap()[..2],
+        &[23680, 23680]
+    );
+    assert_eq!(
+        missing.sim().rng_state(),
+        original.sim().rng_state(),
+        "the missing-Home fallback must not draw from any simulation RNG"
+    );
+    let bytes = crate::sim::snapshot::GameSnapshot::save_validated(missing.sim(), 0, 0, "home", 0);
+    let loaded = crate::sim::snapshot::GameSnapshot::load(&bytes).unwrap();
+    assert_eq!(loaded.sim.session().waypoint_cell(14), Some((92, 92)));
+}
+
 #[test]
 #[ignore = "physical retail ALL01 campaign, authored SpySat_Boom and complete sale"]
 fn stock_all01_spy_satellite_sale_reshrouds_then_reveals_waypoint() {
-    let mut scene = campaign_scene();
+    let mut scene = campaign_scene(MAP, false);
     let authored = scene
         .map
         .entities
@@ -385,5 +427,97 @@ fn stock_all01_spy_satellite_sale_reshrouds_then_reveals_waypoint() {
     assert!(
         sim.fog.is_ground_unshrouded(player, WAYPOINT.0, WAYPOINT.1),
         "action18 then reveals authored waypoint496"
+    );
+}
+
+/// Full retail FullInit/FillInData composition, including authored terrain and
+/// structures. The outside-LocalSize player Flak has no initial discovery;
+/// Building440D25/440E5C therefore never admits GrandOpening445F80. Its turret
+/// also blocks UpdateAnimation451145's independent ready write.
+#[test]
+#[ignore = "physical retail ALL02 campaign load and discovery"]
+fn stock_all02_hidden_player_flak_waits_for_discovery() {
+    let mut scene = campaign_scene("ALL02UMD.MAP", false);
+    let player = scene.sim().session.current_house().unwrap();
+    let flak_type = scene.runtime.resources.rules.object("NAFLAK").unwrap();
+    assert!(flak_type.has_turret);
+    assert_eq!(flak_type.sight, 5);
+    let find = |scene: &HeadlessScenario, kind: &str, cell: (u16, u16)| {
+        scene
+            .sim()
+            .entities()
+            .iter_sorted()
+            .find_map(|(id, entity)| {
+                (entity.owner() == player
+                    && scene.sim().interner.resolve(entity.type_ref()) == kind
+                    && (entity.position.rx(), entity.position.ry()) == cell)
+                    .then_some(id)
+            })
+            .expect("authored player building")
+    };
+    let flak = find(&scene, "NAFLAK", (159, 165));
+    let barricade = find(&scene, "CABARR02", (137, 103));
+    let entity = scene.sim().entities().get(flak).unwrap();
+    assert!(!entity.in_playfield());
+    assert!(!entity.discovery.discovered_by_current_house());
+    assert!(
+        !entity.building_art.actually_placed(),
+        "unseen player turret must not GrandOpen"
+    );
+    assert_eq!(entity.building_ready_latch(), 0);
+    assert_eq!(entity.mission.current().raw(), -1);
+    assert_eq!(entity.mission.queued().known(), Some(MissionType::Guard));
+    for _ in 0..2 {
+        scene
+            .runtime
+            .advance_frame_for_tooling(&[], 22)
+            .expect("ordinary campaign frame");
+    }
+    let entity = scene.sim().entities().get(flak).unwrap();
+    assert!(!entity.building_art.actually_placed());
+    assert_eq!(entity.building_ready_latch(), 0);
+    assert_eq!(entity.mission.current().raw(), -1);
+    assert_eq!(entity.mission.queued().known(), Some(MissionType::Guard));
+    // A non-turret reaches the separate UpdateAnimation ready write, even
+    // before discovery. Do not hold all hidden human buildings in None.
+    assert_eq!(
+        scene
+            .sim()
+            .entities()
+            .get(barricade)
+            .unwrap()
+            .mission
+            .current()
+            .known(),
+        Some(MissionType::Guard)
+    );
+    let runtime = &mut scene.runtime;
+    runtime.simulation.reveal_entire_map(
+        Some(player),
+        UninitContext::new(
+            &runtime.resources.rules,
+            Some(&runtime.resources.overlay_registry),
+        ),
+    );
+    let entity = runtime.simulation.entities().get(flak).unwrap();
+    assert!(entity.discovery.discovered_by_current_house());
+    assert!(
+        entity.building_art.actually_placed(),
+        "real discovery must run the shared opening"
+    );
+    assert_ne!(entity.building_ready_latch(), 0);
+    runtime
+        .advance_frame_for_tooling(&[], 22)
+        .expect("first revealed campaign frame");
+    assert_eq!(
+        runtime
+            .simulation
+            .entities()
+            .get(flak)
+            .unwrap()
+            .mission
+            .current()
+            .known(),
+        Some(MissionType::Guard)
     );
 }

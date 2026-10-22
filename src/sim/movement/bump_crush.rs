@@ -600,18 +600,17 @@ fn deploy_crush_immune(entity: &GameEntity) -> bool {
 }
 
 /// Emit the crush-path `EntityCrushed` (CrushSound) event for a victim at the
-/// crush coordinate; native crush teardown does not also enter the ordinary
-/// DieSound path. Skipped when CrushSound is absent. Call before removing the
-/// victim from the EntityStore, while its type is still readable.
+/// crusher's Location (`0x007418AA..0x007418DC`, `0x0054CCDE..0x0054CD14`);
+/// native crush teardown does not also enter the ordinary DieSound path.
+/// Skipped when CrushSound is absent. Call before removing the victim from
+/// the EntityStore, while its type is still readable.
 pub(crate) fn emit_crush_kill_sounds_at(
     victim: &crate::sim::game_entity::GameEntity,
-    crush_coord: (i32, i32),
+    crusher_location: DriveCoord,
     rules: &crate::rules::ruleset::RuleSet,
     interner: &mut crate::sim::intern::StringInterner,
     sound_events: &mut crate::sim::world::FrameChannel<crate::sim::world::SimSoundEvent>,
 ) {
-    let rx = crush_coord.0.clamp(0, i32::from(u16::MAX)) as u16;
-    let ry = crush_coord.1.clamp(0, i32::from(u16::MAX)) as u16;
     let type_str = interner.resolve(victim.type_ref()).to_string();
     let Some(obj) = rules.object(&type_str) else {
         return;
@@ -620,8 +619,7 @@ pub(crate) fn emit_crush_kill_sounds_at(
         let id = interner.intern(crush_sound);
         sound_events.emit(crate::sim::world::SimSoundEvent::EntityCrushed {
             crush_sound_id: id,
-            rx,
-            ry,
+            world: crusher_location.into(),
         });
     }
 }

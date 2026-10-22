@@ -245,29 +245,17 @@ fn load_bridge_shape(
     art_registry: &ArtRegistry,
 ) -> Option<ShpFile> {
     let image_id: String = art_registry.resolve_overlay_image_id(name, rules_ini);
-    let mut candidates: Vec<String> = art_data::overlay_shp_candidates(
+    // The first file that loads is the image, as OverlayType GetImage5FEDE0
+    // reads only the type's own name; empty frames then draw nothing.
+    art_data::overlay_shp_candidates(
         Some(art_registry),
         name,
         &image_id,
         theater_ext,
         theater_name,
-    );
-    if let Some(alias) = decrement_numeric_suffix(name) {
-        candidates.push(format!("{}.{}", alias, theater_ext));
-        candidates.push(format!("{}.shp", alias));
-        candidates.push(format!("{}.{}", alias.to_ascii_lowercase(), theater_ext));
-        candidates.push(format!("{}.shp", alias.to_ascii_lowercase()));
-    }
-
-    candidates.iter().find_map(|name| {
-        let data = asset_manager.get_ref(name)?;
-        let shp = ShpFile::from_bytes(data).ok()?;
-        let has_drawable = shp
-            .frames
-            .iter()
-            .any(|fr| fr.frame_width > 0 && fr.frame_height > 0);
-        has_drawable.then_some(shp)
-    })
+    )
+    .iter()
+    .find_map(|name| ShpFile::from_bytes(asset_manager.get_ref(name)?).ok())
 }
 
 fn render_bridge_sprite(
@@ -457,20 +445,6 @@ fn pack_bridge_sprites(
         Some(&source_indices),
     );
     BridgeAtlas { texture, entries }
-}
-
-fn decrement_numeric_suffix(name: &str) -> Option<String> {
-    let split: usize = name.rfind(|c: char| !c.is_ascii_digit())?;
-    if split + 1 >= name.len() {
-        return None;
-    }
-    let (prefix, digits) = name.split_at(split + 1);
-    let width: usize = digits.len();
-    let n: u32 = digits.parse().ok()?;
-    if n == 0 {
-        return None;
-    }
-    Some(format!("{}{:0width$}", prefix, n - 1, width = width))
 }
 
 #[cfg(test)]

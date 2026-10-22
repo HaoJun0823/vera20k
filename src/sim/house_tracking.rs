@@ -143,6 +143,11 @@ use crate::sim::intern::InternedId;
 use crate::sim::world::ObjectSubstrate;
 use crate::sim::world::Simulation;
 
+#[cfg(feature = "phobos")]
+mod phobos;
+#[cfg(feature = "phobos")]
+pub(crate) use phobos::{PhobosLimboControl, PhobosPlacement};
+
 /// The type facts the counters test, fixed when the Techno is constructed
 /// ([`TrackingFacts::of`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -418,6 +423,10 @@ impl ForceValues {
 /// the module doc).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HouseTracking {
+    /// Phobos HouseExt's separate limbo counters, in Unit/Infantry/Building/Aircraft order.
+    #[cfg(feature = "phobos")]
+    #[serde(default)]
+    phobos_limbo_counts: [BTreeMap<InternedId, i32>; 4],
     /// `HouseClass+0x2F0`.
     buildings: i32,
     /// `HouseClass+0x2E8`: the tracked vehicles and the buildings tracked
@@ -683,6 +692,11 @@ impl HouseTracking {
     /// the gatherer count joined it (schema `HouseDefeatTracking`).
     pub(crate) fn hash_defeat_counters(&self, hasher: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
+        #[cfg(feature = "phobos")]
+        {
+            b"phobos-house-limbo-v1".hash(hasher);
+            self.phobos_limbo_counts.hash(hasher);
+        }
         self.buildings.hash(hasher);
         self.unit_types.hash(hasher);
         // The totals, which the per-type counts replaced (schema v238 keeps

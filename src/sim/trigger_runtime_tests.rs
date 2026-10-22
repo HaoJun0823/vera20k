@@ -12,6 +12,115 @@ use crate::sim::replay::{ReplayHeader, ReplayLog, ReplayRunner};
 use crate::sim::snapshot::GameSnapshot;
 use crate::sim::world::{FrameEffects, MasterFrameTestRung, Simulation, TickLane};
 
+#[test]
+fn local_reload_preserves_unnamed_and_unassigned_values() {
+    // ReadLocal689B2E clears names only;689C14 skips a missing second token.
+    let map = |variables: &str| {
+        crate::map::map_file::MapFile::from_bytes(
+            format!("{READER_MAP_PREFIX}[VariableNames]\n{variables}").as_bytes(),
+        )
+        .unwrap()
+    };
+    let mut sim = Simulation::new();
+    sim.initialize_trigger_definitions(
+        &map("7=Kept,1\n8=AlsoKept,1\n9=Cleared,1\n"),
+        &Default::default(),
+        None,
+        None,
+    );
+    sim.initialize_trigger_definitions(
+        &map("8=Renamed\n9=ExplicitClear,0\n"),
+        &Default::default(),
+        None,
+        None,
+    );
+    assert!(sim.trigger_local_is_set_for_test(7), "unnamed slot");
+    assert!(sim.trigger_local_is_set_for_test(8), "no assignment token");
+    assert!(!sim.trigger_local_is_set_for_test(9), "explicit assignment");
+}
+
+#[test]
+fn local_reload_matches_original_reader_histories() {
+    let native = crate::test_fixture::json("tools/input_oracle/campaign_start.json");
+    for history in native["local_variable_controls"].as_array().unwrap() {
+        let mut outgoing = Simulation::with_seed(31);
+        outgoing.trigger_runtime.locals_set = history["initial_set"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_u64().unwrap() as u32)
+            .collect();
+        for pass in history["passes"].as_array().unwrap() {
+            let mut source = READER_MAP_PREFIX.to_owned();
+            for section in pass["ordered_sections"].as_array().unwrap() {
+                source.push_str(&format!("[{}]\n", section["name"].as_str().unwrap()));
+                for pair in section["entries"].as_array().unwrap() {
+                    source.push_str(&format!(
+                        "{}={}\n",
+                        pair[0].as_str().unwrap(),
+                        pair[1].as_str().unwrap()
+                    ));
+                }
+            }
+            let map = crate::map::map_file::MapFile::from_bytes(source.as_bytes()).unwrap();
+            let mut incoming = Simulation::with_seed(31);
+            let rng = incoming.rng_state();
+            incoming.inherit_local_variables_for_fresh_load(
+                outgoing.retain_local_variables_for_fresh_load(),
+            );
+            install_map_triggers(&mut incoming, &map);
+            let expected: BTreeSet<u32> = pass["set_slots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|value| value.as_u64().unwrap() as u32)
+                .collect();
+            assert_eq!(incoming.trigger_runtime.locals_set, expected, "{history}");
+            let names: std::collections::BTreeMap<_, _> = map
+                .local_variables
+                .values()
+                .map(|variable| (variable.index.to_string(), variable.name.clone()))
+                .collect();
+            assert_eq!(serde_json::to_value(names).unwrap(), pass["names"]);
+            assert_eq!(incoming.trigger_runtime.dirty, [false; 4]);
+            assert_eq!(incoming.rng_state(), rng);
+            outgoing = incoming;
+        }
+    }
+}
+
+#[test]
+fn local_retention_reaches_incoming_trigger_and_saved_world() {
+    let mut outgoing = Simulation::new();
+    install_map_triggers(
+        &mut outgoing,
+        &trigger_fixture_map("[VariableNames]\n7=MissionFlag,1\n"),
+    );
+    let mut incoming = Simulation::new();
+    incoming
+        .inherit_local_variables_for_fresh_load(outgoing.retain_local_variables_for_fresh_load());
+    install_map_triggers(
+        &mut incoming,
+        &trigger_fixture_map(
+            "[VariableNames]\n7=Renamed\n\
+             [Triggers]\nT=<none>,<none>,Retained,0,1,1,1,0\n\
+             [Events]\nT=2,13,0,0,36,0,7\n\
+             [Actions]\nT=1,28,0,12,0,0,0,0,A\n\
+             [Tags]\nTAG=0,Retained,T\n",
+        ),
+    );
+    incoming.classify_map_triggers(crate::rules::ruleset::RuleSet::empty_for_test());
+    ordinary_master_frame(&mut incoming, None, None, true);
+    assert!(
+        incoming.global_variables()[12],
+        "retained local admits the incoming trigger"
+    );
+    let bytes = GameSnapshot::save_validated(&incoming, 0, 0, "local retention", 0);
+    let saved = GameSnapshot::load(&bytes).unwrap();
+    assert!(saved.sim.trigger_local_is_set_for_test(7));
+    assert!(saved.sim.global_variables()[12]);
+}
+
 #[path = "trigger_runtime_mind_control_callback_tests.rs"]
 mod mind_control_callbacks;
 #[path = "trigger_runtime_mind_control_tests.rs"]
@@ -625,28 +734,81 @@ fn retail_sov01_transport_hint_emits_the_named_cameo_on_the_native_clock() {
 }
 
 #[test]
+fn scenario_timer_expiry_polls_all_tags_before_stopping() {
+    let rules = crate::rules::ruleset::RuleSet::empty_for_test();
+    let map = trigger_fixture_map(
+        "[Triggers]\nFIRST=Neutral,<none>,First,0,1,1,1,0\nSECOND=Neutral,<none>,Second,0,1,1,1,0\n\
+         [Events]\nFIRST=1,14,0,0\nSECOND=1,14,0,0\n\
+         [Actions]\nFIRST=1,28,0,7,0,0,0,0,A\nSECOND=1,28,0,8,0,0,0,0,A\n\
+         [Tags]\nFIRST_TAG=2,First,FIRST\nSECOND_TAG=2,Second,SECOND\n",
+    );
+    let mut sim = Simulation::new();
+    install_map_triggers(&mut sim, &map);
+    sim.classify_map_triggers(rules);
+    sim.session
+        .change_scenario_timer(crate::sim::scenario_session::ScenarioTimerAction::Set(1));
+    sim.session.set_scenario_timer_caption("MISSION:TmeTimer");
+    let rng = sim.rng_state();
+    sim.session.set_binary_frame_for_test(14);
+    sim.advance_triggers(rules, None, FrameEffects::default());
+    assert!(!sim.global_variables()[7] && !sim.global_variables()[8]);
+    assert_eq!(
+        sim.session.scenario_timer_view(),
+        Some((1, "MISSION:TmeTimer"))
+    );
+
+    sim.session.set_binary_frame_for_test(15);
+    sim.advance_triggers(rules, None, FrameEffects::default());
+    assert!(
+        sim.global_variables()[7] && sim.global_variables()[8],
+        "all expiry tags see the running timer before the Logic tail stops it"
+    );
+    assert_eq!(
+        sim.session.scenario_timer_view(),
+        None,
+        "Tactical must hide the completed countdown"
+    );
+    assert!(!sim.session.scenario_timer_elapsed());
+    let actions = sim.trigger_runtime.action_trace.clone();
+    sim.session.set_binary_frame_for_test(16);
+    sim.advance_triggers(rules, None, FrameEffects::default());
+    assert_eq!(
+        sim.trigger_runtime.action_trace, actions,
+        "repeatable expiry tags do not fire again after completion"
+    );
+    assert_eq!(sim.rng_state(), rng);
+}
+
+#[test]
+fn scenario_timer_restarted_by_expiry_action_survives_logic_tail() {
+    let rules = crate::rules::ruleset::RuleSet::empty_for_test();
+    let map = trigger_fixture_map(
+        "[Triggers]\nRESTART=Neutral,<none>,Restart,0,1,1,1,0\n\
+         [Events]\nRESTART=1,14,0,0\n\
+         [Actions]\nRESTART=1,27,0,5,0,0,0,0,A\n\
+         [Tags]\nRESTART_TAG=2,Restart,RESTART\n",
+    );
+    let mut sim = Simulation::new();
+    install_map_triggers(&mut sim, &map);
+    sim.classify_map_triggers(rules);
+    sim.session
+        .change_scenario_timer(crate::sim::scenario_session::ScenarioTimerAction::Set(1));
+    sim.session.set_binary_frame_for_test(15);
+    sim.advance_triggers(rules, None, FrameEffects::default());
+    assert_eq!(sim.session.scenario_timer_view(), Some((75, "")));
+    assert!(!sim.session.scenario_timer_elapsed());
+}
+
+#[test]
 fn scenario_timer_retail_sov01_actions_reach_the_expiry_predicate() {
-    let Some((mut sim, rules, overlay, _map)) = retail_sov01_script_context() else {
+    let Some((mut sim, rules, _overlay, _map)) = retail_sov01_script_context() else {
         return;
     };
-    let source = trigger_type_index(&sim, "0952F87C");
-    let actions = sim.trigger_runtime.definitions.trigger_types[source]
-        .actions
-        .clone();
     sim.session.set_binary_frame_for_test(123);
-    for action in actions
-        .iter()
-        .filter(|action| matches!(action.entry.kind, 23..=27 | 103))
-    {
-        assert!(sim.apply_live_trigger_action(
-            action,
-            sim.trigger_action_context(source, None, TagEventInput::default(), &rules),
-            &mut Vec::new(),
-            &rules,
-            Some(&overlay),
-            FrameEffects::default(),
-        ));
-    }
+    assert_eq!(
+        sim.dev_replay_scenario_timer_actions(&rules, "0952F87C"),
+        Some(3)
+    );
     assert_eq!(
         sim.session.scenario_timer_view(),
         Some((1800, "MISSION:TmeTimer"))
@@ -915,22 +1077,24 @@ fn action128_retail_foots_use_reverse_shared_sweep_and_finish_the_warp() {
 }
 
 #[test]
-fn script40_clears_local_through_trigger_owner_and_advances_on_rejected_indices() {
+fn variable_scripts_use_shared_owner_and_advance_on_rejected_indices() {
     use crate::sim::team_script_vm::{TeamScriptAction, TeamScriptDefinition};
     let rules =
         crate::rules::ruleset::RuleSet::from_ini(&crate::rules::ini_parser::IniFile::from_str(
             "[InfantryTypes]\n0=E1\n[E1]\nStrength=125\nSpeed=4\n",
         ))
         .unwrap();
-    // Original Script40 @ 6E9BBE calls SetLocal689910 even without `first`
-    // and finishes after its unsigned index rejection. These are behavior
-    // regressions; the shared variable owner's native controls remain in
+    // Original TeamClass::AI Script12/38 @6E982B/6E9530 and 39/40
+    // @6E9BA1/6E9BBE call the shared Scenario setters and finish even after
+    // index rejection. The shared variable owner's native controls remain in
     // parsed_variable_actions_match_native_reader_dispatch_and_restore.
-    for (index, initially_set, changed) in [
-        (0, true, true),
-        (99, false, false),
-        (-1, false, false),
-        (100, false, false),
+    for (action_id, index, initially_set, changed) in [
+        (40, 0, true, true),
+        (40, 99, false, false),
+        (40, -1, false, false),
+        (40, 100, false, false),
+        (12, 50, false, false),
+        (38, -1, false, false),
     ] {
         let mut sim = Simulation::new();
         let owner = sim.interner.intern("Russians");
@@ -941,13 +1105,13 @@ fn script40_clears_local_through_trigger_owner_and_advances_on_rejected_indices(
         let member = sim
             .spawn_object("E1", "Russians", 10, 10, 0, &rules)
             .unwrap();
-        let script = sim.interner.intern("Clear local then wait");
+        let script = sim.interner.intern("Variable then wait");
         sim.team_script_vm.register_script(TeamScriptDefinition {
             id: script,
             source: crate::rules::team_ai_ini::TeamAiDefinitionSource::Scenario,
             actions: vec![
                 TeamScriptAction {
-                    action_id: 40,
+                    action_id,
                     argument: index,
                 },
                 TeamScriptAction {
@@ -980,14 +1144,25 @@ fn script40_clears_local_through_trigger_owner_and_advances_on_rejected_indices(
         sim.trigger_runtime.dirty[0] = false;
         let rng = sim.rng_state();
         sim.run_team_ai_pass(&rules, None, FrameEffects::default());
-        assert!(sim.trigger_runtime.locals_set.is_empty(), "index {index}");
+        assert!(
+            sim.trigger_runtime.locals_set.is_empty(),
+            "action {action_id}, index {index}"
+        );
         assert_eq!(sim.trigger_runtime.globals_set, BTreeSet::from([3]));
-        assert_eq!(sim.trigger_runtime.dirty[0], changed, "index {index}");
+        assert_eq!(
+            sim.trigger_runtime.dirty[0], changed,
+            "action {action_id}, index {index}"
+        );
         assert!(
             sim.team_script_vm.team(team).unwrap().advance_pending(),
-            "index {index}"
+            "action {action_id}, index {index}"
         );
-        assert_eq!(sim.rng_state(), rng, "clearing a local has no RNG draw");
+        assert!(sim.team_script_vm.team(team).unwrap().refusal().is_none());
+        assert_eq!(
+            sim.rng_state(),
+            rng,
+            "no Trigger timers watch these variables"
+        );
         sim.run_team_ai_pass(&rules, None, FrameEffects::default());
         assert_eq!(sim.team_script_vm.team(team).unwrap().cursor(), 1);
     }
@@ -1736,7 +1911,7 @@ fn mind_control_event6_owner_change_updates_source_house_before_event44_and_capt
 
 #[test]
 fn mind_control_attack_order_fires_attacked_tags_without_hp_damage() {
-    use crate::sim::command::{Command, CommandEnvelope};
+    use crate::sim::command::Command;
     let (mut sim, rules, overlay, houses) =
         event_ingress_fixture_with_rules(MIND_CONTROL_TAG_RULES);
     let source = sim
@@ -1746,13 +1921,18 @@ fn mind_control_attack_order_fires_attacked_tags_without_hp_damage() {
     install_event_ingress_map(&mut sim, &rules, MIND_CONTROL_TAG_MAP);
     sim.attach_object_trigger_tag(victim, Some("TAG"));
     assert!(sim.trigger_runtime.globals_set.is_empty());
-    sim.queue_command(CommandEnvelope::new(
-        houses[0],
-        sim.session.tick() + 1,
-        Command::Attack {
+    // Every House here is a computer, whose events the DoList never runs
+    // (0x0064C4FB..0x0064C50D). Order the Yuri through the class receiver, as
+    // the computer's own AI does.
+    assert!(sim.apply_command_with_overlays(
+        "House0",
+        &Command::Attack {
             attacker_id: source,
             target_id: victim,
         },
+        &rules,
+        Some(&overlay),
+        FrameEffects::default(),
     ));
     for _ in 0..90 {
         let commands = sim.take_due_commands();
@@ -3184,12 +3364,11 @@ fn mission_announce_then_end_uses_the_player_house_and_shared_timer() {
         "67 preserves duration;69 resumes it instead of starting SavourDelay"
     );
     assert!(sim.ready_outcome_for_owner(player).is_none());
-    assert!(
-        sim.houses
-            .get_mut(&player)
-            .unwrap()
-            .advance_outcome_savour(15, false)
-    );
+    let kind = sim.houses[&player]
+        .pending_outcome(15, false)
+        .expect("native shared timer admits the current House");
+    sim.houses.get_mut(&player).unwrap().complete_outcome(kind);
+    sim.session.admit_outcome(kind);
     assert!(sim.ready_outcome_for_owner(player).is_some());
 }
 

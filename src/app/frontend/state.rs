@@ -26,10 +26,6 @@ pub(crate) struct FrontendState {
     /// Cooperative progress authority.
     pub(crate) multiplayer_shell_runtime:
         crate::app::frontend::skirmish_session::MultiplayerShellRuntime,
-    /// Last owner-draw Skirmish button state observed by the native render path.
-    /// Used for the retail GenericClick paint-transition sound.
-    pub(crate) skirmish_shell_last_painted_pressed_button:
-        Option<crate::ui::skirmish_shell::OwnerDrawButton>,
     pub(crate) skirmish_shell_chrome:
         Option<crate::render::skirmish_shell_chrome::SkirmishShellChromeAtlas>,
     pub(crate) main_menu_shell_state: crate::ui::main_menu_shell::MainMenuShellState,
@@ -241,4 +237,6 @@ pub(crate) enum ShellMessageBoxPurpose {
     /// GameExit::Defeat `0x006860E5`: Yes restarts this start, if VERA can
     /// rebuild one; No returns to the shell.
     CampaignReplay(Option<Box<crate::app::match_bootstrap::PreparedCampaignStartup>>),
+    /// MapSelect's failed Init message returns to the victory continuation.
+    CampaignVictory(Box<crate::app::campaign_victory::CampaignVictory>),
 }

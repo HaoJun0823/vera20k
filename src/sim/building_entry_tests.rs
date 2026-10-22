@@ -1956,7 +1956,8 @@ fn occupants_are_admitted_in_order_and_a_human_drops_its_seek() {
         .iter()
         .filter_map(|event| match *event {
             crate::sim::world::SimSoundEvent::StructureGarrisoned { owner } => Some((owner, None)),
-            crate::sim::world::SimSoundEvent::BuildingGarrisonedSfx { owner, rx, ry } => {
+            crate::sim::world::SimSoundEvent::BuildingGarrisonedSfx { owner, world } => {
+                let (rx, ry, ..) = world.to_cell_sub_z();
                 Some((owner, Some((rx, ry))))
             }
             _ => None,
@@ -2329,11 +2330,6 @@ fn cancelling_a_manual_bunker_entry_frees_it_for_another_tank() {
                 crate::sim::mission::MissionType::Enter,
                 crate::sim::combat::TargetKind::Entity(bunker)
             ),
-            Some(&rules)
-        ));
-        assert!(!sim.apply_command(
-            "YuriCountry",
-            &Command::Stop { entity_id: first },
             Some(&rules)
         ));
         assert_eq!(

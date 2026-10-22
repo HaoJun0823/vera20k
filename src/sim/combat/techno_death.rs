@@ -336,13 +336,12 @@ pub(super) fn append_selected_death_sounds(
     building_die_sound: Option<&str>,
     owner_is_human: bool,
     main_rng: &crate::sim::rng::MainRng,
-    rx: u16,
-    ry: u16,
-    death_sounds: &mut Vec<(String, u16, u16)>,
+    location: crate::sim::anim_class::AnimWorldCoord,
+    death_sounds: &mut Vec<(String, crate::sim::anim_class::AnimWorldCoord)>,
 ) {
     let mut append_choice = |choices: &[String]| {
         if let Some(sound) = select_death_sound(choices, main_rng) {
-            death_sounds.push((sound, rx, ry));
+            death_sounds.push((sound, location));
         }
     };
 
@@ -355,7 +354,7 @@ pub(super) fn append_selected_death_sounds(
         && object_type.die_sounds.is_empty()
         && let Some(sound_id) = building_die_sound.filter(|id| !id.is_empty())
     {
-        death_sounds.push((sound_id.to_owned(), rx, ry));
+        death_sounds.push((sound_id.to_owned(), location));
     }
 }
 

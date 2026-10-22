@@ -11,19 +11,17 @@
 //! MapSelect writes the next map into Scenario+0x125C, the carry-over record
 //! `0x004C6180` saves the 50 globals, the mission counter Scenario+0x1254
 //! increments (`0x00685AAF`) and Start_Scenario `0x00683AB0` runs with the
-//! retained campaign index (`0x00685C47`). The record (globals and the
-//! player House's difficulty row) is written back by `0x004C6210` once
+//! retained campaign index (`0x00685C47`). The record (globals, the
+//! player House's difficulty row and remaining countdown) is written back by `0x004C6210` once
 //! Start_Scenario has read the next map; see `sim::campaign_carry_over`.
 //!
 //! Residuals, all inert on the retail campaign maps:
-//! - the Win movie (`+0x143C`, before StandaloneScore) is not played; retail
-//!   campaign maps use `Win=<none>`. `[Basic] SkipScore` (`+0x34AE`) is read by
+//! - `[Basic] SkipScore` (`+0x34AE`) is read by
 //!   the outcome router: yes skips only `0x103`, then follows this continuation;
 //!   retail campaign maps use `SkipScore=no`.
 //! - the record's money (`CarryOverMoney` x the House's money, capped by
-//!   `CarryOverCap`, also added to House+0x1DC) and the mission timer
-//!   (`TimerInherit`) are not carried; every retail map has
-//!   `CarryOverMoney=0.000000` and `TimerInherit=no`.
+//!   `CarryOverCap`, also added to House+0x1DC) is not carried; every retail
+//!   map has `CarryOverMoney=0.000000`.
 //! - the calls after the restore (`0x00685D7F..0x00685DAE`: `0x007241A0`,
 //!   `0x004F4480`, `0x004A3C30`) are not ported.
 //! - Session+0x3C0 bit 2 (`0x00685934`) skips the score, movies and
@@ -35,10 +33,8 @@
 //! - SkipMapSelect=yes (`0x005ADE20`) matches NextScenario against the stage
 //!   recorded in Scenario+0x35A0, which VERA does not track; such a map
 //!   returns to the shell. Every retail map has `SkipMapSelect=no`.
-//! - MapSelect failures show `MSG:UnableMapSelect` (`0x005ADDCF`) before the
-//!   current map is replayed; VERA logs instead of showing the box.
-//! - a restored saved game carries no campaign index, so its win returns to
-//!   the shell.
+//! Saved campaigns retain their Scenario index and incoming carry-over;
+//! their wins enter this same continuation after saved-world admission.
 
 use std::collections::VecDeque;
 
@@ -49,6 +45,26 @@ use crate::rules::ini_parser::IniFile;
 /// `CCINIClass::ReadString` into a CString (`0x00528C00`) reads through a
 /// 0x400-byte buffer.
 const MAP_SELECT_VALUE_CAPACITY: usize = 0x400;
+
+/// gamemd GameExit::Victory @0x00685670,685915..685960: Play_Movie_ByIndex
+/// 5BF260 reads Scenario+143C before SkipScore is tested. ReadMovie4757D0
+/// resolves against the fixed ART registry; SetDefaults6837F4 supplies -1.
+/// The existing movie owner returns to the retained outcome on every exit.
+pub(crate) fn win_movie<'a>(
+    destination: &super::match_runtime::scenario_exit::ScenarioExitDestination,
+    basic: &crate::map::basic::BasicSection,
+    movies: &'a crate::rules::movies::MovieRegistry,
+) -> Option<&'a str> {
+    use super::match_runtime::scenario_exit::ScenarioExitDestination;
+    if !matches!(
+        destination,
+        ScenarioExitDestination::CampaignScore { .. }
+            | ScenarioExitDestination::CampaignVictoryContinue
+    ) {
+        return None;
+    }
+    movies.name(movies.find_index(basic.win.as_deref()?))
+}
 
 /// What a won campaign mission does once its score dialog returns.
 #[derive(Debug)]
@@ -65,7 +81,12 @@ enum VictoryEnd {
     /// EndOfGame: Show_Credits, then the shell.
     Credits,
     /// Start_Scenario with the next map.
-    NextMission(Box<PreparedCampaignStartup>),
+    NextMission {
+        startup: Box<PreparedCampaignStartup>,
+        rearm_initial_save: bool,
+    },
+    /// FUN_005ADD10's failed Init: acknowledge before retrying this map.
+    MapSelectFailed(Box<PreparedCampaignStartup>),
 }
 
 /// MapSelect's result for Scenario+0x125C.
@@ -75,7 +96,10 @@ pub(crate) enum MapSelectPick {
     Next(String),
     /// Scenario+0x125C keeps the current map, which Start_Scenario replays.
     KeepCurrent,
-    /// The native code dereferences a missing stage or choice here.
+    /// Init5AE220 failed. Wrapper5ADD10 shows MSG:UnableMapSelect; victory
+    /// ignores its return and reloads the current map without rearming ABCE08.
+    InitFailed,
+    /// SetNextScenario dereferences a missing choice after successful Init.
     Fault(&'static str),
 }
 
@@ -100,7 +124,8 @@ fn map_select_value(mapsel: &IniFile, section: &str, key: &str) -> String {
 }
 
 /// MapSelect without SkipMapSelect (`0x005ADD10` -> `0x005AE100`); it shows
-/// no dialog. `side` is the ID of the player House type's side
+/// no selection dialog. Failed Init shows the wrapper's message box. `side`
+/// is the ID of the player House type's side
 /// (`Scenario+0x1C74` -> `HouseType+0xBC`, `0x005ADF40..0x005ADF5B`).
 pub(crate) fn map_select(
     mapsel: Option<&IniFile>,
@@ -113,7 +138,7 @@ pub(crate) fn map_select(
     };
     // Init `0x005AE220` fails without the file, a side or any stage.
     let Some(mapsel) = mapsel.filter(|_| !stages.is_empty()) else {
-        return MapSelectPick::KeepCurrent;
+        return MapSelectPick::InitFailed;
     };
     // `0x005CF760`: the stage whose Scenario equals the current map, both
     // uppercased (`0x007B5B30`).
@@ -121,7 +146,9 @@ pub(crate) fn map_select(
         .iter()
         .find(|stage| map_select_value(mapsel, stage, "Scenario").eq_ignore_ascii_case(current))
     else {
-        return MapSelectPick::Fault("the current map is no MAPSELMD stage");
+        // gamemd FUN_005AE220 @0x005AE220,5AE31C..5AE369 rejects the
+        // current stage before SetNextScenario5AE126 rearms the save latch.
+        return MapSelectPick::InitFailed;
     };
     // `0x005AE15C`: only a stage with a MapVQ chooses.
     if map_select_value(mapsel, stage, "MapVQ").is_empty() {
@@ -236,13 +263,11 @@ impl App {
                             ))
                     });
                 let current = sim.session().map_name();
-                let scenario = match map_select(
-                    mapsel.as_ref().map(|selected| &selected.ini),
-                    side,
-                    current,
-                ) {
+                let pick = map_select(mapsel.as_ref().map(|selected| &selected.ini), side, current);
+                let init_failed = pick == MapSelectPick::InitFailed;
+                let scenario = match pick {
                     MapSelectPick::Next(scenario) => Some(scenario),
-                    MapSelectPick::KeepCurrent => {
+                    MapSelectPick::KeepCurrent | MapSelectPick::InitFailed => {
                         log::warn!("MapSelect chose no new map; {current} is replayed");
                         Some(current.to_owned())
                     }
@@ -253,14 +278,22 @@ impl App {
                 };
                 match (scenario, sim.session().campaign_mission_counter()) {
                     (Some(scenario), Some(counter)) => {
-                        VictoryEnd::NextMission(Box::new(campaign.next_mission(
+                        let startup = Box::new(campaign.next_mission(
                             scenario,
                             counter + 1,
                             state.persistence.options_profile.difficulty,
                             sim.session().game_options().game_speed,
                             sim.save_campaign_carry_over(),
                             &mut crate::app::match_bootstrap::OrdinaryMatchSeedClock,
-                        )))
+                        ));
+                        if init_failed {
+                            VictoryEnd::MapSelectFailed(startup)
+                        } else {
+                            VictoryEnd::NextMission {
+                                startup,
+                                rearm_initial_save: true,
+                            }
+                        }
                     }
                     _ => VictoryEnd::Shell,
                 }
@@ -294,10 +327,48 @@ impl App {
                 state,
                 crate::app::frontend::credits_roll::CreditsReturn::MainMenu,
             ),
-            VictoryEnd::NextMission(startup) => Self::start_campaign_scenario(
-                state,
-                crate::app::loading::pump::LoadingRequest::campaign(*startup),
-            ),
+            VictoryEnd::MapSelectFailed(startup) => {
+                // gamemd FUN_005ADD10 @0x005ADD10,5ADD8B..5ADDCF calls
+                // ShellMessageBox5D3490 with MSG:UnableMapSelect/TXT_OK.
+                // Victory685A56 ignores its result and proceeds after any
+                // dismissal. Failed Init never reaches5AE126's ABCE08 write.
+                let labels =
+                    crate::ui::main_menu_dialogs::ShellMessageBoxLabels::map_select_failure(
+                        &|key, fallback| Self::csf_label(state, key, fallback),
+                    );
+                Self::destroy_current_shell_dialog(state);
+                state.frontend.shell_route = crate::app::shell_route::ShellRoute::MainMenu;
+                Self::open_shell_message_box(
+                    state,
+                    crate::app::frontend::state::ShellMessageBox {
+                        labels,
+                        purpose:
+                            crate::app::frontend::state::ShellMessageBoxPurpose::CampaignVictory(
+                                Box::new(CampaignVictory {
+                                    movies: VecDeque::new(),
+                                    then: VictoryEnd::NextMission {
+                                        startup,
+                                        rearm_initial_save: false,
+                                    },
+                                }),
+                            ),
+                    },
+                );
+            }
+            VictoryEnd::NextMission {
+                startup,
+                rearm_initial_save,
+            } => {
+                // Only successful MapSelect Init rearms ABCE08 at5AE126.
+                // The failed-Init acknowledgement preserves that owner latch.
+                if rearm_initial_save {
+                    state.persistence.arm_initial_campaign_save();
+                }
+                Self::start_campaign_scenario(
+                    state,
+                    crate::app::loading::pump::LoadingRequest::campaign(*startup),
+                );
+            }
         }
     }
 }
@@ -342,15 +413,16 @@ Scenario=ALL03umd.MAP
     }
 
     #[test]
-    fn a_failed_init_or_a_stage_without_map_vq_keeps_the_current_map() {
+    fn failed_initialization_requires_a_notice_but_a_stage_without_vq_succeeds() {
         assert_eq!(
             pick(MAPSEL, "Nod", "ALL01umd.MAP"),
-            MapSelectPick::KeepCurrent
+            MapSelectPick::InitFailed
         );
         assert_eq!(
             map_select(None, Some("GDI"), "ALL01umd.MAP"),
-            MapSelectPick::KeepCurrent
+            MapSelectPick::InitFailed
         );
+        assert_eq!(pick(MAPSEL, "GDI", "OTHER.MAP"), MapSelectPick::InitFailed);
         let no_vq = MAPSEL.replace("MapVQ=GDIMAP01.VQA\n2=ALL02", "2=ALL02");
         assert_eq!(
             pick(&no_vq, "GDI", "ALL01umd.MAP"),
@@ -359,11 +431,7 @@ Scenario=ALL03umd.MAP
     }
 
     #[test]
-    fn missing_stages_and_choices_are_native_faults() {
-        assert!(matches!(
-            pick(MAPSEL, "GDI", "OTHER.MAP"),
-            MapSelectPick::Fault(_)
-        ));
+    fn missing_choices_after_successful_init_are_native_faults() {
         let last = MAPSEL.replace(
             "Scenario=ALL03umd.MAP",
             "Scenario=ALL03umd.MAP\nMapVQ=X.VQA",
@@ -380,6 +448,56 @@ Scenario=ALL03umd.MAP
 
     fn catalog(name: &str) -> Option<String> {
         (!name.eq_ignore_ascii_case("<none>")).then(|| name.to_owned())
+    }
+
+    #[test]
+    fn win_movie_uses_the_fixed_catalog_and_saved_basic_reader() {
+        let Some(art) = crate::rules::retail_ini_fixture::retail_ini("artmd.ini") else {
+            return;
+        };
+        let rules = crate::rules::process_owner::NativeRulesProcessOwner::from_cold_start_sources(
+            IniFile::empty(),
+            None,
+            art,
+            Default::default(),
+            Default::default(),
+        )
+        .unwrap();
+        let movie = rules.movies().name(0).expect("retail movie catalog");
+        let basic = basic(&format!(
+            "Win={}\nSkipScore=yes",
+            movie.to_ascii_lowercase()
+        ));
+        // SavedMapMetadata serializes this same BasicSection with save_codec;
+        // its layout digest automatically changes when the field is added.
+        let bytes = crate::util::save_codec::serialize(&basic).unwrap();
+        let restored = crate::util::save_codec::deserialize(&bytes).unwrap();
+        use crate::app::match_runtime::scenario_exit::ScenarioExitDestination;
+        assert_eq!(
+            win_movie(
+                &ScenarioExitDestination::CampaignVictoryContinue,
+                &restored,
+                rules.movies()
+            ),
+            Some(movie),
+            "SkipScore bypasses the dialog, not Win"
+        );
+        assert_eq!(
+            win_movie(
+                &ScenarioExitDestination::CampaignDefeat,
+                &restored,
+                rules.movies()
+            ),
+            None
+        );
+        assert_eq!(
+            win_movie(
+                &ScenarioExitDestination::CampaignVictoryContinue,
+                &crate::map::basic::BasicSection::default(),
+                rules.movies()
+            ),
+            None
+        );
     }
 
     #[test]
@@ -422,6 +540,7 @@ Scenario=ALL03umd.MAP
                     &assets,
                 )
                 .expect("retail campaign map");
+                assert_eq!(loaded.map.basic.win.as_deref(), Some("<none>"), "{name}");
                 let (movies, branch) = victory_plan(&loaded.map.basic, catalog, None);
                 if index + 1 < maps.len() {
                     assert!(movies.is_empty(), "{name}: {movies:?}");
@@ -450,6 +569,10 @@ Scenario=ALL03umd.MAP
         let mut campaigns = crate::rules::campaigns::CampaignRegistry::default();
         campaigns.apply_ini(&battle.ini, &crate::rules::movies::MovieRegistry::default());
         let mut clock = crate::app::match_bootstrap::OrdinaryMatchSeedClock;
+        assert_eq!(
+            map_select(Some(&mapsel.ini), Some("GDI"), "UNLISTED.MAP"),
+            MapSelectPick::InitFailed
+        );
         for (side, name, maps) in [("GDI", "ALL1", ALLIED), ("Nod", "SOV1", SOVIET)] {
             let mut startup = crate::app::match_bootstrap::prepare_campaign_startup(
                 &campaigns, name, 1, None, None, &mut clock,

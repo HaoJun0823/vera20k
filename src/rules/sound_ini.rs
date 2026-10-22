@@ -405,7 +405,7 @@ impl SoundRegistry {
     /// Literal action+90 consumers index the Voc array registered by7512CA..
     ///75133D. Duplicate IDs keep their first slot; a negative/missing slot is
     ///the existing safe invalid-reference boundary, without creating a sound.
-    pub(crate) fn entry_by_index(&self, index: i32) -> Option<&SoundEntry> {
+    pub fn entry_by_index(&self, index: i32) -> Option<&SoundEntry> {
         let key = self.native_order.get(usize::try_from(index).ok()?)?;
         self.entries.get(key)
     }

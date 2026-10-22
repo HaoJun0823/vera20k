@@ -103,11 +103,17 @@
 //! - rules/ does NOT depend on (outside tests): sim/, render/, ui/, audio/, net/
 
 pub mod airstrike;
+pub mod phobos_radiation;
 /// Whether this binary includes the supported Ares extensions. INIs cannot change it.
 pub const ARES_ENABLED: bool = cfg!(feature = "ares");
+/// Whether this binary includes the supported Phobos extensions. INIs cannot change it.
+pub const PHOBOS_ENABLED: bool = cfg!(feature = "phobos");
 pub(crate) mod ares_prerequisites;
 pub(crate) mod ares_armor;
+pub(crate) mod ares_emp;
+pub(crate) mod ares_warhead;
 pub mod armor;
+pub mod country_loading;
 #[cfg(test)]
 mod ares_manual_control_tests;
 pub mod compatibility;
@@ -149,6 +155,7 @@ pub mod mind_control_rules;
 pub mod missile_spawn;
 pub mod mission_data;
 pub mod movies;
+pub mod native_ini_hash;
 pub mod native_processing;
 pub mod object_type;
 pub mod overlay_types;

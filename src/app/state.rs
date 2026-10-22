@@ -34,16 +34,19 @@ pub(crate) struct AppState {
     pub(crate) persistence: crate::app::persistence::PersistenceState,
 }
 
-/// Drop app-owned scenario-exit runtime after a successful world replacement.
-/// Serialized HouseState remains the sole authority for any loaded SavourDelay;
-/// wall waits are reconstructed from its expiry latch without replaying EVA.
+/// Drop app-owned scenario-exit runtime and failure modal after a successful world replacement.
+/// Serialized HouseState owns SavourDelay and pending flags; ScenarioSession
+/// retains admitted requests. A saved frame cursor resumes its House wait
+/// with a fresh process clock, without replaying the result announcement.
 /// ClearScene685213..68521F and ordinary load cleanup69BB40 reset the shared
 /// 87E758 output scalar, not Theme's slots/fading. ThemeLoad721040 must see
 /// that process state unchanged; fresh-start request cancellation stays there.
 pub(crate) fn reset_scenario_exit_runtime(state: &mut AppState) {
     state.match_state.scenario_outcome = None;
     state.match_state.scenario_exit = None;
-    state.audio.set_master_output_scale(1.0);
+    state.match_state.network_failure = None;
+    crate::app::lan_service::return_transport(state);
+    state.audio.restore_sound_master();
 }
 
 impl AppState {
@@ -153,7 +156,9 @@ impl AppState {
     /// Asset-independent status cards and diagnostic modals use the OS cursor,
     /// and so does the pointer once it leaves the client area: mouse.shp has no
     /// art for the title bar or resize border, and the OS arrow is drawn there
-    /// whether VERA asks for it or not.
+    /// whether VERA asks for it or not. Main-menu dialogs (Options, Keyboard,
+    /// the exit confirm) are shell pages that draw mouse.shp themselves, so
+    /// they keep it; excluding them showed the OS arrow beside it.
     pub(crate) fn use_software_cursor(&self) -> bool {
         self.platform.pointer_in_client
             && !(self.frontend.screen == crate::ui::game_screen::GameScreen::MainMenu
@@ -170,7 +175,6 @@ impl AppState {
                     .match_presentation
                     .in_game_menu
                     .draws_over_battlefield())
-            && !self.main_menu_dialog_open()
     }
 
     /// Whether any main-menu modal dialog (exit confirm, options, keyboard)

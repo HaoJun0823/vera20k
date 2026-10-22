@@ -512,12 +512,9 @@ impl Simulation {
         if origin == (0, 0) {
             return [0, 0, 0];
         }
-        let coord = crate::sim::movement::ground_pose::target_get_coords(
-            crate::sim::combat::TargetKind::Cell(origin.0, origin.1),
-            self,
-            cells,
-        )
-        .expect("Cell GetCoords always returns a coordinate");
+        // A fresh Map5657A0 lookup, which stamps the Dummy on a miss; not the
+        // retained-Cell GetCoords that target_get_coords dispatches.
+        let coord = crate::sim::movement::navcom::target_cell_coord(origin.0, origin.1, cells);
         [coord.x, coord.y, coord.z]
     }
 
@@ -699,6 +696,96 @@ impl Simulation {
             .expect("projection House remains registered")
             .retain_base_geometry(primary, radius);
         true
+    }
+
+    /// `HouseClass::DetermineEdge @ 0x0050DB00`: the map edge `owner`'s
+    /// aircraft come from and leave by (House+0x577C,
+    /// [`HouseState::waypoint_edge`]). Its callers, SelectPrimaryFactory
+    /// (`0x0044813D`) and TogglePrimaryFactory (`0x00448241`), pass a
+    /// `Factory=BuildingType` Building of `owner`.
+    ///
+    /// - That Building, when it is primary (`+0x3D3`) and its type's Factory
+    ///   is BuildingType (`0x0050DB23..0x0050DB6E`), is the anchor.
+    /// - Otherwise, when House+0x2F0 is nonzero, the House+68 walk
+    ///   (`0x0050DB73..0x0050DC34`) takes each non-limbo `ConstructionYard=`
+    ///   Building in turn and stops at a primary one; without one, the first
+    ///   other non-limbo Building. With neither, the edge stays (`0x0050DC86`).
+    ///
+    /// The anchor is the Building's GetCoords (`0x00447AC0`, its foundation
+    /// centre); Map[coord] (`0x00565730`) gives the cell the edge choice
+    /// ([`determine_waypoint_edge`]) measures from. Native marks "no anchor"
+    /// with the zero CoordStruct (`0x00A8EFF8`), which a placed Building's
+    /// GetCoords never equals (its X is at least 128).
+    ///
+    /// RESIDUAL: VERA's Unlimbo and ChangeOwner append the Building to
+    /// House+68 before this call; native appends after it (`0x00441594`,
+    /// `0x004491D2`). The walk runs only when another primary
+    /// `Factory=BuildingType` Building kept the flag. Every retail one is a
+    /// `ConstructionYard=` type, where the walk stops before that tail.
+    ///
+    /// A mapless fixture without PlayfieldBounds keeps its edge.
+    ///
+    /// [`determine_waypoint_edge`]: crate::sim::house_state::determine_waypoint_edge
+    pub(crate) fn determine_house_edge(
+        &mut self,
+        owner: InternedId,
+        building: u64,
+        rules: &RuleSet,
+    ) {
+        let Some(bounds) = self.playfield_bounds else {
+            return;
+        };
+        let primary_yard_factory = self.production.is_primary_factory(building)
+            && self
+                .substrate
+                .entities
+                .get(building)
+                .and_then(|entity| self.object_type(entity.type_ref(), rules))
+                .is_some_and(|object| {
+                    object.factory_type()
+                        == Some(crate::rules::object_type::FactoryType::BuildingType)
+                });
+        let anchor = if primary_yard_factory {
+            Some(building)
+        } else {
+            let Some(house) = self.houses.get(&owner) else {
+                return;
+            };
+            let mut yard = None;
+            let mut other = None;
+            if house.tracking().buildings() != 0 {
+                for &id in house.base_projection().buildings() {
+                    let Some(entity) = self.substrate.entities.get(id) else {
+                        continue;
+                    };
+                    if entity.lifecycle.in_limbo() {
+                        continue;
+                    }
+                    if self
+                        .object_type(entity.type_ref(), rules)
+                        .is_some_and(|object| object.construction_yard)
+                    {
+                        yard = Some(id);
+                        if self.production.is_primary_factory(id) {
+                            break;
+                        }
+                    } else if other.is_none() {
+                        other = Some(id);
+                    }
+                }
+            }
+            yard.or(other)
+        };
+        let Some(cell) = anchor
+            .and_then(|id| self.substrate.entities.get(id))
+            .and_then(super::lifecycle::object_get_coords_cell)
+        else {
+            return;
+        };
+        let edge = crate::sim::house_state::determine_waypoint_edge(cell, bounds);
+        if let Some(house) = self.houses.get_mut(&owner) {
+            house.assign_waypoint_edge(edge);
+        }
     }
 
     /// [`HouseState::cost_factors`] for `owner`. `None` without a House, which
@@ -1917,3 +2004,7 @@ mod tests {
         assert_eq!(after[2..], before[2..]);
     }
 }
+
+#[cfg(test)]
+#[path = "house_edge_tests.rs"]
+mod edge_tests;

@@ -1,8 +1,18 @@
 //! Native retained Terrain coordinates through static and animated DrawIt.
 //! The corpus stops at the shape sink; this compares instance inputs, not pixels.
 
-use super::native_terrain_instances;
+use super::{native_terrain_instance, terrain_draw_frame};
 use crate::render::overlay_atlas::OverlaySpriteEntry;
+use crate::render::terrain_draw::TerrainPiece;
+
+/// Terrain DrawIt (0x71C1B0): a static type draws frame 1 below 2 health and
+/// frame 0 otherwise; an animated type draws its stage whatever its health.
+#[test]
+fn terrain_draw_frame_follows_health_and_stage() {
+    assert_eq!(terrain_draw_frame(None, 2), Some(0));
+    assert_eq!(terrain_draw_frame(None, 1), Some(1));
+    assert_eq!(terrain_draw_frame(Some(7), 1), Some(7));
+}
 
 #[test]
 fn terrain_retained_xyz_projection_and_piece_z_match_original_render() {
@@ -50,23 +60,26 @@ fn terrain_retained_xyz_projection_and_piece_z_match_original_render() {
             ],
             "{row}: original projection"
         );
-        let pieces = native_terrain_instances(
-            &sprite,
-            &sprite,
-            [
-                point.0,
-                point.1
-                    - if row.get("animation").is_some() {
-                        16.0
-                    } else {
-                        0.0
-                    },
-            ],
-            lift,
-            0.3,
-            [1.0; 3],
-            Default::default(),
-        );
+        let draw_point = [
+            point.0,
+            point.1
+                - if row.get("animation").is_some() {
+                    16.0
+                } else {
+                    0.0
+                },
+        ];
+        let pieces = [TerrainPiece::Body, TerrainPiece::Shadow].map(|piece| {
+            native_terrain_instance(
+                &sprite,
+                piece,
+                draw_point,
+                lift,
+                0.3,
+                [1.0; 3],
+                Default::default(),
+            )
+        });
         let dirty_translation =
             row["viewport_y"].as_i64().unwrap() - row["dirty_y"].as_i64().unwrap();
         for (piece, draw) in pieces.iter().zip(draws) {

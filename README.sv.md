@@ -40,6 +40,15 @@ ska gå.
 - **Flerspelarläge:** Nätverksspel är ännu inte tillgängligt.
 - **Skala:** Slag med 30 spelare och 20 000 enheter har ännu inte demonstrerats.
 
+## Ladda ner och spela
+
+Ladda ner installationsprogrammet för Windows, macOS eller Linux från
+[releasesidan](https://github.com/YuriPlanet/vera20k/releases). Det hittar ditt Yuri's Revenge från
+[Steam](https://store.steampowered.com/app/2229850/) eller
+[EA-appen](https://www.ea.com/games/command-and-conquer/command-and-conquer-the-ultimate-collection)
+och installerar VERA20K i en ny mapp. Dit hamnar även moddar och nytt innehåll framöver, så spelets
+egna filer ändras aldrig.
+
 ## Arkitektur
 
 Motorn har tre huvuddelar:

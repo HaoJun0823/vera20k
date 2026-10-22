@@ -16,8 +16,8 @@ use anyhow::Result;
 use winit::event_loop::EventLoop;
 
 fn main() -> Result<()> {
-    // A launch from the macOS app bundle works in the app's data folder. Enter
-    // it before the logger opens logs/ there.
+    // A launch from the macOS app bundle or the Linux AppImage works in the
+    // app's data folder. Enter it before the logger opens logs/ there.
     let app_bundle = vera20k::app::app_bundle::enter_data_folder();
     let log_path = match vera20k::util::logging::init_file_logger("ra2") {
         Ok(path) => {
@@ -40,6 +40,10 @@ fn main() -> Result<()> {
         std::env::consts::ARCH,
     );
     log::info!("Ares support compiled in: {}", vera20k::rules::ARES_ENABLED);
+    log::info!(
+        "Phobos support compiled in: {}",
+        vera20k::rules::PHOBOS_ENABLED
+    );
     if let Some(path) = &log_path {
         log::info!("Log file: {}", path.display());
     }

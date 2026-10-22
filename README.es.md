@@ -42,6 +42,15 @@ palabra sobre su rumbo.
 - **Multijugador:** El juego en red aún no está disponible.
 - **Escala:** Todavía no se han demostrado batallas con 30 jugadores y 20 000 unidades.
 
+## Descargar y jugar
+
+Descarga el instalador para Windows, macOS o Linux desde la
+[página de versiones](https://github.com/YuriPlanet/vera20k/releases). Encuentra tu Yuri's Revenge
+de [Steam](https://store.steampowered.com/app/2229850/) o de la
+[app de EA](https://www.ea.com/games/command-and-conquer/command-and-conquer-the-ultimate-collection)
+e instala VERA20K en una carpeta nueva. Ahí irán también los mods y el contenido nuevo, así que los
+archivos del juego nunca se modifican.
+
 ## Arquitectura
 
 El motor tiene tres partes principales:

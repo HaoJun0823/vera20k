@@ -9,6 +9,7 @@
 //!
 //! This boundary admits one local human, Battle and stock YR campaigns. Ares
 //! builds also carry allocated custom Country identities into Battle startup.
+//! External campaigns pass an explicit Scenario independently of record0.
 //! It does not load native saves, run network sessions or load extension DLLs.
 
 use std::path::{Path, PathBuf};
@@ -45,6 +46,42 @@ pub(crate) struct CampaignSpawn {
     /// Campaign human convention: 0 Easy, 1 Normal, 2 Hard.
     pub(crate) difficulty: i32,
     pub(crate) build_off_ally: bool,
+}
+
+impl CampaignSpawn {
+    /// Normalize an external campaign selection through the ordinary campaign
+    /// startup owner. CampaignID and Side remain client metadata, never indexes
+    /// into Country/HouseType or the Campaign array.
+    pub(crate) fn prepare_startup(
+        self,
+        catalog: &crate::rules::campaigns::CampaignRegistry,
+        game_speed: i32,
+        clock: &mut impl crate::app::match_bootstrap::MatchSeedClock,
+    ) -> Result<crate::app::match_bootstrap::PreparedCampaignStartup> {
+        // CnCNet/yrpp-spawner de64f070, Spawner.cpp327 passes
+        // StartScenario(ScenarioName,1,0). Original683AB0 keeps this index
+        // independently of the explicit filename; see campaign_start_prefix.json.
+        // Do not infer a record from Scenario, Side or client CampaignID.
+        let campaign_index = 0;
+        crate::app::match_bootstrap::prepare_campaign_startup_at_index(
+            catalog,
+            campaign_index,
+            self.difficulty,
+            Some(&self.scenario),
+            Some(crate::app::match_bootstrap::CampaignLaunchOptions {
+                game_speed,
+                build_off_ally: self.build_off_ally,
+                scenario_directory: self.scenario_directory,
+            }),
+            clock,
+        )
+        .with_context(|| {
+            format!(
+                "campaign record {campaign_index} unavailable for Scenario {:?}",
+                self.scenario
+            )
+        })
+    }
 }
 
 impl SpawnRequest {
@@ -155,7 +192,17 @@ impl SpawnRequest {
                 scenario,
                 scenario_directory: None,
                 campaign_id: integer(settings, "CampaignID", -1)?,
-                side: ranged(settings, "Side", 0, 0, 1)? as u8,
+                side: ranged(
+                    settings,
+                    "Side",
+                    0,
+                    0,
+                    if crate::rules::ARES_ENABLED {
+                        i32::from(u8::MAX)
+                    } else {
+                        1
+                    },
+                )? as u8,
                 difficulty,
                 build_off_ally: boolean(settings, "BuildOffAlly", false)?,
             })
@@ -480,3 +527,7 @@ fn integer(section: &IniSection, key: &str, default: i32) -> Result<i32> {
 #[cfg(test)]
 #[path = "cncnet_spawn_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cncnet_campaign_spawn_tests.rs"]
+mod campaign_tests;

@@ -1,6 +1,6 @@
 [package]
 name = "vera20k-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "VERA20k's GPU-free engine: assets, rules, map, simulation, lockstep and the headless scenario"
 publish = false
@@ -27,6 +27,9 @@ path = "bin/sim-bench.rs"
 [features]
 # Compile the supported Ares behavior; INIs cannot enable an absent capability.
 ares = []
+# Compile the supported Phobos behavior; INIs cannot enable an absent capability.
+# Independent of `ares`: Phobos itself does not require Ares.
+phobos = []
 # The client's Ctrl+Shift dev chord reaches simulation and utility hooks.
 dev-overlays = []
 # Read-only snapshots and opt-in frame timing for the browser dashboard.

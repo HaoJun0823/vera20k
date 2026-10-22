@@ -382,6 +382,7 @@ impl Simulation {
         Self::emit_deploy_action_sound(
             &mut self.interner,
             &self.substrate,
+            self.resolved_terrain.as_ref(),
             &mut self.sound_events,
             id,
             requested,
@@ -583,12 +584,14 @@ impl Simulation {
                     true
                 }
                 38 => {
-                    let requested = if self
-                        .substrate
-                        .entities
-                        .get(id)
-                        .is_some_and(|actor| actor.mission.current().raw() == 10)
-                    {
+                    // `0x00520B61..0x00520B84`: Get_Mission (vt+0x184,
+                    // `0x005B3040`, current or else queued) == Harvest asks
+                    // a forced Shovel; anything else takes the forced Ready
+                    // at `0x00520E42`.
+                    let requested = if self.substrate.entities.get(id).is_some_and(|actor| {
+                        actor.mission.effective().known()
+                            == Some(crate::sim::mission::MissionType::Harvest)
+                    }) {
                         38
                     } else {
                         DO_READY

@@ -41,6 +41,15 @@ oyuncular söylüyor.
 - **Çok oyunculu mod:** Ağ üzerinden oyun henüz mevcut değil.
 - **Ölçek:** 30 oyunculu, 20.000 birimli savaşlar henüz gösterilmiş değil.
 
+## İndir ve oyna
+
+Windows, macOS veya Linux yükleyicisini
+[sürümler sayfasından](https://github.com/YuriPlanet/vera20k/releases) indirin. Yükleyici,
+[Steam](https://store.steampowered.com/app/2229850/)'den ya da
+[EA uygulamasından](https://www.ea.com/games/command-and-conquer/command-and-conquer-the-ultimate-collection)
+aldığınız Yuri's Revenge'i bulur ve VERA20K'yi yeni bir klasöre kurar. Modlar ve yeni içerikler de
+oraya gidecek; böylece oyunun kendi dosyaları hiç değiştirilmez.
+
 ## Mimari
 
 Motorun üç ana bölümü vardır:

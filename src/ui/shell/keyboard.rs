@@ -100,6 +100,7 @@ impl KeyboardState {
         let mut categories: Vec<_> = commands.iter().map(|r| r.category.clone()).collect();
         categories.sort_by_key(|s| s.to_lowercase());
         categories.dedup();
+        categories.retain(|category| !trailing_categories.contains(category));
         for category in trailing_categories {
             if !categories.contains(&category) {
                 categories.push(category);
@@ -458,14 +459,41 @@ mod tests {
             },
         ];
         // "AaaVera" sorts first, so finding it last proves it is appended;
-        // "Control" is already derived, so it must not appear twice.
+        // A repeated trailing label must not appear twice.
         let state = KeyboardState::new(
             KeyboardParent::Launcher,
             rows,
-            vec!["AaaVera".into(), "Control".into()],
+            vec!["AaaVera".into(), "AaaVera".into()],
         );
         assert_eq!(state.categories, ["Control", "Selection", "AaaVera"]);
         assert_eq!(state.category, 0, "the retail category opens selected");
+    }
+
+    #[test]
+    fn populated_trailing_category_stays_last_and_keeps_command_identity() {
+        let rows = vec![
+            KeyboardCommandRow {
+                command_index: 7,
+                name: "Extension".into(),
+                category: "AaaVera".into(),
+                description: "extension".into(),
+            },
+            KeyboardCommandRow {
+                command_index: 8,
+                name: "Stop".into(),
+                category: "Control".into(),
+                description: "stop".into(),
+            },
+        ];
+        let mut state = KeyboardState::new(
+            KeyboardParent::Launcher,
+            rows,
+            vec!["AaaVera".into(), "AaaVera".into()],
+        );
+        assert_eq!(state.categories, ["Control", "AaaVera"]);
+        state.select_category(1);
+        state.select_command(0);
+        assert_eq!(state.selected_command().unwrap().command_index, 7);
     }
 
     #[test]

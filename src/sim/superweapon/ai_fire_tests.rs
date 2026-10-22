@@ -1090,8 +1090,8 @@ fn retail_computer_house_nukes_the_enemy_construction_yard() {
     assert!(!instance.is_ready);
     assert!(sim.sound_events.iter().any(|event| matches!(
         event,
-        crate::sim::world::SimSoundEvent::SuperWeaponLaunched { owner, rx: 42, ry: 42, .. }
-            if *owner == americans
+        crate::sim::world::SimSoundEvent::SuperWeaponLaunched { owner, world, .. }
+            if *owner == americans && world.to_cell_sub_z().0 == 42 && world.to_cell_sub_z().1 == 42
     )));
 }
 

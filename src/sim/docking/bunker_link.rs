@@ -144,7 +144,13 @@ pub fn install_bunker_link(sim: &mut Simulation, building_id: u64, unit_id: u64,
         now,
         &LiveReadyInputProvider { rules },
     );
-    emit_bunker_wall_sound(&sim.substrate, &mut sim.sound_events, building_id, true);
+    emit_bunker_wall_sound(
+        &sim.substrate,
+        sim.resolved_terrain.as_ref(),
+        &mut sim.sound_events,
+        building_id,
+        true,
+    );
 }
 
 /// Clear BOTH sides of the link and send the radio BREAK. Returns the unit id
@@ -180,8 +186,11 @@ pub(crate) fn break_bunker_link(
 /// sound id and skips it when the rules key is empty.
 /// Played by `BuildingClass::UpdateBunker` (`0x00458E50`) state 5 (`0x0045936F`), and on
 /// teardown by `EmptyBunker` (`0x004595C0`) and `ClearBunker` (`0x00459470`).
+/// Every site plays at the bunker building's Location (`0x0045934A..0x0045936F`,
+/// `0x004594A2..0x004594C8`, `0x004595E7..0x0045960D`).
 pub(crate) fn emit_bunker_wall_sound(
     substrate: &ObjectSubstrate,
+    terrain: Option<&crate::map::resolved_terrain::ResolvedTerrainGrid>,
     sound_events: &mut FrameChannel<SimSoundEvent>,
     building_id: u64,
     up: bool,
@@ -189,11 +198,11 @@ pub(crate) fn emit_bunker_wall_sound(
     let Some(b) = substrate.entities.get(building_id) else {
         return;
     };
-    let (rx, ry) = (b.position.rx(), b.position.ry());
+    let world = crate::sim::movement::ground_pose::object_location(b, terrain).into();
     sound_events.emit(if up {
-        SimSoundEvent::BunkerWallsUp { rx, ry }
+        SimSoundEvent::BunkerWallsUp { world }
     } else {
-        SimSoundEvent::BunkerWallsDown { rx, ry }
+        SimSoundEvent::BunkerWallsDown { world }
     });
 }
 
@@ -241,7 +250,13 @@ pub(crate) fn release_normal(
     effects: FrameEffects<'_>,
 ) {
     emit_bunker_wall_anim(sim, building_id, false, rules);
-    emit_bunker_wall_sound(&sim.substrate, &mut sim.sound_events, building_id, false);
+    emit_bunker_wall_sound(
+        &sim.substrate,
+        sim.resolved_terrain.as_ref(),
+        &mut sim.sound_events,
+        building_id,
+        false,
+    );
     let Some(unit_id) = sim
         .substrate
         .entities
@@ -448,7 +463,13 @@ pub(crate) fn clear_bunker(
         return;
     };
     emit_bunker_wall_anim(sim, building_id, false, rules);
-    emit_bunker_wall_sound(&sim.substrate, &mut sim.sound_events, building_id, false);
+    emit_bunker_wall_sound(
+        &sim.substrate,
+        sim.resolved_terrain.as_ref(),
+        &mut sim.sound_events,
+        building_id,
+        false,
+    );
     break_first_contact(sim, building_id, rules, effects);
     if let Some(u) = sim.substrate.entities.get_mut(unit_id) {
         u.bunker.link = BunkerLink::None;
@@ -739,6 +760,13 @@ mod tests {
         let mut sim = Simulation::new();
         let rules = rules();
         spawn_bunker(&mut sim, 2, "Americans");
+        // On level-2 ground: the cue keeps the bunker's height.
+        sim.substrate
+            .entities
+            .get_mut(2)
+            .unwrap()
+            .position
+            .set_z_for_test(2);
         spawn_tank(&mut sim, 1, "Americans", "TANK");
         // Native deselection preserves this live membership.
         assert!(matches!(sim.reveal(1), RevealOutcome::Revealed { .. }));
@@ -773,12 +801,25 @@ mod tests {
             MissionId::from_known(MissionType::Guard)
         );
 
-        let up = sim
+        let up: Vec<_> = sim
             .sound_events
             .iter()
-            .filter(|e| matches!(e, SimSoundEvent::BunkerWallsUp { .. }))
-            .count();
-        assert_eq!(up, 1, "exactly one walls-up sound on install");
+            .filter_map(|e| match e {
+                SimSoundEvent::BunkerWallsUp { world } => Some(*world),
+                _ => None,
+            })
+            .collect();
+        // UpdateBunker state 5 plays it at the bunker's Location
+        // (`0x0045934A..0x0045936F`).
+        assert_eq!(
+            up,
+            [crate::sim::anim_class::AnimWorldCoord {
+                x: 10 * 256 + 128,
+                y: 10 * 256 + 128,
+                z: 208,
+            }],
+            "exactly one walls-up sound on install, at the bunker's Location"
+        );
     }
 
     #[test]

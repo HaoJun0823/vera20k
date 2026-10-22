@@ -46,10 +46,13 @@
 //! - `BuildingClass::Mission_Selling 0x00449CE5` (state 2) / `0x0044AB36` (upgrade) →
 //!   `EVA_StructureSold`; `BuildingClass::ToggleRepair 0x004470B7` →
 //!   `EVA_Repairing` (sim events).
-//! - Depot `BuildingClass::MissionRepairAndProduce 0x0044BDC5`
-//!   (`CreateRadarEvent(8)` → `EVA_UnitRepaired`), `0x0044BFEA` (available
-//!   money `== 0` → `EVA_InsufficientFunds`), `0x0044C507` (`+0x41A` →
-//!   `EVA_Repairing`) (sim events, app listener/radar admission).
+//! - `BuildingClass::MissionRepairAndProduce`: depot `0x0044BDC5` and
+//!   hospital `0x0044B973` (`CreateRadarEvent(8)` → `EVA_UnitRepaired`,
+//!   string `0x0081905C`; the hospital's is also behind `IsHumanPlayer
+//!   0x0050B6F0`, `0x0044B939`), depot `0x0044BFEA` (available money `== 0`
+//!   → `EVA_InsufficientFunds`), `0x0044C507` (`+0x41A` → `EVA_Repairing`)
+//!   (sim events, `sim::docking::building_dock` and `sim::docking::hospital`;
+//!   app listener/radar admission).
 //! - `BuildingClass::ChangeOwner 0x00448428/0x0044848A` (+ `0x00448459`
 //!   `QueueVoice(CaptureEvaEvent)`) → TechBuildingLost / BuildingCaptured /
 //!   per-type capture line (sim event).
@@ -66,31 +69,42 @@
 //!   (`EVA_StructureAbandoned`), `InfantryClass::PerCellProcess 0x00519BC9`
 //!   (bridge), `TechnoClass::AI_Update 0x006FA0CB/0x006FA139` (promotion),
 //!   `LightningStorm::Process 0x0053AB11` — landed earlier.
-//!
-//! Reachable in a stock skirmish, prerequisite mechanism missing in VERA
-//! (documented, not produced):
-//! - Hospital `BuildingClass::MissionRepairAndProduce 0x0044B973` →
-//!   `EVA_UnitHealed` (separate hospital servicing mechanism).
-//! - `FootClass::OnSold 0x004D9F94` → `EVA_UnitSold` (no unit selling).
-//! - `0x00448226` (primary-factory setter, `[this+0x3D3]=1` then
-//!   `0x0050B6F0`) → `EVA_PrimaryBuildingSelected` (no primary factory).
-//! - `RadarClass::PlaceBeacon 0x00430D78` (`EVA_BeaconPlaced`), `0x00430F1B`
-//!   (`CreateRadarEvent(0xB)` → `EVA_BeaconDetected`) (no beacons).
-//! - `HouseClass::MakeAlly 0x004F9F35` (`EVA_AllianceRequested` string
-//!   `0x82479C`), `MakeEnemy 0x004FA1D5` (`EVA_AllianceBroken`) (no in-match
-//!   diplomacy).
+//! - `0x00448226` (primary-factory setter, `[this+0x3D3]=1`, then
+//!   `IsHumanPlayer 0x0050B6F0`) → `EVA_PrimaryBuildingSelected`
+//!   (`sim::production::can_build::toggle_factory_primary`, sim event).
+//! - `HouseClass::MakeAlly 0x004F9F35` (`EVA_AllianceRequested`, string
+//!   `0x0082479C`), `MakeEnemy 0x004FA1D5` (`EVA_AllianceBroken`) and the rest
+//!   of the alliance family (`sim::house_diplomacy::announce_alliance` →
+//!   `SimSoundEvent::AllianceChanged`; the ALLY event is queued by the
+//!   Diplomacy dialog and the `ToggleAlliance` hotkey in
+//!   `app::input::diplomacy`).
 //! - Crate handlers `0x00482EBB/0x004830AA/0x0048328A` (`EVA_UnitArmor|Speed|
 //!   FirePowerUpgraded`, spoken when a local-player unit's multiplier was
 //!   exactly `1.0`, `0x00482E61..0x00482E8D`): the sim's crate pickup
 //!   (`crates::pickup`) emits them as `HouseEva` for each changed house and
 //!   this side applies the local test. Retail `evamd.ini` defines none of the
 //!   three sections, so they resolve to silence, as natively.
+//! - `BuildingClass::ReadFromINI 0x0044FD1A`, `GoOnline 0x00452355`,
+//!   `GoOffline 0x004523DE` (`EVA_BuildingOnLine/OffLine`, human house only):
+//!   `sim::building_power::go_building_online` / `go_building_offline`, called
+//!   for map-placed buildings (`sim::world::world_spawn`), `EventClass::Execute`
+//!   (`Command::SetBuildingOnLine`; YR has no UI that queues the event) and
+//!   `TriggerAction::Execute` (`sim::trigger_runtime`).
+//!
+//! Reachable in a stock skirmish, not produced in VERA (documented):
+//! - `RadarClass::PlaceBeacon 0x00430D78` (`EVA_BeaconPlaced`), `0x00430F1B`
+//!   (`CreateRadarEvent(0xB)` → `EVA_BeaconDetected`): there are no beacons
+//!   and the `PlaceBeacon` hotkey is a no-op (#1348).
 //!
 //! Excluded (not reachable from stock-skirmish input):
-//! - `BuildingClass::ReadFromINI 0x0044FD1A`, `GoOnline 0x00452355`,
-//!   `GoOffline 0x004523DE` (`EVA_BuildingOnLine/OffLine`): callers are
-//!   `ReadFromINI` (map-placed player buildings), `EventClass::Execute` (the
-//!   TS power-toggle event YR exposes no UI for) and `TriggerAction::Execute`.
+//! - `FootClass::OnSold 0x004D9F70` → `EVA_UnitSold` (string `0x00822630`,
+//!   spoken at `0x004D9F94`): never spoken in retail play. The line and
+//!   `SellSound` sit inside the `IsHumanPlayer 0x0050B6F0` gate
+//!   (`0x004D9F81..0x004D9FB0`), and the only retail unit sale (#2710) is a
+//!   computer-owned useless harvester sold at a Service Depot
+//!   (`MissionRepairAndProduce 0x0044C4BC..0x0044C4DB`, owner not
+//!   `IsControlledByHuman 0x0050B730`), which is therefore silent. VERA has
+//!   no unit sale.
 //! - `SuperClass::AI_Charging 0x006CC179` (`*Ready` on a superweapon granted
 //!   already charged, `SuperClass::Grant 0x006CB560` `+0x6E`): the
 //!   building-complete grant passes 0.

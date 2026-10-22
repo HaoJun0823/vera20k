@@ -1,4 +1,4 @@
-//! Infantry deployment actions and the shared Unit DEPLOY event receiver.
+//! Infantry deployment actions and the shared DEPLOY event receiver.
 //!
 //! Infantry's Doing and shared Techno Stage own its sequence. The completion
 //! receiver applies the independent crush byte and passive-scan timer effects,
@@ -53,7 +53,8 @@ impl CrushImmunity {
 
 /// Event9 DEPLOY4C76BC..4C7812. MCV conversion, simple deployment, the
 /// deploy-fire arm, Unit transports and a tank bunker's occupant share this
-/// event; each concrete Mission_Unload branch owns its effects. A transport's
+/// event; Infantry uses its existing Mission_Unload deployment branch too.
+/// Each concrete Mission_Unload branch owns its effects. A transport's
 /// empty hold does not suppress this event: it still stops and queues Unload.
 /// Native controls: tools/spatial_oracle/transport_unload.py --deploy-event.
 ///
@@ -62,9 +63,9 @@ impl CrushImmunity {
 /// sends OVER_OUT to its radio contact 0 (vt+0x274(3), `0x004C77E4`).
 ///
 /// RESIDUAL: native refuses only an aircraft (`0x004C777E`) and the
-/// Construction/Selling missions below; VERA admits only the Unit kinds whose
-/// Unload arms it ports: an MCV, a simple deployer, a deploy-fire unit, a Unit
-/// transport and a unit in a tank bunker. Other Units fail the deploy key's
+/// Construction/Selling missions below; VERA admits Infantry and the Unit kinds
+/// whose Unload arms it ports: an MCV, a simple deployer, a deploy-fire unit, a
+/// Unit transport and a unit in a tank bunker. Other Units fail the deploy key's
 /// CanDeploySlashUnload query; their externally supplied DEPLOY events remain
 /// outside these represented Unload arms. Self-click still uses its separate
 /// clicked-Mission owner and requires cargo for a transport.
@@ -78,7 +79,8 @@ pub(crate) fn issue_order(
         e.lifecycle.object_alive()
             && !e.lifecycle.in_limbo()
             && e.tether.partner().is_none()
-            && (crate::sim::mcv_deploy::is_mcv(sim, e, rules)
+            && (e.category() == EntityCategory::Infantry
+                || crate::sim::mcv_deploy::is_mcv(sim, e, rules)
                 || crate::sim::unit_simple_deploy::is_simple_deployer(sim, e, rules)
                 || unit_fires_on_deploy(sim, e, rules)
                 || (e.category() == EntityCategory::Unit
@@ -291,8 +293,9 @@ impl Simulation {
     /// `vt+0x310` (`0x00700D10`), the deploy key's other test, refuses only a
     /// Unit in a tube or under EMP, which this already refuses.
     ///
-    /// RESIDUAL: the EMP refusal (vt+0x37C) of Units and Aircraft is not
-    /// represented: EMP has no Rust producer.
+    /// The feature-gated Ares producer reaches the existing Unit EMP refusal.
+    /// Aircraft EMP and Unit DeathFrame's separate virtual override remain
+    /// outside the ordinary live ground-victim chain.
     pub fn can_deploy_slash_unload(&self, id: u64, rules: &RuleSet) -> bool {
         let Some(entity) = self.substrate.entities.get(id) else {
             return false;
@@ -309,6 +312,15 @@ impl Simulation {
         }
         match entity.category() {
             EntityCategory::Unit => {
+                //700E47..700E53 invokes Unit746C90 -> Techno70EFD0 before
+                // admission. For the live Drive victim, positive+504 vetoes
+                // both AI Hunt deploy and Guard→Unload through this owner.
+                // Active-retail EMP producer reachability is not established;
+                // default builds retain their current constructor-zero path.
+                #[cfg(feature = "ares")]
+                if entity.emp_remaining() > 0 {
+                    return false;
+                }
                 if entity.low_bridge_tube_state.is_some() {
                     return false;
                 }
@@ -390,10 +402,13 @@ impl Simulation {
 impl Simulation {
     /// Shared DeploySound/UndeploySound receiver. Infantry Do_Action51D939
     /// requests it for an admitted changed action; Unit739AC0/739CD0 request
-    /// it on each admitted updater visit.
+    /// it on each admitted updater visit. Every site plays at the actor's own
+    /// Location: Infantry `0x0051D94F..0x0051D9CA`, Unit deploy
+    /// `0x00739C86..0x00739CB9`, Unit undeploy `0x00739E81..0x00739EB3`.
     pub(crate) fn emit_deploy_action_sound(
         interner: &mut StringInterner,
         substrate: &ObjectSubstrate,
+        terrain: Option<&crate::map::resolved_terrain::ResolvedTerrainGrid>,
         sound_events: &mut FrameChannel<SimSoundEvent>,
         id: u64,
         requested: i32,
@@ -417,19 +432,17 @@ impl Simulation {
         let Some(sound) = sound else {
             return Ok(());
         };
-        let (rx, ry) = (actor.position.rx(), actor.position.ry());
+        let world = crate::sim::movement::ground_pose::object_location(actor, terrain).into();
         let sound_id = interner.intern(sound);
         sound_events.emit(if requested == 27 {
             SimSoundEvent::EntityDeployed {
                 deploy_sound_id: sound_id,
-                rx,
-                ry,
+                world,
             }
         } else {
             SimSoundEvent::EntityUndeployed {
                 undeploy_sound_id: sound_id,
-                rx,
-                ry,
+                world,
             }
         });
         Ok(())
@@ -542,11 +555,11 @@ impl Simulation {
             }
         } else {
             self.infantry_do_action(id, 27, true, rules, effects)?;
-            //70E120 uses the SprayAttack slot70DD70, not GetCurrentWeapon
-            //70E1A0. The existing GetWeapon owner resolves the live tier.
+            //70E120 uses the SprayAttack selector70DD70, not GetCurrentWeapon
+            //70E1A0. The shared owner forwards it through GetWeapon70E140.
             let actor = self.substrate.entities.get(id).expect("same Unload actor");
-            let slot = if object.spray_attack { 0 } else { 1 };
-            let area_fire = combat_weapon::weapon_for_index(object, actor.veterancy.rank(), slot)
+            let (_, deployed_weapon) = combat_weapon::deploy_weapon(object, actor.veterancy.rank());
+            let area_fire = deployed_weapon
                 .and_then(|(weapon, _)| rules.weapon(weapon))
                 .is_some_and(|weapon| weapon.area_fire);
             if area_fire {

@@ -1098,28 +1098,11 @@ impl App {
         else {
             return false;
         };
-        // An open list covers the rows under it, so it gets first refusal on the
-        // click. Clicking anywhere else closes it without acting on whatever is
-        // underneath, the way a dismissed dropdown behaves.
-        if let Some(combo) = modal.open_combo {
-            let items = crate::ui::skirmish_shell::setup_combo_items(combo);
-            let on_list = crate::ui::skirmish_shell::random_map_setup_dropdown_row_at(
-                &layout,
-                combo.row(),
-                items.len(),
-                x,
-                y,
-            )
-            .is_some();
-            let on_face = crate::ui::skirmish_shell::random_map_setup_control_at(&layout, x, y)
-                == Some(combo.control());
-            if !on_list && !on_face {
-                modal.open_combo = None;
-                return true;
-            }
-            if on_list {
-                return true;
-            }
+        // The combos act on press, ahead of the buttons: an open list takes
+        // every press, and an enabled face never arms a button press.
+        if let Some(cue) = modal.press_combos(&layout, x, y) {
+            Self::play_skirmish_shell_ui_sound(state, cue);
+            return true;
         }
         if let Some(control) = crate::ui::skirmish_shell::random_map_setup_control_at(&layout, x, y)
         {
@@ -1236,21 +1219,6 @@ impl App {
         else {
             return false;
         };
-        // Releasing over an open list commits that entry. The press was never
-        // armed for list clicks, so this has to run before the pressed check.
-        if let Some(combo) = modal.open_combo {
-            let items = crate::ui::skirmish_shell::setup_combo_items(combo);
-            if let Some(index) = crate::ui::skirmish_shell::random_map_setup_dropdown_row_at(
-                &layout,
-                combo.row(),
-                items.len(),
-                x,
-                y,
-            ) {
-                modal.set_combo_value(combo, items[index].value);
-                return true;
-            }
-        }
         let pressed = modal.pressed_control.take();
         let released = crate::ui::skirmish_shell::random_map_setup_control_at(&layout, x, y);
         if pressed.is_none() || pressed != released {
@@ -1298,20 +1266,14 @@ impl App {
             Control::Load0x6c2 => open_browser = Some(SavedSeedMode::Load),
             Control::Save0x6c3 => open_browser = Some(SavedSeedMode::Save),
             Control::Delete0x6c4 => open_browser = Some(SavedSeedMode::Delete),
+            // The combos act on press (`press_combos`) and never arm a press;
+            // dragging the players slider is a separate input mode.
             Control::MapType0x405
             | Control::Time0x3ea
             | Control::Theater0x407
             | Control::Size0x406
-            | Control::Resources0x408 => {
-                if let Some(combo) =
-                    crate::ui::skirmish_shell::SetupCombo::from_control(released.expect("matched"))
-                {
-                    modal.toggle_combo(combo);
-                }
-            }
-            // Dragging the players slider is a separate input mode; clicking the
-            // track alone does not move it.
-            Control::Players0x3eb => {}
+            | Control::Resources0x408
+            | Control::Players0x3eb => {}
         }
 
         if let Some(mode) = open_browser {

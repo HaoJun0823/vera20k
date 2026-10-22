@@ -36,6 +36,8 @@ mod draw_passes;
 mod magnetic_wave_gpu_tests;
 mod object_extras;
 #[cfg(test)]
+mod parachute_native_gpu_tests;
+#[cfg(test)]
 mod parachute_owner_color_gpu_tests;
 #[cfg(test)]
 mod placement_gpu_tests;
@@ -47,6 +49,9 @@ mod target_laser_gpu_tests;
 pub(crate) use draw_passes::{draw_bridge_shadows, draw_pooled_cell_bodies};
 pub(crate) mod draw_plan_lowering;
 mod merge_passes;
+mod object_stages;
+#[cfg(test)]
+mod object_stages_gpu_tests;
 pub(crate) mod minimap_transaction;
 
 use anyhow::Result;
@@ -168,8 +173,14 @@ pub(crate) fn render_game(
     let render_started = state.diag.telemetry_observer.active().then(Instant::now);
     // RadarClass::Draw 653100 consumes timeGetTime buckets. The frame owner
     // supplies wall time normally, or the map diagnostic's recorded OS input.
-    if let Some(radar) = state.match_state.match_presentation.radar_anim.as_mut() {
-        radar.tick(&state.renderer.gpu, times.radar_ms);
+    let housing_settled = state
+        .match_state
+        .match_presentation
+        .radar_anim
+        .as_mut()
+        .is_some_and(|radar| radar.tick(&state.renderer.gpu, times.radar_ms));
+    if housing_settled {
+        crate::app::radar_movie::end_radar_sound_loop(state);
     }
     let (sw, sh) = (state.render_width() as f32, state.render_height() as f32);
 
@@ -686,6 +697,11 @@ fn upload_to_gpu(
     let (super_timer_fill, super_timer_text) =
         crate::app::presentation::super_timers::build_super_timer_instances(state);
 
+    // GScreenClass_DrawText's Phobos build description, the tactical view's
+    // top-right identity box; empty outside Phobos builds.
+    let (build_text_fill, build_text_text) =
+        crate::app::presentation::build_text::build_instances(state);
+
     let pool: &mut InstanceBufferPool = &mut state.renderer.instance_pool;
 
     // Debug overlays
@@ -732,6 +748,8 @@ fn upload_to_gpu(
     pool.upload(&state.renderer.gpu, "cell_sparkles", &world.cell_sparkles);
     pool.upload(&state.renderer.gpu, "super_timer_fill", &super_timer_fill);
     pool.upload(&state.renderer.gpu, "super_timer_text", &super_timer_text);
+    pool.upload(&state.renderer.gpu, "build_text_fill", &build_text_fill);
+    pool.upload(&state.renderer.gpu, "build_text_text", &build_text_text);
 
     // UI overlays
     pool.upload(&state.renderer.gpu, "drag", &ui.drag);

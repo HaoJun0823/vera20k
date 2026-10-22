@@ -115,8 +115,10 @@ fn retail_tibtre_decode_and_atlas_pairs_match_original_shape_draw() {
                     "{file} frame{index}: original RLE source"
                 );
                 if index < 11 {
-                    let (body, shadow) =
-                        atlas.native_terrain_pair(&type_name, index as u8).unwrap();
+                    let (Some(body), Some(shadow)) = atlas.terrain_pieces(&type_name, index as u8)
+                    else {
+                        panic!("{file} stage {index}: body and stencil");
+                    };
                     for (entry, i) in [(body, index), (shadow, index + 11)] {
                         let source = &shp.frames[i];
                         assert_eq!(
@@ -136,7 +138,8 @@ fn retail_tibtre_decode_and_atlas_pairs_match_original_shape_draw() {
                     }
                 }
             }
-            assert!(atlas.native_terrain_pair(&type_name, 11).is_none());
+            let (body, shadow) = atlas.terrain_pieces(&type_name, 11);
+            assert!(body.is_none() && shadow.is_none());
         }
     }
     gpu.queue.submit(std::iter::empty());

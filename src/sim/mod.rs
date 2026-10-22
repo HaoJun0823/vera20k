@@ -26,6 +26,7 @@ pub(crate) mod ai_base_defense;
 pub(crate) mod ai_base_site;
 pub mod ammo;
 pub mod anim_class;
+pub(crate) mod object_fall;
 #[cfg(any(test, feature = "test-support"))]
 pub mod arena_fixture;
 pub(crate) mod base_plan;
@@ -44,6 +45,7 @@ pub mod capture_manager;
 pub mod cheats;
 pub mod cloak_disguise;
 pub mod command;
+pub mod command_queue;
 pub mod components;
 pub(crate) mod conversion_health;
 pub mod crates; // scenario-start crate placement (Post_Map_Init step 3)

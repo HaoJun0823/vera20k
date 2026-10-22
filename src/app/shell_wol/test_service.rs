@@ -7,7 +7,8 @@
 //! It answers the visit's and the WOL setup's requests once no shell
 //! transition runs: like a real service, a reply arrives after the page that
 //! asked has slid out. Any login is accepted. The lobbies, games and users
-//! are fixed stand-ins; Boris's game is a tournament room, and the user is
+//! are fixed stand-ins; Boris's game is a tournament room, Vladimir's has
+//! other rules (its exInfo hash differs from the user's), and the user is
 //! in a stand-in squad, so clan games can be created. Two of the users say
 //! one line each when a chat lobby is joined, and a locate finds them. A
 //! created game is joined by one stand-in guest, in no squad, who picks,
@@ -24,7 +25,7 @@
 //! has the same matchbot, whose `Start` names Cooperative on `C2S01MD.MAP`.
 
 use super::lobby::WolJoined;
-use super::service::WolLadderRecord;
+use super::service::{WolHighScoreRecord, WolLadderRecord};
 use super::{WolApiStatus, WolLoginAccepted, WolServer, WolServerList, WolServiceEvent};
 use super::{WolProvider, WolServiceRequest, service_event};
 use crate::app::AppState;
@@ -109,7 +110,11 @@ fn setup_requests(state: &mut AppState) -> Vec<NetworkSetupRequest> {
 
 fn answer_setup(state: &mut AppState, request: NetworkSetupRequest) {
     if let NetworkSetupRequest::WolChat(WolChatLine::Locate { name }) = &request {
-        let result = locate(&String::from_utf16_lossy(name));
+        let result = locate(
+            &String::from_utf16_lossy(name),
+            stand_in_hash(state),
+            &stand_in_map(state),
+        );
         service_event(state, WolServiceEvent::Located(result));
         return;
     }
@@ -366,7 +371,7 @@ fn answer(state: &mut AppState, request: WolServiceRequest) {
         WolServiceRequest::ListChannels { kind, .. } => WolServiceEvent::Channels {
             kind,
             channels: if kind == GAME_CHANNEL {
-                games()
+                games(stand_in_hash(state), &stand_in_map(state))
             } else {
                 lobbies()
             },
@@ -407,8 +412,14 @@ fn answer(state: &mut AppState, request: WolServiceRequest) {
         WolServiceRequest::Chat {
             line: WolChatLine::Locate { name },
             ..
-        } => WolServiceEvent::Located(locate(&String::from_utf16_lossy(&name))),
-        WolServiceRequest::Locate(name) => WolServiceEvent::Located(locate(&name)),
+        } => WolServiceEvent::Located(locate(
+            &String::from_utf16_lossy(&name),
+            stand_in_hash(state),
+            &stand_in_map(state),
+        )),
+        WolServiceRequest::Locate(name) => {
+            WolServiceEvent::Located(locate(&name, stand_in_hash(state), &stand_in_map(state)))
+        }
         // The user is in the stand-in squad; the stand-in users are in none.
         WolServiceRequest::SquadInfo { id: 0 | SQUAD } => WolServiceEvent::Squad {
             id: SQUAD,
@@ -439,10 +450,13 @@ fn answer(state: &mut AppState, request: WolServiceRequest) {
         WolServiceRequest::LadderRecords(names) => WolServiceEvent::Ladder(
             names
                 .iter()
-                .filter(|name| name.eq_ignore_ascii_case("Tanya"))
-                .map(|_| tanya_ladder())
+                .filter_map(|name| ladder_record(name))
                 .collect(),
         ),
+        WolServiceRequest::HighScores(names) => WolServiceEvent::HighScores(Ok(names
+            .iter()
+            .filter_map(|name| high_score(name))
+            .collect())),
         WolServiceRequest::Chat {
             line: WolChatLine::Page { name, .. },
             ..
@@ -540,7 +554,7 @@ fn lobby_greeting(state: &mut AppState) {
     }
 }
 
-/// Tanya's ladder record, the only one the service holds.
+/// Tanya's ladder record.
 fn tanya_ladder() -> WolLadderRecord {
     WolLadderRecord {
         name: "Tanya".into(),
@@ -550,6 +564,44 @@ fn tanya_ladder() -> WolLadderRecord {
         rank: 1,
         disconnects: 0,
     }
+}
+
+/// The ladder holds Tanya (rank 1) and Boris (rank 17); Natasha is
+/// unranked.
+fn ladder_record(name: &str) -> Option<WolLadderRecord> {
+    if name.eq_ignore_ascii_case("Tanya") {
+        Some(tanya_ladder())
+    } else if name.eq_ignore_ascii_case("Boris") {
+        Some(WolLadderRecord {
+            name: "Boris".into(),
+            wins: 4,
+            losses: 6,
+            points: 300,
+            rank: 17,
+            disconnects: 1,
+        })
+    } else {
+        None
+    }
+}
+
+/// The high scores: Tanya's 1520 points (a three-star general's badge) at
+/// rank 7; Boris's 90 points (lieutenant) at rank 123 with every co-op
+/// campaign finished.
+fn high_score(name: &str) -> Option<WolHighScoreRecord> {
+    let (name, points, rank, coop) = if name.eq_ignore_ascii_case("Tanya") {
+        ("Tanya", 1520, 7, 0)
+    } else if name.eq_ignore_ascii_case("Boris") {
+        ("Boris", 90, 123, 0xF)
+    } else {
+        return None;
+    };
+    Some(WolHighScoreRecord {
+        name: name.into(),
+        points,
+        rank,
+        coop,
+    })
 }
 
 /// The buddy list a fresh process starts with: Tanya (in a chat lobby),
@@ -590,9 +642,9 @@ fn page(state: &mut AppState, name: &str) {
 /// A locate finds Boris in his game, Ivan with find disabled (`0x40132`)
 /// and the other lobby stand-ins in the first chat lobby; anyone else is
 /// not logged in (`0x40130`).
-fn locate(name: &str) -> Result<WolChannel, u32> {
+fn locate(name: &str, hash: i32, map: &str) -> Result<WolChannel, u32> {
     if name.eq_ignore_ascii_case("Boris") {
-        return Ok(games().remove(1));
+        return Ok(games(hash, map).remove(1));
     }
     if name.eq_ignore_ascii_case("Ivan") {
         return Err(0x0004_0132);
@@ -787,26 +839,60 @@ fn lobby_members() -> Vec<WolMember> {
     ]
 }
 
-/// Open games of other stand-in hosts, and one that is full. Each keeps an
-/// observer slot, which the shown capacity leaves out.
-fn games() -> Vec<WolChannel> {
-    let game = |host: &str, users, max_users, ping| WolChannel {
+/// The hash the stand-in hosts publish: the user's own, so their games
+/// pass admission (0 without the process sources, when it is skipped).
+fn stand_in_hash(state: &AppState) -> i32 {
+    super::lobby::local_ini_hash(state).unwrap_or(0)
+}
+
+/// The first scenario record, which Tanya's and Vladimir's games name.
+fn stand_in_map(state: &AppState) -> String {
+    state
+        .frontend
+        .scenario_catalog
+        .records()
+        .first()
+        .map(|record| record.file_name.clone())
+        .unwrap_or_default()
+}
+
+/// Open games of other stand-in hosts, one that is full and one whose
+/// rules differ (`hash + 1`). Each keeps an observer slot, which the shown
+/// capacity leaves out. Their scenarios name `map`, the random map and a
+/// name the 40-byte exInfo cuts.
+fn games(hash: i32, map: &str) -> Vec<WolChannel> {
+    let game = |host: &str, users, max_users, ping, hash: i32, scenario: &str| WolChannel {
         kind: GAME_CHANNEL,
         max_users,
         users,
         ping,
         name: format!("{host}'s_game"),
-        ex_info: format!("{EX_INFO_VERSION},0,0,0,1,"),
+        ex_info: crate::ui::wol_lobby::ExInfo {
+            version: EX_INFO_VERSION,
+            hash,
+            observer_open: 1,
+            scenario: scenario.into(),
+            ..Default::default()
+        }
+        .write(),
         ..Default::default()
     };
     vec![
-        game("Tanya", 1, 7, 40),
+        game("Tanya", 1, 7, 40, hash, map),
         // A tournament room (+0x14): two rows.
         WolChannel {
             tournament: 1,
-            ..game("Boris", 2, 7, 180)
+            ..game("Boris", 2, 7, 180, hash, "RandMap.Sed")
         },
-        game("Natasha", 6, 7, 350),
+        game(
+            "Natasha",
+            6,
+            7,
+            350,
+            hash,
+            "Transylvania_but_much_longer_still.yro",
+        ),
+        game("Vladimir", 2, 7, 90, hash.wrapping_add(1), map),
     ]
 }
 
@@ -862,11 +948,18 @@ mod tests {
         let context = AdmissionContext {
             quick_match: false,
             clan_id: 0,
-            local_hash: None,
+            local_hash: Some(7),
         };
-        let games = games();
+        let games = games(7, "Transylv.yro");
         assert_eq!(admit(&games[0], false, context), Ok(()));
         assert_eq!(admit(&games[2], false, context), Err(Some("WOL:GameFull")));
+        assert_eq!(admit(&games[3], false, context), Err(Some("TXT_MISMATCH")));
+        assert_eq!(games[0].ex_info, "25,7,0,0,1,Transylv.yro");
+        assert_eq!(
+            games[2].ex_info().scenario,
+            "Transylvania_but_much_longer_",
+            "the 40-byte cut"
+        );
         assert_eq!(host_of(&games[1].name), "Boris");
         assert!(lobbies()[0].lobby_number() == Some(0));
         let list = servers();

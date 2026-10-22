@@ -20,12 +20,6 @@
 //! Evidence: `tools/superweapon_oracle.py` sections `force_shield_launch` and
 //! `super_fade` (Unicorn on gamemd.exe), replayed in `force_shield_tests.rs`.
 //!
-//! RESIDUAL: `StartSound=` plays at the launch cell's centre at height 0
-//! (`SuperWeaponLaunched` carries only the cell), natively at the deck
-//! coordinate (`0x006CD172`), which carries the cell's ground height and,
-//! over a bridge, 416 more leptons. Trigger: a Force Shield on a raised,
-//! sloped or bridge cell. Effect: the cue's position on screen, so its pan.
-//!
 //! Ledger: no RNG draws and no detach calls. Timer writes: the house's
 //! blackout (`0x0050BC90`); each shielded building's curtain
 //! (`TechnoClass::IronCurtain @ 0x0070E2B0`, `+0x18C`) and the C4 timer a
@@ -133,11 +127,13 @@ pub fn launch(
         }
     }
 
+    // `StartSound=` (`0x006CD176`) plays at the deck coordinate
+    // `0x006CD07D..0x006CD0D3` built.
+    let [x, y, z] = deck;
     sim.sound_events.emit(SimSoundEvent::SuperWeaponLaunched {
         owner,
         sw_type,
-        rx: target_rx,
-        ry: target_ry,
+        world: crate::sim::anim_class::AnimWorldCoord { x, y, z },
     });
 
     log::info!(

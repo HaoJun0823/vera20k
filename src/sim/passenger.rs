@@ -1087,7 +1087,9 @@ pub fn add_garrison_occupant(
         return false;
     };
     let owner = pax.owner();
-    let (rx, ry) = (pax.position.rx(), pax.position.ry());
+    let world =
+        crate::sim::movement::ground_pose::object_get_coords(pax, sim.resolved_terrain.as_ref())
+            .into();
     let Some(pax_size) = sim
         .object_type(pax.type_ref(), rules)
         .filter(|object| object.occupier)
@@ -1129,7 +1131,7 @@ pub fn add_garrison_occupant(
         sim.sound_events
             .emit(SimSoundEvent::StructureGarrisoned { owner });
         sim.sound_events
-            .emit(SimSoundEvent::BuildingGarrisonedSfx { owner, rx, ry });
+            .emit(SimSoundEvent::BuildingGarrisonedSfx { owner, world });
     }
     if sim.houses.get(&owner).is_some_and(|house| house.is_human())
         && let Some(pax) = sim.substrate.entities.get_mut(pax_id)

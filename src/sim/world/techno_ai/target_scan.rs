@@ -431,7 +431,7 @@ pub(super) fn passive_acquire_gate(
     if mission != MissionType::Guard {
         return false;
     }
-    let slot = if obj.spray_attack { 0 } else { 1 };
+    let (slot, _) = combat_weapon::deploy_weapon(obj, entity.veterancy.rank());
     let target = entity.attack_target.target();
     let area_fire = fire_subject(sim, rules, id, target, slot, None)
         .and_then(|subject| subject.weapon_at(slot).map(|weapon| weapon.area_fire))

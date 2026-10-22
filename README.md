@@ -41,6 +41,15 @@ VERA20K is made by gamers, for gamers, and gamers have the final say in where it
 - **Multiplayer:** Network play is not available yet.
 - **Scale:** Battles with 30 players and 20,000 units have not yet been demonstrated.
 
+## Download and play
+
+Download the installer for Windows, macOS or Linux from the
+[releases page](https://github.com/YuriPlanet/vera20k/releases). It finds your copy of
+Yuri's Revenge from [Steam](https://store.steampowered.com/app/2229850/) or the
+[EA app](https://www.ea.com/games/command-and-conquer/command-and-conquer-the-ultimate-collection)
+and sets up VERA20K in a new folder. Mods and new content will go there too, so the game's own files
+are never changed.
+
 ## Architecture
 
 The engine has three main parts:
@@ -107,6 +116,15 @@ To launch single-player YR skirmishes or campaigns from a CnCNet client, see the
 
 Help is welcome. You can write code, refactor the engine, test the game, share ideas, or play
 it next to the original and tell us what feels wrong. Open a PR and we'll take it from there.
+
+Keep PRs small:
+
+- One fix per PR, with the native function name and address cited next to the code.
+- One to three regression tests that fail without the fix. No parameter sweeps.
+- No native-execution corpora or harnesses. If you think one is needed (numeric math, RNG
+  order), ask first; at most about 20 cases and 100 KB.
+- A PR description of about 15 lines: what changed, why, how you tested it.
+
 Discussion is on [Discord](https://discord.gg/kmjRUn5m5F) and in the QQ group (1097193563).
 
 ## Support
@@ -127,5 +145,6 @@ Command & Conquer and Red Alert, World-Altering Editor, Final Alert, YRpp, Ares,
 many others.
 
 Licensed under the [GPLv3](LICENSE-GPL). This repository contains no game files. Command &
-Conquer and Red Alert are trademarks of Electronic Arts Inc., and the screenshots show game art
-owned by Electronic Arts. VERA20K is not affiliated with or endorsed by Electronic Arts.
+Conquer and Red Alert are trademarks of Electronic Arts Inc., and the screenshots and the app
+icon, Red Alert 2's red star, show game art owned by Electronic Arts. VERA20K is not affiliated
+with or endorsed by Electronic Arts.

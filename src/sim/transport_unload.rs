@@ -535,13 +535,20 @@ fn eject_head_passenger(
                 sim.team_add_member(team, pax_id, false, rules, overlay_registry, effects);
             }
 
+            // `0x0073DC35..0x0073DC67` (PlayAtCoord `0x00750E20`): at the
+            // transport's Location, after the passenger's Unlimbo.
             if let Some(sound) = leave_sound {
+                let world = crate::sim::movement::ground_pose::object_location(
+                    sim.substrate
+                        .entities
+                        .get(transport_id)
+                        .expect("transport resolved before the head pop"),
+                    sim.resolved_terrain.as_ref(),
+                )
+                .into();
                 let sound_id = sim.interner.intern(&sound);
-                sim.sound_events.emit(SimSoundEvent::LeaveTransport {
-                    sound_id,
-                    rx: base.0,
-                    ry: base.1,
-                });
+                sim.sound_events
+                    .emit(SimSoundEvent::LeaveTransport { sound_id, world });
             }
             Ok(())
         },
@@ -809,10 +816,9 @@ pub(crate) fn unit_mission_unload(
                 // the transport's own (hover) type, which is what makes a
                 // hover transport leave the water before it unloads.
                 // Zone -1, MovementZone Normal, seeded at the transport's own
-                // cell (`0x0073D772..0x0073D7B0`). Residual: when nothing
-                // passes, native still sets the destination to the null cell
-                // (`0x0073D7B5..0x0073D7D1`); VERA sets none and waits. That
-                // needs no Wheel ground within 32 rings of the transport.
+                // cell (`0x0073D772..0x0073D7B0`). A failed search still
+                // returns packed CellStruct::Empty (0,0), which the caller
+                // looks up and passes to Set_Destination73D7B5..73D7D1.
                 let seed = (
                     i32::from(entity.position.rx()),
                     i32::from(entity.position.ry()),
@@ -823,21 +829,26 @@ pub(crate) fn unit_mission_unload(
                     movement_zone: MovementZone::Normal,
                     bridge_aware_zone: false,
                 };
-                if let Some(cell) = sim.nearby_passable_cell(
-                    seed,
-                    NearbyArgs::plain(wheel_land, NearbyFootprint::SINGLE),
+                let cell = sim
+                    .nearby_passable_cell(
+                        seed,
+                        NearbyArgs::plain(wheel_land, NearbyFootprint::SINGLE),
+                    )
+                    .unwrap_or((0, 0));
+                if let Some(terrain) = sim.resolved_terrain.as_ref() {
+                    // This fresh lookup precedes the Unit setter. Retain its
+                    // identity even if a later setter lookup restamps Dummy.
+                    terrain.native_cell_identity((cell.0 as i16, cell.1 as i16));
+                }
+                // Set_Destination only: keep Unload and state 0 while moving.
+                if let Err(cause) = sim.assign_destination_represented(
+                    id,
+                    Some(crate::sim::components::NavTargetRef::cell(cell.0, cell.1)),
+                    rules,
+                    overlay_registry,
+                    effects,
                 ) {
-                    // `Set_Destination` only — the committed selector stays
-                    // Unload and state 0 re-runs once the drive has ended.
-                    if let Err(cause) = sim.assign_destination_represented(
-                        id,
-                        Some(crate::sim::components::NavTargetRef::cell(cell.0, cell.1)),
-                        rules,
-                        overlay_registry,
-                        effects,
-                    ) {
-                        log::warn!("Unload destination {id}: {cause}");
-                    }
+                    log::warn!("Unload destination {id}: {cause}");
                 }
                 return WAIT_MOVING_FRAMES;
             }

@@ -102,11 +102,23 @@ fn bound_saved_world(
     let roster =
         crate::map::houses::parse_house_roster(&map.ini, &rules.color_schemes, Some(&rules));
     let lighting = crate::map::lighting::parse_lighting(&map.ini);
+    // A nonempty retained title makes both warm and cold resource restoration
+    // prove that saved names survive without consulting the current CSF.
+    let mut campaign_names = crate::rules::campaign_loading::CampaignScenarioNames::default();
+    campaign_names.apply_ini(
+        &IniFile::from_str("[saved.map]\nUIName=NAME:SAVED\n"),
+        "saved.map",
+        &crate::assets::csf_file::test_csf(&[
+            ("NAME:SAVED", "Retained mission name"),
+            ("NAME:SAVEDSav", "Retained save title"),
+        ]),
+    );
     let metadata = SavedMapMetadata::capture(
         map.ini.content_hash(),
         &loaded.source,
         &map.basic,
         &map.ranking,
+        &campaign_names,
         &map.terrain_objects,
         &roster,
         &roster.color_map(),
@@ -191,6 +203,19 @@ fn native_saved_power() -> SavedPowerBar {
     }
 }
 
+fn saved_radar_for_fixture() -> crate::sim::snapshot::saved_local_view::SavedRadarEvents {
+    let mut saved = crate::render::radar::saved_radar_fixture();
+    // Keep this resource fixture's distinct logical/native clocks (91/92).
+    // Shift the live alert fixture's timeline with the restored world.
+    let offset = saved.last_advanced_frame.unwrap() - 91;
+    saved.last_advanced_frame = Some(91);
+    for event in &mut saved.events {
+        event.created_frame -= offset;
+        event.phase_started_frame = event.phase_started_frame.map(|frame| frame - offset);
+    }
+    saved
+}
+
 fn snapshot_bytes(
     runtime: &SimRuntime,
     owner: &NativeRulesProcessOwner,
@@ -222,6 +247,7 @@ fn snapshot_bytes(
     )
     .unwrap();
     view.set_power_bar(native_saved_power());
+    view.set_radar_events(saved_radar_for_fixture());
     GameSnapshot::save_validated_with_presentation(
         &runtime.simulation,
         map.map_hash(),
@@ -255,6 +281,11 @@ fn assert_incoming_resources(
         prepared.power_bar_anim.saved(),
         native_saved_power(),
         "incoming retained Power wins on warm and cold preparation"
+    );
+    assert_eq!(
+        prepared.radar_events.saved(),
+        saved_radar_for_fixture(),
+        "both warm and cold loads transport incoming live alerts"
     );
     let sim = &prepared.world.simulation;
     assert_eq!(
@@ -295,6 +326,10 @@ fn assert_incoming_resources(
     assert_eq!(
         serde_json::to_value(&prepared.map).unwrap(),
         serde_json::to_value(map).unwrap()
+    );
+    assert_eq!(
+        prepared.map.campaign_names().save_title(),
+        "Retained save title"
     );
     assert_eq!(
         save_codec::serialize(

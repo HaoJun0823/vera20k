@@ -42,6 +42,7 @@ const ACTION_SET_SUPER_CHARGE_PERCENTAGE: i32 = 129;
 const ACTION_SET_ALTERNATE_BASE: i32 = 137;
 const ACTION_CLEAR_ALTERNATE_BASE: i32 = 138;
 
+const EVENT_ATTACKED: i32 = 6;
 const EVENT_ANY: i32 = 8;
 const EVENT_BRIDGE_COLLAPSED: i32 = 31;
 const EVENT_GLOBAL_IS_SET: i32 = 27;
@@ -380,16 +381,13 @@ impl RuntimeDefinitions {
         // ignoring case, and ReadINI727240/6E6080 read every record by that
         // Type's own ID, exact case. A key differing from an earlier one only
         // in case revisits that Type and reads the earlier key's records.
-        // Residual, exact duplicate keys: LoadFromStraw525A60 keeps every
-        // copy (526177 appends each to the entry list and CRC index without
-        // a duplicate check) and 7275D0/6E5ED0/4AD1B3 visit each copy by
-        // index, so native reads that Type once per copy: a duplicated
-        // [Triggers] key prepends its events again. ReadString finds the key
-        // through the qsorted CRC index (526B10), so the copy whose value it
-        // returns is the sort's. IniFile keeps the first copy only, so each
-        // Type is read once here. No extracted retail map has a duplicate.
+        // LoadFromStraw525A60/526177 retains every physical entry. The
+        // 7275D0/6E5ED0 loops revisit a Type for each copy, reading its header
+        // through the shared CRC lookup526B10: events prepend again while
+        // actions replace. No new RNG/timer/detach owner belongs to the read;
+        // the existing Fill/LiveTrigger constructor consumes those events.
         if let Some(section) = map.ini.section("Triggers") {
-            for key in section.keys() {
+            for key in section.physical_keys() {
                 if section.read_name(key, 24).is_none() {
                     continue;
                 }
@@ -445,7 +443,7 @@ impl RuntimeDefinitions {
             }
         }
         if let Some(section) = map.ini.section("Tags") {
-            for key in section.keys() {
+            for key in section.physical_keys() {
                 if section.read_name(key, 24).is_none() {
                     continue;
                 }
@@ -529,6 +527,12 @@ impl RuntimeDefinitions {
 // Original jump-table bytes71F700/71F744/71F780/71F7C0 and6E3F08.
 // These are classification only, never substitutes for event predicates.
 fn event_classification(kind: i32) -> u8 {
+    // Ares3.0 GetFlags1004F6A0: EMP62..65 are attached-object events;
+    // Persistable1004F610 returns false for every one of them.
+    #[cfg(feature = "ares")]
+    if matches!(kind, 62..=65) {
+        return 2;
+    }
     let mut flags = 0;
     if matches!(kind, 0 | 1 | 4 | 8 | 24 | 25 | 26 | 31 | 53 | 54 | 59) {
         flags |= 1;
@@ -655,6 +659,14 @@ pub struct TriggerRuntime {
     #[cfg(any(test, feature = "test-support"))]
     #[serde(skip)]
     stop_before_action: Option<i32>,
+}
+
+/// Draw-free transfer of the outgoing Scenario's local values into a fresh
+/// Scenario. TriggerRuntime remains authoritative; saved restoration does not
+/// use this transfer. ClearScene6851F0 clears globals, but retains these slots.
+#[derive(Debug)]
+pub struct RetainedLocalVariables {
+    set: BTreeSet<u32>,
 }
 
 impl PartialEq for TriggerRuntime {
@@ -1067,6 +1079,21 @@ impl Simulation {
     pub(crate) fn trigger_definitions_prepared(&self) -> bool {
         self.trigger_runtime.definitions_prepared
     }
+
+    /// Snapshot the values that SetDefaults683610 and ClearScene6851F0 leave
+    /// intact. Names come from the incoming map; no live Tag state transfers.
+    pub fn retain_local_variables_for_fresh_load(&self) -> RetainedLocalVariables {
+        RetainedLocalVariables {
+            set: self.trigger_runtime.locals_set.clone(),
+        }
+    }
+
+    /// Install the outgoing values before ReadLocal689B20 and before any new
+    /// Tag exists. This is a fresh-load handoff, never a saved-world overlay.
+    pub fn inherit_local_variables_for_fresh_load(&mut self, prior: RetainedLocalVariables) {
+        assert!(!self.trigger_runtime.definitions_prepared);
+        self.trigger_runtime.locals_set = prior.set;
+    }
     /// Full_Init687984..6879CB registry ingress. No live instance is created
     /// until a Cell/Object attachment or Fill classification requires it.
     pub fn initialize_trigger_definitions(
@@ -1076,15 +1103,25 @@ impl Simulation {
         eva: Option<&crate::rules::sound_ini::EvaRegistry>,
         sounds: Option<&crate::rules::sound_ini::SoundRegistry>,
     ) {
+        // ReadLocal689B2E clears names only. Missing second tokens and slots
+        // absent from the map keep their current value;689C24 writes explicit
+        // assignments directly without setter notifications or RNG draws.
+        let mut locals_set = std::mem::take(&mut self.trigger_runtime.locals_set);
+        for variable in map.local_variables.values() {
+            match variable.initially_set {
+                Some(true) => {
+                    locals_set.insert(variable.index);
+                }
+                Some(false) => {
+                    locals_set.remove(&variable.index);
+                }
+                None => {}
+            }
+        }
         self.trigger_runtime = TriggerRuntime {
             definitions: RuntimeDefinitions::read_map(map, teams, eva, sounds),
             definitions_prepared: true,
-            locals_set: map
-                .local_variables
-                .values()
-                .filter(|v| v.initially_set)
-                .map(|v| v.index)
-                .collect(),
+            locals_set,
             ..TriggerRuntime::default()
         };
     }
@@ -1449,6 +1486,51 @@ impl Simulation {
             .condition
             .clone();
         match condition.kind {
+            #[cfg(feature = "ares")]
+            62..=65 => {
+                // Installed HasOccurred71E949 ->100503E0/1004F7DC..870.
+                // The actor is the affected Techno. House-specific63/65
+                // compare the source's raw House+30, without Country/MP
+                // lookup; no mutable persistence or shared House is written.
+                if input.kind != condition.kind {
+                    return false;
+                }
+                let Some(actor) = input.actor.and_then(|id| self.substrate.entities.get(id)) else {
+                    return false;
+                };
+                if matches!(condition.kind, 63 | 65)
+                    && !input
+                        .source
+                        .and_then(|id| self.substrate.entities.get(id))
+                        .and_then(|source| self.base_reservation_house_index(source.owner()))
+                        .is_some_and(|index| index == condition.value)
+                {
+                    return false;
+                }
+                (actor.emp_remaining() > 0) == matches!(condition.kind, 62 | 63)
+            }
+            53 => {
+                // HasOccurred71ECF5..71ED56, original gamemd: raised53
+                // and clear A8ED6B admit a forced GetDisplayOwner(+D0,1).
+                // Compare the first Country502D30 House identity, not its
+                // Country or actual owner. Only persistence is written.
+                // Source: tag_lifecycle.py --spy-entry-events.
+                if input.kind != 53 || self.buildup_bypass_active() {
+                    return false;
+                }
+                let Some(actor) = input.actor.and_then(|id| self.substrate.entities.get(id)) else {
+                    return false;
+                };
+                let displayed = actor.disguise_house(true, self.session.current_house(), false);
+                let selected = u16::try_from(condition.value).ok().and_then(|country| {
+                    self.house_by_country_index(crate::rules::ruleset::CountryIdx(country), rules)
+                });
+                let matched = displayed.is_some() && displayed == selected;
+                if matched {
+                    *persistence = true;
+                }
+                matched
+            }
             54 => {
                 // HasOccurred71ED59..71EDB8: raised54/non-NULL actor,
                 // forced GetDisguise(1), RTTI InfantryType16, valid+34 and
@@ -1960,6 +2042,54 @@ impl Simulation {
         self.publish_trigger_effects(effects);
     }
 
+    /// `HouseClass::NotifyUnderAttack @ 0x004F93E0`'s Tag raise
+    /// (`0x004F95D4..0x004F95FD`), which ends every call after the radar/EVA
+    /// arms, for any House: Tag6E53A0 raises event 6 ("attacked by any
+    /// house") with no object, the zero Cell `0x00A8EF98` (static init
+    /// `0x004F50A0`), unforced and with no source, on each of the House's Tags
+    /// (+3C), first to last. Every slot re-reads the list (`0x004F95E3`) and
+    /// the count (+48, `0x004F95F7`), so a raise that detaches its Tag shifts
+    /// the next one into the slot just passed, which the walk skips, as
+    /// natively. Besides event 6, the raise meets event 8 and every event
+    /// whose predicate ignores the raised kind (`has_occurred`), so
+    /// it also springs a House's condition Triggers (timers, counts) between
+    /// the House's own event-8 raises. Its callers own the NotifyUnderAttack
+    /// admission. No own RNG draw, timer write or detach:
+    /// Register/Spring/actions own those.
+    pub(crate) fn raise_house_attacked_tags(
+        &mut self,
+        house: crate::sim::intern::InternedId,
+        rules: &crate::rules::ruleset::RuleSet,
+        overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
+        frame_effects: FrameEffects<'_>,
+    ) {
+        let mut effects = Vec::new();
+        let mut slot = 0;
+        while let Some(&tag) = self
+            .trigger_runtime
+            .house_tags
+            .get(&house)
+            .and_then(|tags| tags.get(slot))
+        {
+            self.dispatch_live_tag_event(
+                tag,
+                TagEventInput {
+                    kind: EVENT_ATTACKED,
+                    actor: None,
+                    source: None,
+                    cell: (0, 0),
+                    force: false,
+                },
+                &mut effects,
+                rules,
+                overlay_registry,
+                frame_effects,
+            );
+            slot += 1;
+        }
+        self.publish_trigger_effects(effects);
+    }
+
     /// Recalc6EA49F..6EA4D2 walks the current Tag array backwards before
     /// destroying an empty, previously-full leaving Team. No own RNG draws,
     /// timers or detach: ordinary Register/Reset/actions own those effects.
@@ -2035,6 +2165,75 @@ impl Simulation {
         true
     }
 
+    /// FootAI4DA7B0..4DA80C, after high-flight sight and before Process.
+    /// Every signed frame divisible by16 raises CellTag59 for a +54 high
+    /// flyer, including stationary actors hostile to the local viewer.
+    /// Original Unit/Infantry/Aircraft +1B8=41BEA0 and +1BC=5F6960 use
+    /// physical Location, independently of the locomotor navigation head.
+    /// Source: original retail gamemd instructions and actual class tables;
+    /// shared query comparisons: spatial_oracle/object_get_cell and
+    /// object_flight_height; caller/getter and live Tag histories:
+    /// spatial_oracle/tag_lifecycle.py --periodic-cell-events.
+    /// No own RNG, timer or detach operation.
+    pub(crate) fn dispatch_airborne_cell_tag_event(
+        &mut self,
+        actor: u64,
+        context: crate::sim::world::UninitContext<'_>,
+    ) {
+        if self.session.binary_frame() & 15 != 0 {
+            return;
+        }
+        let (tag, cell) = {
+            let Some(entity) = self.substrate.entities.get(actor) else {
+                return;
+            };
+            if !entity.category().is_foot() {
+                return;
+            }
+            let Some(terrain) = context.terrain().or(self.resolved_terrain.as_ref()) else {
+                return;
+            };
+            let cells = NativeCellQuery::canonical(terrain);
+            if !crate::sim::movement::air_movement::is_high_flying_in_query(
+                entity,
+                &cells,
+                Some((context.rules(), &self.interner)),
+            ) {
+                return;
+            }
+            let physical =
+                || crate::sim::movement::ground_pose::position_world_coord(&entity.position);
+            //4DA7D2 tests the first Cell's Tag;4DA7F8 obtains the receiver
+            //again after41BEA0 packs Location XY. Each5F6960 preserves both
+            //Map565730 lookups and the canonical Dummy's retained fields.
+            let first = crate::sim::movement::ground_pose::query_object_cell(&cells, physical());
+            if !self.trigger_runtime.cell_tags.contains_key(&first) {
+                return;
+            }
+            let cell = crate::sim::movement::coord_cell(physical());
+            let second = crate::sim::movement::ground_pose::query_object_cell(&cells, physical());
+            let Some(&tag) = self.trigger_runtime.cell_tags.get(&second) else {
+                return;
+            };
+            (tag, cell)
+        };
+        let mut effects = Vec::new();
+        self.dispatch_live_tag_event(
+            tag,
+            TagEventInput {
+                kind: 59,
+                actor: Some(actor),
+                cell,
+                ..Default::default()
+            },
+            &mut effects,
+            context.rules(),
+            context.registry(),
+            context.effects(),
+        );
+        self.publish_trigger_effects(effects);
+    }
+
     /// Bridge575EE0's per-cell ingress: each visited CellClass whose +3C Tag
     /// is nonnull calls Tag6E53A0(31, null actor, Cell ABD480, unforced,
     /// null source). ABD480 is the zero Cell (startup5618B0). The raise is
@@ -2091,11 +2290,12 @@ impl Simulation {
         self.trigger_runtime.cell_tags.get(&cell).copied()
     }
 
-    /// Foot4D8978..4D8A14, reached from the unique Arrival per-cell owner.
+    /// Foot4D8978..4D8A6B, reached from the unique Arrival per-cell owner.
     /// Cell5657A0 and its Tag pointer are retained before the first callback;
     /// each raise re-reads the actor's packed Location cell. Bridge100/400
     /// requires OnBridge8C. This does not invent a Fly per-cell producer.
-    /// Source: tools/spatial_oracle/tag_lifecycle.py --entered-cell-events;
+    /// Source: tools/spatial_oracle/tag_lifecycle.py --entered-cell-events
+    /// and --spy-entry-events;
     /// original Steam gamemd. No own RNG/timer/detach.
     pub(crate) fn dispatch_foot_cell_tag_events(
         &mut self,
@@ -2140,9 +2340,10 @@ impl Simulation {
                 );
             }
         }
-        //4D8A14..4D8A6B: the same retained direct CellTag receives54 from
-        //Agent Infantry after1/59.53 remains explicitly out of scope. The
-        //type/Location are re-read after preceding synchronous callbacks.
+        //4D8A14..4D8A6B: re-read the Infantry/Agent admission after1/59,
+        //then send53 and54 to the cached CellTag. Admission is checked once;
+        //each callback re-reads Location even if53 detached that Tag. Its
+        //remaining nonpending linked Triggers may still register54.
         let rules = context.rules();
         if let Some(tag) = direct_tag
             && self.substrate.entities.get(actor).is_some_and(|entity| {
@@ -2152,23 +2353,27 @@ impl Simulation {
                         .is_some_and(|ty| ty.agent)
             })
         {
-            let entity = self.substrate.entities.get(actor).unwrap();
-            let cell = crate::sim::movement::coord_cell(
-                crate::sim::movement::ground_pose::position_world_coord(&entity.position),
-            );
-            self.dispatch_live_tag_event(
-                tag,
-                TagEventInput {
-                    kind: 54,
-                    actor: Some(actor),
-                    cell,
-                    ..Default::default()
-                },
-                &mut effects,
-                context.rules(),
-                context.registry(),
-                context.effects(),
-            );
+            for kind in [53, 54] {
+                let Some(entity) = self.substrate.entities.get(actor) else {
+                    break;
+                };
+                let cell = crate::sim::movement::coord_cell(
+                    crate::sim::movement::ground_pose::position_world_coord(&entity.position),
+                );
+                self.dispatch_live_tag_event(
+                    tag,
+                    TagEventInput {
+                        kind,
+                        actor: Some(actor),
+                        cell,
+                        ..Default::default()
+                    },
+                    &mut effects,
+                    context.rules(),
+                    context.registry(),
+                    context.effects(),
+                );
+            }
         }
         //4D8A70..4D8B66: a missing/inadmissible direct CellTag does not
         //suppress line checks. Scan each complete native cell-array row/column,
@@ -2239,9 +2444,93 @@ impl Simulation {
                 );
             }
         }
+        // Foot4D8B66..4D8CA5 scans the live Map tag vector with the shared
+        // A83DBC cursor. Actions may detach a tag, destroy one (adjusting this
+        // cursor), or enter another cell synchronously. Neither a snapshot of
+        // the vector nor a local index preserves those callbacks' behavior.
+        self.trigger_runtime.map_cursor = 0;
+        while let Some(&tag) = self
+            .trigger_runtime
+            .map_tags
+            .get(self.trigger_runtime.map_cursor as usize)
+        {
+            let attached = self.trigger_runtime.tag(tag).and_then(|live| {
+                self.trigger_runtime
+                    .definitions
+                    .has_event(live.type_index, 24)
+                    .then_some(live.attached_cell)
+            });
+            if let Some(attached) = attached {
+                let reachable = (|| {
+                    //4D8BAA copies vt+4C's Head_To coordinate before +BC
+                    //obtains its own coordinate/layer. A paid head is not
+                    //the object's physical Location.
+                    let destination = crate::sim::movement::coord_cell(
+                        self.foot_navigation_coordinate(actor).ok()?,
+                    );
+                    let entity = self.substrate.entities.get(actor)?;
+                    let current =
+                        crate::sim::movement::ground_pose::position_world_coord(&entity.position);
+                    let in_tube = entity.low_bridge_tube_state.is_some();
+                    let head = if in_tube {
+                        current
+                    } else {
+                        self.foot_navigation_coordinate(actor).ok()?
+                    };
+                    let terrain = context.terrain().or(self.resolved_terrain.as_ref())?;
+                    let cells = NativeCellQuery::canonical(terrain);
+                    let destination_bridge =
+                        crate::sim::movement::ground_pose::navigation_should_be_on_bridge(
+                            &cells,
+                            head,
+                            current,
+                            entity.on_bridge(),
+                            in_tube,
+                        )
+                        .ok()?;
+                    //4D8BF4..4D8C39: the Tag's cell is the SOURCE, with its
+                    //raw structural bridge bit. Map56D100's fringe shortcuts
+                    //are asymmetric; do not reverse these endpoints.
+                    let source_bridge = cells.flags(cells.lookup(attached)) & 0x100 != 0;
+                    let movement_zone = self.object_type(entity.type_ref(), rules)?.movement_zone;
+                    self.zone_grid.as_ref()?.can_reach_native(
+                        &cells,
+                        crate::sim::pathfinding::zone_map::ZoneQueryCell::Copied(attached),
+                        crate::sim::pathfinding::zone_map::ZoneQueryCell::Copied(destination),
+                        movement_zone,
+                        source_bridge,
+                        destination_bridge,
+                        false,
+                        self.playfield_bounds()?,
+                        self.map_size_diamond()?,
+                    )
+                })();
+                if reachable == Some(true) {
+                    //4D8C4D re-reads vt+4C for the event payload. Do not
+                    //add an Alive gate: earlier callbacks may have changed a
+                    //retained actor. Stop only when its storage is gone.
+                    let Ok(coordinate) = self.foot_navigation_coordinate(actor) else {
+                        break;
+                    };
+                    self.dispatch_live_tag_event(
+                        tag,
+                        TagEventInput {
+                            kind: 24,
+                            actor: Some(actor),
+                            cell: crate::sim::movement::coord_cell(coordinate),
+                            ..Default::default()
+                        },
+                        &mut effects,
+                        rules,
+                        context.registry(),
+                        context.effects(),
+                    );
+                }
+            }
+            self.trigger_runtime.map_cursor = self.trigger_runtime.map_cursor.wrapping_add(1);
+        }
         self.publish_trigger_effects(effects);
-        //Event53 remains explicitly deferred; the later Map24 zone scan
-        //and ordinary Fly ingress retain their existing residuals.
+        // Ordinary Fly ingress remains unproven.
     }
 
     fn trigger_action_context(
@@ -2302,6 +2591,43 @@ impl Simulation {
             );
         }
         result
+    }
+
+    /// Diagnostic admission for a later campaign countdown without playing
+    /// its preceding objectives. Replay only the parsed timer actions through
+    /// their existing dispatcher; do not enable the source trigger or supply
+    /// elapsed time. Shipping builds omit this entry point.
+    #[cfg(any(test, feature = "dev-overlays"))]
+    pub fn dev_replay_scenario_timer_actions(
+        &mut self,
+        rules: &crate::rules::ruleset::RuleSet,
+        trigger_id: &str,
+    ) -> Option<usize> {
+        let source = self.trigger_runtime.definitions.trigger_type(trigger_id)?;
+        let actions: Vec<_> = self.trigger_runtime.definitions.trigger_types[source]
+            .actions
+            .iter()
+            .filter(|action| matches!(action.entry.kind, 23..=27 | 103))
+            .cloned()
+            .collect();
+        if actions.is_empty() {
+            return None;
+        }
+        let mut effects = Vec::new();
+        for action in &actions {
+            if !self.apply_live_trigger_action(
+                action,
+                self.trigger_action_context(source, None, TagEventInput::default(), rules),
+                &mut effects,
+                rules,
+                None,
+                FrameEffects::default(),
+            ) {
+                return None;
+            }
+        }
+        debug_assert!(effects.is_empty());
+        Some(actions.len())
     }
 
     fn dispatch_live_tag_event(
@@ -2430,6 +2756,21 @@ impl Simulation {
     /// copies their bytes (`0x004C6187..0x004C61A1`).
     pub fn global_variables(&self) -> [bool; SCENARIO_GLOBAL_COUNT] {
         std::array::from_fn(|index| self.trigger_runtime.globals_set.contains(&(index as u32)))
+    }
+
+    /// Controlled campaign capture input through SetGlobal689670, including
+    /// its ordinary Tag timer resets. This does not replace the incoming
+    /// carry-over record; Victory4C6180 must capture it normally.
+    #[cfg(feature = "dev-overlays")]
+    pub fn dev_set_scenario_global(&mut self, index: i32, set: bool) {
+        Self::set_trigger_variable(
+            &self.session,
+            &mut self.scenario_rng,
+            &mut self.trigger_runtime,
+            true,
+            index,
+            set,
+        );
     }
 
     /// Shared Scenario SetGlobal689670/SetLocal689910 mutation, including
@@ -2577,7 +2918,7 @@ impl Simulation {
                 );
             }
             if !fired {
-                self.dispatch_live_tag_event(
+                fired = self.dispatch_live_tag_event(
                     tag,
                     TagEventInput {
                         kind: 51,
@@ -2592,10 +2933,27 @@ impl Simulation {
                     frame_effects,
                 );
             }
-            // Scenario countdown14 expiry still belongs to its timer owner;
-            // the campaign opening has no started countdown.
+            // Logic55B11E..55B159 checks the current timer only after both
+            // ordinary timer events fail. Earlier actions may have restarted it.
+            if !fired && self.session.scenario_timer_elapsed() {
+                self.dispatch_live_tag_event(
+                    tag,
+                    TagEventInput {
+                        kind: 14,
+                        actor: None,
+                        source: None,
+                        cell: (0, 0),
+                        force: false,
+                    },
+                    &mut effects,
+                    rules,
+                    overlay_registry,
+                    frame_effects,
+                );
+            }
             self.trigger_runtime.logic_cursor = self.trigger_runtime.logic_cursor.wrapping_add(1);
         }
+        self.session.finish_scenario_timer_poll();
         self.trigger_runtime.dirty = [false; 4];
         effects
     }
@@ -3778,6 +4136,9 @@ impl Simulation {
             }
             110 => {
                 effects.extend(self.session.pause_scenario(value.unwrap_or(0)));
+                // ScenarioPause684060 pauses elapsed time and Vox inline,
+                // before a following result action or House's Vox poll.
+                frame_effects.consume_prefix_effects(effects);
             }
             87 => {
                 // Steam gamemd, Execute6DDBD5..6DDBF3.
@@ -4399,6 +4760,14 @@ impl Simulation {
 }
 
 impl TriggerRuntime {
+    /// Retail CellClass::Constructor @ 0x0047BBF0, reached by
+    /// MapClass::Resize @ 0x00565C10, directly clears Dummy+3C at 0x0047BC18.
+    /// This is not ReplaceTag485250: retain Tag refs, timers and live state.
+    /// Source: original gamemd.exe instructions.
+    pub(super) fn reconstruct_dummy_for_map_resize(&mut self) {
+        self.cell_tags.remove(&NativeCellIdentity::Dummy);
+    }
+
     fn replace_cell_trigger_tag(&mut self, cell: NativeCellIdentity, tag: Option<usize>) {
         if let Some(previous) = self.cell_tags.remove(&cell)
             && let Some(old) = self.tags[previous].as_mut()
@@ -4592,6 +4961,14 @@ fn count_techtype(sim: &Simulation, type_id: &str) -> usize {
 mod tests;
 
 #[cfg(test)]
+#[path = "trigger_runtime_duplicate_ini_tests.rs"]
+mod duplicate_ini_tests;
+
+#[cfg(test)]
+#[path = "trigger_runtime_zone_entry_tests.rs"]
+mod zone_entry_tests;
+
+#[cfg(test)]
 #[path = "trigger_runtime_native_tests.rs"]
 mod native_tests;
 
@@ -4644,6 +5021,10 @@ mod build_type_tests;
 mod house_notification_tests;
 
 #[cfg(test)]
+#[path = "trigger_runtime_house_attacked_tests.rs"]
+mod house_attacked_tests;
+
+#[cfg(test)]
 #[path = "trigger_runtime_wakeup_tests.rs"]
 mod wakeup_tests;
 
@@ -4678,6 +5059,10 @@ mod movement_event_tests;
 #[cfg(test)]
 #[path = "trigger_runtime_shroud_spy_tests.rs"]
 mod shroud_spy_tests;
+
+#[cfg(test)]
+#[path = "trigger_runtime_periodic_cell_tests.rs"]
+mod periodic_cell_tests;
 
 #[cfg(test)]
 #[path = "trigger_runtime_infantry_psycho_tests.rs"]
@@ -4802,6 +5187,14 @@ mod restore_tests;
 #[cfg(test)]
 #[path = "trigger_runtime_scenario_pause_tests.rs"]
 mod scenario_pause_tests;
+
+#[cfg(test)]
+#[path = "trigger_runtime_outcome_tests.rs"]
+mod outcome_tests;
+
+#[cfg(test)]
+#[path = "trigger_runtime_digest_ini_tests.rs"]
+mod digest_ini_tests;
 
 #[cfg(test)]
 #[path = "world/building_sale_trigger_tests.rs"]

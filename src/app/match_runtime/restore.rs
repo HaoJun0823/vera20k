@@ -48,7 +48,20 @@ pub(crate) fn commit_prepared_load(
     state.frontend.screen = crate::ui::game_screen::GameScreen::InGame;
     // A validated saved timeline replaces the outgoing fresh-L0 evidence and
     // remains available to the ordinary pump and exact diagnostic stepping.
-    state.match_state.startup.acknowledge_saved_load();
+    state.process_assets.refresh_campaigns_if_available();
+    let campaign = state.process_assets.campaigns().and_then(|campaigns| {
+        crate::app::match_bootstrap::PreparedCampaignStartup::from_saved_scenario(
+            campaigns,
+            &state
+                .match_state
+                .sim_runtime
+                .as_ref()
+                .expect("prepared saved game installs a runtime")
+                .simulation,
+            committed.map.source(),
+        )
+    });
+    state.match_state.startup.acknowledge_saved_load(campaign);
     if from_menu {
         crate::app::loading::pump::present_game_mode_blank(state);
     }
@@ -66,6 +79,10 @@ pub(crate) fn commit_prepared_load(
         .simulation
         .session()
         .game_mode();
+    if game_mode == crate::sim::scenario_session::ScenarioGameMode::Campaign {
+        // Successful ContentLoad67F7C1 suppresses a new initial save.
+        state.persistence.loaded_campaign();
+    }
     state
         .match_state
         .session
@@ -96,6 +113,7 @@ pub(crate) fn commit_prepared_load(
     let theater_ext = crate::app::loading::init_helpers::theater_ext_for(&theater_name).to_owned();
     let binary_frame = runtime.simulation.session().binary_frame();
     let map = crate::app::loading::transitions::MapPresentationInputs {
+        campaign_names: Some(committed.map.campaign_names().clone()),
         basic: committed.map.basic().clone(),
         ranking: committed.map.ranking().clone(),
         source: committed.map.source().clone(),
@@ -170,6 +188,7 @@ pub(crate) fn commit_prepared_load(
     }
     if let Some(minimap) = state.match_state.match_presentation.minimap.as_mut() {
         minimap.mark_stale();
+        minimap.restore_radar_events(committed.radar_events);
     }
     // Replaces every outgoing cursor mode, including the targeting and
     // Repair/Sell modes, with the saved Display's.

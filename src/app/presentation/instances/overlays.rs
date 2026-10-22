@@ -334,11 +334,10 @@ pub(crate) fn build_display_effect_instances(
         let Some(anim) = sim.anim(stable_id) else {
             continue;
         };
-        // The canopy is placed by `build_parachute_instances`, on its owner's
-        // sort key.
-        if parachute_type.is_some_and(|ty| parachute_canopy_owner(anim, ty).is_some()) {
-            continue;
-        }
+        // Paradrop creates a retained Anim, whose GetCoords resolves its
+        // owner-relative75-lepton lift. Draw it at its own Display encounter.
+        let is_parachute =
+            parachute_type.is_some_and(|ty| parachute_canopy_owner(anim, ty).is_some());
         let type_name: &str = sim.interner().resolve(anim.type_id());
         let config = input.rules.art().anim_runtime_config(type_name);
         if config.is_some_and(|config| !config.art_body_read) {
@@ -358,6 +357,7 @@ pub(crate) fn build_display_effect_instances(
         };
         let (mut center_x, mut center_y, rx, ry, _, mut lift_px) =
             anim_world_render_coords(anim_coord);
+        let mut drawn_coord = [anim_coord.x, anim_coord.y, anim_coord.z];
         let is_building_anim = anim.is_building_anim();
         // Slot preparation uses the committed coordinate; retain that geometry.
         // Free Anims keep their existing sampled point for admission and drawing.
@@ -375,6 +375,7 @@ pub(crate) fn build_display_effect_instances(
             );
             [center_x, center_y] = sample.screen;
             lift_px = sample.lift.round() as i32;
+            drawn_coord = sample.coord;
         }
         if !projection_admitted([center_x, center_y], input.camera, projection_viewport) {
             continue;
@@ -428,7 +429,10 @@ pub(crate) fn build_display_effect_instances(
         }
         // DrawIt423055..42305D resolves the ordinary source as AC + AnimType.Start,
         // just as the building-slot caller. Special draw arms retain their
-        // existing frame selection until their own renderer is ported.
+        // existing frame selection until their own renderer is ported, and so
+        // does a HasBounce ground shadow ahead of them, which natively takes
+        // AC + Start in every arm (4233CD). Residual: no retail Tiled or RING1
+        // type sets Bouncer=, IsMeteor= or Start=.
         let start = if super::anim_draw::ordinary_anim_type(type_name, config) {
             config.map_or(0, |config| config.start)
         } else {
@@ -437,12 +441,18 @@ pub(crate) fn build_display_effect_instances(
         let Ok(frame) = u16::try_from(anim.runtime().current_frame.wrapping_add(start)) else {
             continue;
         };
-        let tint = input.lighting.anim_tint_at((rx, ry), config);
+        let tint = if is_parachute {
+            [1.0; 3]
+        } else {
+            input.lighting.anim_tint_at((rx, ry), config)
+        };
         let remap_color =
             crate::render::sprite_atlas::anim_remap_color(anim, sim.interner(), input.house_colors);
-        let palette_light = if remap_color.is_some() {
+        let palette_light = if remap_color.is_some() && !is_parachute {
             Default::default()
         } else {
+            // Keep the canopy's instance Convert/53-row scheme transport,
+            // including shroud selection, when joining the ordinary Anim draw.
             crate::app::presentation::lighting::anim_palette_light(
                 input.lighting,
                 (rx, ry),
@@ -546,6 +556,11 @@ pub(crate) fn build_display_effect_instances(
                             axis: input.axis,
                             viewport: [cam_x, cam_y, sw, sh],
                             legacy_policy: parent.policy.render_z,
+                            bounce_drop_px: super::anim_draw::anim_bounce_drop_px(
+                                sim,
+                                anim,
+                                drawn_coord,
+                            ),
                         },
                     ),
                 ),
@@ -637,26 +652,6 @@ pub(super) fn presentation_anim_frame_count(
         let canonical = type_name.to_ascii_uppercase();
         frame_counts.get(&canonical).copied()
     })
-}
-
-/// Every object that owns a live canopy this frame: the falling ones, and the
-/// landed ones whose canopy is still playing out.
-pub(crate) fn parachute_canopy_owners(
-    state: &AppState,
-    sim: &crate::sim::world::Simulation,
-) -> std::collections::HashSet<u64> {
-    let Some(parachute_type) = state
-        .rules()
-        .and_then(|rules| rules.general.parachute_shp.as_deref())
-        .and_then(|name| sim.interner().get(name))
-    else {
-        return std::collections::HashSet::new();
-    };
-    sim.display_layers()
-        .ordered_ids()
-        .filter_map(|&id| sim.anim(id))
-        .filter_map(|anim| parachute_canopy_owner(anim, parachute_type))
-        .collect()
 }
 
 /// The object a canopy hangs on: an owner-attached anim of the
@@ -988,12 +983,6 @@ pub(crate) fn build_overlay_instances(
     );
 
     // Terrain objects from [Terrain] section.
-    // Residual raw/animated terrain paths retain the old editor adjustment.
-    // The proven ordinary extended body/shadow branch below does not use it.
-    // FA2 IsoView.cpp:6389 applies a -3px Y fudge to terrain objects (trees, rocks):
-    //   drawy = ... + f_y/2 - 3 - pic.wMaxHeight/2
-    const TERRAIN_OBJECT_Y_FUDGE: f32 = -3.0;
-
     let Some(sim) = state
         .match_state
         .sim_runtime
@@ -1025,21 +1014,26 @@ pub(crate) fn build_overlay_instances(
             continue;
         }
 
+        let terrain_type = state
+            .rules()
+            .and_then(|rules| rules.terrain_object_type_case_insensitive(name));
+        let is_animated = terrain_type.is_some_and(|terrain_type| terrain_type.is_animated);
+        let spawns_tiberium = terrain_type.is_some_and(|terrain_type| terrain_type.spawns_tiberium);
         // Terrain DrawIt71C208 selects the Stage written by Terrain AI.
         // Wall-clock presentation cannot advance or restart a spawner.
-        let frame = sim
-            .terrain_objects()
-            .animations()
-            .get(&obj.cell())
-            .map_or(Some(0), |animation| {
-                u8::try_from(animation.current_frame()).ok()
-            });
-        let Some(frame) = frame else { continue };
-        let key = OverlaySpriteKey {
-            name: name.to_string(),
-            frame,
+        let stage = is_animated.then(|| {
+            sim.terrain_objects()
+                .animations()
+                .get(&obj.cell())
+                .map_or(0, |animation| animation.current_frame())
+        });
+        let Some(frame) = terrain_draw_frame(stage, obj.health()) else {
+            continue;
         };
-        let Some(spr) = atlas.get(&key) else { continue };
+        let (body, shadow) = atlas.terrain_pieces(name, frame);
+        if body.is_none() && shadow.is_none() {
+            continue;
+        }
 
         let depth = super::helpers::compute_sprite_depth_params_lifted(
             origin_y,
@@ -1047,11 +1041,6 @@ pub(crate) fn build_overlay_instances(
             screen_y,
             lift_px,
         );
-        let spawns_tiberium = state
-            .rules()
-            .and_then(|rules| rules.terrain_object_type_case_insensitive(name))
-            .map(|terrain_type| terrain_type.spawns_tiberium)
-            .unwrap_or(false);
         let tint: [f32; 3] = state
             .match_state
             .match_presentation
@@ -1072,87 +1061,76 @@ pub(crate) fn build_overlay_instances(
             crate::render::palette_light::PaletteLight::cell(light_grid, obj.cell(), false)
         };
 
-        let Some(parent) = ground_order.object_draw(obj.stable_id(), SpriteEncoding::Terrain)
+        let Some(mut parent) = ground_order.object_draw(obj.stable_id(), SpriteEncoding::Terrain)
         else {
             continue;
         };
-        if let Some((body, shadow)) = atlas.native_terrain_pair(name, frame) {
-            use crate::app::presentation::render::draw_plan_lowering::{
-                ObjectPieceInstance, ObjectTexture, PlannedObjectInstance,
-            };
-            use crate::render::tactical_draw_plan::RenderZPolicy;
-            use crate::render::terrain_draw::TerrainPiece;
-            // Terrain DrawIt 0071C304/0071C34E preserves one draw point for
-            // body and shadow. Each SHP's own integer canvas/frame offsets
-            // then locate the stored rectangle. No FA2 editor Y adjustment.
-            let point = [
-                screen_x + TILE_WIDTH / 2.0,
-                screen_y + TILE_HEIGHT / 2.0 - if spawns_tiberium { 16.0 } else { 0.0 },
-            ];
-            let [body_instance, shadow_instance] =
-                native_terrain_instances(body, shadow, point, lift_px, depth, tint, palette_light);
-            let mut parent = parent;
-            let render_z = if sim.terrain_objects().animations().contains_key(&obj.cell()) {
-                RenderZPolicy::ReadOnly
-            } else {
-                RenderZPolicy::ReadWrite
-            };
-            parent.policy.render_z = render_z;
-            ground_objects.push(PlannedObjectInstance::object(
-                parent,
-                vec![
-                    ObjectPieceInstance {
-                        target: ObjectTexture::TerrainShp(TerrainPiece::Body),
-                        render_z,
-                        instance: body_instance,
-                    },
-                    ObjectPieceInstance {
-                        target: ObjectTexture::TerrainShp(TerrainPiece::Shadow),
-                        render_z,
-                        instance: shadow_instance,
-                    },
-                ],
-            ));
-            continue;
-        }
-        ground_objects.push(
-            crate::app::presentation::render::draw_plan_lowering::PlannedObjectInstance::object(
-                parent,
-                vec![crate::app::presentation::render::draw_plan_lowering::ObjectPieceInstance {
-                    target: crate::app::presentation::render::draw_plan_lowering::ObjectTexture::OverlayAtlas,
-                    render_z: parent.policy.render_z,
-                    instance: SpriteInstance {
-                        position: [
-                            screen_x + TILE_WIDTH / 2.0 + spr.offset_x,
-                            screen_y + TILE_HEIGHT / 2.0 + spr.offset_y + TERRAIN_OBJECT_Y_FUDGE,
-                        ],
-                        size: spr.pixel_size,
-                        uv_origin: spr.uv_origin,
-                        uv_size: spr.uv_size,
+        use crate::app::presentation::render::draw_plan_lowering::{
+            ObjectPieceInstance, ObjectTexture, PlannedObjectInstance,
+        };
+        use crate::render::tactical_draw_plan::RenderZPolicy;
+        use crate::render::terrain_draw::TerrainPiece;
+        // Terrain DrawIt 0071C304/0071C34E preserves one draw point for
+        // body and shadow. Each SHP's own integer canvas/frame offsets
+        // then locate the stored rectangle.
+        let point = [
+            screen_x + TILE_WIDTH / 2.0,
+            screen_y + TILE_HEIGHT / 2.0 - if spawns_tiberium { 16.0 } else { 0.0 },
+        ];
+        // DrawIt flags 2E00 read Z only for an animated type; 4E00 also write.
+        let render_z = if is_animated {
+            RenderZPolicy::ReadOnly
+        } else {
+            RenderZPolicy::ReadWrite
+        };
+        parent.policy.render_z = render_z;
+        let pieces = [(TerrainPiece::Body, body), (TerrainPiece::Shadow, shadow)]
+            .into_iter()
+            .filter_map(|(piece, sprite)| {
+                Some(ObjectPieceInstance {
+                    target: ObjectTexture::TerrainShp(piece),
+                    render_z,
+                    instance: native_terrain_instance(
+                        sprite?,
+                        piece,
+                        point,
+                        lift_px,
                         depth,
                         tint,
                         palette_light,
-                        alpha: 1.0,
-                        ..Default::default()
-                    },
-                }],
-            ),
-        );
+                    ),
+                })
+            })
+            .collect();
+        ground_objects.push(PlannedObjectInstance::object(parent, pieces));
     }
 }
 
+/// Terrain DrawIt (0x71C1B0) frame: an IsAnimated type's stage, else frame 1
+/// below 2 health, else 0. Its crumbling arm never draws: Take_Damage
+/// (0x71B920) starts crumbling on a lethal hit and uninits the object in the
+/// same call.
+fn terrain_draw_frame(stage: Option<i32>, health: i32) -> Option<u8> {
+    stage.map_or(Some(u8::from(health < 2)), |stage| u8::try_from(stage).ok())
+}
+
 /// Ordinary Terrain DrawIt 0071C304/0071C34E: both stored frames share one
-/// projected draw point. Native class terms and gradients remain piece data.
-fn native_terrain_instances(
-    body: &crate::render::overlay_atlas::OverlaySpriteEntry,
-    shadow: &crate::render::overlay_atlas::OverlaySpriteEntry,
+/// projected draw point. The body takes gradient 2 and class Z -12, the
+/// shadow gradient 0 and -3.
+fn native_terrain_instance(
+    sprite: &crate::render::overlay_atlas::OverlaySpriteEntry,
+    piece: crate::render::terrain_draw::TerrainPiece,
     point: [f32; 2],
     lift_px: i32,
     depth: f32,
     tint: [f32; 3],
     palette_light: crate::render::palette_light::PaletteLight,
-) -> [SpriteInstance; 2] {
-    [(body, 2, -12), (shadow, 0, -3)].map(|(sprite, gradient, class_z)| SpriteInstance {
+) -> SpriteInstance {
+    let (gradient, class_z) = match piece {
+        crate::render::terrain_draw::TerrainPiece::Body => (2, -12),
+        crate::render::terrain_draw::TerrainPiece::Shadow => (0, -3),
+    };
+    SpriteInstance {
         position: [point[0] + sprite.offset_x, point[1] + sprite.offset_y],
         size: sprite.pixel_size,
         uv_origin: sprite.uv_origin,
@@ -1164,7 +1142,7 @@ fn native_terrain_instances(
         z_gradient: gradient,
         z_adjust: super::helpers::lifted_z_adjust(lift_px, class_z),
         ..Default::default()
-    })
+    }
 }
 
 /// Sample the upstream polygon without rebuilding its native shape. History
@@ -1251,172 +1229,6 @@ pub(crate) fn build_weapon_wave_instances(
     // native DrawExtras first uses SpotlightClass type 16's zero-blend
     // shape-blitter/light-mask path, which this renderer does not yet expose.
     // A white quad or alpha approximation would invent visible behavior.
-}
-
-/// Emit one sprite instance per active parachute anim, anchored at the
-/// descending GI's screen position with the SHP atlas's pre-baked
-/// offset_x/offset_y handling sprite-center anchoring.
-///
-/// Depth: chute depth = GI body depth − epsilon, so it sorts above the body
-/// in the same Layer 2 (Ground) band — matching gamemd's
-/// AnimClass::GetLayer override that forces owner-attached anims to Layer 2
-/// regardless of art.ini Layer=.
-///
-/// The body's key arrives in `body_depths` from `build_shp_instances`, which
-/// must therefore have run first this frame. It is not re-derived here: the
-/// body's key is anchored on the ground row the GI is descending onto, not on
-/// the row it is drawn at, and a paradrop starts 216 px above that row. A
-/// canopy keyed off the drawn row would sort ~14 iso rows behind the man
-/// hanging on it and disappear behind any building in between.
-///
-/// Palette: native `ObjectClass::Paradrop @ 0x005F5940` stores the owner's
-/// `GetRemapColour` result at Anim+0xD4. The retained Anim remap selects the
-/// matching `SelectedScheme` atlas variant; an absent remap keeps the ordinary
-/// AltPalette `GlobalAnim`/colour-0 path.
-///
-/// RESIDUAL: native also copies `+0x10A` of the owner's cell (vtable+0x1BC)
-/// to Anim+0xFC after attach (`0x005F5B1F..0x005F5B30`); this renderer still
-/// draws without a Z test. It is independent of the owner's palette selection.
-pub(crate) fn build_parachute_instances(
-    input: &DisplayEffectInputs<'_>,
-    ground_objects: &mut [crate::app::presentation::render::draw_plan_lowering::PlannedObjectInstance],
-    body_depths: &super::shp::ParachuteBodyDepths,
-    interpolation: Option<&crate::app::presentation::interpolation::RenderInterpolation>,
-) {
-    /// Depth epsilon — chute sorts slightly above the GI body. Half of the
-    /// per-Z bias used in `compute_sprite_depth_params`. Increase if
-    /// z-fighting is observed in-game.
-    const CHUTE_DEPTH_EPSILON: f32 = 0.0005;
-
-    /// Vertical lift, in pixels, applied to the chute sprite so the canopy
-    /// sits above the GI's head rather than centered on the body. Tunable;
-    /// gamemd's PARACH SHP layout produces this offset implicitly through
-    /// frame-internal positioning, which our atlas doesn't replicate exactly.
-    const CHUTE_Y_LIFT: f32 = 8.0;
-
-    let sim = input.sim;
-    let Some(atlas) = input.atlas else {
-        return;
-    };
-    let z = input.zoom;
-    let (cam_x, cam_y, sw, sh) = (
-        input.camera[0],
-        input.camera[1],
-        input.render_size[0] as f32 / z,
-        input.render_size[1] as f32 / z,
-    );
-    // The canopy is a simulation `AnimClass` attached to the falling object
-    // (`Simulation::attach_parachute_anim`); this pass only places it on the
-    // body's sort key. The generic anim pass skips it (`parachute_canopy_owner`).
-    let Some(shp_name) = input.rules.general.parachute_shp.as_deref() else {
-        return;
-    };
-    let Some(parachute_type) = sim.interner().get(shp_name) else {
-        return;
-    };
-
-    for &anim_id in sim.display_layers().ordered_ids() {
-        let Some(anim) = sim.anim(anim_id) else {
-            continue;
-        };
-        let Some(target_id) = parachute_canopy_owner(anim, parachute_type) else {
-            continue;
-        };
-        let Ok(frame) = u16::try_from(anim.runtime().current_frame) else {
-            continue;
-        };
-        let entity = match sim.entities().get(target_id) {
-            Some(e) => e,
-            None => continue,
-        };
-        // The body's own key for this frame. Absent means the body was culled
-        // or never emitted, in which case there is nothing for a canopy to
-        // hang on and nothing to sort it against.
-        let Some(&body_depth) = body_depths.get(&target_id) else {
-            continue;
-        };
-        // Draw the chute exactly where the body is drawn, so it follows the
-        // airborne GI rather than the ground beneath it.
-        let (gx, gy) = interpolation.map_or_else(
-            || crate::render::locomotor_visual::screen_position(entity),
-            |interpolation| {
-                let pose = interpolation.sample_entity(entity, sim.session().binary_frame());
-                (pose.screen[0], pose.screen[1])
-            },
-        );
-        if !in_view(gx, gy, 200.0, 200.0, cam_x, cam_y, sw, sh, 200.0) {
-            continue;
-        }
-
-        // Single-facing anim (no Facings= in art.ini for PARACH).
-        let remap_color =
-            crate::render::sprite_atlas::anim_remap_color(anim, sim.interner(), input.house_colors);
-        let key = ShpSpriteKey {
-            palette_context: if remap_color.is_some() {
-                crate::render::sprite_atlas::anim_remap_context(anim)
-            } else {
-                crate::render::sprite_atlas::ShpPaletteContext::GlobalAnim
-            },
-            type_id: shp_name.to_string(),
-            facing: 0,
-            frame,
-            house_color: remap_color.unwrap_or(HouseColorIndex(0)),
-        };
-        let Some(entry) = atlas.get(&key) else {
-            // PARACH not yet loaded into the atlas. Logged once at startup
-            // by the atlas-load path; per-frame silence here is intentional.
-            continue;
-        };
-        let cx: f32 = gx + entry.offset_x;
-        let cy: f32 = gy + entry.offset_y - CHUTE_Y_LIFT;
-
-        // Preserve the existing canopy tint; only the source palette variant
-        // follows the native per-instance ConvertClass.
-        let tint: [f32; 3] = [1.0, 1.0, 1.0];
-
-        // Depth: GI body depth minus a small epsilon so the chute draws on
-        // top. ZAdjust=-10 in gamemd is a depth-sort fudge with no precise
-        // pixel mapping; in our depth-buffer rendering, lower depth = closer
-        // to camera = on top.
-        let depth = (body_depth - CHUTE_DEPTH_EPSILON).clamp(0.001, 0.999);
-
-        let Some(parent) = ground_objects
-            .iter_mut()
-            .find(|object| object.parent.id == target_id)
-        else {
-            continue;
-        };
-        parent.pieces.push(
-            crate::app::presentation::render::draw_plan_lowering::ObjectPieceInstance {
-                target:
-                    crate::app::presentation::render::draw_plan_lowering::ObjectTexture::ShpPage(
-                        entry.page as usize,
-                    ),
-                // VERA-internal: the chute's native Z term (an anim ZAdjust of
-                // -10 above a descending body) is not carried by this piece,
-                // so it draws without a Z test rather than with a wrong one.
-                render_z: crate::render::tactical_draw_plan::RenderZPolicy::None,
-                instance: SpriteInstance {
-                    position: [cx, cy],
-                    size: entry.pixel_size,
-                    uv_origin: entry.uv_origin,
-                    uv_size: entry.uv_size,
-                    source_palette: entry.source_palette,
-                    depth,
-                    tint,
-                    palette_light: crate::app::presentation::lighting::anim_palette_light(
-                        input.lighting,
-                        (entity.position.rx(), entity.position.ry()),
-                        input.rules.art().anim_runtime_config(shp_name),
-                        false,
-                        anim.remap().as_ref(),
-                    ),
-                    alpha: 1.0,
-                    ..Default::default()
-                },
-            },
-        );
-    }
 }
 
 #[cfg(test)]

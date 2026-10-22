@@ -1,6 +1,6 @@
 [package]
 name = "vera20k"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Vera20k Engine — a from-scratch Rust engine for Red Alert 2: Yuri's Revenge"
 autobins = false
@@ -43,6 +43,9 @@ required-features = ["telemetry-dashboard"]
 default = ["dev-overlays"]
 # Optional gameplay extensions. Neither default nor shipping builds enable this.
 ares = ["vera20k-core/ares"]
+# Optional Phobos extensions, independent of the Ares capability; neither
+# default nor shipping builds enable this either.
+phobos = ["vera20k-core/phobos"]
 # The Ctrl+Shift dev chord: renderer-native diagnostic overlays (grid, heightmap,
 # pathgrid, foot path, fog), the debug pause and quicksave/quickload. Captures
 # rely on it (literal Ctrl+Shift+M/N quicksave/quickload).
@@ -116,6 +119,15 @@ libc = "0.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSImage", "NSOpenPanel", "NSPanel", "NSResponder", "NSSavePanel", "NSView", "NSWindow"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSLocale", "NSString", "NSURL"] }
+
+# --- Windows program icon and version details ---
+# build.rs compiles them into vera20k.exe with the Windows SDK's resource
+# compiler. A target table for build dependencies matches the host, so other
+# hosts never build this. The default `toml` feature reads
+# [package.metadata.winresource], which build.rs does not use; 0.1.34 has
+# `compile_for`, which keeps them to the game.
+[target.'cfg(windows)'.build-dependencies]
+winresource = { version = "0.1.34", default-features = false }
 
 [dev-dependencies]
 # Client tests use core's test fixtures and helpers.

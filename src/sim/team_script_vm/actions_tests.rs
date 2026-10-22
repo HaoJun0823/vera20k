@@ -709,6 +709,55 @@ fn retail_sov01_script17_uses_the_production_script_registry() {
     }
 }
 
+/// Script actions 25 (`0x006E9901`), 26 (`0x006E9921`) and 27
+/// (`0x006E993E`) play the argument's sound, movie and song, then move on,
+/// instead of leaving the team stalled on an unported action.
+#[test]
+fn sound_movie_and_music_actions_play_and_advance() {
+    let rules = rules();
+    let mut sim = Simulation::new();
+    let owner = sim.interner.intern("Russians");
+    sim.houses
+        .register(HouseState::new(owner, 1, None, false, 0, 10));
+    let script = sim.interner.intern("SOUND SCRIPT");
+    sim.team_script_vm.register_script(TeamScriptDefinition {
+        id: script,
+        source: TeamAiDefinitionSource::FixedAimd,
+        actions: [(25, 7), (26, 4), (27, 3), (25, 7)]
+            .map(|(action_id, argument)| TeamScriptAction {
+                action_id,
+                argument,
+            })
+            .to_vec(),
+    });
+    let team = sim.team_script_vm.create_team(owner, script, Vec::new(), 0);
+    {
+        let state = sim.team_script_vm.teams.get_mut(&team).unwrap();
+        state.cursor = -1;
+        state.advance_pending = true;
+    }
+    for _ in 0..3 {
+        sim.team_step_script(team, &rules, None, FrameEffects::default());
+    }
+    let state = sim.team_script_vm.team(team).unwrap();
+    assert_eq!(state.cursor(), 2);
+    assert!(state.advance_pending());
+    assert!(state.refusal().is_none());
+    assert!(matches!(
+        sim.sound_events.take_for_test().as_slice(),
+        [crate::sim::world::SimSoundEvent::VocCenteredIndex { index: 7 }]
+    ));
+    assert!(matches!(
+        sim.drain_trigger_effects().as_slice(),
+        [
+            crate::sim::trigger_runtime::TriggerEffect::FullscreenMovie { index: 4 },
+            crate::sim::trigger_runtime::TriggerEffect::MusicTheme {
+                request: crate::sim::trigger_runtime::ThemeRequest::Index(3),
+            }
+        ]
+    ));
+}
+
 /// The building tests' power plants: the Russians' own, the Americans' near
 /// and far ones, and the Germans'.
 const PLANTS: [(&str, u16, u16); 4] = [
