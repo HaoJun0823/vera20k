@@ -4,8 +4,9 @@ Roadmap for driving the local player's house from an agent. The agent takes the 
 the player's hands, not of the game: it observes what the player would see and issues the
 same commands the player's clicks produce, through the command path the game already uses.
 
-Status: design, with the H0 actuation skeleton implemented and tested. See
-[Current state](#current-state).
+Status: the hands are implemented, and the retail policy's base-building chain runs in a
+local match: turning auto play on makes the driven house deploy its MCV and build the
+base its loaded rules ask for. See [Current state](#current-state).
 
 This document specifies the **actuation layer** ("the hands") only: observation, the agent
 interface, the host, and the admission gate. It deliberately does **not** specify the
@@ -87,16 +88,133 @@ Timing the agent must be written against:
 
 | Area | State |
 |---|---|
-| `src/sim/autoplay/observation.rs` | Implemented: `AutoPlayView` with credits, power output/drain/balance, own entities, `max_health`, ready buildings, ground walkability. Each field reads its authoritative owner. |
-| `src/sim/autoplay/policy.rs` | Implemented: `AutoPlayPolicy`, the swappable seam, with the one-self-contained-issuer contract. |
-| `src/sim/autoplay/scripted_policy.rs` | Implemented: `ScriptedPolicy`, a fixed `(frame, Command)` schedule — the only policy so far. |
-| `src/sim/autoplay/host.rs` | Implemented: `AutoPlayHost::step` — observation → agent → gate → `queue_commands`. The gate reuses `Simulation::entity_owned_by_id` and `Simulation::order_actor_admits` rather than restating them. |
-| `src/sim/autoplay/autoplay_tests.rs` | Implemented: 10 tests over the envelope, the gate's three rejections, the per-frame cap, input lock, the release schedule and the observation. Four run on synthetic rules so they hold without `RA2_DIR`; six need it to spawn real object types. |
+| `src/sim/control/observation.rs` | Implemented: `Observation`, the L2 read-only projection — credits, power output/drain/balance, own entities, `max_health`, ready buildings, ground walkability and the `pub(crate)` queries the retail brain needs. Each field reads its authoritative owner. |
+| `src/sim/control/brain.rs` | Implemented: `Brain` and `Outbox`, the decision port. Declared on the L2 side so L2 never names a brain. See [the AI layers](ai-layers.md). |
+| `src/sim/control/board.rs` | Implemented: `ControlBoard::step` — state requests → decisions → managed stepping → gate → `queue_commands`, with the two domain switches and the per-frame budget. The gate reuses `Simulation::entity_owned_by_id` and `Simulation::order_actor_admits` rather than restating them. |
+| `src/sim/behavior/` | Implemented: the L1 execution layer — the `Goal` vocabulary, the single `Funnel` with its readiness gate, `ObjectView`/`ThreatView`, and the managed routine contract. |
+| `src/sim/strategy/retail/` | Implemented: `RetailBrain`, the retail decision layer. It generates the native BasePlan with `recalc_base_plan` from its own `BasePlanState` and `SimRng`, adopts a base that already stands, and answers in orders and intents: deploy the Construction Yard maker, queue the first open node's type, splice a power plant ahead of a node whose drain would black the house out, place the finished product, count the node satisfied, keep the harvesters `AI_Choose_Unit`'s branch asks for, ask its factories for combat units, send the army at the nearest enemy object, and raise the teams its own selector picks. See [the retail policy chain](#the-retail-policy-chain). |
+| `src/sim/autoplay/scripted_policy.rs` | Implemented: `ScriptedPolicy`, a fixed `(frame, Command)` schedule — a test brain, not what the hotkey installs. |
+| `src/sim/autoplay/host.rs` | Implemented: `AutoPlayHost`, the facade the client holds. It forwards to `ControlBoard` and exposes the domain switch, the brain name, the rejection counts and the managed table. |
+| `src/sim/autoplay/autoplay_tests.rs` | Implemented: 31 tests over the envelope, the gate's three rejections, the per-frame cap, input lock, the release schedule, the observation, the retail chain (MCV → yard → the plan's first buildings → teams → army), the order funnel, managed mode and the external schema. Several run on synthetic rules so they hold without `RA2_DIR`; the rest need it to spawn real object types. |
+| `docs/ai-layers.md` | The three-layer contract: boundaries, module inventory, data ownership, the direct/managed split and the reserved external seam. |
 | `vera20k` hotkey category | Groundwork, delivered separately: `catalog::VERA_CATEGORY_KEY` is declared in the input layer and listed after every category the retail commands carry. |
-| AutoPlay hotkey | Implemented: `HotkeyCommand::ToggleAutoPlay`, registered in the `vera20k` category with **no default key** — `KEYBOARDMD.INI` has no entry for it, so the player assigns one. Pressing it installs or removes `MatchState::auto_play`. |
+| AutoPlay hotkey | Implemented, two keys. `HotkeyCommand::ToggleAutoPlay` installs `RetailBrain` on the local house with both halves on, or removes the host; `HotkeyCommand::ToggleAutoPlayForces` flips only the forces half of an installed host. Both sit in the `vera20k` category with **no default key** — `KEYBOARDMD.INI` has no entry for them, so the player assigns them. |
 | Frame-loop wiring | Implemented: `advance_one_simulation_frame` steps the host immediately before `take_due_commands`, when one is installed. A match with no host takes the unchanged path. |
-| A scripted scenario test (MCV → build → place → unit) | Not started. The actuation path is unit-tested, not yet exercised end to end in `headless_scenario`. |
-| Anything in `sim::ai_*` | Untouched. |
+| Anything in `sim::ai_*` | Read by the policy through the same pure generators the computer AI uses; no AI code was changed. |
+
+### The retail policy chain
+
+`RetailBrain` reproduces the native order of work, one plan node at a time, and
+each step is a command rather than a house-state write:
+
+| Step | Native authority | Command |
+|---|---|---|
+| Generate the plan | `AI_RecalcBuildOptions 0x005054B0`, run when the yard appears | — |
+| Anchor node zero, adopt the standing base | `0x00739926`; a takeover pairs each node with the building already there | — |
+| Deploy the yard maker | `UnitClass::Deploy 0x007393C0` | `DeployMcv` |
+| Pick the open node | `AI_Choose_Building 0x004FE3E0`, `Find_Node 0x0042EB50` | — |
+| Ask whether it may be built | `HouseClass::CanBuild 0x004F7870` | — |
+| Splice a plant ahead of a node its drain would black out | `AI_Choose_Building 0x004FE6F6..0x004FE943` | `QueueProduction` |
+| Start it | yard `Suggest_New_Object 0x004FBD80` | `QueueProduction` |
+| Place it | `Place_Production 0x004FB0E0`, `CanPlaceAt` | `PlaceReadyBuilding` |
+| Count the node | `0x0042E780` / `0x0042F260` | — |
+| Keep the harvesters the house needs | `AI_Choose_Unit 0x004F4D40`'s harvester branch | `QueueProduction` |
+| Raise the teams its triggers pick | the house's own team block (`HouseClass::Update`, `0x004F8A00`), asked as a state intent and applied by the control board through `sim::ai_team_creation` | — (no command) |
+| Ask for a combat unit | `AI_Choose_Unit 0x004F4D40`'s Unit, Infantry and Aircraft branches over the house's forming teams (`TeamClass::Get_Needed_Types`) | `QueueProduction` |
+| Send the army at the nearest enemy object | what an attack click on that object means; native's teams and their scripts are absent. Targets are houses this one is at war with — the ally graph's complement — never a `MultiplayPassive` house, which owns the map's tech buildings, garrisonable houses and parked cars | `Attack` |
+| Send an engineer to the nearest capturable building | what an engineer click on that building means | `CaptureBuilding` |
+
+### Two switches
+
+`AutoPlayDomains { production, forces }` is the host's filter, so both official
+policies obey it:
+
+| Switch | On | Off |
+|---|---|---|
+| `production` | queue, place, sell, repair, rally, deploy the MCV | stop issuing that kind; what is already queued keeps building |
+| `forces` | unit orders and superweapon use | stop issuing new orders; orders already given keep running |
+
+The master key installs with both; the second key flips `forces` alone, so a
+player can keep the base growing while commanding the troops, or hand the troops
+over and take building back. Neither switch undoes what was already issued —
+cancelling a queued building or recalling an order would be a destructive
+decision the policy should not make for the player.
+
+The gate filters what a policy emits. `RetailBrain` fills both halves:
+production is the base plan, the spliced plants, the harvesters, the teams its
+own selector raises and the units those teams are short of; forces is the
+`Attack` each combat unit gets on the nearest enemy object and the
+`CaptureBuilding` each engineer gets on the nearest capturable one, refreshed
+when a nearer target appears or after about fifteen seconds. Switching `forces`
+off leaves the army where it stands and stops new orders of that kind; switching
+`production` off stops the base, the factories and the team raises while the army
+keeps its orders. Neither half issues a superweapon strike yet.
+
+Residuals, all recorded in the module docs: control nodes (`-1` walls, base
+defenses, `-2`, `-3` perimeter) are stepped over rather than driven;
+`AI_Manage_Build_Queue 0x004FDD10` — the recovery that sells, splices and
+reorders around a node that cannot be built — is absent, so a node that makes no
+progress for 900 frames is given up and the rest of the plan runs (a plan stuck
+forever leaves a play test with a dead base, which is worse than a slightly
+out-of-order one); the placement cell is the policy's own choice, because a
+human house has no native plan centre (`+0x5750` is AI-only) and therefore no
+`FindBaseBuildingSite` answer, so the policy sweeps outwards from its own
+buildings for the first cell the placement gate admits, moving on when the
+receiver refuses one, and abandons a product that finds no cell at all; and the
+unit chooser's two AI-only gates (`IsHumanPlayer`, `House+0x24C CurrentIQ`) are
+read as an AI house's would be, because a policy-driven house is played in the
+player's place and a human house's IQ stays 0, which would leave the house with
+no income at all.
+
+The army's unit choices are native now: the policy raises the teams the house's
+own selector picks (its timer expired, `HouseClass::Update`'s team block asked
+as a state intent and applied by the host through `sim::ai_team_creation`), and
+asks `AI_Choose_Unit`'s Unit, Infantry and Aircraft branches what those forming
+teams are short of. The team AI pass itself has no house gate, so a
+policy-driven house's teams run like any other house's: they recruit the house's
+units (`TeamClass::Recruit`) and drive them by their scripts, and the policy's
+own order step stands down for a recruited member rather than give the same unit
+a second order. What is still the policy's own is the *orders for the units no
+team has taken*: each combat unit is sent at the nearest enemy object and each
+engineer at the nearest capturable building — what a player's click on it means —
+with the whole map in view the way the computer AI has it. Superweapon strikes
+are the next chain; `AI_Manage_Build_Queue` the one after.
+
+### What citing the retail AI buys, and what it does not
+
+A play test of this stage reported the shape of the problem plainly: units that
+attack everything, engineers that are told to shoot, a base that builds whatever
+the plan asks for whether or not it can pay, and an army that is "working but
+not clever". None of that contradicts the retail AI; it is what you get when its
+*decisions* are cited without the *state and target selection* they read.
+
+| Part of the native chain | Where it stands here |
+|---|---|
+| `AI_RecalcBuildOptions` → BasePlan nodes | ported (`sim::base_plan_generation`), driven by this policy |
+| `Find_Node`, `BaseClass` node satisfaction | ported (`sim::ai_base_building`) |
+| `AI_Choose_Building`'s power splice | ported, now driven by this policy |
+| `CanBuild`, `Place_Production`'s gates | ported, called as-is |
+| `AI_Choose_Unit`'s harvester branch | ported, driven by this policy |
+| `AI_Choose_Unit`'s unit/infantry/aircraft branches | **not reachable**: their input is what the house's *teams* still need (`TeamClass::Get_Needed_Types`), and a policy-driven house has no teams. The type walk stands in for it |
+| `AITrigger` evaluation, `CreateTeam`, `AIMD.INI` team types | ported, and now driven: the policy asks the house's own selector when its team timer expires, and the host applies the plan through `sim::ai_team_creation` |
+| `AI_Choose_Unit`'s unit/infantry/aircraft branches | ported and reachable now that the house owns teams; the policy drives them with its own draws and leaves the house's choice slot alone |
+| Team script missions (`Attack Enemy`, …) | ported and running: the team AI pass has no house gate, so a policy-driven house's teams recruit and drive their members by script. The policy's nearest-hostile rule covers only the units no team has taken |
+| `AI_Manage_Build_Queue` (sell, splice, reorder, credit-cutoff production modes) | not ported; a node that cannot be built is given up after 900 frames |
+| Base defense and wall nodes (`-1`, `-2`, `-3`) | stepped over |
+
+So the rule this stage earns is: **citing a native decision is only as reliable
+as the inputs you give it.** A ported generator fed by invented inputs — the
+nearest hostile object, a cursor over the rules' type lists — produces a policy
+that runs, which is what this stage proves, and that plays badly, which is what
+it does not hide. Where a stand-in replaces a native body, it is named as one
+here and in the module docs, and it is replaced by the native mechanism rather
+than tuned: teams before unit choice, team scripts before target selection,
+`AI_Manage_Build_Queue` before any hand-written ordering rule.
+
+That last point is why income came before the rest of the unit chain: a base
+that only builds buildings spends its starting wallet and stops part-way through
+its plan, at whichever node the credits run out — a play test reported exactly
+that stall at the war factory.
 
 `ScriptedPolicy` takes a typed `Vec<(u64, Command)>`, not JSON. `Command` is
 serde-derived, but its `InternedId` fields are numeric, so a JSON script could
@@ -108,101 +226,42 @@ one, and H0's "Done when" below is adjusted accordingly.
 
 | Responsibility | Owner |
 |---|---|
-| Read-only projection of what the house can see | `sim::autoplay::observation` |
-| Policy interface — the swappable brain | `sim::autoplay::policy` |
-| Admission gate, per-frame cap, envelope construction — the stable hand | `sim::autoplay::host` |
-| Calling the host once per frame | the frame loop: `app/match_runtime/sim_tick`, and the headless runner |
+| Read-only projection of what the house can see | `sim::control::observation` |
+| Decision port — the swappable brain | `sim::control::brain` (`Brain`, `Outbox`) |
+| Admission gate, per-frame budget, envelope construction, managed stepping — the stable hand | `sim::control::board` |
+| Object orders, readiness, the per-object view, micro routines | `sim::behavior` |
+| What to build, raise, send and take | `sim::strategy` |
+| Calling the host once per frame | the frame loop: `app/match_runtime/sim_tick` |
 | Everything else | unchanged. No existing owner moves. |
 
-**Placement: `src/sim/autoplay/`, inside the core crate.** Three reasons:
+**Placement: `src/sim/{behavior,control,strategy}/`, inside the core crate.**
+Three reasons:
 
-- The observation layer must call `pub(crate)` queries (`can_build`,
+- The projection must call `pub(crate)` queries (`can_build`,
   `find_base_building_site`); from `app/` it cannot reach them.
-- `src/headless_scenario.rs` can then drive an agent with no window, which is where the
-  tests live.
+- The core crate can then drive an agent with no window, which is where the tests live.
 - It depends on `sim` only, so the `sim/` → `render|ui|audio|net` rule holds.
 
-## Design
+`src/sim/autoplay/` is the facade over those three: `AutoPlayHost` (installed by the
+hotkey, stepped by the frame loop), `AutoPlayDomains` (the two switches),
+`ScriptedPolicy` (the test brain) and the tests.
 
-Sketches. Accessor names are indicative and get fixed against the owning module while
-implementing; the point here is the boundary, not the spelling.
+## The three layers
 
-### Observation
+**[`docs/ai-layers.md`](ai-layers.md) is the contract**: boundaries, the module
+inventory, data ownership, the direct/managed split, the reserved external seam and
+the recorded gaps. This page keeps the player-facing half — the hotkeys, the switches
+and the actuation rules below.
 
-A read-only projection built for a specific house. It is **not** `SimView`: that returns
-`&Simulation` and is effectively full read access. It is **not** `telemetry_snapshot()`
-either: that is a debug view with `TELEMETRY_MAX_SPOTS` truncation and `f32` display
-coordinates, and reading it would lose precision and threaten determinism.
-
-```rust
-pub struct AutoPlayView<'a> { sim: &'a Simulation, house: InternedId }
-
-impl AutoPlayView<'_> {
-    fn credits(&self) -> i32;
-    fn power_balance(&self) -> i32;
-    fn own_entities(&self) -> impl Iterator<Item = EntityView>;
-    fn visible_enemies(&self) -> impl Iterator<Item = EntityView>;
-    fn buildable(&self) -> impl Iterator<Item = BuildableView>;
-    fn pending_placement(&self) -> Option<PendingPlacement>;
-    fn placement_site(&self, ty: &ObjectType) -> Option<(i16, i16)>;
-    fn is_passable(&self, rx: u16, ry: u16) -> bool;
-}
-```
-
-Rules:
-
-- Integer or `SimFixed` only. No `f32` reaches a decision.
-- Iteration order is fixed: storage order for entities, registration order for houses.
-  No `HashMap` iteration, ever.
-- `visible_enemies` filters through `Fog::is_cell_visible(house, ..)`. Whether the agent
-  should be fog-limited at all is a **brain** question, not decided here; the field is
-  provided with a switch so either answer works.
-
-### Policy
-
-The swappable brain. **One policy drives a house at a time**, and it is expected to be
-self-contained.
-
-```rust
-pub trait AutoPlayPolicy {
-    fn name(&self) -> &'static str;
-    fn decide(&mut self, view: &AutoPlayView<'_>) -> Vec<Command>;
-}
-```
-
-Called once per frame, between frames. The policy owns its own state — its plan, its
-generator, its memory of what it asked for and what has happened since. It is the only
-issuer for its house, so the host arbitrates nothing and keeps no ledger on its behalf;
-there is never a second competitor to share one with. If a future need forces the host to
-know about outstanding work, that is a new decision, not an assumption to build on now.
-
-Implementations are interchangeable, which is the point of the seam:
-
-| Policy | Decisions come from |
-|---|---|
-| Retail AI | the loaded rules for basic choices — what may be built, which buildings count as economic and which as defensive — and `AIMD.INI` for strategy, tactics and team instruction groups. A mod that extends either file changes what it decides without touching VERA. |
-| `ScriptedPolicy` | a fixed `(frame, Command)` schedule. Implements it today. |
-| A later controller | anything. |
-
-The seam also runs the other way: the host takes an owner rather than assuming the local
-player, so the same hands can stand in for a computer player.
-
-### Host
-
-```rust
-pub struct AutoPlayHost { policy: Box<dyn AutoPlayPolicy>, owner: InternedId, max_per_frame: usize }
-
-impl AutoPlayHost {
-    pub fn step(&mut self, sim: &mut Simulation);
-}
-```
-
-Per frame: build the view for `owner` → `policy.decide` → gate each command → wrap into
-`CommandEnvelope { owner, execute_tick: sim.session().tick(), .. }` → `sim.queue_commands`.
-
-It takes no `RuleSet`: the host does not decide anything, and a policy that needs the
-loaded rules takes them when it is constructed or when the seam grows a rules argument.
-Adding one now would be plumbing for a policy that does not exist yet.
+In one paragraph: **L1 executes** one object's order (the `Goal` vocabulary, the single
+`Funnel` that gates on `Simulation::mission_ready_to_commence` and answers
+`Queued`/`NotReady`/`Rejected`, `ObjectView`/`ThreatView`, and the managed micro
+routines); **L2 stores and delivers** (the board's frame order, the domain switches,
+the per-frame budget, the managed phase table, the projection); **L3 decides** (the
+`Brain` port, with `RetailBrain` as its one implementation today). Dependencies run one
+way, L3 → L2 → L1, and
+`architecture_guards.rs::sim_ai_layers_depend_one_way` fails the tests if that stops
+being true.
 
 The gate is deliberately minimal. Strict human equivalence is a non-goal, so the gate
 only prevents self-harm, it does not re-derive `What_Action`:
@@ -245,19 +304,19 @@ hotkey that installs the host.
 
 Still to do for this stage, before it counts as done:
 
-- **Where the script comes from.** The hotkey installs a `ScriptedPolicy`, and nothing
-  supplies it a script yet, so switching auto play on runs an empty agent. Options are a
-  file the player drops next to the map, a scripted scenario, or the policy layer
-  answering directly — all brain-adjacent, so this is the next decision.
-- An end-to-end scripted scenario in `src/headless_scenario.rs`: deploy the MCV, queue a
-  power plant, place it at a site from `placement_site`, queue a unit — reproducible
-  through `ReplayRunner` with identical state hashes.
+- ~~Where the script comes from.~~ Answered by the retail policy: the hotkey installs
+  `RetailBrain`, and `ScriptedPolicy` stays a test fixture rather than the shipping
+  brain.
+- An end-to-end scenario in `src/headless_scenario.rs`: deploy the MCV, queue a power
+  plant, place it, queue a unit — reproducible through `ReplayRunner` with identical state
+  hashes. The chain is covered in `autoplay_tests.rs` today, which asserts the buildings
+  stand but does not replay it.
 
-Done when: both hold.
+Done when: the replay scenario holds.
 
 ### Stage H1: full observation surface
 
-Scope: fill in `AutoPlayView` — credits, power, own entities, visible enemies, buildable
+Scope: fill in `Observation` — credits, power, own entities, visible enemies, buildable
 list, production queue, pending placement, placement site, passability. Each field with a
 test asserting it reads the authoritative owner and not a derived cache.
 
@@ -317,16 +376,18 @@ start the AI today. Auto play is what gives them meaning for a human house.
 
 ## Deferred: the brain
 
-The seam is in place and one trivial policy occupies it. Still open:
+The seam is in place, and the base-building half of the retail policy now occupies it:
+`RetailBrain` generates the plan and builds it, without touching the house's AI fields
+(they stay the computer AI's). Still open:
 
-1. **The retail AI policy.** Building it means giving it its own memory — plan, generator,
-   production bookkeeping — rather than reading the computer AI's house fields, which are
-   never populated for a human house. It is a policy-internal change; the host does not
-   move for it.
+1. **The rest of the retail AI policy.** Base building is the first chain. Units and
+   infantry choices (`AI_Choose_Unit` and friends), `AI_Manage_Build_Queue`, base defense
+   placement, walls, team creation and `AIMD.INI` strategy remain: each is a new chain on
+   the same policy, and each needs its own evidence.
 2. **Fog honesty.** The computer AI sees the whole map, so a policy reusing its decisions
    makes the driven house omniscient. Fine for unattended play, wrong for anything
-   competitive. `AutoPlayView` already offers a fog-filtered view, and whether to use it
-   is the policy's call.
+   competitive. `Observation` offers the queries a fog-filtered view would need, and
+   whether to use them is the brain's call.
 3. **Per-house AI state ownership.** `ai_production`, `ai_unit_choices` and the team timers
    are the computer AI's memory, and one owner writes them: the existing AI for a computer
    house, or a policy for the house it drives — never both at once.

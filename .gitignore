@@ -30,6 +30,7 @@ Thumbs.db
 /infodocs/
 
 /docs/*
+!/docs/ai-layers.md
 !/docs/ares.md
 !/docs/ares-generic-warhead.md
 !/docs/ini-roots.md

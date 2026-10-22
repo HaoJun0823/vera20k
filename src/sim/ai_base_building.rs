@@ -431,7 +431,7 @@ pub(crate) fn choose_building(
 /// house's `GDIPowerPlant=`, the side 2 house's `ThirdPowerPlant=`, any other
 /// side's `NodAdvancedPower=` when `0x00505360` admits it, else
 /// `NodRegularPower=`.
-fn power_plant_to_splice(
+pub(crate) fn power_plant_to_splice(
     sim: &Simulation,
     rules: &RuleSet,
     owner: InternedId,

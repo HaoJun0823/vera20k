@@ -4,10 +4,21 @@
 
 use crate::rules::ruleset::RuleSet;
 use crate::sim::autoplay::host::AutoPlayHost;
-use crate::sim::autoplay::observation::AutoPlayView;
-use crate::sim::autoplay::policy::AutoPlayPolicy;
 use crate::sim::autoplay::scripted_policy::{ScriptStep, ScriptedPolicy};
+use crate::sim::behavior::managed::{MicroKind, MicroParams, Stage};
+use crate::sim::behavior::order::{ApplyOutcome, Refusal};
+use crate::sim::behavior::{Funnel, Goal};
 use crate::sim::command::{Command, CommandEnvelope};
+use crate::sim::control::board::AutoPlayDomains;
+use crate::sim::control::brain::{Brain, Outbox};
+use crate::sim::control::external::{
+    ActionSlot, ENTITY_SLOTS, GLOBAL_SLOTS, OBSERVATION_SCHEMA_VERSION, ObservationBatch,
+    ObservationSchema, PolicySource, batch_for,
+};
+use crate::sim::control::intent::Intent;
+use crate::sim::control::observation::Observation;
+use crate::sim::intern::InternedId;
+use crate::sim::strategy::retail::RetailBrain;
 use crate::sim::world::Simulation;
 
 /// The 32x32 arena with its two houses — `Americans` human, `Russians` a
@@ -46,6 +57,56 @@ fn host(sim: &mut Simulation, script: Vec<(u64, Command)>) -> AutoPlayHost {
     )
 }
 
+/// A host for `Americans` playing the retail brain.
+fn retail_host(sim: &mut Simulation, seed: u64) -> AutoPlayHost {
+    AutoPlayHost::new(Box::new(RetailBrain::new(seed)), american(sim), usize::MAX)
+}
+
+/// One scripted brain frame: the commands the script releases now.
+fn script_frame(
+    agent: &mut ScriptedPolicy,
+    rules: &RuleSet,
+    sim: &Simulation,
+    owner: InternedId,
+) -> Vec<Command> {
+    let obs = Observation::new(sim, owner);
+    let mut out = Outbox::default();
+    agent.think(rules, &obs, &mut out);
+    out.commands
+}
+
+/// One retail brain frame, as the commands the control layer would issue for
+/// it.
+///
+/// The brain is read directly, so a test can inspect its plan and its memory
+/// afterwards; admission is the host's business and is covered by the gate
+/// tests and the end-to-end chain tests. Orders go through the same order
+/// funnel the board uses, so a mid-transition object shows up as "no command"
+/// here exactly as it would in play.
+fn frame_commands(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    sim: &Simulation,
+    owner: InternedId,
+) -> Vec<Command> {
+    let obs = Observation::new(sim, owner);
+    let mut out = Outbox::default();
+    brain.think(rules, &obs, &mut out);
+    let mut commands: Vec<Command> = out.commands;
+    for intent in out.intents {
+        if let Some(command) = intent.command() {
+            commands.push(command);
+        }
+    }
+    let funnel = Funnel::new(sim, rules, owner);
+    for order in &out.orders {
+        if let Ok(command) = funnel.prepare(order.actor, order.goal) {
+            commands.push(command);
+        }
+    }
+    commands
+}
+
 #[test]
 fn host_queues_commands_with_the_house_owner_and_the_current_tick() {
     let Some((mut sim, rules)) = arena(0xA17) else {
@@ -56,7 +117,7 @@ fn host_queues_commands_with_the_house_owner_and_the_current_tick() {
         .expect("an American tank");
     let mut host = host(&mut sim, vec![(0, Command::Stop { entity_id: tank })]);
 
-    host.step(&mut sim);
+    host.step(&mut sim, &rules);
 
     let queued = sim.pending_command_snapshot();
     assert_eq!(queued.len(), 1, "one admitted command reaches the queue");
@@ -76,7 +137,7 @@ fn gate_rejects_an_actor_the_house_does_not_own() {
         .expect("a Russian tank");
     let mut host = host(&mut sim, vec![(0, Command::Stop { entity_id: theirs })]);
 
-    host.step(&mut sim);
+    host.step(&mut sim, &rules);
 
     assert!(
         sim.pending_command_snapshot().is_empty(),
@@ -87,10 +148,10 @@ fn gate_rejects_an_actor_the_house_does_not_own() {
 
 #[test]
 fn gate_rejects_a_command_naming_no_live_actor() {
-    let (mut sim, _rules) = synthetic_arena(0xA17);
+    let (mut sim, rules) = synthetic_arena(0xA17);
     let mut host = host(&mut sim, vec![(0, Command::Stop { entity_id: 0xDEAD })]);
 
-    host.step(&mut sim);
+    host.step(&mut sim, &rules);
 
     assert!(
         sim.pending_command_snapshot().is_empty(),
@@ -101,7 +162,7 @@ fn gate_rejects_a_command_naming_no_live_actor() {
 
 #[test]
 fn gate_passes_house_scoped_commands_without_an_actor() {
-    let (mut sim, _rules) = synthetic_arena(0xA17);
+    let (mut sim, rules) = synthetic_arena(0xA17);
     let power_plant = sim.interner.intern("GAPOWR");
     let mut host = host(
         &mut sim,
@@ -113,7 +174,7 @@ fn gate_passes_house_scoped_commands_without_an_actor() {
         )],
     );
 
-    host.step(&mut sim);
+    host.step(&mut sim, &rules);
 
     assert_eq!(
         sim.pending_command_snapshot().len(),
@@ -133,7 +194,7 @@ fn host_issues_nothing_while_input_is_locked() {
     let mut host = host(&mut sim, vec![(0, Command::Stop { entity_id: tank })]);
     sim.session.set_input_locked_for_test(true);
 
-    host.step(&mut sim);
+    host.step(&mut sim, &rules);
 
     assert!(
         sim.pending_command_snapshot().is_empty(),
@@ -166,7 +227,7 @@ fn the_per_frame_cap_drops_the_overflow() {
         2,
     );
 
-    host.step(&mut sim);
+    host.step(&mut sim, &rules);
 
     assert_eq!(
         sim.pending_command_snapshot().len(),
@@ -174,6 +235,63 @@ fn the_per_frame_cap_drops_the_overflow() {
         "the third command of the frame is dropped"
     );
     assert_eq!(host.rejected(), 1);
+}
+
+#[test]
+fn the_two_switches_split_building_from_troops() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 16, 16, 64, &rules)
+        .expect("an American tank");
+    let power = sim.interner.get("GAPOWR").expect("the power plant type");
+    let owner = american(&mut sim);
+    let script = || {
+        ScriptedPolicy::new(vec![
+            ScriptStep {
+                frame: 0,
+                command: Command::QueueProduction { type_id: power },
+            },
+            ScriptStep {
+                frame: 0,
+                command: Command::Guard {
+                    entity_id: tank,
+                    target: None,
+                },
+            },
+        ])
+    };
+
+    // Forces off: the base keeps building, the troops are the player's again.
+    let mut host = AutoPlayHost::new(Box::new(script()), owner, usize::MAX);
+    host.set_domains(crate::sim::autoplay::AutoPlayDomains {
+        production: true,
+        forces: false,
+    });
+    host.step(&mut sim, &rules);
+    let queued = sim.take_due_commands();
+    assert_eq!(queued.len(), 1, "only the base's command survives");
+    assert!(
+        matches!(queued[0].payload, Command::QueueProduction { .. }),
+        "the survivor is the production command, got {:?}",
+        queued[0].payload
+    );
+
+    // Production off: the troops may still be ordered, the base is the player's.
+    let mut host = AutoPlayHost::new(Box::new(script()), owner, usize::MAX);
+    host.set_domains(crate::sim::autoplay::AutoPlayDomains {
+        production: false,
+        forces: true,
+    });
+    host.step(&mut sim, &rules);
+    let queued = sim.take_due_commands();
+    assert_eq!(queued.len(), 1, "only the troops' command survives");
+    assert!(
+        matches!(queued[0].payload, Command::Guard { .. }),
+        "the survivor is the unit order, got {:?}",
+        queued[0].payload
+    );
 }
 
 #[test]
@@ -205,13 +323,13 @@ fn the_scripted_policy_releases_each_step_once_at_its_frame() {
 
     // Out of order input is sorted, and same-frame steps keep their given order.
     assert_eq!(agent.pending().len(), 3);
-    assert!(agent.decide(&AutoPlayView::new(&sim, owner)).is_empty());
+    assert!(script_frame(&mut agent, &rules, &sim, owner).is_empty());
     assert_eq!(sim.session().tick(), 0);
 
     // Frame 5 releases both of its steps, once, in script order.
     advance_to(&mut sim, &rules, 5);
     assert_eq!(sim.session().tick(), 5);
-    let released = agent.decide(&AutoPlayView::new(&sim, owner));
+    let released = script_frame(&mut agent, &rules, &sim, owner);
     assert_eq!(
         released,
         vec![
@@ -220,14 +338,14 @@ fn the_scripted_policy_releases_each_step_once_at_its_frame() {
         ]
     );
     assert!(
-        agent.decide(&AutoPlayView::new(&sim, owner)).is_empty(),
+        script_frame(&mut agent, &rules, &sim, owner).is_empty(),
         "a step is released once, not every frame"
     );
 
     // Frame 9 releases the last one.
     advance_to(&mut sim, &rules, 9);
     assert_eq!(
-        agent.decide(&AutoPlayView::new(&sim, owner)),
+        script_frame(&mut agent, &rules, &sim, owner),
         vec![Command::Guard {
             entity_id: tank,
             target: None
@@ -259,7 +377,7 @@ fn a_host_issued_command_is_drained_by_the_frame_that_follows_its_step() {
 
     let mut drained_per_frame = Vec::new();
     for _ in 0..8 {
-        host.step(&mut sim);
+        host.step(&mut sim, &rules);
         let due = sim.take_due_commands();
         drained_per_frame.push(due.len());
         sim.advance_tick(&due, Some(&rules), None, None, 33);
@@ -276,7 +394,7 @@ fn a_host_issued_command_is_drained_by_the_frame_that_follows_its_step() {
 fn observation_reads_the_wallet_and_power_from_their_owners() {
     let (mut sim, _rules) = synthetic_arena(0xA17);
     let owner = american(&mut sim);
-    let view = AutoPlayView::new(&sim, owner);
+    let view = Observation::new(&sim, owner);
 
     assert_eq!(view.house(), owner);
     assert_eq!(view.tick(), sim.session().tick());
@@ -307,7 +425,7 @@ fn observation_lists_only_the_houses_own_objects() {
         .expect("a Russian tank");
     let owner = american(&mut sim);
 
-    let view = AutoPlayView::new(&sim, owner);
+    let view = Observation::new(&sim, owner);
     let ids: Vec<u64> = view.own_entities().map(|entity| entity.entity_id).collect();
     assert!(ids.contains(&tank));
     assert!(
@@ -331,7 +449,7 @@ fn observation_lists_only_the_houses_own_objects() {
 /// The queue is the authority; this only counts what the host has handed it.
 #[test]
 fn a_house_with_no_registration_issues_nothing() {
-    let (mut sim, _rules) = synthetic_arena(0xA17);
+    let (mut sim, rules) = synthetic_arena(0xA17);
     let stranger = sim.interner.intern("Stranger");
     let mut host = AutoPlayHost::new(
         Box::new(ScriptedPolicy::from_pairs([(0, Command::Cheer)])),
@@ -339,9 +457,758 @@ fn a_house_with_no_registration_issues_nothing() {
         usize::MAX,
     );
 
-    host.step(&mut sim);
+    host.step(&mut sim, &rules);
 
     assert!(sim.pending_command_snapshot().is_empty());
+}
+
+/// The retail policy takes its order from the native BasePlan, so what it asks
+/// for is whatever `AI_RecalcBuildOptions` put first — not something this
+/// module picks. It must also ask once, not every frame.
+#[test]
+fn the_retail_policy_queues_the_first_building_its_plan_asks_for() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    // The Recalc reads the plan's owner country; the arena's houses carry none.
+    let country = sim.interner.intern("Americans");
+    sim.houses_mut_for_test()
+        .get_mut(&owner)
+        .expect("the American house")
+        .set_country_for_test(Some(country));
+    sim.spawn_object("GACNST", "Americans", 16, 16, 64, &rules)
+        .expect("a construction yard");
+    let mut policy = RetailBrain::new(0x5EED);
+
+    let decided = frame_commands(&mut policy, &rules, &sim, owner);
+
+    assert!(
+        !policy.plan().nodes().is_empty(),
+        "the native Recalc generated a plan for this house"
+    );
+    assert_eq!(
+        decided.len(),
+        1,
+        "with a construction yard up, the plan's first open node is buildable"
+    );
+    let Command::QueueProduction { type_id } = decided[0] else {
+        panic!(
+            "the retail policy asks for production, got {:?}",
+            decided[0]
+        );
+    };
+    let name = sim.interner().resolve(type_id).to_owned();
+    let object = rules
+        .object_in_category(crate::rules::object_type::ObjectCategory::Building, &name)
+        .expect("a building type");
+    assert_eq!(
+        Observation::new(&sim, owner).can_build(&rules, object, true),
+        crate::sim::production::CanBuild::Yes,
+        "it only asks for what the house may actually build"
+    );
+
+    // The frame drains that request, so the yard is building it: the next
+    // frame asks for nothing more and the plan works one node at a time.
+    let due: Vec<CommandEnvelope> = decided
+        .iter()
+        .map(|command| CommandEnvelope::new(owner, sim.session().tick(), command.clone()))
+        .collect();
+    sim.advance_tick(&due, Some(&rules), None, None, 33);
+    assert!(
+        frame_commands(&mut policy, &rules, &sim, owner).is_empty(),
+        "one node at a time, and one request per node"
+    );
+}
+
+/// The whole retail chain on one arena: the policy deploys the house's MCV,
+/// queues what the native plan asks for and places it, so an unattended house
+/// builds itself out of the loaded rules.
+#[test]
+fn the_retail_policy_builds_the_base_its_plan_asks_for() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let country = sim.interner.intern("Americans");
+    {
+        let house = sim
+            .houses_mut_for_test()
+            .get_mut(&owner)
+            .expect("the American house");
+        house.set_country_for_test(Some(country));
+        // The launch's start cell, as `scenario_bootstrap` installs it.
+        house.set_base_center((16, 16));
+    }
+    crate::sim::credit_income::add_credits(sim.houses_mut_for_test(), owner, 30_000);
+    sim.spawn_object("AMCV", "Americans", 16, 16, 64, &rules)
+        .expect("an MCV");
+    let mut host = AutoPlayHost::new(Box::new(RetailBrain::new(0x5EED)), owner, usize::MAX);
+
+    // The yard the deploy makes, then the plan's own next buildings beside it.
+    let mut ticks = 0;
+    while ticks < 20_000 && buildings(&sim, owner) < 3 {
+        host.step(&mut sim, &rules);
+        let due: Vec<CommandEnvelope> = sim.take_due_commands();
+        sim.advance_tick(&due, Some(&rules), None, None, 33);
+        ticks += 1;
+    }
+
+    assert_eq!(
+        host.rejected(),
+        0,
+        "every command the policy issued is admissible"
+    );
+    assert!(
+        stands(&sim, owner, "GACNST"),
+        "the Construction Yard maker deployed into a yard"
+    );
+    assert!(
+        stands(&sim, owner, "GAPOWR"),
+        "the plan's first building stands after {ticks} frames"
+    );
+    assert!(
+        buildings(&sim, owner) >= 3,
+        "the plan keeps going once a node is filled: {} buildings after {ticks} frames",
+        buildings(&sim, owner)
+    );
+}
+
+#[test]
+fn a_restarted_policy_continues_the_base_instead_of_rebuilding_it() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let country = sim.interner.intern("Americans");
+    {
+        let house = sim
+            .houses_mut_for_test()
+            .get_mut(&owner)
+            .expect("the American house");
+        house.set_country_for_test(Some(country));
+        house.set_base_center((16, 16));
+    }
+    crate::sim::credit_income::add_credits(sim.houses_mut_for_test(), owner, 30_000);
+    sim.spawn_object("AMCV", "Americans", 16, 16, 64, &rules)
+        .expect("an MCV");
+
+    // Play up to the war factory, which is where the base stood when auto play
+    // was switched off and on again.
+    let mut policy = RetailBrain::new(0x5EED);
+    let mut ticks = 0;
+    while ticks < 20_000 && !stands(&sim, owner, "GAWEAP") {
+        step_policy(&mut sim, &rules, &mut policy, owner);
+        ticks += 1;
+    }
+    assert!(
+        stands(&sim, owner, "GAWEAP"),
+        "the base reached the war factory"
+    );
+
+    // A fresh policy is exactly what the hotkey installs on the second press.
+    let mut restarted = RetailBrain::new(0x5EED);
+    let decided = frame_commands(&mut restarted, &rules, &sim, owner);
+    // The takeover's first production request is the plan's next building; the
+    // army's own request may follow it on the war factory.
+    let Some(Command::QueueProduction { type_id }) = decided
+        .iter()
+        .find(|command| matches!(command, Command::QueueProduction { .. }))
+    else {
+        panic!("the takeover queues a building, got {decided:?}");
+    };
+    let name = sim.interner().resolve(*type_id).to_owned();
+    assert!(
+        !["GAPOWR", "GAPILE", "GAREFN", "GAWEAP"].contains(&name.as_str()),
+        "a takeover continues the base instead of building it again, queued {name}"
+    );
+}
+
+#[test]
+fn the_retail_policy_asks_for_the_harvester_that_earns_its_income() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let country = sim.interner.intern("Americans");
+    {
+        let house = sim
+            .houses_mut_for_test()
+            .get_mut(&owner)
+            .expect("the American house");
+        house.set_country_for_test(Some(country));
+        house.set_base_center((16, 16));
+    }
+    crate::sim::credit_income::add_credits(sim.houses_mut_for_test(), owner, 30_000);
+    // A base that can already build vehicles: without a harvester it earns
+    // nothing, so its plan spends the wallet and stops part-way through.
+    for (name, rx, ry) in [("GACNST", 16, 16), ("GAREFN", 22, 20), ("GAWEAP", 20, 14)] {
+        sim.spawn_object(name, "Americans", rx, ry, 64, &rules)
+            .expect("a starting building");
+    }
+
+    let harvester = crate::sim::ai_buildable::first_owner_compatible_harvester(
+        &rules,
+        rules.country_owner_mask("Americans"),
+    )
+    .map(|ty| ty.id.clone())
+    .expect("the rules name a harvester for this country");
+    let mut policy = RetailBrain::new(0x5EED);
+    let decided = frame_commands(&mut policy, &rules, &sim, owner);
+
+    let queued: Vec<String> = decided
+        .iter()
+        .filter_map(|command| match command {
+            Command::QueueProduction { type_id } => {
+                Some(sim.interner().resolve(*type_id).to_owned())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        queued.contains(&harvester),
+        "the AI's own harvester choice is asked for, got {queued:?}"
+    );
+}
+
+/// `AI_Choose_Building`'s power splice (`0x004FE6F6..0x004FE943`): a node
+/// whose drain would take the house past its output gets the side's plant
+/// first. Without it a base builds the lab its plan asks for at 200 output and
+/// blacks itself out.
+#[test]
+fn the_retail_policy_splices_a_power_plant_ahead_of_a_draining_node() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let country = sim.interner.intern("Americans");
+    sim.houses_mut_for_test()
+        .get_mut(&owner)
+        .expect("the American house")
+        .set_country_for_test(Some(country));
+    crate::sim::credit_income::add_credits(sim.houses_mut_for_test(), owner, 30_000);
+    // The yard and its first plant stand, so the plan's next open node is a
+    // building rather than the power node itself.
+    for (name, rx, ry) in [("GACNST", 16, 16), ("GAPOWR", 20, 16)] {
+        sim.spawn_object(name, "Americans", rx, ry, 64, &rules)
+            .expect("a starting building");
+    }
+    // Five points short of the next node's drain: the chooser's `short` gate.
+    let power = sim.power_states.house_mut(owner);
+    power.set_total_output_for_test(200);
+    power.set_total_drain_for_test(195);
+
+    let queued = |sim: &Simulation, decided: &[Command]| -> Vec<String> {
+        decided
+            .iter()
+            .filter_map(|command| match command {
+                Command::QueueProduction { type_id } => {
+                    Some(sim.interner().resolve(*type_id).to_owned())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let mut policy = RetailBrain::new(0x5EED);
+    let decided = frame_commands(&mut policy, &rules, &sim, owner);
+    let plants = queued(&sim, &decided);
+    assert!(
+        plants.iter().any(|name| name == "GAPOWR"),
+        "the plant is spliced ahead of the node, got {plants:?}"
+    );
+    assert_eq!(plants.len(), 1, "the spliced plant is the only request");
+
+    // With the plant in place the node itself may be built.
+    sim.spawn_object("GAPOWR", "Americans", 24, 16, 64, &rules)
+        .expect("the spliced plant");
+    let power = sim.power_states.house_mut(owner);
+    power.set_total_output_for_test(400);
+    power.set_total_drain_for_test(195);
+    let mut policy = RetailBrain::new(0x5EED);
+    let decided = frame_commands(&mut policy, &rules, &sim, owner);
+    let next = queued(&sim, &decided);
+    assert_eq!(next.len(), 1, "one request per decision, got {next:?}");
+    assert_ne!(
+        next[0], "GAPOWR",
+        "the splice is not repeated once the output covers the node"
+    );
+}
+
+/// The army half: a combat unit is sent at the nearest enemy object, the way a
+/// player's attack click on it would be, and the order stands instead of being
+/// repeated every frame.
+#[test]
+fn the_retail_policy_sends_its_army_at_the_nearest_enemy() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let country = sim.interner.intern("Americans");
+    sim.houses_mut_for_test()
+        .get_mut(&owner)
+        .expect("the American house")
+        .set_country_for_test(Some(country));
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 16, 16, 64, &rules)
+        .expect("an American tank");
+    let near = sim
+        .spawn_object("MTNK", "Russians", 18, 16, 64, &rules)
+        .expect("a Russian tank beside it");
+    let _far = sim
+        .spawn_object("MTNK", "Russians", 26, 26, 64, &rules)
+        .expect("a Russian tank across the arena");
+    let mut policy = RetailBrain::new(0x5EED);
+
+    let decided = frame_commands(&mut policy, &rules, &sim, owner);
+    assert!(
+        decided.contains(&Command::Attack {
+            attacker_id: tank,
+            target_id: near,
+        }),
+        "the nearer enemy is the target, got {decided:?}"
+    );
+
+    let again = frame_commands(&mut policy, &rules, &sim, owner);
+    assert!(
+        !again.iter().any(
+            |command| matches!(command, Command::Attack { attacker_id, .. } if *attacker_id == tank)
+        ),
+        "the order already stands, got {again:?}"
+    );
+}
+
+/// The production half of the army chain: a forming team's task force is what
+/// the factory builds, through `AI_Choose_Unit`'s own Unit branch rather than a
+/// list of its own.
+#[test]
+fn the_retail_policy_builds_the_units_its_teams_need() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let country = sim.interner.intern("Americans");
+    {
+        let house = sim
+            .houses_mut_for_test()
+            .get_mut(&owner)
+            .expect("the American house");
+        house.set_country_for_test(Some(country));
+        house.set_base_center((16, 16));
+    }
+    crate::sim::credit_income::add_credits(sim.houses_mut_for_test(), owner, 30_000);
+    for (name, rx, ry) in [
+        ("GACNST", 16, 16),
+        ("GAPOWR", 12, 22),
+        ("GAREFN", 22, 20),
+        ("GAWEAP", 20, 14),
+    ] {
+        sim.spawn_object(name, "Americans", rx, ry, 64, &rules)
+            .expect("a starting building");
+    }
+    let harvester = crate::sim::ai_buildable::first_owner_compatible_harvester(
+        &rules,
+        rules.country_owner_mask("Americans"),
+    )
+    .map(|ty| ty.id.clone())
+    .expect("the rules name a harvester for this country");
+    sim.spawn_object(&harvester, "Americans", 13, 17, 64, &rules)
+        .expect("a harvester in the field");
+    // The house's power and factory state are the frame's work, not the
+    // spawn's.
+    for _ in 0..3 {
+        sim.advance_tick(&[], Some(&rules), None, None, 33);
+    }
+    // A forming team of two Grizzlies, the way `AI_Choose_Unit`'s Unit branch
+    // reads one: short of its whole task force.
+    let script = sim.interner.intern("AUTOPLAY_SCRIPT");
+    let task_force = sim.interner.intern("AUTOPLAY_TASKFORCE");
+    let team_type = sim.interner.intern("AUTOPLAY_TEAMTYPE");
+    sim.team_script_vm
+        .register_script(crate::sim::team_script_vm::TeamScriptDefinition {
+            id: script,
+            actions: Vec::new(),
+            source: crate::rules::team_ai_ini::TeamAiDefinitionSource::FixedAimd,
+        });
+    sim.team_script_vm
+        .register_task_force(crate::sim::team_script_vm::TeamTaskForceDefinition {
+            id: task_force,
+            group: -1,
+            entries: vec![crate::sim::team_script_vm::TeamTaskForceEntry {
+                member_type: crate::sim::team_script_vm::TeamMemberTypeIdentity {
+                    category: crate::rules::object_type::ObjectCategory::Vehicle,
+                    id: sim.interner.intern("MTNK"),
+                },
+                count: 2,
+            }],
+            source: crate::rules::team_ai_ini::TeamAiDefinitionSource::FixedAimd,
+        });
+    sim.team_script_vm
+        .register_team_type(crate::sim::team_script_vm::TeamTypeDefinition {
+            id: team_type,
+            script_id: script,
+            task_force_id: task_force,
+            priority: 0,
+            is_base_defense: false,
+            suicide: false,
+            aggressive: false,
+            combined_movement_zone: crate::rules::locomotor_type::MovementZone::Normal,
+            base_zone_relation_enforced: false,
+            transport_crossing_required: false,
+        });
+    sim.team_script_vm
+        .construct_team(team_type, owner, true, 0, true, None)
+        .expect("a forming team");
+
+    let mut policy = RetailBrain::new(0x5EED);
+    let decided = frame_commands(&mut policy, &rules, &sim, owner);
+    let queued: Vec<String> = decided
+        .iter()
+        .filter_map(|command| match command {
+            Command::QueueProduction { type_id } => {
+                Some(sim.interner().resolve(*type_id).to_owned())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        queued.iter().any(|name| name == "MTNK"),
+        "the team's task force is what the factory builds, got {queued:?}"
+    );
+}
+
+/// A neutral or civilian house is not a target: the map's tech buildings,
+/// garrisonable houses and parked cars belong to `MultiplayPassive` houses, and
+/// the computer AI leaves them alone.
+#[test]
+fn the_retail_policy_leaves_a_passive_house_alone() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let country = sim.interner.intern("Americans");
+    sim.houses_mut_for_test()
+        .get_mut(&owner)
+        .expect("the American house")
+        .set_country_for_test(Some(country));
+    let russian = sim.interner.intern("Russians");
+    sim.houses_mut_for_test()
+        .get_mut(&russian)
+        .expect("the Russian house")
+        .make_multiplay_passive();
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 16, 16, 64, &rules)
+        .expect("an American tank");
+    sim.spawn_object("MTNK", "Russians", 18, 16, 64, &rules)
+        .expect("a neutral tank beside it");
+
+    let mut policy = RetailBrain::new(0x5EED);
+    let decided = frame_commands(&mut policy, &rules, &sim, owner);
+    assert!(
+        !decided.iter().any(|command| matches!(
+            command,
+            Command::Attack { attacker_id, .. } if *attacker_id == tank
+        )),
+        "a passive house is not attacked, got {decided:?}"
+    );
+}
+
+/// An engineer has no weapon: it captures the nearest building it may take
+/// instead of being sent at it with an attack order it cannot execute.
+#[test]
+fn the_retail_policy_sends_an_engineer_to_capture_a_building() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let country = sim.interner.intern("Americans");
+    sim.houses_mut_for_test()
+        .get_mut(&owner)
+        .expect("the American house")
+        .set_country_for_test(Some(country));
+    let engineer = rules
+        .type_array_ids(crate::rules::object_type::ObjectCategory::Infantry)
+        .iter()
+        .find(|name| {
+            rules
+                .object_in_category(crate::rules::object_type::ObjectCategory::Infantry, name)
+                .is_some_and(|ty| ty.engineer)
+        })
+        .cloned()
+        .expect("the rules name an engineer");
+    let capturable = rules
+        .building_ids
+        .iter()
+        .find(|name| {
+            rules
+                .object_in_category(crate::rules::object_type::ObjectCategory::Building, name)
+                .is_some_and(|ty| ty.capturable)
+        })
+        .cloned()
+        .expect("the rules name a capturable building");
+    let sapper = sim
+        .spawn_object(&engineer, "Americans", 16, 16, 64, &rules)
+        .expect("an engineer");
+    let prize = sim
+        .spawn_object(&capturable, "Russians", 24, 24, 64, &rules)
+        .expect("a capturable building");
+
+    let mut policy = RetailBrain::new(0x5EED);
+    let decided = frame_commands(&mut policy, &rules, &sim, owner);
+    assert!(
+        decided.contains(&Command::CaptureBuilding {
+            engineer_id: sapper,
+            target_building_id: prize,
+        }),
+        "the engineer is sent to capture it, got {decided:?}"
+    );
+    assert!(
+        !decided.iter().any(|command| matches!(
+            command,
+            Command::Attack { attacker_id, .. } if *attacker_id == sapper
+        )),
+        "an unarmed engineer is never given an attack order"
+    );
+}
+
+/// The team half of the chain: the house's own selector decides which teams it
+/// raises, and the host applies that through `sim::ai_team_creation` — the same
+/// teams, the same timer restart, the policy's draws.
+#[test]
+fn the_retail_policy_raises_the_teams_its_own_selector_picks() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let russian = sim.interner.intern("Russians");
+    let country = sim.interner.intern("Americans");
+    // A skirmish: the eligibility gates a campaign's factory rule on the game
+    // mode, and `factories_admit` reads it.
+    sim.session
+        .set_game_mode(crate::sim::scenario_session::ScenarioGameMode::from_legacy_nonzero(true));
+    {
+        let house = sim
+            .houses_mut_for_test()
+            .get_mut(&owner)
+            .expect("the American house");
+        house.set_country_for_test(Some(country));
+        house.set_base_center((16, 16));
+        house.set_enemy_house_for_test(Some(russian));
+        house.team_creation_mut().set_trigger_ratio(100);
+        house.set_ai_triggers_active(true);
+    }
+    crate::sim::credit_income::add_credits(sim.houses_mut_for_test(), owner, 30_000);
+    for (name, rx, ry) in [("GACNST", 16, 16), ("GAPOWR", 12, 22), ("GAWEAP", 20, 14)] {
+        sim.spawn_object(name, "Americans", rx, ry, 64, &rules)
+            .expect("a starting building");
+    }
+    for _ in 0..3 {
+        sim.advance_tick(&[], Some(&rules), None, None, 33);
+    }
+    // A trigger of the house's side that always qualifies, and the TeamType it
+    // raises: a forming team of two Grizzlies.
+    let script = sim.interner.intern("RAISE_SCRIPT");
+    let task_force = sim.interner.intern("RAISE_TASKFORCE");
+    let team_type = sim.interner.intern("RAISE_TEAMTYPE");
+    sim.team_script_vm
+        .register_script(crate::sim::team_script_vm::TeamScriptDefinition {
+            id: script,
+            actions: Vec::new(),
+            source: crate::rules::team_ai_ini::TeamAiDefinitionSource::Scenario,
+        });
+    sim.team_script_vm
+        .register_task_force(crate::sim::team_script_vm::TeamTaskForceDefinition {
+            id: task_force,
+            group: -1,
+            entries: vec![crate::sim::team_script_vm::TeamTaskForceEntry {
+                member_type: crate::sim::team_script_vm::TeamMemberTypeIdentity {
+                    category: crate::rules::object_type::ObjectCategory::Vehicle,
+                    id: sim.interner.intern("MTNK"),
+                },
+                count: 2,
+            }],
+            source: crate::rules::team_ai_ini::TeamAiDefinitionSource::Scenario,
+        });
+    sim.team_script_vm
+        .register_team_type(crate::sim::team_script_vm::TeamTypeDefinition {
+            id: team_type,
+            script_id: script,
+            task_force_id: task_force,
+            priority: 0,
+            // Base defense: the eligibility gate's `UseMinDefenseRule=` branch
+            // only admits a defensive TeamType while the house has fewer
+            // defense teams than `MinimumAIDefensiveTeams=`.
+            is_base_defense: true,
+            suicide: false,
+            aggressive: false,
+            combined_movement_zone: crate::rules::locomotor_type::MovementZone::Normal,
+            base_zone_relation_enforced: false,
+            transport_crossing_required: false,
+        });
+    sim.team_script_vm
+        .register_ai_trigger(crate::sim::team_script_vm::TeamAiTriggerDefinition {
+            id: sim.interner.intern("RAISE_TRIGGER"),
+            tokens: Default::default(),
+            display_name: String::new(),
+            enabled: true,
+            primary_team_type: Some(team_type),
+            owner: Some(crate::sim::team_script_vm::TeamAiTriggerOwner::All),
+            threshold: 0,
+            condition: -1,
+            object_type: None,
+            comparison_mask: [0; 32],
+            weights: [crate::util::native_x87::NativeF64Bits::from_bits(100.0f64.to_bits()); 3],
+            multiplayer: true,
+            side: 0,
+            storage_flag_d1: false,
+            secondary_team_type: None,
+            difficulty_enabled: [true; 3],
+            source: crate::rules::team_ai_ini::TeamAiDefinitionSource::Scenario,
+        });
+
+    let mut policy = RetailBrain::new(0x5EED);
+    let mut state = Outbox::default();
+    {
+        let obs = Observation::new(&sim, owner);
+        policy.state(&rules, &obs, &mut state);
+    }
+    assert_eq!(
+        state.intents.len(),
+        1,
+        "the expired timer asks the selector"
+    );
+    let Intent::RaiseTeams(plan) = &state.intents[0] else {
+        panic!("the state half asks for a team plan");
+    };
+    assert_eq!(
+        &plan.picked,
+        &vec![team_type],
+        "the house's trigger is the one raised"
+    );
+
+    // The host applies it, as it does in play.
+    let mut host =
+        crate::sim::autoplay::host::AutoPlayHost::new(Box::new(policy), owner, usize::MAX);
+    host.step(&mut sim, &rules);
+    let raised: Vec<u64> = sim
+        .team_script_vm
+        .teams_in_order()
+        .filter(|team| team.owner() == owner)
+        .map(|team| team.id())
+        .collect();
+    assert_eq!(raised.len(), 1, "the team stands, got {raised:?}");
+    assert!(
+        !Observation::new(&sim, owner).team_creation_due(),
+        "the timer restarted, so the next pass waits its delay"
+    );
+}
+
+/// A team's script owns its members: the team AI pass has no house gate, so a
+/// policy-driven house's teams recruit its units and drive them like any other
+/// house's. The policy's own order step stands down for them, or two issuers
+/// would give the same unit its next step.
+#[test]
+fn the_retail_policy_leaves_a_teams_members_to_its_script() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let country = sim.interner.intern("Americans");
+    sim.houses_mut_for_test()
+        .get_mut(&owner)
+        .expect("the American house")
+        .set_country_for_test(Some(country));
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 16, 16, 64, &rules)
+        .expect("an American tank");
+    sim.spawn_object("MTNK", "Russians", 18, 16, 64, &rules)
+        .expect("a Russian tank beside it");
+    let script = sim.interner.intern("MEMBER_SCRIPT");
+    let task_force = sim.interner.intern("MEMBER_TASKFORCE");
+    let team_type = sim.interner.intern("MEMBER_TEAMTYPE");
+    sim.team_script_vm
+        .register_script(crate::sim::team_script_vm::TeamScriptDefinition {
+            id: script,
+            actions: Vec::new(),
+            source: crate::rules::team_ai_ini::TeamAiDefinitionSource::Scenario,
+        });
+    sim.team_script_vm
+        .register_task_force(crate::sim::team_script_vm::TeamTaskForceDefinition {
+            id: task_force,
+            group: -1,
+            entries: vec![crate::sim::team_script_vm::TeamTaskForceEntry {
+                member_type: crate::sim::team_script_vm::TeamMemberTypeIdentity {
+                    category: crate::rules::object_type::ObjectCategory::Vehicle,
+                    id: sim.interner.intern("MTNK"),
+                },
+                count: 1,
+            }],
+            source: crate::rules::team_ai_ini::TeamAiDefinitionSource::Scenario,
+        });
+    sim.team_script_vm
+        .register_team_type(crate::sim::team_script_vm::TeamTypeDefinition {
+            id: team_type,
+            script_id: script,
+            task_force_id: task_force,
+            priority: 0,
+            is_base_defense: true,
+            suicide: false,
+            aggressive: false,
+            combined_movement_zone: crate::rules::locomotor_type::MovementZone::Normal,
+            base_zone_relation_enforced: false,
+            transport_crossing_required: false,
+        });
+    let team = sim
+        .team_script_vm
+        .construct_team(team_type, owner, true, 0, true, None)
+        .expect("a forming team");
+    sim.team_add_member(team, tank, false, &rules, None, Default::default());
+
+    let mut policy = RetailBrain::new(0x5EED);
+    let decided = frame_commands(&mut policy, &rules, &sim, owner);
+    assert!(
+        !decided.iter().any(|command| matches!(
+            command,
+            Command::Attack { attacker_id, .. } if *attacker_id == tank
+        )),
+        "a recruited member is the script's, got {decided:?}"
+    );
+}
+
+/// One auto play frame: the brain decides, the frame drains what it issued.
+fn step_policy(
+    sim: &mut Simulation,
+    rules: &RuleSet,
+    policy: &mut RetailBrain,
+    owner: crate::sim::intern::InternedId,
+) {
+    let commands = frame_commands(policy, rules, sim, owner);
+    let due: Vec<CommandEnvelope> = commands
+        .iter()
+        .map(|command| CommandEnvelope::new(owner, sim.session().tick(), command.clone()))
+        .collect();
+    sim.advance_tick(&due, Some(rules), None, None, 33);
+}
+
+/// The house's placed structures.
+fn buildings(sim: &Simulation, owner: crate::sim::intern::InternedId) -> usize {
+    sim.entities()
+        .values()
+        .filter(|entity| {
+            entity.owner() == owner
+                && entity.category() == crate::map::entities::EntityCategory::Structure
+                && !entity.lifecycle.in_limbo()
+        })
+        .count()
+}
+
+/// Whether a live, placed object of `name` belongs to `owner`.
+fn stands(sim: &Simulation, owner: crate::sim::intern::InternedId, name: &str) -> bool {
+    let Some(type_id) = sim.interner().get(name) else {
+        return false;
+    };
+    sim.entities().values().any(|entity| {
+        entity.owner() == owner && entity.type_ref() == type_id && !entity.lifecycle.in_limbo()
+    })
 }
 
 /// Drains the queue the way the production frame loop does, up to `tick`.
@@ -350,4 +1217,258 @@ fn advance_to(sim: &mut Simulation, rules: &RuleSet, tick: u64) {
         let _: Vec<CommandEnvelope> = sim.take_due_commands();
         sim.advance_tick(&[], Some(rules), None, None, 33);
     }
+}
+
+// ---------------------------------------------------------------------------
+// The order funnel, managed mode, and the reserved external seam.
+// ---------------------------------------------------------------------------
+
+/// Every command this frame would queue, without advancing the frame.
+fn frame_issued(host: &mut AutoPlayHost, sim: &mut Simulation, rules: &RuleSet) -> Vec<Command> {
+    host.step(sim, rules);
+    sim.take_due_commands()
+        .into_iter()
+        .map(|envelope| envelope.payload)
+        .collect()
+}
+
+#[test]
+fn the_order_funnel_refuses_an_absent_actor_and_names_a_present_one() {
+    let Some((mut sim, rules)) = arena(0xB0B) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 16, 16, 64, &rules)
+        .expect("an American tank");
+    let funnel = Funnel::new(&sim, &rules, owner);
+
+    assert_eq!(
+        funnel.prepare(u64::MAX, Goal::Stop),
+        Err(Refusal::NoSuchActor),
+        "a gone object is refused, not silently dropped"
+    );
+    assert_eq!(Refusal::NoSuchActor.outcome(), ApplyOutcome::Rejected);
+    assert_eq!(
+        funnel.prepare(tank, Goal::Stop),
+        Ok(Command::Stop { entity_id: tank })
+    );
+    assert!(funnel.owns(tank));
+}
+
+#[test]
+fn a_managed_object_is_driven_by_its_routine_and_keeps_its_phase() {
+    let Some((mut sim, rules)) = arena(0xB0B) else {
+        return;
+    };
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 8, 8, 64, &rules)
+        .expect("an American tank");
+    let _enemy = sim
+        .spawn_object("MTNK", "Russians", 10, 8, 64, &rules)
+        .expect("a Russian tank");
+    let mut host = retail_host(&mut sim, 7);
+    assert!(host.attach(tank, MicroKind::Kite, MicroParams::default(), None));
+    assert!(
+        !host.attach(tank, MicroKind::Kite, MicroParams::default(), None),
+        "a second attach must not reset a phase"
+    );
+
+    let issued = frame_issued(&mut host, &mut sim, &rules);
+
+    let attacks: Vec<&Command> = issued
+        .iter()
+        .filter(|command| {
+            matches!(command, Command::Attack { attacker_id, .. } if *attacker_id == tank)
+        })
+        .collect();
+    assert_eq!(attacks.len(), 1, "one issuer per object: its routine");
+    let managed = host.managed().get(tank).expect("still attached");
+    assert_eq!(managed.kind, MicroKind::Kite);
+    assert_eq!(managed.phase.stage, Stage::Engage);
+    assert_eq!(managed.refusals, 0);
+}
+
+#[test]
+fn a_routine_hands_a_healthy_object_back() {
+    let Some((mut sim, rules)) = arena(0xB0B) else {
+        return;
+    };
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 8, 8, 64, &rules)
+        .expect("an American tank");
+    let mut host = retail_host(&mut sim, 7);
+    assert!(host.attach(tank, MicroKind::Retreat, MicroParams::default(), None));
+
+    host.step(&mut sim, &rules);
+
+    assert!(
+        !host.managed().is_managed(tank),
+        "nothing to retreat from: the brain gets the object back"
+    );
+}
+
+#[test]
+fn the_forces_switch_stops_managed_stepping() {
+    let Some((mut sim, rules)) = arena(0xB0B) else {
+        return;
+    };
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 8, 8, 64, &rules)
+        .expect("an American tank");
+    let _enemy = sim
+        .spawn_object("MTNK", "Russians", 10, 8, 64, &rules)
+        .expect("a Russian tank");
+    let mut host = retail_host(&mut sim, 7);
+    host.set_domains(AutoPlayDomains {
+        production: true,
+        forces: false,
+    });
+    assert!(host.attach(tank, MicroKind::Kite, MicroParams::default(), None));
+
+    let issued = frame_issued(&mut host, &mut sim, &rules);
+
+    assert!(
+        !issued.iter().any(
+            |command| matches!(command, Command::Attack { attacker_id, .. } if *attacker_id == tank)
+        ),
+        "the forces switch stops the routine too"
+    );
+    assert!(host.managed().is_managed(tank), "and does not forget it");
+}
+
+#[test]
+fn two_identical_managed_frames_agree() {
+    let Some((mut sim, rules)) = arena(0xD00D) else {
+        return;
+    };
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 8, 8, 64, &rules)
+        .expect("an American tank");
+    let _enemy = sim
+        .spawn_object("MTNK", "Russians", 10, 8, 64, &rules)
+        .expect("a Russian tank");
+    let owner = american(&mut sim);
+
+    // Two tables, the same attach, the same world: the steps must agree, and so
+    // must the phases they leave behind. This is the invariant that keeps
+    // managed state out of the checksum: it is a pure function of the world and
+    // the phase, so a replay reproduces it from the command stream.
+    let mut first = crate::sim::control::micro::MicroTable::default();
+    let mut second = crate::sim::control::micro::MicroTable::default();
+    assert!(first.attach(tank, MicroKind::Kite, MicroParams::default(), None));
+    assert!(second.attach(tank, MicroKind::Kite, MicroParams::default(), None));
+    {
+        let threats = crate::sim::behavior::ThreatView::new(&sim, owner);
+        let left = first.step_one(tank, &sim, &rules, &threats);
+        let right = second.step_one(tank, &sim, &rules, &threats);
+        assert_eq!(left, right);
+        assert!(matches!(
+            left,
+            Some(crate::sim::behavior::MicroStep::Goal(_))
+        ));
+    }
+    assert_eq!(first.get(tank), second.get(tank));
+}
+
+#[test]
+fn the_external_batch_layout_is_fixed_versioned_and_reproducible() {
+    let Some((mut sim, rules)) = arena(0xC0DE) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let obs = Observation::new(&sim, owner);
+    let schema = ObservationSchema::current();
+    assert_eq!(schema.version, OBSERVATION_SCHEMA_VERSION);
+    assert_eq!(schema.globals, GLOBAL_SLOTS);
+    assert_eq!(schema.entity_features, ENTITY_SLOTS);
+    assert_eq!(schema.global_features.len(), GLOBAL_SLOTS);
+    assert_eq!(schema.entity_feature_names.len(), ENTITY_SLOTS);
+
+    let batch = batch_for(&obs, &rules);
+    assert_eq!(batch.version, OBSERVATION_SCHEMA_VERSION);
+    assert_eq!(batch.globals.len(), GLOBAL_SLOTS);
+    assert_eq!(batch.entities.len(), batch.rows() * ENTITY_SLOTS);
+    assert_eq!(batch.rows(), obs.own_entities().count());
+    assert_eq!(
+        batch,
+        batch_for(&obs, &rules),
+        "two builds from one state agree"
+    );
+
+    let ids: Vec<u64> = (0..batch.rows())
+        .filter_map(|row| batch.row_entity(row))
+        .collect();
+    let mut ascending = ids.clone();
+    ascending.sort_unstable();
+    assert_eq!(ids, ascending, "rows follow stable id order");
+}
+
+#[test]
+fn an_action_slot_resolves_its_rows_and_rejects_an_out_of_range_one() {
+    let Some((mut sim, rules)) = arena(0xC0DE) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    sim.spawn_object("MTNK", "Americans", 8, 8, 64, &rules)
+        .expect("an American tank");
+    sim.spawn_object("MTNK", "Americans", 8, 10, 64, &rules)
+        .expect("a second American tank");
+    let obs = Observation::new(&sim, owner);
+    let batch = batch_for(&obs, &rules);
+    assert!(batch.rows() >= 2, "the arena gives the player objects");
+
+    let slot = ActionSlot {
+        row: 0,
+        goal: Goal::Attack { target: 0 },
+        target_row: Some(1),
+        cell: None,
+    };
+    let (actor, goal) = slot.resolve(&batch).expect("rows in range");
+    assert_eq!(Some(actor), batch.row_entity(0));
+    match goal {
+        Goal::Attack { target } => assert_eq!(Some(target), batch.row_entity(1)),
+        other => panic!("expected an attack, got {other:?}"),
+    }
+
+    let out_of_range = ActionSlot {
+        row: u32::MAX,
+        goal: Goal::Stop,
+        target_row: None,
+        cell: None,
+    };
+    assert!(
+        out_of_range.resolve(&batch).is_none(),
+        "a malformed answer is not an empty one"
+    );
+}
+
+#[test]
+fn a_policy_source_is_object_safe_and_carries_the_schema_version() {
+    struct Echo;
+    impl PolicySource for Echo {
+        fn schema(&self) -> ObservationSchema {
+            ObservationSchema::current()
+        }
+
+        fn act(&mut self, _batch: &ObservationBatch) -> Vec<ActionSlot> {
+            vec![ActionSlot {
+                row: 0,
+                goal: Goal::Stop,
+                target_row: None,
+                cell: None,
+            }]
+        }
+    }
+
+    let mut source: Box<dyn PolicySource> = Box::new(Echo);
+    let batch = ObservationBatch {
+        version: OBSERVATION_SCHEMA_VERSION,
+        globals: vec![0; GLOBAL_SLOTS],
+        entities: vec![0; ENTITY_SLOTS],
+    };
+    assert_eq!(source.schema().version, OBSERVATION_SCHEMA_VERSION);
+    let answer = source.act(&batch);
+    assert_eq!(answer.len(), 1);
+    assert_eq!(answer[0].goal, Goal::Stop);
 }

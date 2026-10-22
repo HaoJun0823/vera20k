@@ -41,7 +41,7 @@ pub(crate) fn registered_commands() -> &'static [CommandMetadata] {
 /// commands. The CSF has no entry, so the page shows the key itself.
 pub(crate) const VERA_CATEGORY_KEY: &str = "vera20k";
 
-const REGISTERED_COMMANDS: [CommandMetadata; 88] = [
+const REGISTERED_COMMANDS: [CommandMetadata; 89] = [
     command!(
         HotkeyCommand::Follow,
         "Follow",
@@ -750,6 +750,16 @@ const REGISTERED_COMMANDS: [CommandMetadata; 88] = [
         "VERA:AutoPlay",
         "vera20k",
         "VERA:AutoPlayDesc",
+        None
+    ),
+    // Auto play's second switch: the forces half alone. Same category, same
+    // unbound default, so a player can assign it next to the master toggle.
+    command!(
+        HotkeyCommand::ToggleAutoPlayForces,
+        "AutoPlayForces",
+        "VERA:AutoPlayForces",
+        "vera20k",
+        "VERA:AutoPlayForcesDesc",
         None
     ),
 ];

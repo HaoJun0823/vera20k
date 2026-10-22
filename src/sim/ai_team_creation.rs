@@ -53,6 +53,7 @@ use crate::rules::superweapon_type::SuperWeaponKind;
 use crate::rules::team_ai_ini::TeamAiDefinitionSource;
 use crate::sim::intern::InternedId;
 use crate::sim::production::find_factory;
+use crate::sim::rng::SimRng;
 use crate::sim::superweapon::{super_nearly_ready, super_types_with_type};
 use crate::sim::team_script_vm::{
     TeamAiTriggerDefinition, TeamAiTriggerOwner, TeamMemberTypeIdentity, TeamTypeDefinition,
@@ -147,8 +148,62 @@ pub(crate) fn update_team_creation(
     {
         return;
     }
-    let team_types = select_team_types(sim, rules, owner, frame_effects);
-    for team_type in team_types {
+    let mut rng = std::mem::replace(&mut sim.scenario_rng, SimRng::new(0));
+    let plan = plan_team_creation(&*sim, rules, owner, |low, high| {
+        rng.next_range_i32_inclusive(low, high)
+    });
+    sim.scenario_rng = rng;
+    apply_team_creation(sim, rules, owner, plan, frame, frame_effects);
+}
+
+/// What the team block decided for one house: the TeamTypes to create, and the
+/// oldest base-defense team the selector made room for by destroying it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TeamCreationPlan {
+    pub picked: Vec<InternedId>,
+    pub evict: Option<u64>,
+}
+
+/// [`update_team_creation`]'s decision, without its writes: the selector's
+/// answer for `owner` as it stands.
+///
+/// A caller that plays a house the computer AI never plays (auto play drives a
+/// human house) applies this through [`apply_team_creation`] itself, with its
+/// own draws; the decision and the state it touches stay one port either way.
+pub(crate) fn plan_team_creation(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    draw: impl FnMut(i32, i32) -> i32,
+) -> TeamCreationPlan {
+    select_team_types_with(
+        sim,
+        rules,
+        owner,
+        |sim, trigger, enemy, defense_full| {
+            is_eligible(sim, rules, trigger, owner, enemy, defense_full)
+        },
+        draw,
+    )
+}
+
+/// [`update_team_creation`]'s writes for one house: the eviction, the
+/// `Autocreate=` marks, the new teams and the timer restart.
+pub(crate) fn apply_team_creation(
+    sim: &mut Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    plan: TeamCreationPlan,
+    frame: i32,
+    frame_effects: FrameEffects<'_>,
+) {
+    if let Some(oldest) = plan.evict {
+        sim.destroy_team(oldest, rules, frame_effects);
+    }
+    for &team_type in &plan.picked {
+        sim.team_script_vm.mark_autocreate(team_type);
+    }
+    for team_type in plan.picked {
         sim.create_team(team_type, Some(owner), rules);
     }
     if let Some(house) = sim.houses.get_mut(&owner) {
@@ -167,7 +222,7 @@ pub(crate) fn update_team_creation(
 ///   teams, the defense teams are full when they exceed
 ///   `MaximumAIDefensiveTeams=`;
 /// - otherwise the oldest defense team (the first of the lowest creation
-///   frame) is destroyed, and the defense teams are full.
+///   frame) is the one to destroy, and the defense teams are full.
 ///
 /// Still below the cap, every AI trigger in order that qualifies
 /// ([`is_eligible`]) joins the draw with its weight (`ftol`); the first one
@@ -177,46 +232,25 @@ pub(crate) fn update_team_creation(
 /// second after the first.
 ///
 /// When one of the house's teams is still forming and is of a picked type,
-/// nothing is created. Otherwise each picked TeamType is marked
-/// `Autocreate=` (`+0xA9`).
-fn select_team_types(
-    sim: &mut Simulation,
-    rules: &RuleSet,
-    owner: InternedId,
-    frame_effects: FrameEffects<'_>,
-) -> Vec<InternedId> {
-    select_team_types_with(
-        sim,
-        rules,
-        owner,
-        |sim, trigger, enemy, defense_full| {
-            is_eligible(sim, rules, trigger, owner, enemy, defense_full)
-        },
-        |sim, low, high| sim.scenario_rng.next_range_i32_inclusive(low, high),
-        frame_effects,
-    )
-}
-
-/// [`select_team_types`] with `eligible` as the eligibility test
-/// ([`is_eligible`] in play) and `draw` as `RandomRanged` on the Scenario RNG.
+/// nothing is created. The `Autocreate=` marks of what is picked are
+/// [`apply_team_creation`]'s, not this function's.
 pub(crate) fn select_team_types_with(
-    sim: &mut Simulation,
+    sim: &Simulation,
     rules: &RuleSet,
     owner: InternedId,
     eligible: impl FnMut(&Simulation, &TeamAiTriggerDefinition, Option<InternedId>, bool) -> bool,
-    mut draw: impl FnMut(&mut Simulation, i32, i32) -> i32,
-    frame_effects: FrameEffects<'_>,
-) -> Vec<InternedId> {
+    mut draw: impl FnMut(i32, i32) -> i32,
+) -> TeamCreationPlan {
     let Some(house) = sim.houses.get(&owner) else {
-        return Vec::new();
+        return TeamCreationPlan::default();
     };
     let enemy = house.enemy_house();
     let ratio = house.team_creation().ratio;
     let triggers_active = house.ai_activation().ai_triggers_active;
     let team_cap = house.difficulty_value(&rules.general.total_ai_team_cap);
     let max_defensive = house.difficulty_value(&rules.general.maximum_ai_defensive_teams);
-    let mut picked = Vec::new();
-    let roll = draw(sim, 1, 100);
+    let mut plan = TeamCreationPlan::default();
+    let roll = draw(1, 100);
     if roll <= ratio && triggers_active {
         let (mut teams, defense_teams) = count_teams(sim, owner);
         let mut defense_full = false;
@@ -225,10 +259,10 @@ pub(crate) fn select_team_types_with(
         } else if let Some(oldest) = oldest_defense_team(sim, owner) {
             teams -= 1;
             defense_full = true;
-            sim.destroy_team(oldest, rules, frame_effects);
+            plan.evict = Some(oldest);
         }
         if teams < team_cap {
-            picked = draw_ai_trigger(sim, enemy, defense_full, eligible, draw);
+            plan.picked = draw_ai_trigger(sim, enemy, defense_full, eligible, draw);
         }
     }
     let vm = &sim.team_script_vm;
@@ -237,15 +271,12 @@ pub(crate) fn select_team_types_with(
             && team.is_forming()
             && team
                 .team_type_id()
-                .is_some_and(|team_type| picked.contains(&team_type))
+                .is_some_and(|team_type| plan.picked.contains(&team_type))
     });
     if cancelled {
-        return Vec::new();
+        plan.picked.clear();
     }
-    for &team_type in &picked {
-        sim.team_script_vm.mark_autocreate(team_type);
-    }
-    picked
+    plan
 }
 
 /// The house's teams, and those of an `IsBaseDefense=` TeamType. The latter
@@ -287,11 +318,11 @@ fn oldest_defense_team(sim: &Simulation, owner: InternedId) -> Option<u64> {
 /// The weighted draw among the qualifying AI triggers (`0x006F0C3E..
 /// 0x006F0DC2`).
 fn draw_ai_trigger(
-    sim: &mut Simulation,
+    sim: &Simulation,
     enemy: Option<InternedId>,
     defense_full: bool,
     mut eligible: impl FnMut(&Simulation, &TeamAiTriggerDefinition, Option<InternedId>, bool) -> bool,
-    mut draw: impl FnMut(&mut Simulation, i32, i32) -> i32,
+    mut draw: impl FnMut(i32, i32) -> i32,
 ) -> Vec<InternedId> {
     let mut entries: Vec<(Option<InternedId>, Option<InternedId>, i32)> = Vec::new();
     let mut priority = false;
@@ -322,7 +353,7 @@ fn draw_ai_trigger(
     if total == 0 || entries.is_empty() {
         return Vec::new();
     }
-    let roll = draw(sim, 1, total) as u32;
+    let roll = draw(1, total) as u32;
     let mut sum: u32 = 0;
     for (primary, secondary, weight) in entries {
         sum = sum.wrapping_add(weight as u32);

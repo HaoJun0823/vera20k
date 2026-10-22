@@ -62,6 +62,9 @@ pub(crate) enum HotkeyCommand {
     /// VERA's own: install or remove the auto play host. Registered after the
     /// retail commands so the original catalog indices are untouched.
     ToggleAutoPlay,
+    /// VERA's own: flip only the forces half of an installed host, so the base
+    /// keeps building while the player takes the troops back, or the other way.
+    ToggleAutoPlayForces,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

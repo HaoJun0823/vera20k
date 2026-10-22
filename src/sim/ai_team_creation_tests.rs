@@ -241,8 +241,8 @@ fn the_selector_matches_the_original() {
             .collect();
         let mut asked = Vec::new();
         let mut draws = Draws::new(row);
-        let picked = select_team_types_with(
-            &mut sim,
+        let plan = select_team_types_with(
+            &sim,
             &rules,
             owner,
             |_, trigger, asked_enemy, defense_full| {
@@ -250,11 +250,10 @@ fn the_selector_matches_the_original() {
                 asked.push((slot, asked_enemy, defense_full));
                 answers[slot]
             },
-            |_, low, high| draws.draw(low, high),
-            crate::sim::world::FrameEffects::default(),
+            |low, high| draws.draw(low, high),
         );
         let slot_of = |id: InternedId| team_types.iter().position(|&tt| tt == id).unwrap();
-        let picked: Vec<usize> = picked.into_iter().map(slot_of).collect();
+        let picked: Vec<usize> = plan.picked.iter().copied().map(slot_of).collect();
         let native_picked: Vec<usize> = row["picked"]
             .as_array()
             .unwrap()
@@ -262,26 +261,12 @@ fn the_selector_matches_the_original() {
             .map(index)
             .collect();
         assert_eq!(picked, native_picked, "{context}: picked");
-        let autocreate: Vec<i32> = team_types
-            .iter()
-            .map(|&id| i32::from(sim.team_script_vm.team_type_ini(id).unwrap().autocreate))
-            .collect();
-        assert_eq!(
-            autocreate,
-            dwords(&row["autocreate"]),
-            "{context}: Autocreate="
-        );
         let native_enemy = flag(&row["enemy"]).then_some(enemy);
         let native_asked: Vec<(usize, Option<InternedId>, bool)> = events(row, "eligible")
             .into_iter()
             .map(|call| (index(&call[1]), native_enemy, dword(&call[2]) != 0))
             .collect();
         assert_eq!(asked, native_asked, "{context}: eligibility asked");
-        let live: Vec<u64> = sim
-            .team_script_vm
-            .teams_in_order()
-            .map(|team| team.id())
-            .collect();
         let destroyed: Vec<usize> = events(row, "destroy")
             .into_iter()
             .map(|call| index(&call[1]))
@@ -292,7 +277,48 @@ fn the_selector_matches_the_original() {
             .filter(|(slot, _)| !destroyed.contains(slot))
             .map(|(_, &id)| id)
             .collect();
-        assert_eq!(live, native_live, "{context}: teams left");
+        // The selector's decision is only half the block: apply it as
+        // `update_team_creation` does, so the eviction, the `Autocreate=` marks
+        // and the new teams are the ones the apply step produces.
+        let frame = sim.session.binary_frame() as i32;
+        apply_team_creation(
+            &mut sim,
+            &rules,
+            owner,
+            plan,
+            frame,
+            crate::sim::world::FrameEffects::default(),
+        );
+        let autocreate: Vec<i32> = team_types
+            .iter()
+            .map(|&id| i32::from(sim.team_script_vm.team_type_ini(id).unwrap().autocreate))
+            .collect();
+        assert_eq!(
+            autocreate,
+            dwords(&row["autocreate"]),
+            "{context}: Autocreate="
+        );
+        let live: Vec<u64> = sim
+            .team_script_vm
+            .teams_in_order()
+            .map(|team| team.id())
+            .collect();
+        let surviving: Vec<u64> = live
+            .iter()
+            .copied()
+            .filter(|id| teams.contains(id))
+            .collect();
+        let created: Vec<u64> = live
+            .iter()
+            .copied()
+            .filter(|id| !teams.contains(id))
+            .collect();
+        assert_eq!(surviving, native_live, "{context}: teams left");
+        assert_eq!(
+            created.len(),
+            native_picked.len(),
+            "{context}: teams created"
+        );
         assert_eq!(draws.asked, native_draws(row), "{context}: draws");
     }
 }

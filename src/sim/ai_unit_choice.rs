@@ -46,6 +46,7 @@ use crate::rules::ruleset::RuleSet;
 use crate::sim::game_entity::GameEntity;
 use crate::sim::intern::InternedId;
 use crate::sim::production::{CanBuild, can_build};
+use crate::sim::rng::SimRng;
 use crate::sim::world::Simulation;
 use crate::util::native_random::unit_draw_threshold;
 use crate::util::native_x87::{NativeF64Bits, X87Chop53};
@@ -147,6 +148,42 @@ impl HouseAiUnitChoices {
 /// (unsigned). Without one, it takes the unit the first buildable refinery
 /// undeploys into while it has fewer gatherers than `AISlaveMinerNumber=`.
 /// Otherwise it asks the teams.
+/// [`choose`]'s decision, for a caller that applies it elsewhere: the class
+/// index the choosers would fill `kind` with.
+///
+/// A policy that plays a house the computer AI never plays drives this with
+/// its own draws and leaves the slot alone — the house's own slot is the
+/// chooser's output, and writing it here would be a second writer.
+pub(crate) fn unit_choice_decision(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    kind: UnitChoiceKind,
+    mut draw: impl FnMut(i32, i32) -> i32,
+) -> Option<i32> {
+    let Some(house) = sim.houses.get(&owner) else {
+        return None;
+    };
+    if house.ai_unit_choices().get(kind) != -1 {
+        return None;
+    }
+    let fill_earliest_percent =
+        house.difficulty_value(&rules.general.fill_earliest_team_probability);
+    let gates = ChooserGates::of_house(sim, rules, owner);
+    let harvester = (kind == UnitChoiceKind::Unit)
+        .then(|| harvester_choice(sim, rules, owner, gates))
+        .flatten();
+    match harvester {
+        Some(index) => Some(index),
+        None => {
+            let candidates = candidates(sim, rules, owner, kind);
+            pick(&candidates, fill_earliest_percent, |low, high| {
+                draw(low, high)
+            })
+        }
+    }
+}
+
 pub(crate) fn choose(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -159,20 +196,11 @@ pub(crate) fn choose(
     if house.ai_unit_choices().get(kind) != -1 {
         return;
     }
-    let fill_earliest_percent =
-        house.difficulty_value(&rules.general.fill_earliest_team_probability);
-    let choice = match (kind == UnitChoiceKind::Unit)
-        .then(|| harvester_choice(sim, rules, owner))
-        .flatten()
-    {
-        Some(index) => Some(index),
-        None => {
-            let candidates = candidates(sim, rules, owner, kind);
-            pick(&candidates, fill_earliest_percent, |low, high| {
-                sim.scenario_rng.next_range_i32_inclusive(low, high)
-            })
-        }
-    };
+    let mut rng = std::mem::replace(&mut sim.scenario_rng, SimRng::new(0));
+    let choice = unit_choice_decision(&*sim, rules, owner, kind, |low, high| {
+        rng.next_range_i32_inclusive(low, high)
+    });
+    sim.scenario_rng = rng;
     if let Some(index) = choice
         && let Some(house) = sim.houses.get_mut(&owner)
     {
@@ -180,9 +208,53 @@ pub(crate) fn choose(
     }
 }
 
+/// The two AI-only facts the harvester branch gates on, for a caller that
+/// plays a house the AI never plays.
+///
+/// The computer AI reads both from the house. Auto play drives the house in
+/// the player's place, so nothing human controls it and its IQ is the grown
+/// one an AI house reaches; a human house keeps IQ 0, which would leave the
+/// branch dormant and a base with no income.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChooserGates {
+    /// Native `IsHumanPlayer`.
+    pub human: bool,
+    /// `House+0x24C` `CurrentIQ`.
+    pub current_iq: i32,
+}
+
+impl ChooserGates {
+    /// The gates as the house itself reports them: what the computer AI uses.
+    pub(crate) fn of_house(sim: &Simulation, rules: &RuleSet, owner: InternedId) -> Self {
+        let Some(house) = sim.houses.get(&owner) else {
+            return Self {
+                human: false,
+                current_iq: 0,
+            };
+        };
+        Self {
+            human: house.is_controlled_by_human(sim.session.game_mode_nonzero()),
+            current_iq: house.current_iq(),
+        }
+    }
+
+    /// The gates for a house a policy plays as if it were a computer house.
+    pub(crate) fn policy_played(rules: &RuleSet) -> Self {
+        Self {
+            human: false,
+            current_iq: rules.general.max_iq_levels,
+        }
+    }
+}
+
 /// The Unit chooser's harvester branch (see [`choose`]): the vehicle index
 /// it takes, or `None` to ask the teams.
-fn harvester_choice(sim: &Simulation, rules: &RuleSet, owner: InternedId) -> Option<i32> {
+pub(crate) fn harvester_choice(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    gates: ChooserGates,
+) -> Option<i32> {
     let house = sim.houses.get(&owner)?;
     let country_name = sim.interner.resolve(house.house_type_id());
     let country_bit = rules.country_owner_mask(country_name);
@@ -204,10 +276,10 @@ fn harvester_choice(sim: &Simulation, rules: &RuleSet, owner: InternedId) -> Opt
         destinations: house.tracking().resource_destinations(),
         harvesters_per_refinery: house.difficulty_value(&rules.general.harvesters_per_refinery),
         slave_miners: house.difficulty_value(&rules.ai_slave_miner_number),
-        current_iq: house.current_iq(),
+        current_iq: gates.current_iq,
         iq_harvester: rules.general.iq_harvester,
         no_ore: house.harvester_no_ore(),
-        human: house.is_controlled_by_human(sim.session.game_mode_nonzero()),
+        human: gates.human,
         tech_level: house.tech_level(),
     })
 }

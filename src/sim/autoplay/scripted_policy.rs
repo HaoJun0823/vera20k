@@ -1,12 +1,16 @@
-//! The scripted policy: a fixed list of commands released by frame number.
+//! The scripted brain: a fixed list of commands released by frame number.
 //!
-//! It is a schedule, not a plan — it never reads the view. It exists so the
-//! actuation path can be built and tested against something, and it is the
-//! simplest thing that can occupy the policy seam.
+//! It is a schedule, not a plan — it never reads the observation. It exists so
+//! the actuation path can be built and tested against something, and it is the
+//! simplest thing that can occupy the brain seam. Because its steps are
+//! commands rather than goals, it uses the outbox's command channel: the gate
+//! (domain switch, budget, ownership, order admission) applies to it exactly as
+//! it does to a retail brain's orders, which is the point of keeping it.
 
-use crate::sim::autoplay::observation::AutoPlayView;
-use crate::sim::autoplay::policy::AutoPlayPolicy;
+use crate::rules::ruleset::RuleSet;
 use crate::sim::command::Command;
+use crate::sim::control::brain::{Brain, Outbox};
+use crate::sim::control::observation::Observation;
 
 /// One command, released at one frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,7 +20,7 @@ pub struct ScriptStep {
     pub command: Command,
 }
 
-/// A policy that plays a fixed script.
+/// A brain that plays a fixed script.
 #[derive(Debug, Clone, Default)]
 pub struct ScriptedPolicy {
     steps: Vec<ScriptStep>,
@@ -47,21 +51,19 @@ impl ScriptedPolicy {
     }
 }
 
-impl AutoPlayPolicy for ScriptedPolicy {
+impl Brain for ScriptedPolicy {
     fn name(&self) -> &'static str {
         "scripted"
     }
 
-    fn decide(&mut self, view: &AutoPlayView<'_>) -> Vec<Command> {
-        let tick = view.tick();
-        let mut released = Vec::new();
+    fn think(&mut self, _rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
+        let tick = obs.tick();
         while let Some(step) = self.steps.get(self.next) {
             if step.frame > tick {
                 break;
             }
-            released.push(step.command.clone());
+            out.command(step.command.clone());
             self.next += 1;
         }
-        released
     }
 }

@@ -1769,12 +1769,20 @@ fn place_ready_building_for_tab(state: &mut AppState, tab: SidebarTab) {
 /// 67 ms frame.
 const AUTO_PLAY_COMMANDS_PER_FRAME: usize = 8;
 
+/// The retail policy's own generator seed. The policy's draws belong to it, not
+/// to a simulation stream, so a fixed seed keeps an unattended match
+/// reproducible frame for frame.
+const AUTO_PLAY_POLICY_SEED: u64 = 0x5EED_2_1;
+
 /// VERA's own: auto play runs exactly while a host is installed, so there is no
-/// second switch that has to be kept in step with it.
+/// second switch that has to be kept in step with it. Installing brings both
+/// halves — building and forces — on.
 ///
-/// The installed policy is a `ScriptedPolicy`, and where its script comes from
-/// is still open (docs/autoplay.md): until something supplies one, this
-/// installs the path with nothing to play.
+/// The installed brain is the retail one (`RetailBrain`): it generates the
+/// native BasePlan from the loaded rules — `AI_RecalcBuildOptions` — and plays
+/// it through the command path: deploy the MCV, queue what the plan asks for,
+/// place it, keep the harvesters coming. `docs/autoplay.md` carries the scope
+/// and the residuals.
 fn toggle_auto_play(state: &mut AppState) {
     let previous = state.match_state.auto_play.take();
     let installing = previous.is_none();
@@ -1788,21 +1796,43 @@ fn toggle_auto_play(state: &mut AppState) {
             return;
         };
         state.match_state.auto_play = Some(crate::sim::autoplay::AutoPlayHost::new(
-            Box::new(crate::sim::autoplay::ScriptedPolicy::default()),
+            Box::new(crate::sim::strategy::retail::RetailBrain::new(
+                AUTO_PLAY_POLICY_SEED,
+            )),
             owner,
             AUTO_PLAY_COMMANDS_PER_FRAME,
         ));
     }
-    // A toggle gives no other sign it fired, and this is the message sink that
-    // takes plain text rather than a CSF template.
-    crate::app::input::messages::post_selection_navigation_text(
-        state,
-        if installing {
-            "Auto play on"
-        } else {
-            "Auto play off"
-        },
-    );
+    post_auto_play_state(state);
+}
+
+/// The second switch: the forces half alone. Turning it off leaves the base
+/// building and stops new unit orders; orders already given keep running, so
+/// the player can take the troops back without them dropping their work.
+fn toggle_auto_play_forces(state: &mut AppState) {
+    let Some(host) = state.match_state.auto_play.as_mut() else {
+        // Without a host there is nothing to flip; say so rather than install one.
+        crate::app::input::messages::post_selection_navigation_text(state, "Auto play off");
+        return;
+    };
+    let mut domains = host.domains();
+    domains.forces = !domains.forces;
+    host.set_domains(domains);
+    post_auto_play_state(state);
+}
+
+/// Report which switches are on. A toggle gives no other sign it fired, and
+/// this is the message sink that takes plain text rather than a CSF template.
+fn post_auto_play_state(state: &mut AppState) {
+    let message = match state.match_state.auto_play.as_ref() {
+        Some(host) => format!(
+            "Auto play: {} ({})",
+            host.domains().describe(),
+            host.policy_name()
+        ),
+        None => "Auto play off".to_string(),
+    };
+    crate::app::input::messages::post_selection_navigation_text(state, &message);
 }
 
 fn dispatch_retail_hotkey(state: &mut AppState, command: HotkeyCommand) {
@@ -1878,8 +1908,10 @@ fn dispatch_retail_hotkey(state: &mut AppState, command: HotkeyCommand) {
         HotkeyCommand::Follow => crate::app::input::camera::toggle_follow_target(state),
         HotkeyCommand::PlanningMode => crate::app::input::planning_mode::toggle(state),
         HotkeyCommand::Delete => crate::app::input::planning_mode::delete_at_cursor(state),
-        // VERA's own: auto play is on while a host is installed.
+        // VERA's own: auto play is on while a host is installed; the second key
+        // flips only the forces half.
         HotkeyCommand::ToggleAutoPlay => toggle_auto_play(state),
+        HotkeyCommand::ToggleAutoPlayForces => toggle_auto_play_forces(state),
         HotkeyCommand::ScatterObject => queue_scatter_for_selected(state),
         HotkeyCommand::AllToCheer => queue_house_cheer(state),
         HotkeyCommand::VeterancyNav => selection_navigation::execute_category_navigation(
