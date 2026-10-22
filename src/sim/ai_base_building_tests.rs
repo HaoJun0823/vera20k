@@ -723,3 +723,47 @@ fn a_human_yard_places_nothing() {
     );
     assert_eq!(node_state(&sim, owner), [((16, 16), 0)]);
 }
+
+/// A brain plays the human house's economy block too: `policy_played` is the
+/// latch that lets a factory exit step the mode, and the same house without it
+/// stays where it was.
+#[test]
+fn a_policy_played_house_steps_its_production_mode() {
+    let rules = rules("");
+    assert_eq!(rules.general.ai_alternate_production_credit_cutoff, 2000);
+    let (mut sim, owner) = computer_house(true);
+    let house = sim.houses.get_mut(&owner).unwrap();
+    house.set_is_human_for_test(true);
+    house.set_player_control_for_test(true);
+    // Broke, which is what puts a computer house on one half of the queue.
+    house.economy_mut().set_credits_for_test(0);
+    house.ai_production_mut().set_for_test(0, -1, true);
+
+    let step = |sim: &mut crate::sim::world::Simulation| {
+        economy_state_machine(
+            &sim.interner,
+            &sim.session,
+            &mut sim.scenario_rng,
+            &mut sim.houses,
+            &sim.power_states,
+            &rules,
+            owner,
+            false,
+        );
+    };
+
+    step(&mut sim);
+    assert_eq!(
+        sim.houses[&owner].ai_production().mode(),
+        0,
+        "a house a human controls has no AI economy block"
+    );
+
+    sim.houses.get_mut(&owner).unwrap().set_policy_played();
+    step(&mut sim);
+    assert_eq!(
+        sim.houses[&owner].ai_production().mode(),
+        1,
+        "a brain-played house steps the mode like a computer house"
+    );
+}

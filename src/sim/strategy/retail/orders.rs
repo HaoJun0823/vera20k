@@ -1,20 +1,27 @@
-//! The army's direct orders: attack the nearest hostile, capture with
-//! engineers.
+//! The army's direct orders: put an idle combat unit on area guard, and every
+//! engineer on the nearest building it may capture.
 //!
-//! Native teams carry this. An `AITrigger` creates a team, its script assigns
-//! missions, and `team_script_vm` writes them onto the members. Those missions
-//! have no player equivalent, and a team's script already runs for a
+//! Native teams carry the attack. An `AITrigger` creates a team, its script
+//! assigns missions, and `team_script_vm` writes them onto the members. Those
+//! missions have no player equivalent, and a team's script already runs for a
 //! brain-driven house, so this module only covers **the units no team has
-//! taken**: each is sent at the nearest hostile object (each engineer at the
-//! nearest capturable building), which is what a player's click on it means.
+//! taken**: an idle one goes on area guard where it stands, and the sim's own
+//! Guard mission decides what it engages and where it returns to. That is the
+//! native posture for a unit no team has taken — it sits, it does not charge,
+//! and it is the sim, not this module, that picks its fight.
 //!
-//! That is a residual, not a port: native target selection reads team scripts,
-//! threat and value, so a play test should expect an army that fights everything
-//! hostile it can reach rather than one that fights what matters. Fog is
-//! likewise not modelled — the computer AI is omniscient and this inherits that.
+//! Sending every idle unit at the nearest hostile instead is what a play test
+//! loses with: the opening squad walks into the enemy's own pre-placed force
+//! and dies, the plan loses the units it was going to recruit, and the base
+//! keeps spending on replacements it cannot afford.
+//!
+//! That leaves the offensive half to the teams, which is where the retail AI
+//! puts it: a hostile the enemy owns is what an `AITrigger` needs, and the
+//! enemy search that sets it runs in the house's own Strategy tick
+//! (`sim::house_strategy`), which the brain asks for.
 //!
 //! The brain remembers one order per unit and refreshes it after
-//! [`ORDER_REFRESH_FRAMES`] or when a nearer target appears. Re-issuing every
+//! [`ORDER_REFRESH_FRAMES`] or when the order would change. Re-issuing every
 //! frame would spend the whole per-frame budget on one army, and re-issuing a
 //! unit that the gate refused would hide the refusal.
 
@@ -25,6 +32,7 @@ use crate::rules::ruleset::RuleSet;
 use crate::sim::control::Goal;
 use crate::sim::control::brain::Outbox;
 use crate::sim::control::observation::{EnemyEntity, Observation};
+use crate::sim::mission::{MissionId, MissionType};
 use crate::sim::strategy::retail::{ORDER_REFRESH_FRAMES, RetailBrain};
 
 /// How many new unit orders one frame may carry. The board drops everything
@@ -36,7 +44,8 @@ const FORCE_ORDERS_PER_FRAME: usize = 8;
 /// One order the brain has issued, and when it looks at that unit again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SentOrder {
-    pub(super) target: u64,
+    /// The hostile the unit was sent at, or `None` for the hold order.
+    pub(super) target: Option<u64>,
     pub(super) refresh: u64,
 }
 
@@ -85,14 +94,14 @@ pub(super) fn engineers(
         let current = brain
             .orders
             .get(&entity.entity_id)
-            .is_some_and(|sent| sent.target == target.entity_id && tick < sent.refresh);
+            .is_some_and(|sent| sent.target == Some(target.entity_id) && tick < sent.refresh);
         if current {
             continue;
         }
         brain.orders.insert(
             entity.entity_id,
             SentOrder {
-                target: target.entity_id,
+                target: Some(target.entity_id),
                 refresh: tick.saturating_add(ORDER_REFRESH_FRAMES),
             },
         );
@@ -106,7 +115,7 @@ pub(super) fn engineers(
     }
 }
 
-/// Send the army at the enemy.
+/// Put every idle combat unit no team has taken on area guard where it stands.
 pub(super) fn forces(
     brain: &mut RetailBrain,
     rules: &RuleSet,
@@ -119,8 +128,10 @@ pub(super) fn forces(
     // the army and a recycled id cannot inherit an old order.
     let ids: BTreeSet<u64> = own.iter().map(|entity| entity.entity_id).collect();
     brain.orders.retain(|id, _| ids.contains(id));
-    let enemies: Vec<EnemyEntity> = obs.enemy_entities().collect();
-    if enemies.is_empty() {
+    if !own.iter().any(|entity| {
+        obs.object_type(rules, entity.type_id)
+            .is_some_and(|ty| is_combat_unit(rules, ty))
+    }) {
         return;
     }
     let mut issued = 0;
@@ -139,31 +150,47 @@ pub(super) fn forces(
         if obs.team_has_member(entity.entity_id) {
             continue;
         }
-        let Some(target) = nearest_enemy(&enemies, entity.cell) else {
+        // A unit that is already holding or fighting is doing exactly this, and
+        // its mission owns it: a second Guard would cancel the fight.
+        if holds_or_fights(entity.mission) {
             continue;
-        };
+        }
         let current = brain
             .orders
             .get(&entity.entity_id)
-            .is_some_and(|sent| sent.target == target.entity_id && tick < sent.refresh);
+            .is_some_and(|sent| sent.target.is_none() && tick < sent.refresh);
         if current {
             continue;
         }
         brain.orders.insert(
             entity.entity_id,
             SentOrder {
-                target: target.entity_id,
+                target: None,
                 refresh: tick.saturating_add(ORDER_REFRESH_FRAMES),
             },
         );
-        out.order(
-            entity.entity_id,
-            Goal::Attack {
-                target: target.entity_id,
-            },
-        );
+        out.order(entity.entity_id, Goal::Guard);
         issued += 1;
     }
+}
+
+/// Whether the object's mission already holds the ground it stands on with the
+/// wider reach this step asks for, or has it fighting.
+///
+/// `Move` is here for the same reason: a unit the house is still walking
+/// somewhere is not idle, and replacing that move with a guard would stop it
+/// half-way. `Guard` is *not*: that mission holds the cell the object stands on
+/// and returns fire, while `AreaGuard` also steps out to engage a hostile that
+/// comes near — the posture a unit no team has taken holds, and the one
+/// `[IQ] GuardArea` gates for a computer house.
+fn holds_or_fights(mission: MissionId) -> bool {
+    [
+        MissionType::Attack,
+        MissionType::Move,
+        MissionType::AreaGuard,
+    ]
+    .into_iter()
+    .any(|kind| mission == MissionId::from_known(kind))
 }
 
 /// Whether an object is one these orders step around: an infantry, vehicle or

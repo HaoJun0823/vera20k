@@ -211,10 +211,31 @@ impl<'a> Observation<'a> {
         (object.type_id == type_id).then_some(factory.progress)
     }
 
-    /// Whether the house's team timer has expired, so `HouseClass::Update`'s
-    /// team block (`sim::ai_team_creation`) would run for it now. The timer is
-    /// the owner's state; the policy reads it and the host restarts it through
-    /// the owner when a pass runs.
+    /// Whether the house's Strategy tick (`HouseClass::AI_Building_Strategy`,
+    /// `0x004FD500`) would run now.
+    ///
+    /// `HouseClass::Update` gates that tick on "no human controls it", so the
+    /// house a brain plays never runs it, and never runs the enemy search
+    /// inside it. A policy reads the timer here and has the tick applied
+    /// through its owner (`sim::house_strategy`), which owns the enemy, the
+    /// emergency state and the fire sale.
+    pub(crate) fn strategy_due(&self) -> bool {
+        crate::sim::house_strategy::strategy_due(self.sim, self.house)
+    }
+
+    /// `HouseClass+0x1E4`: which half of the build queue the house is on.
+    ///
+    /// `AI_EconomyStateMachine` steps it at every factory exit against
+    /// `[General] AIAlternateProductionCreditCutoff=`, and that is how a retail
+    /// house stops both queues from competing for the same credits: 0 runs
+    /// both, 1 the yard while it can build, 2 the units while one can be built.
+    pub(crate) fn production_mode(&self) -> i32 {
+        self.sim
+            .houses
+            .get(&self.house)
+            .map_or(0, |house| house.ai_production().mode())
+    }
+
     pub(crate) fn team_creation_due(&self) -> bool {
         let Some(house) = self.sim.houses().get(&self.house) else {
             return false;

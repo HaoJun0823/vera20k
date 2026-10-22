@@ -31,6 +31,16 @@ pub enum Intent {
     /// (`sim::ai_team_creation`): applied through that module, which owns the
     /// eviction, the `Autocreate=` marks, the new teams and the timer restart.
     RaiseTeams(TeamCreationPlan),
+    /// Run the house's own Strategy tick now
+    /// (`HouseClass::AI_Building_Strategy`, `0x004FD500`): applied through
+    /// `sim::house_strategy`, which owns the enemy search, the defeated-enemy
+    /// forget, the superweapon fire, the emergency state with its fire sale and
+    /// all-to-hunt, the missing-factory reaction, `AI_Manage_Build_Queue` and
+    /// the timer restart.
+    ///
+    /// Native runs it from `HouseClass::Update` for a house no human controls;
+    /// this is the same tick for the house a brain plays.
+    AdvanceStrategy,
     /// Ask the type's factory to start building it (`HouseClass::Begin_Production`).
     QueueProduction { type_id: InternedId },
     /// Cancel the queued copies of a type (`HouseClass::Abandon_Production`).
@@ -47,11 +57,12 @@ pub enum Intent {
 impl Intent {
     /// The command this request is issued as, when it is one.
     ///
-    /// `RaiseTeams` is not a command: a player's hands cannot raise an AI team,
-    /// so it is applied through `sim::ai_team_creation` instead.
+    /// `RaiseTeams` and `AdvanceStrategy` are not commands: a player's hands
+    /// cannot raise an AI team or run a house's AI tick, so they are applied
+    /// through their owning modules instead.
     pub fn command(self) -> Option<Command> {
         Some(match self {
-            Self::RaiseTeams(_) => return None,
+            Self::RaiseTeams(_) | Self::AdvanceStrategy => return None,
             Self::QueueProduction { type_id } => Command::QueueProduction { type_id },
             Self::CancelProduction { type_id, all } => {
                 Command::CancelProductionByType { type_id, all }

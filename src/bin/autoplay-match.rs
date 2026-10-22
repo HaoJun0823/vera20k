@@ -145,6 +145,7 @@ autoplay-match: a headless skirmish with auto play on the local house
 struct Snapshot {
     tick: u64,
     credits: i32,
+    enemy_credits: i32,
     power: i32,
     own: usize,
     enemy: usize,
@@ -158,6 +159,7 @@ fn snapshot(sim: &vera20k_core::sim::world::Simulation, local: InternedId, enemy
     Snapshot {
         tick,
         credits: obs.credits(),
+        enemy_credits: Observation::new(sim, enemy).credits(),
         power: obs.power_balance(),
         own: obs.own_entities().count(),
         enemy: Observation::new(sim, enemy).own_entities().count(),
@@ -227,8 +229,8 @@ fn main() -> Result<(), String> {
         args.per_frame
     );
     println!(
-        "{:>6} {:>9} {:>7} {:>6} {:>6} {:>6} {:>9} {:>9}",
-        "tick", "credits", "power", "own", "enemy", "ready", "rejected", "notready"
+        "{:>6} {:>9} {:>9} {:>7} {:>6} {:>6} {:>6} {:>9} {:>9}",
+        "tick", "credits", "ecred", "power", "own", "enemy", "ready", "rejected", "notready"
     );
 
     if args.dump > 0 {
@@ -252,9 +254,9 @@ fn main() -> Result<(), String> {
     );
     let mut last = snapshot(sim, local, enemy, 0, &host);
     println!(
-        "{:>6} {:>9} {:>7} {:>6} {:>6} {:>6} {:>9} {:>9}",
-        last.tick, last.credits, last.power, last.own, last.enemy, last.ready, last.rejected,
-        last.not_ready
+        "{:>6} {:>9} {:>9} {:>7} {:>6} {:>6} {:>6} {:>9} {:>9}",
+        last.tick, last.credits, last.enemy_credits, last.power, last.own, last.enemy, last.ready,
+        last.rejected, last.not_ready
     );
 
     let mut outcome = "timeout";
@@ -299,17 +301,29 @@ fn main() -> Result<(), String> {
         if tick % args.progress == 0 || outcome != "timeout" {
             if args.dump > 0 {
                 let obs = Observation::new(sim, local);
-                println!(
-                    "  clock: tick {} binary_frame {}",
-                    obs.tick(),
-                    sim.session().binary_frame()
-                );
+                let mut counts: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for entity in obs.own_entities() {
+                    *counts
+                        .entry(format!(
+                            "{}#{:?}",
+                            sim.interner().resolve(entity.type_id),
+                            entity.mission
+                        ))
+                        .or_default() += 1;
+                }
+                let line: Vec<String> = counts
+                    .iter()
+                    .map(|(name, count)| format!("{name} {count}"))
+                    .collect();
+                println!("  own@{tick}: {}", line.join(", "));
             }
             last = snapshot(sim, local, enemy, tick, &host);
             println!(
-                "{:>6} {:>9} {:>7} {:>6} {:>6} {:>6} {:>9} {:>9}",
+                "{:>6} {:>9} {:>9} {:>7} {:>6} {:>6} {:>6} {:>9} {:>9}",
                 last.tick,
                 last.credits,
+                last.enemy_credits,
                 last.power,
                 last.own,
                 last.enemy,

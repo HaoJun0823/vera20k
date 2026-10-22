@@ -31,9 +31,14 @@
 //!   `BuildingClass::Unlimbo`'s `0x0042F260` pass records it;
 //! - an idle unit factory asks for the combat unit the house's forming teams
 //!   still need (`AI_Choose_Unit`'s Unit, Infantry and Aircraft branches,
-//!   `0x004FEA60`) — [`unit_choice`]; every combat unit with no current order
-//!   is sent at the nearest enemy object and every engineer at the nearest
-//!   capturable building — [`orders`].
+//!   `0x004FEA60`) — [`unit_choice`]; a combat unit no team has taken holds the
+//!   base and answers what comes into it, and every engineer takes the nearest
+//!   capturable building — [`orders`];
+//! - which half of the queue runs is the house's mode
+//!   (`AI_ChooseNextProduction`'s dispatch, `HouseClass+0x1E4`), so below
+//!   `[General] AIAlternateProductionCreditCutoff=` the house works one half at
+//!   a time instead of letting the yard and the factories compete for the same
+//!   credits (`AI_EconomyStateMachine`, `sim::ai_base_building`).
 //!
 //! Teams are the other half of the house's own AI: `HouseClass::Update`'s team
 //! block never runs for a house this brain drives, because its gate is "no
@@ -47,20 +52,30 @@
 //! The army's own order step therefore stands down for a recruited member
 //! (`Observation::team_has_member`).
 //!
+//! The house's Strategy tick (`HouseClass::AI_Building_Strategy`,
+//! `0x004FD500`) is the third block `HouseClass::Update` skips for this house,
+//! and the one the other two were waiting on: it is what runs the enemy search
+//! and so gives the house an enemy, and without one the team selector admits
+//! base-defense triggers only — a house that raises a base guard and never an
+//! attack. [`RetailBrain::state`] therefore asks for the tick too, and the
+//! control layer applies it through `sim::house_strategy`: the enemy search,
+//! the defeated-enemy forget, `AI_TryFireSW`, the emergency state with its fire
+//! sale and all-to-hunt, the missing-factory reaction and
+//! `AI_Manage_Build_Queue` all run from there, in one owner.
+//!
 //! **Not driven yet, and not faked** (see `docs/ai-layers.md`):
-//! `AI_Manage_Build_Queue` (`0x004FDD10`) and its credit-cutoff mode,
-//! `AI_ChooseNextProduction` (`0x00506EF0`) base defenses, the superweapon
-//! decision, the enemy-house search and the fire-sale / all-to-hunt reactions.
-//! Each needs its native owner split into a read-only decision and an apply
-//! half before a brain may call it; until then a node whose prerequisites never
-//! appear waits rather than being invented around.
+//! `AI_ChooseNextProduction` (`0x00506EF0`) base defenses. That one needs its
+//! native owner split into a read-only decision and an apply half before a
+//! brain may call it; until then a node whose prerequisites never appear waits
+//! rather than being invented around.
 //!
 //! RESIDUALS:
 //! - The army's *orders for the units no team has taken* are not native: a
-//!   team's members are driven by their script, and everything else is sent at
-//!   the nearest hostile object (each engineer at the nearest capturable
-//!   building) — what a player's click on it means. The unit *choices* are
-//!   native: the forming teams' task forces, drawn by `sim::ai_unit_choice`.
+//!   team's members are driven by their script, and the rest hold the base
+//!   (area guard at the yard) and answer a hostile that comes within
+//!   `[General] AISafeDistance=` of it; each engineer takes the nearest
+//!   capturable building. The unit *choices* are native: the forming teams'
+//!   task forces, drawn by `sim::ai_unit_choice`.
 //! - The `forces` switch gates these orders only. A team's script is the sim's
 //!   pass for the house, not a command, so switching `forces` off leaves a
 //!   recruited member under its script.
@@ -68,9 +83,10 @@
 //!   honesty is still the open question `docs/autoplay.md` records.
 //! - Target selection is one predicate, not the native one: another house's
 //!   object this house is at war with (`sim::house_diplomacy`) and that is not
-//!   `MultiplayPassive`, nearest first. Native picks by team script, threat and
-//!   value, so a play test should expect an army that fights everything hostile
-//!   it can reach rather than one that fights what matters.
+//!   `MultiplayPassive`, nearest first, and only inside the base radius. Native
+//!   picks by team script, threat and value, so a play test should expect a
+//!   garrison that fights what walks in rather than one that fights what
+//!   matters.
 //! - Combat units are requested only when the house can pay for them; the base
 //!   plan itself has no such gate, because native's gate is
 //!   `AI_Manage_Build_Queue`'s credit-cutoff mode, which is unported.
@@ -95,6 +111,7 @@ use std::collections::BTreeMap;
 use crate::rules::ruleset::RuleSet;
 use crate::sim::base_plan::BasePlanState;
 use crate::sim::control::brain::{Brain, Outbox};
+use crate::sim::control::intent::Intent;
 use crate::sim::control::observation::Observation;
 use crate::sim::rng::SimRng;
 
@@ -166,11 +183,18 @@ impl Brain for RetailBrain {
         "retail-ai"
     }
 
-    /// The house's team block, as this brain plays it.
+    /// The house's own Strategy tick and its team block, as this brain plays
+    /// them.
     ///
-    /// Applied before `think`, because the units this frame's choosers ask for
-    /// are the ones the teams just raised need.
+    /// Strategy goes first and the team block follows: the tick's enemy search
+    /// is what gives the house an enemy, and the team selector admits attack
+    /// triggers only for a house that has one. Both are applied before `think`,
+    /// because the units this frame's choosers ask for are the ones the teams
+    /// just raised need.
     fn state(&mut self, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
+        if obs.strategy_due() {
+            out.intent(Intent::AdvanceStrategy);
+        }
         if let Some(intent) = teams::raise(self, rules, obs) {
             out.intent(intent);
         }
@@ -178,24 +202,68 @@ impl Brain for RetailBrain {
 
     fn think(&mut self, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
         self.generate(rules, obs);
-        // The yard and the war factory are separate factories, so a building
-        // and a unit are asked for in the same frame, the way the native AI
-        // works both queues in one pass.
         if let Some(intent) = building_choice::place(self, rules, obs) {
             out.intent(intent);
         }
         expand::deploy_yard_maker(self, rules, obs, out);
-        if let Some(intent) = building_choice::queue(self, rules, obs) {
-            out.intent(intent);
-        }
-        // Income first: a harvester the house lacks is worth more than the
-        // first tank, and both are the same factory's work.
-        if let Some(intent) = unit_choice::harvester(self, rules, obs) {
-            out.intent(intent);
-        } else if let Some(intent) = unit_choice::combat_unit(self, rules, obs) {
-            out.intent(intent);
+        // `AI_ChooseNextProduction` dispatches on the house's mode, and that is
+        // how a retail house keeps the yard and the factories from competing
+        // for the same credits: below `AIAlternateProductionCreditCutoff=` the
+        // economy state machine puts it on one half at a time, and the other
+        // half only runs when this one has nothing to make.
+        match obs.production_mode() {
+            1 => {
+                if !ask_building(self, rules, obs, out) {
+                    ask_units(self, rules, obs, out);
+                }
+            }
+            2 => {
+                if !ask_units(self, rules, obs, out) {
+                    ask_building(self, rules, obs, out);
+                }
+            }
+            _ => {
+                ask_building(self, rules, obs, out);
+                ask_units(self, rules, obs, out);
+            }
         }
         orders::engineers(self, rules, obs, out);
         orders::forces(self, rules, obs, out);
     }
+}
+
+/// The yard's half of the queue. `false` when it had nothing to ask for, which
+/// is what makes the other half run in modes 1 and 2.
+fn ask_building(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    out: &mut Outbox,
+) -> bool {
+    let Some(intent) = building_choice::queue(brain, rules, obs) else {
+        return false;
+    };
+    out.intent(intent);
+    true
+}
+
+/// The factories' half of the queue.
+///
+/// Income first: a harvester the house lacks is worth more than the first tank,
+/// and both are the same factory's work.
+fn ask_units(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    out: &mut Outbox,
+) -> bool {
+    if let Some(intent) = unit_choice::harvester(brain, rules, obs) {
+        out.intent(intent);
+        return true;
+    }
+    let Some(intent) = unit_choice::combat_unit(brain, rules, obs) else {
+        return false;
+    };
+    out.intent(intent);
+    true
 }

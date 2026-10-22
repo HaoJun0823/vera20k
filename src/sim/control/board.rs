@@ -187,6 +187,13 @@ impl ControlBoard {
         if !sim.houses().contains_key(&owner) {
             return;
         }
+        // The brain plays the house's AI blocks as well as its commands, so the
+        // sim's own gates are told once that a brain owns it: `house_state`
+        // owns the latch, and the factory-exit economy block and everything
+        // else that gates on "no human controls it" reads it.
+        if let Some(house) = sim.houses.get_mut(&owner) {
+            house.set_policy_played();
+        }
         self.budget.begin_frame();
         let owner_name = sim.interner().resolve(owner).to_owned();
 
@@ -199,9 +206,7 @@ impl ControlBoard {
             self.brain.state(rules, &obs, &mut state);
         }
         for intent in state.intents {
-            if let Intent::RaiseTeams(plan) = intent {
-                self.raise_teams(sim, rules, owner, plan);
-            }
+            self.apply_state_intent(sim, rules, owner, intent);
         }
 
         // 2. Decisions.
@@ -211,8 +216,8 @@ impl ControlBoard {
             self.brain.think(rules, &obs, &mut out);
         }
         for intent in out.intents {
-            if let Intent::RaiseTeams(plan) = intent {
-                self.raise_teams(sim, rules, owner, plan);
+            if matches!(intent, Intent::RaiseTeams(_) | Intent::AdvanceStrategy) {
+                self.apply_state_intent(sim, rules, owner, intent);
             } else if let Some(command) = intent.command() {
                 self.admit(sim, &owner_name, &command, &mut pending);
             }
@@ -245,6 +250,33 @@ impl ControlBoard {
             .into_iter()
             .map(|command| CommandEnvelope::new(owner, execute_tick, command));
         sim.queue_commands(envelopes);
+    }
+
+    /// Apply one intent that is house state rather than a command.
+    ///
+    /// A team block and a Strategy tick are both things `HouseClass::Update`
+    /// does for a house no human controls; neither rides the command queue, so
+    /// each is applied by its owning module here.
+    fn apply_state_intent(
+        &mut self,
+        sim: &mut Simulation,
+        rules: &RuleSet,
+        owner: InternedId,
+        intent: Intent,
+    ) {
+        match intent {
+            Intent::RaiseTeams(plan) => self.raise_teams(sim, rules, owner, plan),
+            Intent::AdvanceStrategy => crate::sim::house_strategy::update_strategy_policy(
+                sim,
+                rules,
+                owner,
+                None,
+                FrameEffects::default(),
+            ),
+            // Nothing else is house state; an intent that turns up here has a
+            // command and reaches the queue through `Intent::command`.
+            _ => {}
+        }
     }
 
     /// Apply a raised team block through its owner.

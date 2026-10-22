@@ -33,20 +33,22 @@ pub(super) fn raise(
     let plan = obs.plan_team_creation(rules, &mut |low, high| brain.draw(low, high));
     if plan.picked.is_empty() {
         // No team was raised, so the combat branches of `AI_Choose_Unit` have
-        // nothing to answer and the army stops being built. Say so once in a
-        // while: a headless run has nobody watching the base.
-        if obs.tick() % 600 == 0 {
-            log::info!("retail-ai: the team selector raised nothing; the army has no demand");
-        }
-        return None;
+        // nothing to answer and the army stops being built. Say so: a headless
+        // run has nobody watching the base.
+        log::info!("retail-ai: the team selector raised nothing; the army has no demand");
+    } else {
+        log::info!(
+            "retail-ai: raising {} team(s): {:?}",
+            plan.picked.len(),
+            plan.picked
+                .iter()
+                .map(|id| obs.name_of(*id).unwrap_or("?"))
+                .collect::<Vec<_>>()
+        );
     }
-    log::info!(
-        "retail-ai: raising {} team(s): {:?}",
-        plan.picked.len(),
-        plan.picked
-            .iter()
-            .map(|id| obs.name_of(*id).unwrap_or("?"))
-            .collect::<Vec<_>>()
-    );
+    // The pass ran, so its timer restarts even when it raised nothing:
+    // `apply_team_creation` owns that write, and leaving the timer expired
+    // would ask the selector again on the next frame with a fresh roll — more
+    // teams than the house's `TeamDelays=` schedule allows.
     Some(Intent::RaiseTeams(plan))
 }

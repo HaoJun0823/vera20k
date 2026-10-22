@@ -100,6 +100,47 @@ pub(crate) fn update_strategy(
     }
 }
 
+/// Whether the house's Strategy timer has expired, so its tick would run now.
+/// The timer is the owner's state: a policy reads it here and asks for the
+/// tick through [`update_strategy_policy`].
+pub(crate) fn strategy_due(sim: &Simulation, owner: InternedId) -> bool {
+    let frame = sim.session.binary_frame() as i32;
+    sim.houses
+        .get(&owner)
+        .is_some_and(|house| !house.multiplay_passive() && house.strategy_timer().expired(frame))
+}
+
+/// [`update_strategy`] for a house a brain plays: the same tick, the same
+/// writes and the same timer restart, without the "no human controls it" gate.
+///
+/// Auto play drives the local player's house, so `HouseClass::Update`'s
+/// Strategy block never runs for it. Without that block the house never runs
+/// the enemy search ([`pick_enemy`]) and keeps no enemy (`+0x5600`), and
+/// `AITriggerTypeClass::Is_Eligible` (`0x0041E720`) then admits base-defense
+/// triggers only — the house raises a base guard, never an attack, and its
+/// army is neither built nor sent. The enemy search is therefore what the
+/// team block and `AI_Choose_Unit` were waiting on.
+///
+/// Everything else the tick does is native too: the defeated-enemy forget,
+/// `AI_TryFireSW`, the emergency state and its fire sale / all-to-hunt, the
+/// missing-factory reaction and `AI_Manage_Build_Queue`.
+pub(crate) fn update_strategy_policy(
+    sim: &mut Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
+    frame_effects: FrameEffects<'_>,
+) {
+    if !strategy_due(sim, owner) {
+        return;
+    }
+    let frame = sim.session.binary_frame() as i32;
+    let delay = building_strategy(sim, rules, owner, registry, frame_effects);
+    if let Some(house) = sim.houses.get_mut(&owner) {
+        house.restart_strategy_timer(frame, delay);
+    }
+}
+
 /// `HouseClass::AI_Building_Strategy @ 0x004FD500` for an existing house:
 /// the module doc's steps; returns the timer's next delay.
 fn building_strategy(

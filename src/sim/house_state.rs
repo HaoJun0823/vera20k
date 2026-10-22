@@ -522,6 +522,16 @@ pub struct HouseState {
     /// scenario modes and participates independently in EventClass admission.
     #[serde(default)]
     player_control: bool,
+    /// Not a gamemd byte: whether a brain plays this house's AI blocks.
+    ///
+    /// `HouseClass::Update` and the factory-exit AI blocks gate on
+    /// [`HouseState::is_controlled_by_human`], and the house auto play drives is
+    /// the human one, so those blocks never run for it. The control layer
+    /// installs this latch once when it attaches a brain, and from then on the
+    /// gates treat the house as computer-controlled — the same injection the
+    /// team and chooser gates make at their own call sites.
+    #[serde(default)]
+    policy_played: bool,
     /// Per-house native difficulty. Human houses retain Normal unless a map or
     /// game-mode initializer explicitly assigns another native value.
     #[serde(default)]
@@ -2294,6 +2304,19 @@ impl HouseState {
         self.is_human || (!game_mode_nonzero && self.player_control)
     }
 
+    /// Whether a brain plays this house's AI blocks; see the field's note.
+    ///
+    /// The control layer is the only writer: it installs the latch once, when
+    /// it attaches a brain, and nothing clears it while that brain owns the
+    /// house.
+    pub(crate) const fn policy_played(&self) -> bool {
+        self.policy_played
+    }
+
+    pub(crate) fn set_policy_played(&mut self) {
+        self.policy_played = true;
+    }
+
     /// The cell the house bases itself around: the alternate base centre
     /// (`+0x5494`) unless it is the empty cell `(0, 0)` (`0xA8EF98`, zeroed
     /// by its static initializer `0x004F50A0`), else the primary (`+0x5490`,
@@ -2519,6 +2542,7 @@ impl HouseState {
             permanent_factory_plans: Vec::new(),
             is_human,
             player_control: is_human,
+            policy_played: false,
             difficulty: HouseDifficulty::Normal,
             difficulty_biases: HouseDifficultyBiases::default(),
             multiplay_passive: false,

@@ -742,11 +742,12 @@ fn the_retail_policy_splices_a_power_plant_ahead_of_a_draining_node() {
     );
 }
 
-/// The army half: a combat unit is sent at the nearest enemy object, the way a
-/// player's attack click on it would be, and the order stands instead of being
-/// repeated every frame.
+/// The army half: a combat unit no team has taken goes on area guard where it
+/// stands — the posture a unit outside a team holds, and what a player's guard
+/// click would be — and it is not sent at a hostile across the map, nor ordered
+/// again the next frame.
 #[test]
-fn the_retail_policy_sends_its_army_at_the_nearest_enemy() {
+fn the_retail_policy_puts_an_idle_unit_on_area_guard() {
     let Some((mut sim, rules)) = arena(0xA17) else {
         return;
     };
@@ -756,30 +757,34 @@ fn the_retail_policy_sends_its_army_at_the_nearest_enemy() {
         .get_mut(&owner)
         .expect("the American house")
         .set_country_for_test(Some(country));
+    sim.spawn_object("GACNST", "Americans", 16, 16, 64, &rules)
+        .expect("the house's yard");
     let tank = sim
-        .spawn_object("MTNK", "Americans", 16, 16, 64, &rules)
+        .spawn_object("MTNK", "Americans", 12, 18, 64, &rules)
         .expect("an American tank");
-    let near = sim
-        .spawn_object("MTNK", "Russians", 18, 16, 64, &rules)
-        .expect("a Russian tank beside it");
-    let _far = sim
-        .spawn_object("MTNK", "Russians", 26, 26, 64, &rules)
+    sim.spawn_object("MTNK", "Russians", 28, 28, 64, &rules)
         .expect("a Russian tank across the arena");
     let mut policy = RetailBrain::new(0x5EED);
 
     let decided = frame_commands(&mut policy, &rules, &sim, owner);
     assert!(
-        decided.contains(&Command::Attack {
-            attacker_id: tank,
-            target_id: near,
+        decided.contains(&Command::Guard {
+            entity_id: tank,
+            target: None,
         }),
-        "the nearer enemy is the target, got {decided:?}"
+        "the tank goes on area guard where it stands, got {decided:?}"
+    );
+    assert!(
+        !decided
+            .iter()
+            .any(|command| matches!(command, Command::Attack { .. })),
+        "the army does not charge the enemy on its own, got {decided:?}"
     );
 
     let again = frame_commands(&mut policy, &rules, &sim, owner);
     assert!(
         !again.iter().any(
-            |command| matches!(command, Command::Attack { attacker_id, .. } if *attacker_id == tank)
+            |command| matches!(command, Command::Guard { entity_id, .. } if *entity_id == tank)
         ),
         "the order already stands, got {again:?}"
     );
@@ -1079,12 +1084,18 @@ fn the_retail_policy_raises_the_teams_its_own_selector_picks() {
         let obs = Observation::new(&sim, owner);
         policy.state(&rules, &obs, &mut state);
     }
+    let plans: Vec<&Intent> = state
+        .intents
+        .iter()
+        .filter(|intent| matches!(intent, Intent::RaiseTeams(_)))
+        .collect();
     assert_eq!(
-        state.intents.len(),
+        plans.len(),
         1,
-        "the expired timer asks the selector"
+        "the expired timer asks the selector once, got {:?}",
+        state.intents
     );
-    let Intent::RaiseTeams(plan) = &state.intents[0] else {
+    let Intent::RaiseTeams(plan) = plans[0] else {
         panic!("the state half asks for a team plan");
     };
     assert_eq!(
