@@ -20,6 +20,7 @@ use vera20k_core::sim::autoplay::AutoPlayHost;
 use vera20k_core::sim::control::brain::{Brain, Outbox};
 use vera20k_core::sim::control::observation::Observation;
 use vera20k_core::sim::intern::InternedId;
+use vera20k_core::sim::production::ProductionCategory;
 use vera20k_core::sim::strategy::retail::RetailBrain;
 use vera20k_core::skirmish_launch::{AiDifficulty, LaunchCountry};
 
@@ -317,6 +318,42 @@ fn main() -> Result<(), String> {
                     .map(|(name, count)| format!("{name} {count}"))
                     .collect();
                 println!("  own@{tick}: {}", line.join(", "));
+                let yard = obs
+                    .building_in_production()
+                    .map(|(type_id, suspended)| {
+                        format!(
+                            "{} held={suspended}",
+                            sim.interner().resolve(type_id)
+                        )
+                    })
+                    .unwrap_or_else(|| "idle".to_owned());
+                let rules = &scenario.runtime.resources.rules;
+                let held: Vec<String> = [
+                    ProductionCategory::Building,
+                    ProductionCategory::Vehicle,
+                    ProductionCategory::Infantry,
+                    ProductionCategory::Aircraft,
+                ]
+                .into_iter()
+                .map(|category| {
+                    let text = obs
+                        .factory_product(category)
+                        .map(|(type_id, suspended)| {
+                            let progress = obs
+                                .production_progress(rules, type_id)
+                                .unwrap_or(0);
+                            format!("{}@{progress} held={suspended}", sim.interner().resolve(type_id))
+                        })
+                        .unwrap_or_else(|| "-".to_owned());
+                    format!("{category:?}={text}")
+                })
+                .collect();
+                println!(
+                    "  spend@{tick}: mode {} yard {yard} reserve {} | {}",
+                    obs.production_mode(),
+                    obs.army_reserve(rules),
+                    held.join(" ")
+                );
             }
             last = snapshot(sim, local, enemy, tick, &host);
             println!(

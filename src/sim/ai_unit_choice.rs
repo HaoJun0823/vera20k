@@ -363,6 +363,23 @@ fn candidates(
     owner: InternedId,
     kind: UnitChoiceKind,
 ) -> Vec<Candidate> {
+    let money = crate::sim::credit_income::available_money(&sim.houses, owner);
+    candidates_priced(sim, rules, owner, kind, money)
+}
+
+/// [`candidates`] with the wallet as a parameter.
+///
+/// `money` is `Available_Money` in the native pass; passing `i32::MAX` asks what
+/// the teams need with the wallet left out, which is what
+/// [`outstanding_cost`] wants: the choosers' own money test is why a broke
+/// house stops asking for the one type that would fill its team.
+fn candidates_priced(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    kind: UnitChoiceKind,
+    money: i32,
+) -> Vec<Candidate> {
     let category = kind.category();
     let type_count = rules.type_array_ids(category).len();
     let type_index = |id: InternedId| {
@@ -403,7 +420,6 @@ fn candidates(
         .values()
         .filter(|entity| entity.category() == class && entity.owner() == owner)
         .filter_map(|entity| Some((type_index(entity.type_ref())?, entity)));
-    let money = crate::sim::credit_income::available_money(&sim.houses, owner);
     let class_type = |index: usize| rules.type_array_at(category, index as i32);
     tally(
         type_count,
@@ -420,16 +436,45 @@ fn candidates(
     )
 }
 
+/// The credits the house's factories still need before their teams fill.
+///
+/// The dearest type an outstanding need covers that `CanBuild` admits and
+/// `Cost_Of` prices, over all three classes, with the wallet left out of the
+/// test. [`candidates`] drops every type the house cannot pay for right now,
+/// which is why a broke house asks for nothing, buys nothing, never fills the
+/// team, and never attacks: a budget that keeps money for the army needs the
+/// same tally without that test. Zero means the house has no unfilled need.
+pub(crate) fn outstanding_cost(sim: &Simulation, rules: &RuleSet, owner: InternedId) -> i32 {
+    let mut dearest = 0;
+    for kind in [
+        UnitChoiceKind::Unit,
+        UnitChoiceKind::Infantry,
+        UnitChoiceKind::Aircraft,
+    ] {
+        let category = kind.category();
+        for candidate in candidates_priced(sim, rules, owner, kind, i32::MAX) {
+            let Some(object) = rules.type_array_at(category, candidate.index) else {
+                continue;
+            };
+            let cost = sim.cost_of(owner, object, rules);
+            if cost > 0 && cost != i32::MAX {
+                dearest = dearest.max(cost);
+            }
+        }
+    }
+    dearest
+}
+
 /// The tally and the candidate pass (`0x004FEBDC..0x004FEE3D`) over a class
 /// of `type_count` types: each team, as its creation frame and the class
 /// indexes of the types it still needs (`Get_Needed_Types`, in order), adds
 /// to their need and lowers their earliest frame; each object, as its class
 /// index, of a type still needed covers one need of it when `recruitable`
 /// (`IsRecruitable`, asked only then: `0x004FED39..0x004FED4B`); then each
-/// type in
-/// index order with need left is asked `can_build` (`HouseClass::CanBuild`
-/// with neither flag) and, unless it answers No, `cost_of` (`Cost_Of`): at
-/// most `money` (`Available_Money`, signed), it is a candidate.
+/// type in index order with need left is asked `can_build`
+/// (`HouseClass::CanBuild` with neither flag) and, unless it answers No,
+/// `cost_of` (`Cost_Of`): at most `money` (`Available_Money`, signed), it is a
+/// candidate.
 fn tally<T>(
     type_count: usize,
     teams: impl IntoIterator<Item = (i32, Vec<usize>)>,

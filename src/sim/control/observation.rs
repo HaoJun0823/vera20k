@@ -211,6 +211,39 @@ impl<'a> Observation<'a> {
         (object.type_id == type_id).then_some(factory.progress)
     }
 
+    /// The type the building factory holds right now, and whether its build is
+    /// on hold (`FactoryClass`'s suspension).
+    ///
+    /// A budget that puts the yard on hold needs the type to resume it:
+    /// `HouseClass::Begin_Production` resumes a suspended product and would
+    /// queue a second copy of anything else.
+    pub fn building_in_production(&self) -> Option<(InternedId, bool)> {
+        self.factory_product(ProductionCategory::Building)
+    }
+
+    /// The type the house's factory of `category` holds right now, and whether
+    /// its build is on hold — `None` when the factory is idle or the house has
+    /// none of that category.
+    pub fn factory_product(&self, category: ProductionCategory) -> Option<(InternedId, bool)> {
+        let factory = self
+            .sim
+            .production()
+            .factories()
+            .view(self.house, category)?;
+        factory
+            .object
+            .map(|object| (object.type_id, factory.suspended))
+    }
+
+    /// What the factories still need before their teams fill, in credits — the
+    /// dearest type an outstanding need covers, with the wallet left out (see
+    /// [`crate::sim::ai_unit_choice::outstanding_cost`]).
+    ///
+    /// Zero means the army is complete and the yard has the wallet to itself.
+    pub fn army_reserve(&self, rules: &RuleSet) -> i32 {
+        crate::sim::ai_unit_choice::outstanding_cost(self.sim, rules, self.house)
+    }
+
     /// Whether the house's Strategy tick (`HouseClass::AI_Building_Strategy`,
     /// `0x004FD500`) would run now.
     ///
@@ -229,7 +262,7 @@ impl<'a> Observation<'a> {
     /// `[General] AIAlternateProductionCreditCutoff=`, and that is how a retail
     /// house stops both queues from competing for the same credits: 0 runs
     /// both, 1 the yard while it can build, 2 the units while one can be built.
-    pub(crate) fn production_mode(&self) -> i32 {
+    pub fn production_mode(&self) -> i32 {
         self.sim
             .houses
             .get(&self.house)
@@ -272,22 +305,38 @@ impl<'a> Observation<'a> {
 
     /// The unit the house's teams need of `kind`, chosen the way
     /// `HouseClass::AI_Choose_Unit` chooses it (`sim::ai_unit_choice`), as a
-    /// type. `None` when no forming team needs one of that class.
+    /// type. `None` when the house neither has a choice waiting nor needs one of
+    /// that class.
     ///
-    /// The choice is the native decision over the house's live teams, drawn
-    /// with the caller's RNG; the house's own choice slot is left alone, since
-    /// `sim::ai_unit_choice` owns it.
+    /// The house's own choice slot wins when it holds one: `AI_Manage_Build_Queue`
+    /// writes it when it restarts a starved house's production, the factory
+    /// consumes it and its exit clears it, so a caller that ran the chooser
+    /// anyway would chase a type nothing builds. Only a clear slot is filled,
+    /// which is the native order (`AI_ChooseNextProduction` asks a chooser only
+    /// for a -1 slot). The chooser's own answer is drawn with the caller's RNG
+    /// and is not written back: `sim::ai_unit_choice` owns that slot.
     pub(crate) fn unit_choice(
         &self,
         rules: &RuleSet,
         kind: UnitChoiceKind,
         draw: &mut impl FnMut(i32, i32) -> i32,
     ) -> Option<InternedId> {
+        if let Some(index) = self.unit_choice_slot(kind) {
+            let name = rules.type_array_ids(kind.category()).get(index as usize)?;
+            return self.type_id(name);
+        }
         let index = crate::sim::ai_unit_choice::unit_choice_decision(
             self.sim, rules, self.house, kind, draw,
         )?;
         let name = rules.type_array_ids(kind.category()).get(index as usize)?;
         self.type_id(name)
+    }
+
+    /// The class index the house's own choice slot holds for `kind`, or `None`
+    /// while it is clear.
+    pub(crate) fn unit_choice_slot(&self, kind: UnitChoiceKind) -> Option<i32> {
+        let index = self.sim.houses().get(&self.house)?.ai_unit_choices().get(kind);
+        (index != -1).then_some(index)
     }
 
     /// Whether the house's factory of `category` holds anything of its own: a

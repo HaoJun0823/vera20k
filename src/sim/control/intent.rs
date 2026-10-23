@@ -16,6 +16,7 @@ use crate::sim::ai_team_creation::TeamCreationPlan;
 use crate::sim::behavior::goal::Goal;
 use crate::sim::command::Command;
 use crate::sim::intern::InternedId;
+use crate::sim::production::ProductionCategory;
 
 /// One object order, before admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,9 @@ pub enum Intent {
     QueueProduction { type_id: InternedId },
     /// Cancel the queued copies of a type (`HouseClass::Abandon_Production`).
     CancelProduction { type_id: InternedId, all: bool },
+    /// Put the category's running build on hold (`HouseClass::Suspend_Production`).
+    /// A player's sidebar does the same; queueing the type again resumes it.
+    SuspendProduction { category: ProductionCategory },
     /// Place a finished building that waits for a cell (`Place_Production`).
     PlaceBuilding {
         type_id: InternedId,
@@ -67,6 +71,7 @@ impl Intent {
             Self::CancelProduction { type_id, all } => {
                 Command::CancelProductionByType { type_id, all }
             }
+            Self::SuspendProduction { category } => Command::SuspendProduction { category },
             Self::PlaceBuilding { type_id, cell } => Command::PlaceReadyBuilding {
                 type_id,
                 rx: cell.0,

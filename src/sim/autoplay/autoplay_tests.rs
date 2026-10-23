@@ -790,6 +790,41 @@ fn the_retail_policy_puts_an_idle_unit_on_area_guard() {
     );
 }
 
+/// The budget: the yard keeps the money the factories still need, and spends as
+/// it likes once the army is complete. The native plan and `CanBuild` are both
+/// credit-blind, so this is the only thing that stops the yard from spending a
+/// team's last tank on a node the team does not need.
+#[test]
+fn the_yard_keeps_the_money_the_factories_still_need() {
+    use crate::sim::strategy::retail::economy::{self, Yard};
+    let Some((mut sim, rules)) = arena(0xB17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    sim.houses_mut_for_test()
+        .get_mut(&owner)
+        .expect("the American house")
+        .economy_mut()
+        .set_credits_for_test(600);
+
+    let obs = Observation::new(&sim, owner);
+    assert_eq!(
+        economy::yard(&rules, &obs, 700),
+        Yard::Hold,
+        "600 is short of the 700 the army still needs"
+    );
+    assert_eq!(
+        economy::yard(&rules, &obs, 600),
+        Yard::Run,
+        "the reserve is met"
+    );
+    assert_eq!(
+        economy::yard(&rules, &obs, 0),
+        Yard::Run,
+        "a complete army leaves the yard the wallet"
+    );
+}
+
 /// The production half of the army chain: a forming team's task force is what
 /// the factory builds, through `AI_Choose_Unit`'s own Unit branch rather than a
 /// list of its own.

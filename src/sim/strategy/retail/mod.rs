@@ -101,6 +101,7 @@
 
 pub(super) mod build_plan;
 pub(super) mod building_choice;
+pub(crate) mod economy;
 pub(super) mod expand;
 pub(super) mod orders;
 pub(super) mod teams;
@@ -206,27 +207,45 @@ impl Brain for RetailBrain {
             out.intent(intent);
         }
         expand::deploy_yard_maker(self, rules, obs, out);
+
         // `AI_ChooseNextProduction` dispatches on the house's mode, and that is
         // how a retail house keeps the yard and the factories from competing
         // for the same credits: below `AIAlternateProductionCreditCutoff=` the
         // economy state machine puts it on one half at a time, and the other
         // half only runs when this one has nothing to make.
-        match obs.production_mode() {
+        let mode = obs.production_mode();
+        // The budget ([`economy`]) runs over both halves: a node costs several
+        // times a unit, and the teams only fill if the factories can pay.
+        let yard = economy::yard(rules, obs, obs.army_reserve(rules));
+        if yard == economy::Yard::Run {
+            economy::resume(obs, out);
+        } else {
+            economy::hold(obs, out);
+        }
+        let yard_may_build = yard == economy::Yard::Run;
+
+        // Whichever half the mode picked runs the other one when it has nothing
+        // to make, so a mode never idles the house.
+        match mode {
             1 => {
-                if !ask_building(self, rules, obs, out) {
+                let built = yard_may_build && ask_building(self, rules, obs, out);
+                if !built {
                     ask_units(self, rules, obs, out);
                 }
             }
             2 => {
-                if !ask_units(self, rules, obs, out) {
+                if !ask_units(self, rules, obs, out) && yard_may_build {
                     ask_building(self, rules, obs, out);
                 }
             }
             _ => {
-                ask_building(self, rules, obs, out);
+                if yard_may_build {
+                    ask_building(self, rules, obs, out);
+                }
                 ask_units(self, rules, obs, out);
             }
         }
+
         orders::engineers(self, rules, obs, out);
         orders::forces(self, rules, obs, out);
     }

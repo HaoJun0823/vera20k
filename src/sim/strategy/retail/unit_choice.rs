@@ -61,6 +61,9 @@ pub(super) fn combat_unit(
     ] {
         let Some(type_id) = obs.unit_choice(rules, kind, &mut |low, high| brain.draw(low, high))
         else {
+            if obs.tick() % 600 == 0 {
+                log::info!("{kind:?}: the chooser answered nothing");
+            }
             continue;
         };
         let Some(object) = obs.object_type(rules, type_id) else {
@@ -70,22 +73,22 @@ pub(super) fn combat_unit(
         // chooser's own candidate filter already keeps what the house may build
         // and can pay for; this is the brain's scheduling, not a second
         // eligibility test.
-        if obs.factory_busy(category_for_object(object)) {
-            continue;
+        let refusal = if obs.factory_busy(category_for_object(object)) {
+            "its factory is busy"
+        } else if obs.can_build(rules, object, true) != CanBuild::Yes {
+            "CanBuild says no"
+        } else if i64::from(object.cost) > i64::from(obs.credits()) {
+            "the house cannot pay"
+        } else if !obs.has_factory(rules, object) {
+            "no factory"
+        } else if obs.in_production(rules, type_id) {
+            "already in production"
+        } else {
+            return Some(Intent::QueueProduction { type_id });
+        };
+        if obs.tick() % 600 == 0 {
+            log::info!("{kind:?} {} refused: {refusal}", obs.name_of(type_id).unwrap_or("?"));
         }
-        if obs.can_build(rules, object, true) != CanBuild::Yes {
-            continue;
-        }
-        if i64::from(object.cost) > i64::from(obs.credits()) {
-            continue;
-        }
-        if !obs.has_factory(rules, object) {
-            continue;
-        }
-        if obs.in_production(rules, type_id) {
-            continue;
-        }
-        return Some(Intent::QueueProduction { type_id });
     }
     None
 }
