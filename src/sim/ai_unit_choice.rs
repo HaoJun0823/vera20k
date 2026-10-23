@@ -46,7 +46,6 @@ use crate::rules::ruleset::RuleSet;
 use crate::sim::game_entity::GameEntity;
 use crate::sim::intern::InternedId;
 use crate::sim::production::{CanBuild, can_build};
-use crate::sim::rng::SimRng;
 use crate::sim::world::Simulation;
 use crate::util::native_random::unit_draw_threshold;
 use crate::util::native_x87::{NativeF64Bits, X87Chop53};
@@ -148,42 +147,6 @@ impl HouseAiUnitChoices {
 /// (unsigned). Without one, it takes the unit the first buildable refinery
 /// undeploys into while it has fewer gatherers than `AISlaveMinerNumber=`.
 /// Otherwise it asks the teams.
-/// [`choose`]'s decision, for a caller that applies it elsewhere: the class
-/// index the choosers would fill `kind` with.
-///
-/// A policy that plays a house the computer AI never plays drives this with
-/// its own draws and leaves the slot alone — the house's own slot is the
-/// chooser's output, and writing it here would be a second writer.
-pub(crate) fn unit_choice_decision(
-    sim: &Simulation,
-    rules: &RuleSet,
-    owner: InternedId,
-    kind: UnitChoiceKind,
-    mut draw: impl FnMut(i32, i32) -> i32,
-) -> Option<i32> {
-    let Some(house) = sim.houses.get(&owner) else {
-        return None;
-    };
-    if house.ai_unit_choices().get(kind) != -1 {
-        return None;
-    }
-    let fill_earliest_percent =
-        house.difficulty_value(&rules.general.fill_earliest_team_probability);
-    let gates = ChooserGates::of_house(sim, rules, owner);
-    let harvester = (kind == UnitChoiceKind::Unit)
-        .then(|| harvester_choice(sim, rules, owner, gates))
-        .flatten();
-    match harvester {
-        Some(index) => Some(index),
-        None => {
-            let candidates = candidates(sim, rules, owner, kind);
-            pick(&candidates, fill_earliest_percent, |low, high| {
-                draw(low, high)
-            })
-        }
-    }
-}
-
 pub(crate) fn choose(
     sim: &mut Simulation,
     rules: &RuleSet,
@@ -196,11 +159,20 @@ pub(crate) fn choose(
     if house.ai_unit_choices().get(kind) != -1 {
         return;
     }
-    let mut rng = std::mem::replace(&mut sim.scenario_rng, SimRng::new(0));
-    let choice = unit_choice_decision(&*sim, rules, owner, kind, |low, high| {
-        rng.next_range_i32_inclusive(low, high)
-    });
-    sim.scenario_rng = rng;
+    let fill_earliest_percent =
+        house.difficulty_value(&rules.general.fill_earliest_team_probability);
+    let choice = match (kind == UnitChoiceKind::Unit)
+        .then(|| harvester_choice(sim, rules, owner))
+        .flatten()
+    {
+        Some(index) => Some(index),
+        None => {
+            let candidates = candidates(sim, rules, owner, kind);
+            pick(&candidates, fill_earliest_percent, |low, high| {
+                sim.scenario_rng.next_range_i32_inclusive(low, high)
+            })
+        }
+    };
     if let Some(index) = choice
         && let Some(house) = sim.houses.get_mut(&owner)
     {
@@ -208,53 +180,9 @@ pub(crate) fn choose(
     }
 }
 
-/// The two AI-only facts the harvester branch gates on, for a caller that
-/// plays a house the AI never plays.
-///
-/// The computer AI reads both from the house. Auto play drives the house in
-/// the player's place, so nothing human controls it and its IQ is the grown
-/// one an AI house reaches; a human house keeps IQ 0, which would leave the
-/// branch dormant and a base with no income.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ChooserGates {
-    /// Native `IsHumanPlayer`.
-    pub human: bool,
-    /// `House+0x24C` `CurrentIQ`.
-    pub current_iq: i32,
-}
-
-impl ChooserGates {
-    /// The gates as the house itself reports them: what the computer AI uses.
-    pub(crate) fn of_house(sim: &Simulation, rules: &RuleSet, owner: InternedId) -> Self {
-        let Some(house) = sim.houses.get(&owner) else {
-            return Self {
-                human: false,
-                current_iq: 0,
-            };
-        };
-        Self {
-            human: house.is_controlled_by_human(sim.session.game_mode_nonzero()),
-            current_iq: house.current_iq(),
-        }
-    }
-
-    /// The gates for a house a policy plays as if it were a computer house.
-    pub(crate) fn policy_played(rules: &RuleSet) -> Self {
-        Self {
-            human: false,
-            current_iq: rules.general.max_iq_levels,
-        }
-    }
-}
-
 /// The Unit chooser's harvester branch (see [`choose`]): the vehicle index
 /// it takes, or `None` to ask the teams.
-pub(crate) fn harvester_choice(
-    sim: &Simulation,
-    rules: &RuleSet,
-    owner: InternedId,
-    gates: ChooserGates,
-) -> Option<i32> {
+fn harvester_choice(sim: &Simulation, rules: &RuleSet, owner: InternedId) -> Option<i32> {
     let house = sim.houses.get(&owner)?;
     let country_name = sim.interner.resolve(house.house_type_id());
     let country_bit = rules.country_owner_mask(country_name);
@@ -276,10 +204,10 @@ pub(crate) fn harvester_choice(
         destinations: house.tracking().resource_destinations(),
         harvesters_per_refinery: house.difficulty_value(&rules.general.harvesters_per_refinery),
         slave_miners: house.difficulty_value(&rules.ai_slave_miner_number),
-        current_iq: gates.current_iq,
+        current_iq: house.current_iq(),
         iq_harvester: rules.general.iq_harvester,
         no_ore: house.harvester_no_ore(),
-        human: gates.human,
+        human: house.is_controlled_by_human(sim.session.game_mode_nonzero()),
         tech_level: house.tech_level(),
     })
 }
@@ -363,23 +291,6 @@ fn candidates(
     owner: InternedId,
     kind: UnitChoiceKind,
 ) -> Vec<Candidate> {
-    let money = crate::sim::credit_income::available_money(&sim.houses, owner);
-    candidates_priced(sim, rules, owner, kind, money)
-}
-
-/// [`candidates`] with the wallet as a parameter.
-///
-/// `money` is `Available_Money` in the native pass; passing `i32::MAX` asks what
-/// the teams need with the wallet left out, which is what
-/// [`outstanding_cost`] wants: the choosers' own money test is why a broke
-/// house stops asking for the one type that would fill its team.
-fn candidates_priced(
-    sim: &Simulation,
-    rules: &RuleSet,
-    owner: InternedId,
-    kind: UnitChoiceKind,
-    money: i32,
-) -> Vec<Candidate> {
     let category = kind.category();
     let type_count = rules.type_array_ids(category).len();
     let type_index = |id: InternedId| {
@@ -420,6 +331,7 @@ fn candidates_priced(
         .values()
         .filter(|entity| entity.category() == class && entity.owner() == owner)
         .filter_map(|entity| Some((type_index(entity.type_ref())?, entity)));
+    let money = crate::sim::credit_income::available_money(&sim.houses, owner);
     let class_type = |index: usize| rules.type_array_at(category, index as i32);
     tally(
         type_count,
@@ -436,45 +348,16 @@ fn candidates_priced(
     )
 }
 
-/// The credits the house's factories still need before their teams fill.
-///
-/// The dearest type an outstanding need covers that `CanBuild` admits and
-/// `Cost_Of` prices, over all three classes, with the wallet left out of the
-/// test. [`candidates`] drops every type the house cannot pay for right now,
-/// which is why a broke house asks for nothing, buys nothing, never fills the
-/// team, and never attacks: a budget that keeps money for the army needs the
-/// same tally without that test. Zero means the house has no unfilled need.
-pub(crate) fn outstanding_cost(sim: &Simulation, rules: &RuleSet, owner: InternedId) -> i32 {
-    let mut dearest = 0;
-    for kind in [
-        UnitChoiceKind::Unit,
-        UnitChoiceKind::Infantry,
-        UnitChoiceKind::Aircraft,
-    ] {
-        let category = kind.category();
-        for candidate in candidates_priced(sim, rules, owner, kind, i32::MAX) {
-            let Some(object) = rules.type_array_at(category, candidate.index) else {
-                continue;
-            };
-            let cost = sim.cost_of(owner, object, rules);
-            if cost > 0 && cost != i32::MAX {
-                dearest = dearest.max(cost);
-            }
-        }
-    }
-    dearest
-}
-
 /// The tally and the candidate pass (`0x004FEBDC..0x004FEE3D`) over a class
 /// of `type_count` types: each team, as its creation frame and the class
 /// indexes of the types it still needs (`Get_Needed_Types`, in order), adds
 /// to their need and lowers their earliest frame; each object, as its class
 /// index, of a type still needed covers one need of it when `recruitable`
 /// (`IsRecruitable`, asked only then: `0x004FED39..0x004FED4B`); then each
-/// type in index order with need left is asked `can_build`
-/// (`HouseClass::CanBuild` with neither flag) and, unless it answers No,
-/// `cost_of` (`Cost_Of`): at most `money` (`Available_Money`, signed), it is a
-/// candidate.
+/// type in
+/// index order with need left is asked `can_build` (`HouseClass::CanBuild`
+/// with neither flag) and, unless it answers No, `cost_of` (`Cost_Of`): at
+/// most `money` (`Available_Money`, signed), it is a candidate.
 fn tally<T>(
     type_count: usize,
     teams: impl IntoIterator<Item = (i32, Vec<usize>)>,

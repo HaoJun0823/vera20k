@@ -28,15 +28,12 @@
 
 use crate::rules::object_type::{ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
-use crate::sim::ai_team_creation::TeamCreationPlan;
-use crate::sim::ai_unit_choice::UnitChoiceKind;
 use crate::sim::house_state::HouseDifficulty;
 use crate::sim::intern::InternedId;
 use crate::sim::mission::MissionId;
 use crate::sim::production::ProductionCategory;
 use crate::sim::production::{CanBuild, can_build};
 use crate::sim::world::Simulation;
-use crate::sim::world::TypeTechLevels;
 
 /// What one house's agent may look at, and nothing else.
 pub struct Observation<'a> {
@@ -154,7 +151,7 @@ impl<'a> Observation<'a> {
                 cell: (entity.position.rx(), entity.position.ry()),
                 health: entity.health.current(),
                 mission: entity.mission.effective(),
-                orderable: crate::sim::world::order_actor_admits_for(entity),
+                orderable: self.sim.order_actor_admits(entity.stable_id()),
             })
     }
 
@@ -235,110 +232,6 @@ impl<'a> Observation<'a> {
             .map(|object| (object.type_id, factory.suspended))
     }
 
-    /// What the factories still need before their teams fill, in credits — the
-    /// dearest type an outstanding need covers, with the wallet left out (see
-    /// [`crate::sim::ai_unit_choice::outstanding_cost`]).
-    ///
-    /// Zero means the army is complete and the yard has the wallet to itself.
-    pub fn army_reserve(&self, rules: &RuleSet) -> i32 {
-        crate::sim::ai_unit_choice::outstanding_cost(self.sim, rules, self.house)
-    }
-
-    /// Whether the house's Strategy tick (`HouseClass::AI_Building_Strategy`,
-    /// `0x004FD500`) would run now.
-    ///
-    /// `HouseClass::Update` gates that tick on "no human controls it", so the
-    /// house a brain plays never runs it, and never runs the enemy search
-    /// inside it. A policy reads the timer here and has the tick applied
-    /// through its owner (`sim::house_strategy`), which owns the enemy, the
-    /// emergency state and the fire sale.
-    pub(crate) fn strategy_due(&self) -> bool {
-        crate::sim::house_strategy::strategy_due(self.sim, self.house)
-    }
-
-    /// `HouseClass+0x1E4`: which half of the build queue the house is on.
-    ///
-    /// `AI_EconomyStateMachine` steps it at every factory exit against
-    /// `[General] AIAlternateProductionCreditCutoff=`, and that is how a retail
-    /// house stops both queues from competing for the same credits: 0 runs
-    /// both, 1 the yard while it can build, 2 the units while one can be built.
-    pub fn production_mode(&self) -> i32 {
-        self.sim
-            .houses
-            .get(&self.house)
-            .map_or(0, |house| house.ai_production().mode())
-    }
-
-    pub(crate) fn team_creation_due(&self) -> bool {
-        let Some(house) = self.sim.houses().get(&self.house) else {
-            return false;
-        };
-        let frame = self.sim.session().binary_frame() as i32;
-        house.team_creation().timer().expired(frame)
-    }
-
-    /// The TeamTypes the house's own selector would raise now
-    /// (`sim::ai_team_creation::plan_team_creation`), decided with the caller's
-    /// draws. The selector is the native one: a policy-driven house never runs
-    /// it, because its gate is "no human controls this house".
-    /// The TeamTypes the house's own selector would raise now for a house a
-    /// brain plays (`sim::ai_team_creation::plan_team_creation_policy`),
-    /// decided with the caller's draws. The selector is the native one.
-    ///
-    /// The gates are the policy-played ones: this house is the player's slot,
-    /// so its own `RatioAITriggerTeam=` and AI-trigger activation are the ones
-    /// the scenario leaves unset, and reading them would leave the selector
-    /// dead and the army unbuilt.
-    pub(crate) fn plan_team_creation(
-        &self,
-        rules: &RuleSet,
-        draw: &mut impl FnMut(i32, i32) -> i32,
-    ) -> TeamCreationPlan {
-        crate::sim::ai_team_creation::plan_team_creation_policy(
-            self.sim,
-            rules,
-            self.house,
-            crate::sim::ai_team_creation::TeamGates::policy_played(),
-            draw,
-        )
-    }
-
-    /// The unit the house's teams need of `kind`, chosen the way
-    /// `HouseClass::AI_Choose_Unit` chooses it (`sim::ai_unit_choice`), as a
-    /// type. `None` when the house neither has a choice waiting nor needs one of
-    /// that class.
-    ///
-    /// The house's own choice slot wins when it holds one: `AI_Manage_Build_Queue`
-    /// writes it when it restarts a starved house's production, the factory
-    /// consumes it and its exit clears it, so a caller that ran the chooser
-    /// anyway would chase a type nothing builds. Only a clear slot is filled,
-    /// which is the native order (`AI_ChooseNextProduction` asks a chooser only
-    /// for a -1 slot). The chooser's own answer is drawn with the caller's RNG
-    /// and is not written back: `sim::ai_unit_choice` owns that slot.
-    pub(crate) fn unit_choice(
-        &self,
-        rules: &RuleSet,
-        kind: UnitChoiceKind,
-        draw: &mut impl FnMut(i32, i32) -> i32,
-    ) -> Option<InternedId> {
-        if let Some(index) = self.unit_choice_slot(kind) {
-            let name = rules.type_array_ids(kind.category()).get(index as usize)?;
-            return self.type_id(name);
-        }
-        let index = crate::sim::ai_unit_choice::unit_choice_decision(
-            self.sim, rules, self.house, kind, draw,
-        )?;
-        let name = rules.type_array_ids(kind.category()).get(index as usize)?;
-        self.type_id(name)
-    }
-
-    /// The class index the house's own choice slot holds for `kind`, or `None`
-    /// while it is clear.
-    pub(crate) fn unit_choice_slot(&self, kind: UnitChoiceKind) -> Option<i32> {
-        let index = self.sim.houses().get(&self.house)?.ai_unit_choices().get(kind);
-        (index != -1).then_some(index)
-    }
-
     /// Whether the house's factory of `category` holds anything of its own: a
     /// product being built, or a copy queued behind it.
     pub(crate) fn factory_busy(&self, category: ProductionCategory) -> bool {
@@ -416,22 +309,6 @@ impl<'a> Observation<'a> {
         })
     }
 
-    /// The AI's own answer to "what unit does this house need": the harvester
-    /// branch of `HouseClass::AI_Choose_Unit` (`ai_unit_choice`), read as a
-    /// type. `None` when the house has enough gatherers or the rules name none.
-    ///
-    /// That branch is gated on no human controlling the house; auto play is a
-    /// policy driving it in the player's place, so the gate reads false here.
-    pub(crate) fn harvester_choice(&self, rules: &RuleSet) -> Option<InternedId> {
-        let gates = crate::sim::ai_unit_choice::ChooserGates::policy_played(rules);
-        let index =
-            crate::sim::ai_unit_choice::harvester_choice(self.sim, rules, self.house, gates)?;
-        let name = rules
-            .type_array_ids(ObjectCategory::Vehicle)
-            .get(usize::try_from(index).ok()?)?;
-        self.type_id(name)
-    }
-
     /// The rules' name of a type, for messages: a policy that has to say what
     /// it is waiting on names the type the way the rules do.
     pub(crate) fn name_of(&self, type_id: InternedId) -> Option<&'a str> {
@@ -491,22 +368,6 @@ impl<'a> Observation<'a> {
         )
     }
 
-    /// The plant `AI_Choose_Building` would put in front of `ty`
-    /// (`0x004FE6F6..0x004FE943`, [`crate::sim::ai_base_building::power_plant_to_splice`]):
-    /// `ty`'s drain would take the house past its output, so the chooser
-    /// splices the side's plant ahead of it. Read-only; the policy builds the
-    /// plant first and leaves the node to the next decision.
-    pub(crate) fn power_plant_to_splice(
-        &self,
-        rules: &RuleSet,
-        ty: &ObjectType,
-    ) -> Option<InternedId> {
-        let index =
-            crate::sim::ai_base_building::power_plant_to_splice(self.sim, rules, self.house, ty)?;
-        let plant = rules.building_type_at(index)?;
-        self.type_id(&plant.id)
-    }
-
     /// Whether a team of this house has recruited `entity_id`.
     ///
     /// A team's script owns its members: `team_script_vm`'s pass has no house
@@ -557,11 +418,6 @@ impl<'a> Observation<'a> {
     /// `[GameOptions] SuperWeapons=`, which the native Recalc reads.
     pub fn super_weapons(&self) -> bool {
         self.sim.session().game_options().super_weapons
-    }
-
-    /// The scenario's per-type tech levels the native Recalc filters against.
-    pub(crate) fn type_tech_levels(&self) -> &TypeTechLevels {
-        self.sim.type_tech_levels()
     }
 
     /// The id the rules registered a type under, for a policy holding a name.

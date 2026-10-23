@@ -105,6 +105,7 @@ impl Default for HouseAiProduction {
 }
 
 impl HouseAiProduction {
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) const fn mode(&self) -> i32 {
         self.mode
     }
@@ -163,10 +164,7 @@ pub(crate) fn economy_state_machine(
     let Some(house) = houses.get(&owner) else {
         return;
     };
-    // A brain-played house runs the block its own player would: `policy_played`
-    // is the injection (see [`crate::sim::house_state::HouseState`]).
-    if (house.is_controlled_by_human(game_mode_nonzero) && !house.policy_played()) || !game_mode_nonzero
-    {
+    if house.is_controlled_by_human(game_mode_nonzero) || !game_mode_nonzero {
         return;
     }
     let mode = house.ai_production().mode;
@@ -433,7 +431,7 @@ pub(crate) fn choose_building(
 /// house's `GDIPowerPlant=`, the side 2 house's `ThirdPowerPlant=`, any other
 /// side's `NodAdvancedPower=` when `0x00505360` admits it, else
 /// `NodRegularPower=`.
-pub(crate) fn power_plant_to_splice(
+fn power_plant_to_splice(
     sim: &Simulation,
     rules: &RuleSet,
     owner: InternedId,

@@ -147,10 +147,6 @@ pub(crate) mod unit_post;
 #[cfg(test)]
 mod wall_autofill_oracle_tests;
 mod world_commands;
-
-/// The order gate's per-object predicate, for read-only projections that
-/// already hold the object (see `Simulation::order_actor_admits`).
-pub(crate) use world_commands::order_actor_admits_for;
 mod world_hash;
 
 #[cfg(all(test, feature = "ares"))]
@@ -3390,12 +3386,6 @@ impl Simulation {
 
     pub fn power_states(&self) -> &BTreeMap<InternedId, PowerState> {
         self.power_states.as_map()
-    }
-
-    /// The scenario's per-type tech levels. Read by the native base-plan
-    /// generator and by anything asking what a house may build at its level.
-    pub(crate) fn type_tech_levels(&self) -> &TypeTechLevels {
-        &self.type_tech_levels
     }
 
     pub fn super_weapons(

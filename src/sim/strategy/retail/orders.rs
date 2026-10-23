@@ -204,7 +204,10 @@ fn is_combat_unit(rules: &RuleSet, ty: &ObjectType) -> bool {
         && !ty.engineer
         && !ty.harvester
         && !ty.resource_gatherer
-        && !crate::sim::mcv_deploy::deploys_into_of(rules, ty)
+        && !ty
+            .deploys_into
+            .as_deref()
+            .and_then(|name| rules.object(name))
             .is_some_and(|yard| yard.build_const_eligible)
 }
 

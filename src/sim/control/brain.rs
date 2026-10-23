@@ -69,18 +69,6 @@ pub trait Brain {
     /// driving the house.
     fn name(&self) -> &'static str;
 
-    /// State the brain asks the simulation to hold, applied through its owner
-    /// *before* [`Self::think`] runs this frame.
-    ///
-    /// A decision that is not a command belongs here: a player's hands cannot
-    /// raise an AI team, so the team block is not a command and its owner
-    /// (`sim::ai_team_creation`) applies it. Because it is applied first, a
-    /// brain may reason about it in the same frame. Empty for a brain that only
-    /// commands.
-    fn state(&mut self, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
-        let _ = (rules, obs, out);
-    }
-
     /// Called once per frame, before the frame advances. Everything returned in
     /// `out` is considered for that frame's tail.
     ///

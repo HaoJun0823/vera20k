@@ -32,11 +32,10 @@ use crate::sim::behavior::{Goal, MicroStep};
 use crate::sim::command::{Command, CommandEnvelope};
 use crate::sim::control::brain::{Brain, Outbox};
 use crate::sim::control::budget::Budget;
-use crate::sim::control::intent::Intent;
 use crate::sim::control::micro::MicroTable;
 use crate::sim::control::observation::Observation;
 use crate::sim::intern::InternedId;
-use crate::sim::world::{FrameEffects, Simulation};
+use crate::sim::world::Simulation;
 
 /// Which half of the work the player lets auto play do.
 ///
@@ -187,40 +186,20 @@ impl ControlBoard {
         if !sim.houses().contains_key(&owner) {
             return;
         }
-        // The brain plays the house's AI blocks as well as its commands, so the
-        // sim's own gates are told once that a brain owns it: `house_state`
-        // owns the latch, and the factory-exit economy block and everything
-        // else that gates on "no human controls it" reads it.
-        if let Some(house) = sim.houses.get_mut(&owner) {
-            house.set_policy_played();
-        }
         self.budget.begin_frame();
         let owner_name = sim.interner().resolve(owner).to_owned();
 
         let mut pending: Vec<Command> = Vec::new();
 
-        // 1. State the brain asks the simulation to hold, through its owners.
-        let mut state = Outbox::default();
-        {
-            let obs = Observation::new(sim, owner);
-            self.brain.state(rules, &obs, &mut state);
-        }
-        for intent in state.intents {
-            self.apply_state_intent(sim, rules, owner, intent);
-        }
-
-        // 2. Decisions.
+        // 1. Decisions.
         let mut out = Outbox::default();
         {
             let obs = Observation::new(sim, owner);
             self.brain.think(rules, &obs, &mut out);
         }
         for intent in out.intents {
-            if matches!(intent, Intent::RaiseTeams(_) | Intent::AdvanceStrategy) {
-                self.apply_state_intent(sim, rules, owner, intent);
-            } else if let Some(command) = intent.command() {
-                self.admit(sim, &owner_name, &command, &mut pending);
-            }
+            let command = intent.command();
+            self.admit(sim, &owner_name, &command, &mut pending);
         }
         for command in &out.commands {
             self.admit(sim, &owner_name, command, &mut pending);
@@ -250,57 +229,6 @@ impl ControlBoard {
             .into_iter()
             .map(|command| CommandEnvelope::new(owner, execute_tick, command));
         sim.queue_commands(envelopes);
-    }
-
-    /// Apply one intent that is house state rather than a command.
-    ///
-    /// A team block and a Strategy tick are both things `HouseClass::Update`
-    /// does for a house no human controls; neither rides the command queue, so
-    /// each is applied by its owning module here.
-    fn apply_state_intent(
-        &mut self,
-        sim: &mut Simulation,
-        rules: &RuleSet,
-        owner: InternedId,
-        intent: Intent,
-    ) {
-        match intent {
-            Intent::RaiseTeams(plan) => self.raise_teams(sim, rules, owner, plan),
-            Intent::AdvanceStrategy => crate::sim::house_strategy::update_strategy_policy(
-                sim,
-                rules,
-                owner,
-                None,
-                FrameEffects::default(),
-            ),
-            // Nothing else is house state; an intent that turns up here has a
-            // command and reaches the queue through `Intent::command`.
-            _ => {}
-        }
-    }
-
-    /// Apply a raised team block through its owner.
-    ///
-    /// A team is not a command: a player's hands cannot raise one, so it cannot
-    /// ride the queue. `sim::ai_team_creation` applies it — the eviction, the
-    /// `Autocreate=` marks, the teams and the timer restart — for a house its
-    /// own gate would skip.
-    fn raise_teams(
-        &mut self,
-        sim: &mut Simulation,
-        rules: &RuleSet,
-        owner: InternedId,
-        plan: crate::sim::ai_team_creation::TeamCreationPlan,
-    ) {
-        let frame = sim.session().binary_frame() as i32;
-        crate::sim::ai_team_creation::apply_team_creation(
-            sim,
-            rules,
-            owner,
-            plan,
-            frame,
-            FrameEffects::default(),
-        );
     }
 
     /// Step this frame's rotation of attached objects and issue what they ask.

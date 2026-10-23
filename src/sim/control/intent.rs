@@ -2,17 +2,21 @@
 //!
 //! - [`Order`]: one object, one [`Goal`]. Translated by the L1 funnel into the
 //!   command a click would produce, then admitted and queued.
-//! - [`Intent`]: house-scoped work — a build, a placement, a team block — that
-//!   a player's hands do through the sidebar rather than by clicking the map.
+//! - [`Intent`]: house-scoped work — a build, a placement, a sale — that a
+//!   player's hands do through the sidebar rather than by clicking the map.
 //!
 //! Both are *requests*. Naming them separately from
 //! [`Command`](crate::sim::command::Command) is the point of the layer: a brain
 //! says what it wants, L2 decides whether the house may issue it now and which
-//! native owner performs it. Production, placement, sale and the team block
-//! each keep exactly one owner — this module holds no state of its own and
+//! native owner performs it. Production, placement, sale and the queue each
+//! keep exactly one owner — this module holds no state of its own and
 //! re-implements none of them.
+//!
+//! Every request is a command. A brain never asks the simulation to hold
+//! state that is not a player's own doing: a player's hands cannot raise an AI
+//! team or run a house's AI tick, so neither is a request here, and this layer
+//! applies nothing through a module of its own.
 
-use crate::sim::ai_team_creation::TeamCreationPlan;
 use crate::sim::behavior::goal::Goal;
 use crate::sim::command::Command;
 use crate::sim::intern::InternedId;
@@ -25,23 +29,11 @@ pub struct Order {
     pub goal: Goal,
 }
 
-/// House-scoped work.
+/// House-scoped work: everything a player's hands do through the sidebar
+/// rather than by clicking the map. Every variant is a command, so the layer
+/// never has to apply anything through a module of its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Intent {
-    /// The house's own team selector raised these teams
-    /// (`sim::ai_team_creation`): applied through that module, which owns the
-    /// eviction, the `Autocreate=` marks, the new teams and the timer restart.
-    RaiseTeams(TeamCreationPlan),
-    /// Run the house's own Strategy tick now
-    /// (`HouseClass::AI_Building_Strategy`, `0x004FD500`): applied through
-    /// `sim::house_strategy`, which owns the enemy search, the defeated-enemy
-    /// forget, the superweapon fire, the emergency state with its fire sale and
-    /// all-to-hunt, the missing-factory reaction, `AI_Manage_Build_Queue` and
-    /// the timer restart.
-    ///
-    /// Native runs it from `HouseClass::Update` for a house no human controls;
-    /// this is the same tick for the house a brain plays.
-    AdvanceStrategy,
     /// Ask the type's factory to start building it (`HouseClass::Begin_Production`).
     QueueProduction { type_id: InternedId },
     /// Cancel the queued copies of a type (`HouseClass::Abandon_Production`).
@@ -59,14 +51,9 @@ pub enum Intent {
 }
 
 impl Intent {
-    /// The command this request is issued as, when it is one.
-    ///
-    /// `RaiseTeams` and `AdvanceStrategy` are not commands: a player's hands
-    /// cannot raise an AI team or run a house's AI tick, so they are applied
-    /// through their owning modules instead.
-    pub fn command(self) -> Option<Command> {
-        Some(match self {
-            Self::RaiseTeams(_) | Self::AdvanceStrategy => return None,
+    /// The command this request is issued as.
+    pub fn command(self) -> Command {
+        match self {
             Self::QueueProduction { type_id } => Command::QueueProduction { type_id },
             Self::CancelProduction { type_id, all } => {
                 Command::CancelProductionByType { type_id, all }
@@ -78,6 +65,6 @@ impl Intent {
                 ry: cell.1,
             },
             Self::SellBuilding { entity_id } => Command::SellBuilding { entity_id },
-        })
+        }
     }
 }

@@ -99,31 +99,17 @@
 //! integer comparisons over an ordered plan, an ordered entity store and a
 //! fixed cell scan.
 
-pub(super) mod build_plan;
-pub(super) mod building_choice;
-pub(crate) mod economy;
 pub(super) mod expand;
 pub(super) mod orders;
-pub(super) mod teams;
-pub(super) mod unit_choice;
 
 use std::collections::BTreeMap;
 
 use crate::rules::ruleset::RuleSet;
-use crate::sim::base_plan::BasePlanState;
 use crate::sim::control::brain::{Brain, Outbox};
-use crate::sim::control::intent::Intent;
 use crate::sim::control::observation::Observation;
 use crate::sim::rng::SimRng;
 
-use building_choice::Build;
 use orders::SentOrder;
-
-/// How long a node or a placement may make no progress before the brain gives
-/// up on it, in frames. Half a minute at play cadence: long enough that a slow
-/// building or a momentarily blocked prerequisite is not abandoned, short
-/// enough that a play test never watches a dead base.
-pub(super) const GIVE_UP_FRAMES: u32 = 900;
 
 /// How long an order on a unit stands before the brain looks again, in frames.
 /// Fifteen seconds at play cadence: long enough that a unit is not re-tasked
@@ -134,18 +120,11 @@ pub(super) const ORDER_REFRESH_FRAMES: u64 = 450;
 /// Plays the retail base plan and the house AI's choices for whichever house
 /// the control layer drives.
 pub struct RetailBrain {
-    pub(super) plan: BasePlanState,
+    /// This brain's own generator. The native decisions that would draw on it —
+    /// the choosers and the team selector — are not reachable from here yet, so
+    /// nothing reads it; the stream stays the brain's own, never the world's.
+    #[allow(dead_code)]
     pub(super) rng: SimRng,
-    pub(super) generated: bool,
-    /// The product the yard has in hand, if any.
-    pub(super) build: Option<Build>,
-    /// The open node the plan is blocked on, and for how many frames.
-    pub(super) blocked: Option<(usize, u32)>,
-    /// Nodes this brain gave up on, so the rest of the plan still runs.
-    pub(super) skipped: Vec<usize>,
-    /// The node whose build was last reported blocked, so a stall is logged
-    /// once instead of once per frame.
-    pub(super) stall_logged: Option<usize>,
     /// What each combat unit was sent at, and the frame that order goes stale.
     pub(super) orders: BTreeMap<u64, SentOrder>,
 }
@@ -155,25 +134,15 @@ impl RetailBrain {
     /// stream: the brain's draws are not part of the world's random sequence.
     pub fn new(seed: u64) -> Self {
         Self {
-            plan: BasePlanState::default(),
             rng: SimRng::new(seed),
-            generated: false,
-            build: None,
-            blocked: None,
-            skipped: Vec::new(),
-            stall_logged: None,
             orders: BTreeMap::new(),
         }
-    }
-
-    /// The plan this brain holds, for diagnostics and tests.
-    pub fn plan(&self) -> &BasePlanState {
-        &self.plan
     }
 
     /// This brain's own draw, for the native decisions it asks: the choosers
     /// and the team selector both draw on the house's stream in play, and a
     /// brain's stream is its own generator.
+    #[allow(dead_code)]
     pub(super) fn draw(&mut self, low: i32, high: i32) -> i32 {
         self.rng.next_range_i32_inclusive(low, high)
     }
@@ -184,105 +153,10 @@ impl Brain for RetailBrain {
         "retail-ai"
     }
 
-    /// The house's own Strategy tick and its team block, as this brain plays
-    /// them.
-    ///
-    /// Strategy goes first and the team block follows: the tick's enemy search
-    /// is what gives the house an enemy, and the team selector admits attack
-    /// triggers only for a house that has one. Both are applied before `think`,
-    /// because the units this frame's choosers ask for are the ones the teams
-    /// just raised need.
-    fn state(&mut self, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
-        if obs.strategy_due() {
-            out.intent(Intent::AdvanceStrategy);
-        }
-        if let Some(intent) = teams::raise(self, rules, obs) {
-            out.intent(intent);
-        }
-    }
-
     fn think(&mut self, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
-        self.generate(rules, obs);
-        if let Some(intent) = building_choice::place(self, rules, obs) {
-            out.intent(intent);
-        }
-        expand::deploy_yard_maker(self, rules, obs, out);
-
-        // `AI_ChooseNextProduction` dispatches on the house's mode, and that is
-        // how a retail house keeps the yard and the factories from competing
-        // for the same credits: below `AIAlternateProductionCreditCutoff=` the
-        // economy state machine puts it on one half at a time, and the other
-        // half only runs when this one has nothing to make.
-        let mode = obs.production_mode();
-        // The budget ([`economy`]) runs over both halves: a node costs several
-        // times a unit, and the teams only fill if the factories can pay.
-        let yard = economy::yard(rules, obs, obs.army_reserve(rules));
-        if yard == economy::Yard::Run {
-            economy::resume(obs, out);
-        } else {
-            economy::hold(obs, out);
-        }
-        let yard_may_build = yard == economy::Yard::Run;
-
-        // Whichever half the mode picked runs the other one when it has nothing
-        // to make, so a mode never idles the house.
-        match mode {
-            1 => {
-                let built = yard_may_build && ask_building(self, rules, obs, out);
-                if !built {
-                    ask_units(self, rules, obs, out);
-                }
-            }
-            2 => {
-                if !ask_units(self, rules, obs, out) && yard_may_build {
-                    ask_building(self, rules, obs, out);
-                }
-            }
-            _ => {
-                if yard_may_build {
-                    ask_building(self, rules, obs, out);
-                }
-                ask_units(self, rules, obs, out);
-            }
-        }
-
+        expand::deploy_yard_maker(rules, obs, out);
         orders::engineers(self, rules, obs, out);
         orders::forces(self, rules, obs, out);
     }
 }
 
-/// The yard's half of the queue. `false` when it had nothing to ask for, which
-/// is what makes the other half run in modes 1 and 2.
-fn ask_building(
-    brain: &mut RetailBrain,
-    rules: &RuleSet,
-    obs: &Observation<'_>,
-    out: &mut Outbox,
-) -> bool {
-    let Some(intent) = building_choice::queue(brain, rules, obs) else {
-        return false;
-    };
-    out.intent(intent);
-    true
-}
-
-/// The factories' half of the queue.
-///
-/// Income first: a harvester the house lacks is worth more than the first tank,
-/// and both are the same factory's work.
-fn ask_units(
-    brain: &mut RetailBrain,
-    rules: &RuleSet,
-    obs: &Observation<'_>,
-    out: &mut Outbox,
-) -> bool {
-    if let Some(intent) = unit_choice::harvester(brain, rules, obs) {
-        out.intent(intent);
-        return true;
-    }
-    let Some(intent) = unit_choice::combat_unit(brain, rules, obs) else {
-        return false;
-    };
-    out.intent(intent);
-    true
-}

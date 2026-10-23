@@ -2811,10 +2811,9 @@ impl Simulation {
     ///   and in its shared prefix; EjectBunker and the dormant aircraft Unload
     ///   arm bypass that prefix and keep a team member in its team.
     pub(crate) fn order_actor_admits(&self, stable_id: u64) -> bool {
-        self.substrate
-            .entities
-            .get(stable_id)
-            .is_some_and(order_actor_admits_for)
+        self.substrate.entities.get(stable_id).is_some_and(|e| {
+            e.lifecycle.object_alive() && e.health.current() > 0 && !e.lifecycle.in_limbo()
+        })
     }
 
     /// The Target/Destination half of the native order-admission gate.
@@ -3962,15 +3961,4 @@ mod tests {
             BunkerState::Idle
         );
     }
-}
-
-/// The acting object's half of the native order-admission gate, as a free
-/// function so a read-only projection can ask the same predicate about an
-/// object it already holds instead of looking it up again.
-///
-/// Before the synchronized order path touches anything it requires the acting
-/// object to be present, natively alive, above zero strength and out of limbo;
-/// [`Simulation::order_actor_admits`] is the by-id shape of the same test.
-pub(crate) fn order_actor_admits_for(entity: &crate::sim::game_entity::GameEntity) -> bool {
-    entity.lifecycle.object_alive() && entity.health.current() > 0 && !entity.lifecycle.in_limbo()
 }

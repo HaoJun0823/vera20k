@@ -102,13 +102,8 @@ pub(crate) fn deploys_into<'r>(
     entity: &GameEntity,
     rules: &'r RuleSet,
 ) -> Option<&'r ObjectType> {
-    deploys_into_of(rules, sim.object_type(entity.type_ref(), rules)?)
-}
-
-/// The same read for a type already in hand, for a caller holding only the
-/// type id (a policy deciding whether to deploy its Construction Yard maker).
-pub(crate) fn deploys_into_of<'r>(rules: &'r RuleSet, ty: &ObjectType) -> Option<&'r ObjectType> {
-    rules.object(ty.deploys_into.as_deref()?)
+    let obj = sim.object_type(entity.type_ref(), rules)?;
+    rules.object(obj.deploys_into.as_deref()?)
 }
 
 /// `DeploysInto` is one of `[AI] BuildConst=` (Rules `+0x8AC`, compared by

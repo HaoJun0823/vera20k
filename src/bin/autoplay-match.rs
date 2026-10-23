@@ -328,31 +328,33 @@ fn main() -> Result<(), String> {
                     })
                     .unwrap_or_else(|| "idle".to_owned());
                 let rules = &scenario.runtime.resources.rules;
-                let held: Vec<String> = [
-                    ProductionCategory::Building,
-                    ProductionCategory::Vehicle,
-                    ProductionCategory::Infantry,
-                    ProductionCategory::Aircraft,
-                ]
-                .into_iter()
-                .map(|category| {
-                    let text = obs
-                        .factory_product(category)
-                        .map(|(type_id, suspended)| {
-                            let progress = obs
-                                .production_progress(rules, type_id)
-                                .unwrap_or(0);
-                            format!("{}@{progress} held={suspended}", sim.interner().resolve(type_id))
+                let factories = |owner: InternedId| {
+                    let obs = Observation::new(sim, owner);
+                    [ProductionCategory::Vehicle, ProductionCategory::Infantry]
+                        .into_iter()
+                        .map(|category| {
+                            let text = obs
+                                .factory_product(category)
+                                .map(|(type_id, suspended)| {
+                                    let progress = obs
+                                        .production_progress(rules, type_id)
+                                        .unwrap_or(0);
+                                    format!(
+                                        "{}@{progress}{}",
+                                        sim.interner().resolve(type_id),
+                                        if suspended { "!" } else { "" }
+                                    )
+                                })
+                                .unwrap_or_else(|| "-".to_owned());
+                            format!("{category:?}={text}")
                         })
-                        .unwrap_or_else(|| "-".to_owned());
-                    format!("{category:?}={text}")
-                })
-                .collect();
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
                 println!(
-                    "  spend@{tick}: mode {} yard {yard} reserve {} | {}",
-                    obs.production_mode(),
-                    obs.army_reserve(rules),
-                    held.join(" ")
+                    "  spend@{tick}: yard {yard} | own {} | enemy {}",
+                    factories(local),
+                    factories(enemy),
                 );
             }
             last = snapshot(sim, local, enemy, tick, &host);
