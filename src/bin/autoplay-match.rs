@@ -27,10 +27,12 @@ use vera20k_core::skirmish_launch::{AiDifficulty, LaunchCountry};
 /// The map main's own match bench loads by default, so it is known to have the
 /// ore, the starts and the trigger data a match needs.
 const DEFAULT_MAP: &str = "Death.mmx";
-/// Ten minutes of game time at the native 15 frames a second.
-const DEFAULT_TICKS: u64 = 9_000;
-/// A progress line every thirty seconds.
-const DEFAULT_PROGRESS: u64 = 450;
+/// Forty minutes of game time at the native 15 frames a second: a match
+/// against the computer AI does not resolve in ten, and a gate that stops
+/// before one side has lost cannot tell a draw from a loss.
+const DEFAULT_TICKS: u64 = 36_000;
+/// A progress line every two minutes.
+const DEFAULT_PROGRESS: u64 = 1_800;
 /// Commands the control layer admits per frame. The client's hotkey uses 8;
 /// a headless run is not a player, but the budget is the same shape.
 const DEFAULT_PER_FRAME: usize = 8;

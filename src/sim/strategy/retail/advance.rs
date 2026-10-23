@@ -17,7 +17,7 @@
 //! down for the frame; a house that has not got an army yet keeps holding its
 //! base, which is what a player does with five tanks and no plan.
 
-use crate::rules::object_type::ObjectCategory;
+use crate::rules::object_type::{ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
 use crate::sim::control::Goal;
 use crate::sim::control::brain::Outbox;
@@ -32,12 +32,16 @@ use super::{ORDER_REFRESH_FRAMES, RetailBrain};
 /// Below this the opening force is the whole army, and an opening force that
 /// walks into the enemy's pre-placed garrison is a house that has traded its
 /// base for nothing.
-const ARMY_TO_ATTACK: usize = 8;
+const ARMY_TO_ATTACK: usize = 10;
 
 /// How many units one frame may re-task. The board's per-frame budget drops
 /// everything past its own limit, so a larger number here would only spend
 /// the frame on orders that never leave.
 const ADVANCE_ORDERS_PER_FRAME: usize = 8;
+
+/// How close an enemy has to come to the yard before the army stays home,
+/// in cells. A raid inside this ring is what the army was bought for.
+const THREAT_RADIUS: i32 = 18;
 
 /// Send the army at the enemy's base when it is large enough. `false` when
 /// the house is not pushing this frame, so the caller keeps its own posture.
@@ -56,22 +60,51 @@ pub(super) fn advance(
         .filter(|entity| !obs.team_has_member(entity.entity_id))
         .collect();
     // An army the base cannot replace is not an army, it is the whole house
-    // walking out of the gate.
-    if fighters.len() < ARMY_TO_ATTACK || !super::build::can_replace_units(rules, obs) {
+    // walking out of the gate; and a base with nothing to hold it is a base
+    // that falls while the army is away. The third gate is the one that
+    // decides matches: an enemy already at the yard is what the army is for,
+    // and marching out with it in the base loses the production the army
+    // came from.
+    if fighters.len() < ARMY_TO_ATTACK
+        || !super::build::can_replace_units(rules, obs)
+        || !super::build::base_defended(rules, obs)
+        || base_under_threat(rules, obs)
+    {
         return false;
     }
     // Structures, not units: a base is what a house loses with, and a
-    // defending unit walks into the push on its own.
-    let targets: Vec<EnemyEntity> = obs
+    // defending unit walks into the push on its own. Refineries first — a
+    // house that loses its unloading bays loses the war it is paying for,
+    // and the opponent's wallet is the one number that decides the late game.
+    let structures: Vec<(&ObjectType, EnemyEntity)> = obs
         .enemy_entities()
-        .filter(|enemy| {
+        .filter_map(|enemy| {
             obs.object_type(rules, enemy.type_id)
-                .is_some_and(|ty| ty.category == ObjectCategory::Building)
+                .filter(|ty| ty.category == ObjectCategory::Building)
+                .map(|ty| (ty, enemy))
         })
         .collect();
+    let economy: Vec<EnemyEntity> = structures
+        .iter()
+        .filter(|(ty, _)| ty.resource_destination)
+        .map(|(_, enemy)| *enemy)
+        .collect();
+    let targets: Vec<EnemyEntity> = if economy.is_empty() {
+        structures.iter().map(|(_, enemy)| *enemy).collect()
+    } else {
+        economy
+    };
     if targets.is_empty() {
         return false;
     }
+
+    // One target for the whole army, not the nearest for each unit: units
+    // pointed at their own nearest structure arrive one at a time and are
+    // killed one at a time. A fist is what takes a base.
+    let anchor = fighters.first().map_or((0, 0), |entity| entity.cell);
+    let Some(target) = nearest_target(&targets, anchor) else {
+        return false;
+    };
 
     let tick = obs.tick();
     let mut issued = 0;
@@ -87,9 +120,6 @@ pub(super) fn advance(
         ) {
             continue;
         }
-        let Some(target) = nearest_target(&targets, entity.cell) else {
-            continue;
-        };
         let current = brain
             .orders
             .get(&entity.entity_id)
@@ -108,6 +138,23 @@ pub(super) fn advance(
         issued += 1;
     }
     true
+}
+
+/// Whether an enemy is close enough to the yard that the army belongs at
+/// home. `true` when the house has no yard to measure from: a house with
+/// nothing to defend has nothing to gain by walking away either.
+fn base_under_threat(rules: &RuleSet, obs: &Observation<'_>) -> bool {
+    let Some(base) = obs.own_entities().find(|entity| {
+        obs.object_type(rules, entity.type_id)
+            .is_some_and(|ty| ty.build_const_eligible)
+    }) else {
+        return true;
+    };
+    obs.enemy_entities().any(|enemy| {
+        let dx = i32::from(enemy.cell.0) - i32::from(base.cell.0);
+        let dy = i32::from(enemy.cell.1) - i32::from(base.cell.1);
+        dx * dx + dy * dy <= THREAT_RADIUS * THREAT_RADIUS
+    })
 }
 
 /// The enemy structure nearest `from`, ties going to the earlier one in

@@ -37,7 +37,7 @@ use super::RetailBrain;
 /// `HarvestersPerRefinery=`: a player runs a queue at the refinery, because
 /// the trip out and back is most of a harvester's life and two of them idle
 /// the bay between deliveries.
-const HARVESTERS_PER_REFINERY: usize = 3;
+const HARVESTERS_PER_REFINERY: usize = 2;
 
 /// How many refineries the economy grows to. Past this the ore within reach
 /// of the base is the limit, not the unloading bays. A refinery also brings
@@ -49,6 +49,25 @@ const REFINERY_TARGET: usize = 3;
 /// army affordable later; an army bought out of a thin economy is an army
 /// that stops the income it was bought with.
 const COMBAT_MIN_CREDITS: i32 = 2_000;
+
+/// How many base defenses the house keeps standing.
+///
+/// The opponent pushes with numbers a player's opening army cannot match, and
+/// a base with no tower is a base whose production one raid stops for good:
+/// the yard goes dark, the factories follow, and the match is lost by
+/// logistics rather than by the fight.
+const DEFENSE_TARGET: usize = 2;
+
+/// The wallet a radar or a tech centre has to leave behind: both unlock
+/// better types rather than more of them, so they come after the army.
+const TECH_MIN_CREDITS: i32 = 4_000;
+
+/// How many fighting units the house fields before it buys a radar.
+const ARMY_FOR_TECH: usize = 8;
+
+/// How many war factories the house runs. One factory replaces losses; two
+/// grow an army.
+const WAR_FACTORY_TARGET: usize = 2;
 
 /// One frame's spending: take what is finished out of the yard, start the
 /// next structure, and keep the factories busy.
@@ -199,16 +218,52 @@ fn candidate<'r>(rules: &'r RuleSet, obs: &Observation<'_>) -> Option<(&'r Objec
     // ore delivered is the only income a player's house has. A base that
     // builds its barracks first pays for soldiers out of its starting wallet
     // and then has nothing left to pay for anything.
-    if let Some(found) = wanted_once(rules, obs, &rules.build_weapons_types) {
-        return Some(found);
+    // Two war factories, not one: the second doubles what the house can put
+    // on the field per minute, which is the whole difference between an army
+    // that replaces itself and one that shrinks with every fight.
+    if count_in(obs, rules, &rules.build_weapons_types) < WAR_FACTORY_TARGET {
+        if let Some(found) = first_buildable(rules, obs, &rules.build_weapons_types) {
+            return Some(found);
+        }
     }
     if let Some(found) = wanted_once(rules, obs, &rules.build_barracks_types) {
         return Some(found);
     }
-    if let Some(found) = wanted_once(rules, obs, &rules.build_radar_types) {
-        return Some(found);
+    // Then something to hold the base with, before anything that only makes
+    // it grow: a radar is worth less than a base that survives the first
+    // raid.
+    if can_replace_units(rules, obs) && count_in(obs, rules, base_defenses(rules, obs)) < DEFENSE_TARGET
+    {
+        if let Some(found) = first_buildable(rules, obs, base_defenses(rules, obs)) {
+            return Some(found);
+        }
     }
-    wanted_once(rules, obs, &rules.build_tech_types)
+    // Radar and the tech centre unlock better types, not more of them, and
+    // they draw power the factories need. They wait for an army to unlock
+    // them for: a house that buys a radar before it can field eight fighting
+    // units has bought a map it has nothing to put on.
+    if obs.credits() >= TECH_MIN_CREDITS && fighter_count(rules, obs) >= ARMY_FOR_TECH {
+        if let Some(found) = wanted_once(rules, obs, &rules.build_radar_types) {
+            return Some(found);
+        }
+        return wanted_once(rules, obs, &rules.build_tech_types);
+    }
+    None
+}
+
+/// The house's fighting units: what the army is made of, harvesters and
+/// engineers aside.
+fn fighter_count(rules: &RuleSet, obs: &Observation<'_>) -> usize {
+    obs.own_entities()
+        .filter(|entity| {
+            obs.object_type(rules, entity.type_id).is_some_and(|ty| {
+                ty.weapon_count > 0
+                    && ty.category != ObjectCategory::Building
+                    && !ty.resource_gatherer
+                    && !ty.engineer
+            })
+        })
+        .count()
 }
 
 /// The type from `names` the house may build now, in list order.
@@ -313,6 +368,18 @@ fn class_types<'r>(
         let type_id = obs.type_id(&ty.id)?;
         (obs.can_build(rules, ty, true) != CanBuild::No).then_some((ty, type_id))
     })
+}
+
+/// The `[AI]` base-defense list of the house's own side: what the native
+/// computer would answer a raid with, read for the same question here.
+fn base_defenses<'r>(rules: &'r RuleSet, obs: &Observation<'_>) -> &'r [String] {
+    obs.side_index()
+        .map_or(&[], |side| rules.base_defense_types(side))
+}
+
+/// Whether the base has anything standing between a raid and its yard.
+pub(super) fn base_defended(rules: &RuleSet, obs: &Observation<'_>) -> bool {
+    count_in(obs, rules, base_defenses(rules, obs)) > 0
 }
 
 /// Whether the base can replace what it loses: a war factory for the
