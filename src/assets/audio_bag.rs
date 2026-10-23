@@ -334,16 +334,14 @@ pub fn decode_bag_audio(entry: &AudioBagEntry, data: &[u8]) -> Option<BagAudio> 
         // `FUN_00409C40 @ 0x00409C40` then wires the one block decoder,
         // `IMA_ADPCM__DecodeBlock @ 0x0040AA70`.
         super::ima_adpcm::decode_blocks(data, entry.channels(), entry.chunk_size)
-    } else if entry.is_16bit() {
-        // Raw 16-bit signed PCM (little-endian).
-        data.as_chunks::<2>()
-            .0
-            .iter()
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-            .collect()
     } else {
-        // Raw 8-bit unsigned PCM → convert to 16-bit signed.
-        data.iter().map(|&b| ((b as i16) - 128) * 256).collect()
+        // Raw PCM, 16-bit signed little-endian or 8-bit unsigned, through the
+        // one PCM converter the WAV reader also uses.
+        let bits = if entry.is_16bit() { 16 } else { 8 };
+        let mut cursor = super::wav_file::WavPcmCursor::pcm(bits)?;
+        let mut samples = Vec::with_capacity(data.len());
+        while cursor.decode_next(data, &mut samples) {}
+        samples
     };
 
     Some(BagAudio {

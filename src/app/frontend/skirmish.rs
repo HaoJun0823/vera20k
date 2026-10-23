@@ -19,7 +19,6 @@ use crate::rules::color_scheme::{
     ColorSchemeEntry, scheme_entry_by_name, scheme_entry_for_priority,
 };
 use crate::rules::house_colors::{DEFAULT_SCHEME_ENTRY, HouseColorIndex};
-use crate::rules::ini_parser::IniFile;
 use crate::rules::overlay_types::OverlayTypeRegistry;
 use crate::rules::ruleset::RuleSet;
 use crate::sim::scenario_bootstrap::normalized_launch_slots;
@@ -120,7 +119,6 @@ pub(crate) fn build_overlay_presentation(
     batch: &BatchRenderer,
     theater_ext: &str,
     theater_name: &str,
-    rules_ini: &IniFile,
     rules: &RuleSet,
     overlay_registry: &OverlayTypeRegistry,
     theater_iso_palette: Option<&Palette>,
@@ -148,7 +146,6 @@ pub(crate) fn build_overlay_presentation(
         );
     }
 
-    let crate_rules = &rules.crate_rules;
     let art_registry = rules.art();
     let rubble_arts: Vec<_> = rules.building_rubble_arts().cloned().collect();
 
@@ -227,10 +224,10 @@ pub(crate) fn build_overlay_presentation(
         overlay_atlas::compute_overlay_radar_colors(
             asset_manager,
             overlay_registry,
+            overlay_atlas::OverlayRadarColorSource::Cell,
             &overlay_names,
             theater_ext,
             theater_name,
-            rules_ini,
             art_registry,
         );
 
@@ -251,10 +248,7 @@ pub(crate) fn build_overlay_presentation(
             theater_ext,
             theater_name,
             overlay_registry,
-            &rules.tiberium_types,
-            crate_rules,
-            rules_ini,
-            art_registry,
+            rules,
             Some(&rules.smudge_types),
             &rubble_arts,
         )
@@ -273,8 +267,6 @@ pub(crate) fn build_overlay_presentation(
             theater_ext,
             theater_name,
             overlay_registry,
-            rules_ini,
-            art_registry,
             &rubble_arts,
         )
     });

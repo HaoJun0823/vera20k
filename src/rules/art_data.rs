@@ -367,12 +367,16 @@ pub struct BuildingAnimVariantConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnimTypeRuntimeConfig {
     /// False means the allocated native type has never completed ART ReadINI.
-    /// It retains constructor bounds and must not load an orphan SHP.
+    /// It retains constructor bounds. Only a reached saved type load can
+    /// supply an image without this ART read.
     pub art_body_read: bool,
     /// ObjectType::ReadINI @ 0x005F933B reads Image from the exact AnimType
     /// section with a 25-byte buffer and the constructor's type ID default.
     /// Keep this animation value separate from generic object-art resolution.
     image: String,
+    /// Inherited ObjectType::ReadINI AlphaImage value (`+0x213`, 25 bytes),
+    /// distinct from Image and present only for a type whose ART body was read.
+    pub(crate) alpha_image: String,
     pub start: i32,
     pub loop_start: i32,
     pub loop_end: i32,
@@ -383,6 +387,9 @@ pub struct AnimTypeRuntimeConfig {
     pub explicit_loop_end: Option<i32>,
     /// Signed SHP frame count read from header offset +6 during asset binding.
     pub raw_shp_frame_count: Option<i32>,
+    /// Resolver427C62's raw-count/2; InitTheater427940 can replace Shape
+    /// without replacing this numeric value. None precedes asset binding.
+    pub middle_frame: Option<i32>,
     /// Signed SHP height read from header offset +4 during asset binding:
     /// `MOVSX [image+4]`, as `LightningStorm::CreateCloudBolt` reads its first
     /// bolt's image (`0x0053A16B`).
@@ -417,20 +424,19 @@ pub struct AnimTypeRuntimeConfig {
     /// leaves it `0.0` when the key is absent, and the read passes the current
     /// value back as its own default.
     ///
-    /// UNCHECKED consumer (M11b): the per-frame damage arm at
+    /// The per-frame damage arm at
     /// `AnimClass::AI 0x00424507..0x0042464C` accumulates this into
     /// `AnimClass+0x188`, which the constructor seeds to **`1.0`**
     /// (`0x00421FA4` zeroes the low dword, `0x00421FC8` writes `0x3FF00000` to
     /// the high dword), so the first armed frame always emits at least one
-    /// point. Nothing reads this field yet.
+    /// point. `Simulation::visit_anim` consumes it after a due frame advance.
     pub damage: NativeF64Bits,
     /// art.ini `Warhead=`, `AnimTypeClass+0x330`, resolved by
     /// `WarheadTypeClass::FindOrAllocate`. Bouncer-landing only — the per-frame
     /// damage arm hard-selects `[CombatDamage] C4Warhead`/`FlameDamage2`
-    /// instead. Not consumed yet (M11b).
+    /// instead.
     pub warhead: Option<String>,
     /// art.ini `DamageRadius=`, `AnimTypeClass+0x334`. Bouncer-landing only.
-    /// Not consumed yet (M11b).
     pub damage_radius: i32,
     /// art.ini `Elasticity=`, `AnimTypeClass+0x310`, a `ReadDouble`.
     /// Constructor default `0x3FE99999_A0000000` — the single-precision `0.8f`
@@ -548,8 +554,6 @@ pub enum AnimAssetBindError {
     InvalidDamageFireOffset,
     #[error("required animation type [{0}] is absent from merged art data")]
     MissingAnimType(String),
-    #[error("required SHP for animation type [{0}] was not found")]
-    MissingShp(String),
     #[error("animation SHP [{name}] has an invalid signed frame count {count}")]
     InvalidFrameCount { name: String, count: i32 },
     #[error(
@@ -790,6 +794,7 @@ fn parse_anim_runtime_config(section: &IniSection) -> AnimTypeRuntimeConfig {
     AnimTypeRuntimeConfig {
         art_body_read: true,
         image: section.read_string("Image", &section.name, 0x19),
+        alpha_image: section.read_object_alpha_image(""),
         start: section.read_int("Start", 0),
         loop_start: section.read_int("LoopStart", 0),
         loop_end: explicit_loop_end.unwrap_or(0),
@@ -797,6 +802,7 @@ fn parse_anim_runtime_config(section: &IniSection) -> AnimTypeRuntimeConfig {
         explicit_end,
         explicit_loop_end,
         raw_shp_frame_count: None,
+        middle_frame: None,
         raw_shp_height: None,
         loop_count: section.read_int("LoopCount", 0),
         rate_logic_frames: read_anim_rate(section)
@@ -959,6 +965,9 @@ pub struct ArtRegistry {
     occupy_heights: HashMap<String, i32>,
     /// section ID (uppercase) -> generic AnimType runtime metadata.
     anim_runtime_configs: HashMap<String, AnimTypeRuntimeConfig>,
+    /// First native Anim slot's immutable image projection. Unlike orphan
+    /// ART metadata, these requests came from the retained ProcessedType.
+    anim_type_images: HashMap<String, crate::rules::object_image::ObjectImageState>,
     /// Fresh AnimType `(Theater, NewTheater)` after the Image and own ART reads.
     anim_theater_flags: HashMap<String, (bool, bool)>,
     /// Full deterministic Next/Trailer closure reachable from scheduler-owned roots.
@@ -1208,18 +1217,20 @@ impl ArtRegistry {
             let report = section.read_name("Report", 0x80).map(str::to_owned);
             let start_sound = section.read_name("StartSound", 0x80).map(str::to_owned);
             let anim_runtime_config = parse_anim_runtime_config(section);
-            // ObjectType::ReadINI5F92D0 reads these from the one-hop Image25
-            // section. AnimType::ReadINI427D00 then rereads its own section
-            // using those values as defaults. Fresh AnimTypes have no image:
-            // the base reader skips LoadSHP for their RTTI5 (428E50).
-            let image_section = ini.section(&anim_runtime_config.image);
-            let mut anim_theater = image_section.is_some_and(|s| s.read_bool("Theater", false));
-            let mut anim_new_theater =
-                image_section.is_some_and(|s| s.read_bool("NewTheater", false));
-            if !anim_runtime_config.image.is_empty() {
-                anim_theater = section.read_bool("Theater", anim_theater);
-                anim_new_theater = section.read_bool("NewTheater", anim_new_theater);
-            }
+            // ObjectType::ReadINI5F92D0 selects the one-hop Image25 ART.
+            // This is a fresh AnimType: its base reader skips LoadSHP for
+            // RTTI5 (428E50), and427D00 can read its own theater flags before
+            // any shape resolves. Later Process reads depend on actual shape
+            // success and remain outside this fresh metadata projection.
+            let mut anim_image = crate::rules::object_image::ObjectImageState::new(&section.name);
+            anim_image.read_ini(
+                section,
+                ini,
+                crate::rules::object_image::ObjectImageKind::Animation,
+                crate::rules::object_image::ImageTheater::Uninitialized,
+            );
+            anim_image.read_anim_theater_flags(section);
+            let (anim_theater, anim_new_theater) = (anim_image.theater(), anim_image.new_theater());
             let extra_light: i32 = section.read_int("ExtraLight", 0);
             let queueing_cell = section.read_minmax("QueueingCell", [0, 0]);
             // Multi-pad parser: read DockingOffset0..7 from art.ini.
@@ -1388,6 +1399,7 @@ impl ArtRegistry {
             can_hide_things,
             occupy_heights,
             anim_runtime_configs,
+            anim_type_images: HashMap::new(),
             anim_theater_flags,
             scheduler_anim_types: BTreeSet::new(),
             damage_fire_offsets_valid,
@@ -1402,6 +1414,7 @@ impl ArtRegistry {
             can_hide_things: HashMap::new(),
             occupy_heights: HashMap::new(),
             anim_runtime_configs: HashMap::new(),
+            anim_type_images: HashMap::new(),
             anim_theater_flags: HashMap::new(),
             scheduler_anim_types: BTreeSet::new(),
             damage_fire_offsets_valid: true,
@@ -1445,9 +1458,39 @@ impl ArtRegistry {
             let mut config = parse_anim_runtime_config(&IniSection::new(name.clone()));
             config.art_body_read = false;
             config.image = name.clone();
-            self.anim_theater_flags.insert(key.clone(), (false, false));
             self.anim_runtime_configs.insert(key, config);
         }
+    }
+
+    /// Install the process owner's image projection after the separate ART
+    /// receipt. AnimTypeLoad428855 may supply requests while that receipt is
+    /// still false; neither projection executes another reader or factory.
+    pub(crate) fn apply_anim_type_image_states(
+        &mut self,
+        states: &[(String, crate::rules::object_image::ObjectImageState)],
+    ) {
+        self.anim_type_images.clear();
+        for (name, image) in states {
+            let key = name.to_ascii_uppercase();
+            if self.anim_type_images.contains_key(&key) {
+                continue;
+            }
+            if let Some(config) = self.anim_runtime_configs.get_mut(&key) {
+                config.image = image.image().to_owned();
+            }
+            self.anim_type_images.insert(key, image.clone());
+        }
+    }
+
+    /// None is an unregistered resource consumer; Some(empty) is a real
+    /// native AnimType whose image loader has not been reached.
+    pub(crate) fn anim_image_loads(
+        &self,
+        name: &str,
+    ) -> Option<&[crate::rules::object_image::ObjectImageLoad]> {
+        self.anim_type_images
+            .get(&name.to_ascii_uppercase())
+            .map(|image| image.shp_loads())
     }
 
     /// Apply the canonical RulesClass processing receipt's AnimType references
@@ -1494,6 +1537,7 @@ impl ArtRegistry {
         )
         .expect("test animation bounds must be valid");
         config.raw_shp_frame_count = Some(raw_count);
+        config.middle_frame = Some(raw_count / 2);
         config.end = loaded_end;
         config.loop_end = loaded_loop_end;
         self.scheduler_anim_types.insert(key);
@@ -1577,35 +1621,96 @@ impl ArtRegistry {
             .get(name)
             .cloned()
             .ok_or_else(|| AnimAssetBindError::MissingAnimType(name.to_string()))?;
-        if !config.art_body_read {
-            return Ok(());
-        }
         let image_id = self.resolve_anim_image_id(name);
-        let candidates =
-            anim_shp_candidates(Some(self), name, &image_id, theater_ext, theater_name);
+        let candidates = effect_shp_candidates(
+            crate::rules::art_data::EffectImageKind::Animation,
+            Some(self),
+            name,
+            &image_id,
+            theater_ext,
+            theater_name,
+        );
         let data = candidates
             .iter()
-            .find_map(|candidate| asset_manager.get_ref(candidate))
-            .ok_or_else(|| AnimAssetBindError::MissingShp(name.to_string()))?;
-        let header_word = |offset: usize| {
-            data.get(offset..offset + 2)
+            .find_map(|candidate| asset_manager.get_ref(candidate));
+        if !config.art_body_read && data.is_none() {
+            // Fresh unread types and saved own-name misses are valid null
+            // images (AnimRead427D22 / AnimTypeLoad428955).
+            return Ok(());
+        }
+        let header_word = |data: Option<&[u8]>, offset: usize| {
+            data.and_then(|data| data.get(offset..offset + 2))
                 .map(|bytes| i32::from(i16::from_le_bytes([bytes[0], bytes[1]])))
                 .unwrap_or(0)
         };
-        let raw_count = header_word(6);
-        let (loaded_end, loaded_loop_end) = resolve_loaded_bounds(
-            name,
-            raw_count,
-            config.shadow,
-            config.explicit_end,
-            config.explicit_loop_end,
-        )?;
-        let bound = self
-            .anim_runtime_configs
-            .get_mut(name)
-            .expect("configuration was resolved above");
+        let raw_count = header_word(data, 6);
+        if !config.art_body_read {
+            // AnimTypeLoad428855 binds physical bytes without427B50: keep
+            // constructor End/LoopEnd/Middle0, including after resave/load.
+            let bound = self.anim_runtime_configs.get_mut(name).unwrap();
+            bound.raw_shp_frame_count = Some(raw_count);
+            bound.raw_shp_height = Some(header_word(data, 4));
+            bound.middle_frame = Some(0);
+            return Ok(());
+        }
+        // Read_Map4AD092 / MouseLoad5BE689 -> InitTheater427940 can replace
+        // Shape after427B50 wrote End/LoopEnd/Middle. Bind that earlier image
+        // for those numbers; drawing and image dimensions use the final one.
+        let bounds_data = match self
+            .anim_type_images
+            .get(name)
+            .and_then(|image| image.anim_bounds_loads())
+        {
+            Some(loads) => loads
+                .iter()
+                .flat_map(|load| load.shp_names(theater_ext, theater_name))
+                .find_map(|candidate| asset_manager.get_ref(&candidate)),
+            None => data,
+        };
+        let bounds_count = header_word(bounds_data, 6);
+        let (mut loaded_end, mut loaded_loop_end) = if bounds_data.is_some() {
+            resolve_loaded_bounds(
+                name,
+                bounds_count,
+                config.shadow,
+                config.explicit_end,
+                config.explicit_loop_end,
+            )?
+        } else {
+            //427C1A skips numeric writes on a null resolver image. Explicit
+            // ART reads still occur, and Start/Middle can spawn particles.
+            (
+                config.explicit_end.unwrap_or(0),
+                config.explicit_loop_end.unwrap_or(0),
+            )
+        };
+        let mut middle = bounds_count / 2;
+        if let Some(loads) = self
+            .anim_type_images
+            .get(name)
+            .and_then(|image| image.anim_theater_bounds_loads())
+            && let Some(post_data) = loads
+                .iter()
+                .flat_map(|load| load.shp_names(theater_ext, theater_name))
+                .find_map(|candidate| asset_manager.get_ref(&candidate))
+        {
+            // The NewTheater arm427A1E calls427B50 again after the explicit
+            // ART bounds reads: fill only zero End/LoopEnd, always write
+            // Middle. Earlier successful generic bounds survive this call.
+            let post_count = header_word(Some(post_data), 6);
+            let (post_end, _) = resolve_loaded_bounds(name, post_count, config.shadow, None, None)?;
+            if loaded_end == 0 {
+                loaded_end = post_end;
+            }
+            if loaded_loop_end == 0 {
+                loaded_loop_end = loaded_end;
+            }
+            middle = post_count / 2;
+        }
+        let bound = self.anim_runtime_configs.get_mut(name).unwrap();
         bound.raw_shp_frame_count = Some(raw_count);
-        bound.raw_shp_height = Some(header_word(4));
+        bound.raw_shp_height = Some(header_word(data, 4));
+        bound.middle_frame = Some(middle);
         bound.end = loaded_end;
         bound.loop_end = loaded_loop_end;
         Ok(())
@@ -1800,7 +1905,8 @@ impl ArtRegistry {
     /// Animation image identity from its own exact ART body, never an Image
     /// redirect's metadata or a whitespace-normalized type section. The native
     /// loader @ 0x00427BA5 falls back to the literal type ID when Image is empty.
-    /// Unread types never load an image (the binding and draw gates own that).
+    /// An unread type keeps its constructor image name, including after a
+    /// saved load supplies that own-name SHP without reading an ART alias.
     pub fn resolve_anim_image_id(&self, anim_type: &str) -> String {
         self.anim_runtime_config(anim_type)
             .map(|config| config.image.as_str())
@@ -1813,12 +1919,13 @@ impl ArtRegistry {
     ///
     /// gamemd-derived: `TechnoTypeClass::ReadINI @ 0x00712170` reads art
     /// `Cameo=` from the section named by `ImageFile` (`+0x1F8`), which
-    /// `ObjectTypeClass::ReadINI` fills from the rules `Image=` key with the
-    /// type ID as default (`0x005F9335`). The read at `0x0071599F` takes the
+    /// `ObjectTypeClass::ReadINI` reads from the rules `Image=` key with the
+    /// retained Image as default, initially the type ID (`0x005F9335`).
+    /// The read at `0x0071599F` takes the
     /// section from `LEA ESI,[EBP+0x1F8]` (`0x007157B5`); the art section's
-    /// own `Image=` redirect is never the cameo section, and a BuildingType
-    /// rewrites `ImageFile` from art only after the base read (`0x0046C1DA`
-    /// follows the `CALL 0x712170` at `0x0045FE6B`). Stock: `[MTNK]`
+    /// own `Image=` redirect is never the cameo section. Building's later
+    /// `InitTheater @ 0x0045F230` reads that redirect at `0x0045F945` into a
+    /// separate filename without changing ImageFile. Stock: `[MTNK]`
     /// (`Image=GTNK`) shows `GTNKICON`, not `[MTNK]`'s `MTNKICON`, and
     /// `[YENGINEER]` (`Image=ENGINEER`) shows `ENGNICON`.
     ///
@@ -1893,45 +2000,6 @@ impl ArtRegistry {
         None
     }
 
-    /// Resolve the effective image id for an overlay.
-    ///
-    /// Follows the overlay resolution order: art `[NAME].Image=` first, then
-    /// rules `[NAME].Image=`.
-    pub fn resolve_overlay_image_id(&self, overlay_name: &str, rules_ini: &IniFile) -> String {
-        let upper_name: String = overlay_name.to_uppercase();
-        let mut image_id: String = upper_name.clone();
-
-        if let Some(art_image) = self
-            .get(&upper_name)
-            .and_then(|entry| normalize_id(entry.image.as_deref().unwrap_or_default()))
-        {
-            image_id = art_image;
-        }
-        if let Some(rules_image) = rules_ini
-            .section(overlay_name)
-            .and_then(|section| section.read_name("Image", 0x19))
-            .and_then(normalize_id)
-        {
-            image_id = rules_image;
-        }
-
-        image_id
-    }
-
-    /// Exact overlay convention flags used by filename generation.
-    pub fn overlay_convention_flags(&self, overlay_name: &str, image_id: &str) -> (bool, bool) {
-        let name_entry: Option<&ArtEntry> = self.get(overlay_name);
-        let image_entry: Option<&ArtEntry> = self.get(image_id);
-
-        let uses_theater: bool = image_entry.map(|e| e.theater).unwrap_or(false)
-            || name_entry.map(|e| e.theater).unwrap_or(false);
-        let uses_new_theater: bool = image_entry.map(|e| e.new_theater).unwrap_or(false)
-            || name_entry.map(|e| e.new_theater).unwrap_or(false)
-            || self.should_use_new_theater(image_id);
-
-        (uses_theater, uses_new_theater)
-    }
-
     /// Check whether `NewTheater` substitution should be applied.
     fn should_use_new_theater(&self, upper_image: &str) -> bool {
         if has_hardcoded_new_theater_prefix(upper_image) {
@@ -2001,7 +2069,7 @@ impl ArtRegistry {
     /// Eagerly populate `frame_width`/`frame_height` on entries whose anim has
     /// a smudge-spawn flag (Crater/Burn/ForceBigCraters). Reads the middle
     /// frame (the raw frame count halved) of each anim's SHP via the shared
-    /// `anim_shp_candidates` filename pipeline. Anims without a loadable SHP
+    /// `effect_shp_candidates` filename pipeline. Anims without a loadable SHP
     /// keep the (30, 30) defaults from their initial parse.
     ///
     /// Returns `(populated, fallback)` for diagnostic logging:
@@ -2028,8 +2096,14 @@ impl ArtRegistry {
         let mut populated: u32 = 0;
         let mut fallback: u32 = 0;
         for (name, image_id) in pending {
-            let candidates: Vec<String> =
-                anim_shp_candidates(Some(self), &name, &image_id, theater_ext, theater_name);
+            let candidates: Vec<String> = effect_shp_candidates(
+                crate::rules::art_data::EffectImageKind::Animation,
+                Some(self),
+                &name,
+                &image_id,
+                theater_ext,
+                theater_name,
+            );
             let shp_bytes: Option<&[u8]> = candidates.iter().find_map(|c| asset_manager.get_ref(c));
             let Some(data) = shp_bytes else {
                 fallback += 1;
@@ -2103,15 +2177,43 @@ pub fn object_shp_candidates(
 /// its own animation bounds. Original controls: rules_oracle/anim_theater_flags.
 /// This registry models fresh reads, not rereads with an already resident image.
 ///
-/// The theater-extension and plain-name candidates after those two are VERA
-/// leniency kept for `Theater=yes` rows and loose test assets.
-pub fn anim_shp_candidates(
+/// Particle images are a separate native family (ParticleType WhatAmI645920).
+/// Registering a same-named Anim cannot replace their resource requests.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EffectImageKind {
+    Animation,
+    Particle,
+}
+
+/// Registered AnimTypes use only their retained native read/load/postpass
+/// requests. Unregistered ART/resource callers retain the compatibility
+/// filename policy below, including its existing loose-asset leniency.
+pub fn effect_shp_candidates(
+    kind: EffectImageKind,
     art: Option<&ArtRegistry>,
     anim_type: &str,
     image_id: &str,
     theater_ext: &str,
     theater_name: &str,
 ) -> Vec<String> {
+    if kind == EffectImageKind::Animation
+        && let Some(registry) = art
+    {
+        if let Some(loads) = registry.anim_image_loads(anim_type) {
+            return loads
+                .iter()
+                .flat_map(|load| load.shp_names(theater_ext, theater_name))
+                .collect();
+        }
+        if registry
+            .anim_runtime_config(anim_type)
+            .is_some_and(|config| !config.art_body_read)
+        {
+            return Vec::new();
+        }
+    }
+    // Unregistered ART/resource consumers retain their compatibility naming.
+    // Actual AnimTypes above use only the sole native owner's reached plan.
     let upper_anim: String = anim_type.to_uppercase();
     let upper_image: String = image_id.to_uppercase();
     let (uses_theater, uses_new_theater) = art
@@ -2152,95 +2254,6 @@ pub fn anim_shp_candidates(
     }
 
     candidates
-}
-
-/// Generate filename candidates for overlay SHPs.
-///
-/// This function only applies conventions. Callers should resolve `image_id`
-/// through `ArtRegistry::resolve_overlay_image_id()` first.
-pub fn overlay_shp_candidates(
-    art: Option<&ArtRegistry>,
-    overlay_name: &str,
-    image_id: &str,
-    theater_ext: &str,
-    theater_name: &str,
-) -> Vec<String> {
-    let upper_name: String = overlay_name.to_uppercase();
-    let upper_image: String = image_id.to_uppercase();
-    let (uses_theater, uses_new_theater): (bool, bool) = art
-        .map(|registry| registry.overlay_convention_flags(&upper_name, &upper_image))
-        .unwrap_or((false, has_hardcoded_new_theater_prefix(&upper_image)));
-    let mut candidates: Vec<String> = Vec::with_capacity(6);
-
-    if uses_new_theater {
-        let subbed: String = apply_theater_letter(&upper_image, theater_name);
-        push_candidate(
-            &mut candidates,
-            format!("{}.{}", subbed, theater_ext.to_ascii_uppercase()),
-        );
-        push_candidate(&mut candidates, format!("{}.SHP", subbed));
-
-        let generic: String = apply_generic_letter(&upper_image);
-        if generic != subbed && generic != upper_image {
-            push_candidate(
-                &mut candidates,
-                format!("{}.{}", generic, theater_ext.to_ascii_uppercase()),
-            );
-            push_candidate(&mut candidates, format!("{}.SHP", generic));
-        }
-    }
-
-    if uses_theater {
-        push_candidate(
-            &mut candidates,
-            format!("{}.{}", upper_image, theater_ext.to_ascii_uppercase()),
-        );
-        push_candidate(&mut candidates, format!("{}.SHP", upper_image));
-    } else {
-        push_candidate(&mut candidates, format!("{}.SHP", upper_image));
-        push_candidate(
-            &mut candidates,
-            format!("{}.{}", upper_image, theater_ext.to_ascii_uppercase()),
-        );
-    }
-
-    candidates
-}
-
-/// Build the one primary filename and one generic-letter retry used by
-/// `OverlayTypeClass::GetSHP` for map-pack placement eligibility.
-///
-/// Keep this separate from [`overlay_shp_candidates`]: render loading probes a
-/// deliberately broader compatibility list, while the native object-type
-/// loader constructs exactly one name and only retries after forcing its
-/// second character to `G`.
-pub fn native_overlay_shp_names(
-    art: &ArtRegistry,
-    image_id: &str,
-    theater_ext: &str,
-    theater_name: &str,
-) -> [String; 2] {
-    let upper_image = image_id.to_ascii_uppercase();
-    // ObjectTypeClass has already resolved `Image=` at this point; its two
-    // filename flags come from that resolved art section, not from the broad
-    // name/image convention union used by render probing.
-    let image_entry = art.get(&upper_image);
-    let uses_theater = image_entry.is_some_and(|entry| entry.theater);
-    let uses_new_theater = image_entry.is_some_and(|entry| entry.new_theater);
-
-    let (primary_stem, extension) = if uses_theater {
-        (upper_image, theater_ext.to_ascii_uppercase())
-    } else {
-        let stem = if uses_new_theater {
-            apply_theater_letter(&upper_image, theater_name)
-        } else {
-            upper_image
-        };
-        (stem, "SHP".to_string())
-    };
-    let primary = format!("{primary_stem}.{extension}");
-    let generic_retry = apply_generic_letter(&primary);
-    [primary, generic_retry]
 }
 
 /// Generate VXL/HVA filenames for a voxel model.
@@ -2865,8 +2878,8 @@ mod anim_runtime_metadata_tests {
         assert_eq!(f64::from_bits(debris.max_xy_vel.bits()), 25.0);
         assert!(debris.bouncer);
 
-        // The one live per-frame-damage producer in stock skirmish: the fire a
-        // destroyed building leaves behind.
+        // Positive fixed-ART input. Registration and an ordinary live
+        // producer are separate gates, exercised by authored CellAnim tests.
         let fire3 = registry
             .anim_runtime_config("FIRE3")
             .expect("stock FIRE3 declaration");

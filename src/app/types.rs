@@ -372,6 +372,9 @@ pub(crate) enum CursorFeedbackKind {
     /// and the cursor is over the tactical map. Payload is the per-SW
     /// CursorId resolved from the `Action=` INI string.
     SuperWeaponTarget(CursorId),
+    /// Beacon placement mode with nothing selected: action 0x3C, row 0x4E
+    /// (`0x004AB754` revealed, `0x004AB3DB` shrouded).
+    PlaceBeacon,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -140,3 +140,41 @@ fn taunt_preserves_raw_byte_and_does_not_repack_it() {
     assert_eq!(fields.color, u32::MAX);
     assert_eq!(read.into_bytes(), raw);
 }
+
+#[test]
+fn beacon_records_carry_coord_slot_and_house_at_native_offsets() {
+    let placed = BeaconRecord::Placed {
+        house: 2,
+        slot: 1,
+        coord: [0x1a80, -0x80, 0x1a0],
+    };
+    let made = BeaconMessage::new("Host", placed).unwrap();
+    let bytes = made.as_bytes();
+    assert_eq!(bytes.len(), BEACON_LEN);
+    assert_eq!(&bytes[..4], &0x20u32.to_le_bytes());
+    assert_eq!(&bytes[4..9], b"Host\0");
+    assert_eq!(&bytes[0x2f..0x33], &0x1a80i32.to_le_bytes());
+    assert_eq!(&bytes[0x33..0x37], &(-0x80i32).to_le_bytes());
+    assert_eq!(&bytes[0x37..0x3b], &0x1a0i32.to_le_bytes());
+    assert_eq!((bytes[0x3b], bytes[0x3c]), (1, 2));
+    assert_eq!(BeaconMessage::decode(bytes).unwrap().record(), placed);
+
+    let deleted = BeaconMessage::new("Host", BeaconRecord::Deleted { house: 7, slot: 2 }).unwrap();
+    let mut raw = deleted.as_bytes().to_vec();
+    assert_eq!(&raw[..4], &0x21u32.to_le_bytes());
+    // The receiver sign-extends both bytes.
+    raw[0x3c] = 0xff;
+    assert_eq!(
+        BeaconMessage::decode(&raw).unwrap().record(),
+        BeaconRecord::Deleted { house: -1, slot: 2 }
+    );
+    assert!(matches!(
+        BeaconMessage::decode(&raw[..60]),
+        Err(InGameMessageError::WrongBeaconLength { actual: 60 })
+    ));
+    raw[0] = 0x22;
+    assert!(matches!(
+        BeaconMessage::decode(&raw),
+        Err(InGameMessageError::WrongBeaconKind { actual: 0x22 })
+    ));
+}

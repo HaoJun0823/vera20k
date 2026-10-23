@@ -1933,17 +1933,20 @@ fn source_release_and_zero_sight_gate_preserve_original_cached_metadata() {
     let context = crate::sim::world::UninitContext::default();
     world.update_object_sight_in_view(1, 0, None, &config, None, context);
     let assert_cache = |world: &crate::sim::world::Simulation, expected: &serde_json::Value| {
-        let cache = &world.fog.sight_admissions[&(1, owner)];
+        let source = world
+            .fog
+            .source_sight(1, owner)
+            .expect("native source cache is retained per viewer");
         assert_eq!(
-            u64::from(cache.latched),
+            u64::from(source.latched),
             expected["latch"].as_u64().unwrap()
         );
         assert_eq!(
-            i64::from(cache.radius),
+            i64::from(source.radius),
             expected["radius"].as_i64().unwrap()
         );
         assert_eq!(
-            cache.origin,
+            source.origin,
             (
                 crate::util::lepton::lepton_to_cell(expected["xyz"][0].as_i64().unwrap() as i32)
                     as u16,
@@ -1951,6 +1954,11 @@ fn source_release_and_zero_sight_gate_preserve_original_cached_metadata() {
                     as u16,
                 expected["xyz"][2].as_i64().unwrap() as i32,
             ),
+        );
+        assert_eq!(
+            world.fog.sight_is_latched(1, owner),
+            expected["latch"].as_u64().unwrap() != 0,
+            "the accepted viewer contribution has its own active bit"
         );
         let location = crate::sim::movement::ground_pose::object_location(
             world.entities().get(1).unwrap(),
@@ -1962,9 +1970,29 @@ fn source_release_and_zero_sight_gate_preserve_original_cached_metadata() {
         );
     };
     assert_cache(&world, &native["nested"][0]["before"]);
+    let cache_hash = |fog: &FogState| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        fog.hash_sight_admissions(&mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    };
+    let mut cleared_client = world.fog.clone();
+    assert!(cleared_client.clear_source_sight_latch(1, owner).is_some());
+    assert_ne!(
+        cache_hash(&world.fog),
+        cache_hash(&cleared_client),
+        "the client native latch participates in the deterministic fog hash"
+    );
     world.release_object_sight_with_context(1, context);
     assert_cache(&world, &native["nested"][0]["after"]);
-    assert!(world.fog.sight_admissions[&(1, owner)].cells.is_empty());
+    assert!(
+        world
+            .fog
+            .sight_admission(1, owner)
+            .unwrap()
+            .cells
+            .is_empty()
+    );
+    assert_eq!(world.fog.source_sight_viewers(1), vec![owner]);
     world
         .substrate
         .entities
@@ -1974,4 +2002,12 @@ fn source_release_and_zero_sight_gate_preserve_original_cached_metadata() {
         .stamp_type_sight(0);
     world.update_object_sight_in_view(1, 0, None, &config, None, context);
     assert_cache(&world, &native["after_sight0_gate"]);
+    let restored: FogState =
+        save_codec::deserialize(&save_codec::serialize(&world.fog).unwrap()).unwrap();
+    assert_eq!(
+        restored.source_sight(1, owner),
+        world.fog.source_sight(1, owner),
+        "native client cache metadata survives the snapshot round trip"
+    );
+    assert_eq!(cache_hash(&restored), cache_hash(&world.fog));
 }

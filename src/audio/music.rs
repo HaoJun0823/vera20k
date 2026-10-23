@@ -1,12 +1,13 @@
 //! Optional rodio music output.
 //!
 //! Theme catalog and lifecycle ownership live in `audio::theme`. This module
-//! owns only the physical device/player plus independent gain projections.
+//! owns only the physical device/player, the source the device pulls each song
+//! through (decoding it as it plays), and independent gain projections.
 
 use std::num::NonZero;
+use std::time::Duration;
 
-use rodio::buffer::SamplesBuffer;
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player};
+use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 
 use crate::audio::arbiter::{VolumeInterp, combine_linear};
 use crate::audio::sfx::native_volume_amplitude;
@@ -41,9 +42,81 @@ fn effective_music_volume(score_volume: f64, own_linear: i32, focus_output_scale
     native_volume_amplitude(combine_linear(own_linear, score)) * focus_output_scale as f32
 }
 
+/// Samples per span the Theme stream reports. rodio 0.22.2
+/// `UniformSourceIterator::bootstrap` cuts the device mixer's input into spans
+/// of at most 32768 samples, as it cut the whole-song buffer this stream
+/// replaced, so its rate converter restarts at the same points and
+/// `Player::get_pos` stays exact. VERA-owned, not native.
+const SPAN_SAMPLES: usize = 32_768;
+
+const STEREO: NonZero<u16> = NonZero::new(2).unwrap();
+
+#[cfg(not(test))]
+type MusicOutput = MixerDeviceSink;
+
+// Control-state regressions use rodio's offline mixer. Opening devices from
+// short-lived Windows test threads can outlive CPAL's cached COM apartment:
+// https://github.com/RustAudio/cpal/issues/1302.
+#[cfg(test)]
+enum MusicOutput {
+    Device(MixerDeviceSink),
+    Offline(rodio::mixer::Mixer),
+}
+
+#[cfg(test)]
+impl MusicOutput {
+    fn mixer(&self) -> &rodio::mixer::Mixer {
+        match self {
+            Self::Device(device) => device.mixer(),
+            Self::Offline(mixer) => mixer,
+        }
+    }
+}
+
+/// The device-thread end of the Theme stream: rodio pulls the song from it,
+/// decoding it as it plays (see [`PreparedTrack`]).
+struct MusicStream {
+    track: PreparedTrack,
+    sample_rate: NonZero<u32>,
+}
+
+impl Iterator for MusicStream {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        self.track.next()
+    }
+}
+
+impl Source for MusicStream {
+    fn current_span_len(&self) -> Option<usize> {
+        // rodio 0.22.2 `Source::current_span_len`: `Some(0)` only once no
+        // sample remains.
+        Some(if self.track.exhausted() {
+            0
+        } else {
+            SPAN_SAMPLES
+        })
+    }
+
+    fn channels(&self) -> NonZero<u16> {
+        STEREO
+    }
+
+    fn sample_rate(&self) -> NonZero<u32> {
+        self.sample_rate
+    }
+
+    /// Unknown before the last block decodes; nothing reads it. The Theme
+    /// list shows the WAV header length (`ThemeEntry::duration_seconds`).
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
 pub struct MusicPlayer {
     /// rodio mixer device sink — must be kept alive or all audio stops.
-    _device: MixerDeviceSink,
+    _device: MusicOutput,
     current_player: Option<Player>,
     volume: f64,
     /// The Theme stream's own `+0x10` interp (`stream+0x14 -> +0x10`), built
@@ -66,14 +139,26 @@ impl MusicPlayer {
         let device = DeviceSinkBuilder::open_default_sink()
             .map_err(|error| log::error!("Failed to initialize music audio: {error}"))
             .ok()?;
-        Some(Self {
+        #[cfg(test)]
+        let device = MusicOutput::Device(device);
+        Some(Self::with_output(device))
+    }
+
+    fn with_output(device: MusicOutput) -> Self {
+        Self {
             _device: device,
             current_player: None,
             volume: DEFAULT_SCORE_VOLUME,
             own: VolumeInterp::new(VOLUME_SCALE, 0),
             focus_output_scale: 1.0,
             paused: false,
-        })
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn offline_for_test() -> (Self, rodio::mixer::MixerSource) {
+        let (mixer, source) = rodio::mixer::mixer(STEREO, NonZero::new(22_050).unwrap());
+        (Self::with_output(MusicOutput::Offline(mixer)), source)
     }
 
     pub(crate) fn state(&self) -> MusicOutputState {
@@ -86,10 +171,7 @@ impl MusicPlayer {
     }
 
     pub(crate) fn submit(&mut self, prepared: PreparedTrack) -> bool {
-        let Some(channels) = NonZero::new(2u16) else {
-            return false;
-        };
-        let Some(rate) = NonZero::new(prepared.sample_rate) else {
+        let Some(sample_rate) = NonZero::new(prepared.sample_rate) else {
             return false;
         };
         if let Some(player) = self.current_player.take() {
@@ -98,14 +180,16 @@ impl MusicPlayer {
         // `StreamPlayer__PlayFile`: `SetTargetImmediate(+0x10, 0x4000)`.
         self.own.set_target_immediate(VOLUME_SCALE);
         self.own.tick(0);
-        let source = SamplesBuffer::new(channels, rate, prepared.samples);
+        log::info!("Playing prepared music track: {}", prepared.stem);
         let player = Player::connect_new(self._device.mixer());
         player.set_volume(self.effective_volume());
-        player.append(source);
+        player.append(MusicStream {
+            track: prepared,
+            sample_rate,
+        });
         if self.paused {
             player.pause();
         }
-        log::info!("Playing prepared music track: {}", prepared.stem);
         self.current_player = Some(player);
         true
     }
@@ -195,7 +279,10 @@ impl MusicPlayer {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::assets::mix_archive::SharedBytes;
 
     fn db(amplitude: f32) -> f64 {
         20.0 * f64::from(amplitude).log10()
@@ -218,17 +305,15 @@ mod tests {
     /// (`0x00407E7D`), and a Theme fade on it reports `Ramping` until silent.
     #[test]
     fn a_new_file_resets_the_interp_every_fade_shares() {
-        let Some(mut player) = MusicPlayer::new() else {
-            return;
-        };
+        let (mut player, _output) = MusicPlayer::offline_for_test();
         player.fade_stream_out(0);
         player.tick_stream_volume(1_001);
         assert_eq!(player.own.value(), 0);
-        assert!(player.submit(PreparedTrack {
-            stem: "Silence".into(),
-            samples: vec![0.0; 22_050 * 2 * 10],
-            sample_rate: 22_050,
-        }));
+        assert!(player.submit(PreparedTrack::decoded(
+            "Silence".into(),
+            vec![0.0; 22_050 * 2 * 10],
+            22_050,
+        )));
         assert_eq!(player.own.value(), VOLUME_SCALE);
         assert_eq!(player.state(), MusicOutputState::Playing);
         player.fade_stream_out(1_001);
@@ -237,5 +322,36 @@ mod tests {
         assert_eq!(player.own.value(), VOLUME_SCALE / 2);
         player.tick_stream_volume(2_002);
         assert_eq!(player.state(), MusicOutputState::Playing);
+    }
+
+    /// `state` reads `Finished` from `Player::empty`, which rodio's `Done`
+    /// sets on the pull after a source's last sample. A streamed song must
+    /// reach it then, not at a decode boundary before.
+    #[test]
+    fn a_streamed_song_empties_its_player_after_the_last_sample() {
+        // 16-bit stereo PCM over two runs: 4096 bytes, then a two-frame tail.
+        let pcm: Vec<u8> = (0..4_104u32).map(|i| (i % 251) as u8).collect();
+        let mut file =
+            b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0\x02\0\x22\x56\0\0\0\0\0\0\x04\0\x10\0data"
+                .to_vec();
+        file.extend((pcm.len() as u32).to_le_bytes());
+        file.extend(&pcm);
+        let file = SharedBytes::from(Arc::<[u8]>::from(file));
+        let track = PreparedTrack::streamed("Song", &file).expect("PCM song streams");
+        let (player, mut output) = Player::new();
+        player.append(MusicStream {
+            track,
+            sample_rate: NonZero::new(22_050).unwrap(),
+        });
+        for _ in 0..pcm.len() / 2 {
+            assert!(!player.empty());
+            output.next();
+        }
+        assert!(
+            !player.empty(),
+            "the last sample is out, the end not yet read"
+        );
+        output.next();
+        assert!(player.empty());
     }
 }

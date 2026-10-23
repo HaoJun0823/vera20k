@@ -24,6 +24,11 @@ const _: () = assert!(
     cfg!(feature = "phobos") == rules::PHOBOS_ENABLED,
     "enable Phobos through the vera20k package's phobos feature"
 );
+// The same boundary for the NPatch placeholder.
+const _: () = assert!(
+    cfg!(feature = "npatch") == rules::NPATCH_ENABLED,
+    "enable NPatch through the vera20k package's npatch feature"
+);
 
 // Opaque process-RNG cursor receipt shared by map generation and simulation.
 use vera20k_core::rng_continuation;

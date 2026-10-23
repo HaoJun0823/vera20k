@@ -10,8 +10,11 @@ extensions. Build the supported extensions explicitly:
 cargo run --release --bin vera20k --features phobos
 ```
 
-The capability is independent of Ares: a Phobos build needs no `ares` feature, and the two combine
-with `--features ares,phobos`.
+The capability is independent of Ares and NPatch: a Phobos build needs neither feature, and all
+three combine with `--features ares,phobos,npatch`. Every implemented Phobos chain must keep working
+when the other capabilities are compiled in — the compatibility rule and the pattern for two
+extensions touching one native site are in
+[NPatch placeholder](npatch.md#cross-extension-compatibility).
 
 Phobos builds identify themselves in the window title, the startup log, and the build description
 drawn at the tactical view's top right during a match. That description is Phobos's own text: the

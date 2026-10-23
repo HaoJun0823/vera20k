@@ -67,6 +67,9 @@ pub struct ParticleType {
     /// @ 0x00644F50` reaches `ObjectTypeClass::ReadINI @ 0x005F92D0`, which
     /// retains the current 25-byte string when Image is missing or empty.
     pub image: String,
+    /// Inherited `ObjectTypeClass::ReadINI @ 0x005F92D0` AlphaImage buffer
+    /// (`+0x213`, `char[25]`), separate from the particle's main Image.
+    pub(crate) alpha_image: String,
     /// Native `StartFrame=` (`ParticleTypeClass+0x2EC`): the constructor at
     /// `ParticleTypeClass::Constructor @ 0x00644BE0` starts it at zero;
     /// `ParticleTypeClass::ReadINI @ 0x00644F50` passes its current value
@@ -196,6 +199,7 @@ impl ParticleType {
             name: name.to_string(),
             behaves_like,
             image: section.read_name("Image", 0x19).unwrap_or(name).to_owned(),
+            alpha_image: section.read_object_alpha_image(""),
             start_frame: section.read_int("StartFrame", 0),
 
             // ParticleType644BE0/644F50 retain full signed words; the

@@ -56,15 +56,14 @@ fn scene(root: &Path) -> (HeadlessScenario, u64) {
         let sim = scene.sim();
         let terrain = sim.resolved_terrain().unwrap();
         let bounds = sim.playfield_bounds().unwrap();
-        let offsets = crate::rules::foundation::foundation_cell_offsets(
-            &scene
-                .runtime
-                .resources
-                .rules
-                .object("GAPOWR")
-                .unwrap()
-                .foundation,
-        );
+        let offsets = scene
+            .runtime
+            .resources
+            .rules
+            .object("GAPOWR")
+            .unwrap()
+            .foundation
+            .cell_offsets();
         terrain
             .cells()
             .iter()
@@ -210,6 +209,7 @@ fn emit(
             detail,
             detail_level,
             lighting: &light,
+            retained_anim_intensities: None,
             house_colors: &house_colors,
             hidden_super_anims: &hidden,
             show_hidden: false,
@@ -290,7 +290,8 @@ fn retail_power_plant_slot_obeys_detail_without_pausing_its_ai() {
     );
     assert!(!config.translucent && config.translucency == 0);
     let image = rules.art().resolve_anim_image_id("GAPOWR_A");
-    let physical = crate::rules::art_data::anim_shp_candidates(
+    let physical = crate::rules::art_data::effect_shp_candidates(
+        crate::rules::art_data::EffectImageKind::Animation,
         Some(rules.art()),
         "GAPOWR_A",
         &image,

@@ -205,14 +205,15 @@ impl EntryCell {
         };
         let at = (p.0 as u16, p.1 as u16);
         let sim = live.sim;
-        let terrain_object = terrain_object
-            .then(|| sim.terrain_objects.cell_index().get(&at).copied())
-            .flatten();
+        let terrain_objects = sim
+            .terrain_objects
+            .members_at(at)
+            .filter(move |_| terrain_object);
         listed
             .then(|| {
                 sim.substrate
                     .occupancy
-                    .cell_objects(at.0, at.1, layer, terrain_object)
+                    .cell_objects(at.0, at.1, layer, terrain_objects)
             })
             .into_iter()
             .flatten()
@@ -1098,7 +1099,7 @@ fn full_foot_entry<'a>(
                 //51C1BB..51C223: a wall at damage stage DamageLevels (+0x2A0)
                 //is no wall to Infantry. Otherwise the primary warhead needs
                 //Wall= (772AC0); Infantry has no crusher or Wood= route.
-                if u16::from(live_overlay.overlay_data >> 4) != flags.damage_levels {
+                if i32::from(live_overlay.overlay_data >> 4) != flags.damage_levels {
                     if !combat_weapon::is_armed(e, obj) || !warhead.is_some_and(|w| w.wall) {
                         return Ok(7);
                     }

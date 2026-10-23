@@ -2213,7 +2213,7 @@ fn native_all01_reactor_damage_uses_retail_rules_and_shared_power_owner() {
         .unwrap();
     let rules = RuleSet::from_processed_rules(&processed).unwrap();
     let object = rules.object("NANRCT").unwrap();
-    let dimensions = crate::rules::foundation::foundation_dimensions(&object.foundation);
+    let dimensions = object.foundation.dimensions();
     assert_eq!(
         json!([dimensions.0, dimensions.1]),
         corpus["retail_inputs"]["foundation_dimensions"]
@@ -2274,7 +2274,7 @@ fn native_all01_reactor_damage_uses_retail_rules_and_shared_power_owner() {
     entity.set_native_unique_id_for_test(integer(&native["reactor_native_unique_id"]));
     entity
         .type_facts
-        .set_foundation_for_test(object.foundation.clone());
+        .set_foundation_for_test(object.foundation.clone().into());
     entity.begin_building_body(BuildingBodyMode::Idle, 0);
     sim.substrate.entities.insert(entity);
     sim.add_entity_occupancy(1);

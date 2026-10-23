@@ -241,6 +241,9 @@ pub(crate) enum NetworkLoadingRequest {
         recipients: Vec<usize>,
         byte: u8,
     },
+    /// A beacon record `0x20`/`0x21` to every other node
+    /// (`0x00430E0C..0x00430E4E`, `0x004313C2..0x004313F5`).
+    Beacon(crate::net::lan_messages::ingame::BeaconRecord),
     /// BC6's `0x26` to every node.
     CooperativeReady,
     /// BC6's `0x24` (Quit) to every node.
@@ -2092,6 +2095,16 @@ impl MatchSession {
             network
                 .loading_requests
                 .push(NetworkLoadingRequest::Chat { recipients, text });
+        }
+    }
+
+    pub(crate) fn request_beacon(&mut self, record: crate::net::lan_messages::ingame::BeaconRecord) {
+        if let Some(network) = self.network.as_mut()
+            && matches!(network.phase, NetworkPhase::Frozen { .. })
+        {
+            network
+                .loading_requests
+                .push(NetworkLoadingRequest::Beacon(record));
         }
     }
 

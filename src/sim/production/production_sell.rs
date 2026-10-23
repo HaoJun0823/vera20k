@@ -66,8 +66,6 @@ use crate::sim::mission::{MissionId, MissionType};
 use crate::sim::world::FrameEffects;
 use crate::sim::world::{SimSoundEvent, Simulation, UninitContext};
 
-use crate::rules::foundation::foundation_dimensions;
-
 #[cfg(test)]
 #[path = "pack_voice_tests.rs"]
 mod pack_voice_tests;
@@ -667,7 +665,7 @@ fn sale_sounds(sim: &mut Simulation, rules: &RuleSet, id: u64) {
             Some((
                 entity.owner(),
                 entity.position,
-                undeploys(rules, object) && foundation_dimensions(&object.foundation) == (1, 1),
+                undeploys(rules, object) && object.foundation.dimensions() == (1, 1),
                 object.packup_sound.clone(),
             ))
         })

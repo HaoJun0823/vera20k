@@ -112,6 +112,37 @@ fn nominal_type_reader_matches_executed_physical_history() {
     }
 }
 
+#[test]
+fn object_alpha_image_uses_retail_values_and_retains_current_per_rules_pass() {
+    use crate::rules::ruleset::RuleSet;
+
+    let Some((retail_rules, fixed_art)) = crate::rules::retail_ini_fixture::retail_rules_and_art()
+    else {
+        return;
+    };
+    let mut layers = RulesLayerStack::new(retail_rules);
+    let read = |layers: &RulesLayerStack| {
+        let processed = layers.process_with_fixed_art(&fixed_art).unwrap();
+        let rules = RuleSet::from_processed_rules(&processed).unwrap();
+        (
+            rules.object("TSTLAMP").unwrap().alpha_image.clone(),
+            rules.object("GALITE").unwrap().alpha_image.clone(),
+        )
+    };
+
+    assert_eq!(read(&layers), ("ALPHATST".into(), "NONE".into()));
+    layers.push(
+        RulesLayerKind::GameMode,
+        IniFile::from_str("[TSTLAMP]\nAlphaImage=LIGHTPOST\n[GALITE]\nAlphaImage=LIGHTNONE\n"),
+    );
+    assert_eq!(read(&layers), ("LIGHTPOST".into(), "LIGHTNONE".into()));
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[TSTLAMP]\nStrength=601\n[GALITE]\nAlphaImage=\n"),
+    );
+    assert_eq!(read(&layers), ("LIGHTPOST".into(), "LIGHTNONE".into()));
+}
+
 ///71592A reads exact-case ART ShadowIndex with the current field as default,
 ///after each retained Rules Image read. Neither retail zero nor final-image
 ///defaults can replace the previous section's selected value.
@@ -895,7 +926,9 @@ fn building_foundation_pass_matches_original_art_reads() {
             .families
             .get_mut(&RulesTypeFamily::Building)
             .unwrap()[0]
-            .building_foundation = input["initial_foundation_id"].as_u64().unwrap() as u8;
+            .building_foundation = crate::rules::foundation::Foundation::Stock(
+            input["initial_foundation_id"].as_u64().unwrap() as u8,
+        );
         let mut raw = IniSection::new(type_id.to_owned());
         raw.set("Image", input["image"].as_str().unwrap());
         if let Some(poison) = input["rules_foundation_poison"].as_str() {
@@ -922,13 +955,13 @@ fn building_foundation_pass_matches_original_art_reads() {
         rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&fixed_art));
         let object = rules.object(type_id).unwrap();
         assert_eq!(
-            crate::rules::foundation::foundation_id(&object.foundation),
+            object.foundation.selector(),
             row["output"]["foundation_id"].as_u64().unwrap() as u8,
             "{}: projected and installed native field",
             input["name"]
         );
         assert_eq!(
-            crate::rules::foundation::foundation_dimensions(&object.foundation),
+            object.foundation.dimensions(),
             (
                 row["output"]["width"].as_u64().unwrap() as u16,
                 row["output"]["height"].as_u64().unwrap() as u16,
@@ -1322,6 +1355,62 @@ fn projectile_flat_survives_registry_handoff_and_resets_with_its_owner() {
             .projectile("SHOT")
             .unwrap()
             .flat
+    );
+}
+
+#[test]
+fn overlay_cell_anim_retains_its_factory_result_across_empty_reads() {
+    // OverlayTypeClass::ReadINI 0x005FE867..0x005FE8A0 retains an empty
+    // read, while AnimTypeClass::FindOrAllocate 0x00428B80 clears "none".
+    let Some((mut root, mut art)) = crate::rules::retail_ini_fixture::retail_rules_and_art() else {
+        return;
+    };
+    root.merge(&IniFile::from_str("[GEM01]\nCellAnim=VCELLFX\n"));
+    art.merge(&IniFile::from_str("[VCELLFX]\nImage=SMOKEY\n"));
+    let mut layers = RulesLayerStack::new(root);
+    let first = layers.process_with_fixed_art(&art).unwrap();
+    let reference = |processed: &ProcessedRulesLayers| {
+        let registry =
+            crate::rules::overlay_types::OverlayTypeRegistry::from_processed_rules(processed);
+        registry
+            .flags(registry.id_for_name("GEM01").unwrap())
+            .unwrap()
+            .cell_anim
+            .clone()
+    };
+    assert_eq!(reference(&first).as_deref(), Some("VCELLFX"));
+    assert!(
+        first
+            .anim_type_art_read_states()
+            .any(|state| state == ("VCELLFX", false))
+    );
+    let constructors = first.native_type_construction_trace().events();
+
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[GEM01]\nTiberium=yes\nCellAnim=\n"),
+    );
+    let retained = layers.process_with_fixed_art(&art).unwrap();
+    assert_eq!(reference(&retained).as_deref(), Some("VCELLFX"));
+    assert!(
+        retained
+            .anim_type_art_read_states()
+            .any(|state| state == ("VCELLFX", true))
+    );
+    assert_eq!(
+        retained.native_type_construction_trace().events(),
+        constructors
+    );
+
+    layers.push(
+        RulesLayerKind::Scenario,
+        IniFile::from_str("[GEM01]\nCellAnim=none\n"),
+    );
+    let cleared = layers.process_with_fixed_art(&art).unwrap();
+    assert_eq!(reference(&cleared), None);
+    assert_eq!(
+        cleared.native_type_construction_trace().events(),
+        constructors
     );
 }
 
@@ -1919,7 +2008,7 @@ fn native_startup_prepass_repeat_and_reset_keep_each_phase_on_one_registry_owner
          [Animations]\n0=A\n\
          [BuildingTypes]\n0=B\n\
          [Countries]\n0=HOUSE\n\
-         [General]\nDamageFireTypes=SEED,PREANIM\n\
+         [General]\nDamageFireTypes=SEED,PREANIM\nTreeStrength=375\n\
          [A]\nNext=RULES_ANIM_BODY_IGNORED\n\
          [B]\nPrimary=W\nExplosion=BA\nFreeUnit=U\nSecretBuilding=B2\n\
          [B2]\nPrimary=W2\n\
@@ -1943,6 +2032,7 @@ fn native_startup_prepass_repeat_and_reset_keep_each_phase_on_one_registry_owner
         &crate::rules::sound_ini::EvaRegistry::default(),
     )
     .expect("synthetic startup processes");
+    assert_eq!(startup.registry_state().rules_tree_strength, 25);
     assert_eq!(boundaries, [1, 2, 4, 5, 12]);
     assert_eq!(
         startup.events()[..4]
@@ -2000,6 +2090,8 @@ fn native_startup_prepass_repeat_and_reset_keep_each_phase_on_one_registry_owner
     let retained_state = repeat.into_registry_state_discarding_events();
     let (prepass, prepass_boundaries) =
         process_native_noncampaign_rules_prepass_inner(retained_state, &root);
+    // ReadGeneral671DD2 runs in this prefix before TypeReset6686C0.
+    assert_eq!(prepass.registry_state().rules_tree_strength, 375);
     assert_eq!(
         prepass_boundaries,
         if crate::rules::ARES_ENABLED {
@@ -2036,6 +2128,7 @@ fn native_startup_prepass_repeat_and_reset_keep_each_phase_on_one_registry_owner
     let reset_state = prepass
         .into_registry_state_discarding_events()
         .destructive_reset();
+    assert_eq!(reset_state.rules_tree_strength, 375);
     let processed = RulesLayerStack::new(root)
         .process_with_fixed_art_and_registry_state(&fixed_art, reset_state)
         .expect("post-reset full Process succeeds");

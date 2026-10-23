@@ -5,7 +5,6 @@
 
 use crate::headless_scenario::{HeadlessScenario, battle_session, load_session};
 use crate::map::resolved_terrain::NativeCellQuery;
-use crate::rules::foundation::foundation_cell_offsets;
 use crate::sim::anim_class::{AnimRemap, AnimWorldCoord};
 use crate::sim::cell_rect::{
     CellRect, CellRectPassabilityContext, cell_is_in_playfield_height_aware, check_passability_rect,
@@ -128,34 +127,24 @@ impl RetailParachuteScene {
                     let terrain = sim.resolved_terrain().unwrap();
                     let ty = rules.object(type_id).unwrap();
                     let level = terrain.cell(x, y)?.level;
-                    let level_foundation =
-                        foundation_cell_offsets(&ty.foundation)
-                            .iter()
-                            .all(|&(dx, dy)| {
-                                let xy =
-                                    (i32::from(x) + i32::from(dx), i32::from(y) + i32::from(dy));
-                                cell_is_in_playfield_height_aware(
-                                    xy,
-                                    sim.playfield_bounds(),
-                                    Some(terrain),
-                                ) && terrain
-                                    .cell(xy.0 as u16, xy.1 as u16)
-                                    .is_some_and(|cell| cell.level == level && cell.slope_type == 0)
-                            });
-                    let clear_foundation =
-                        foundation_cell_offsets(&ty.foundation)
-                            .iter()
-                            .all(|&(dx, dy)| {
-                                clear_ground_rect(
-                                    sim,
-                                    CellRect::new(
-                                        i32::from(x) + i32::from(dx),
-                                        i32::from(y) + i32::from(dy),
-                                        1,
-                                        1,
-                                    ),
-                                )
-                            });
+                    let level_foundation = ty.foundation.cell_offsets().iter().all(|&(dx, dy)| {
+                        let xy = (i32::from(x) + i32::from(dx), i32::from(y) + i32::from(dy));
+                        cell_is_in_playfield_height_aware(xy, sim.playfield_bounds(), Some(terrain))
+                            && terrain
+                                .cell(xy.0 as u16, xy.1 as u16)
+                                .is_some_and(|cell| cell.level == level && cell.slope_type == 0)
+                    });
+                    let clear_foundation = ty.foundation.cell_offsets().iter().all(|&(dx, dy)| {
+                        clear_ground_rect(
+                            sim,
+                            CellRect::new(
+                                i32::from(x) + i32::from(dx),
+                                i32::from(y) + i32::from(dy),
+                                1,
+                                1,
+                            ),
+                        )
+                    });
                     if !level_foundation || !clear_foundation {
                         return None;
                     }

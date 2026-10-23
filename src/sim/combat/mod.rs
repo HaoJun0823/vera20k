@@ -116,6 +116,8 @@ mod radiation_beam_tests;
 #[cfg(test)]
 mod shrapnel_chain_tests;
 #[cfg(test)]
+mod screen_shake_tests;
+#[cfg(test)]
 mod unit_damage_response_tests;
 #[cfg(test)]
 mod walk_attack_tests;
@@ -126,8 +128,8 @@ pub(crate) use combat_targeting::build_attacker_snapshot;
 pub(crate) use detonation_anim::projectile_impact_cell;
 pub(crate) use effects::DeathEffects;
 pub use effects::{
-    CombatLightRequest, ExplosionEffect, SmudgeSpawnRequest, TiberiumReductionRequest,
-    UnderAttackEvent, UnitLostEvent,
+    CombatLightRequest, ExplosionEffect, ScreenShakeUpdate, SmudgeSpawnRequest,
+    TiberiumReductionRequest, UnderAttackEvent, UnitLostEvent,
 };
 pub use in_range::can_fire_at_target;
 pub use in_range::{MaplessTarget, can_fire_at_target_in_query, mapless_in_range};
@@ -195,7 +197,6 @@ use crate::map::entities::EntityCategory;
 use crate::map::houses::HouseAllianceMap;
 use crate::map::resolved_terrain::ResolvedTerrainGrid;
 use crate::rules::animation_sequence::SequenceSet;
-use crate::rules::foundation::foundation_dimensions;
 use crate::rules::object_type::ObjectType;
 use crate::rules::overlay_types::OverlayTypeRegistry;
 use crate::rules::ruleset::{HouseCostFactors, RuleSet};

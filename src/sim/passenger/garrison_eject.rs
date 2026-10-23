@@ -14,7 +14,6 @@
 use super::PassengerRole;
 use crate::map::entities::EntityCategory;
 use crate::map::resolved_terrain::NativeCellQuery;
-use crate::rules::foundation::foundation_dimensions;
 use crate::rules::ruleset::RuleSet;
 use crate::sim::movement::infantry_entry::{InfantryEntryArgs, InfantryEntryClass};
 use crate::sim::world::{
@@ -437,7 +436,7 @@ pub(crate) fn sell_building_occupants(
         if !obj.can_be_occupied {
             return 0;
         }
-        let (fw, fh) = foundation_dimensions(&obj.foundation);
+        let (fw, fh) = obj.foundation.dimensions();
         (
             entity.position.rx(),
             entity.position.ry(),
@@ -562,7 +561,7 @@ pub(crate) mod tests {
         );
         building
             .type_facts
-            .set_foundation_for_test("2x2".to_string());
+            .set_foundation_for_test("2x2".to_string().into());
         building.set_type_ref_for_test(sim.interner.intern("CAGAS01"));
         sim.substrate.entities.insert(building);
     }
@@ -666,7 +665,7 @@ pub(crate) mod tests {
         );
         building
             .type_facts
-            .set_foundation_for_test("2x2".to_string());
+            .set_foundation_for_test("2x2".to_string().into());
         building.set_owner_for_test(americans);
         building.set_type_ref_for_test(sim.interner.intern(type_id));
         building.passenger_role =

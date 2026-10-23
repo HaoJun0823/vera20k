@@ -277,6 +277,7 @@ fn live_tag_rgb_overrides_reach_packets_and_survive_ambient_writes_during_storm(
             art.anim_runtime_config("ALT"),
             false,
             None,
+            brightness,
         ),
         PaletteLight::new([1000; 3], 1, brightness, true)
     );
@@ -292,11 +293,12 @@ fn live_tag_rgb_overrides_reach_packets_and_survive_ambient_writes_during_storm(
             Some(&crate::sim::anim_class::AnimRemap::House(
                 crate::sim::intern::InternedId::default()
             )),
+            brightness,
         ),
         expected
     );
     assert_eq!(
-        anim_palette_light(&lights.grid, (0, 0), None, false, None),
+        anim_palette_light(&lights.grid, (0, 0), None, false, None, brightness),
         PaletteLight::plain(53, brightness)
     );
     //555E50 constructs a new Convert with Storm RGB even though the
@@ -320,6 +322,8 @@ fn live_tag_rgb_overrides_reach_packets_and_survive_ambient_writes_during_storm(
 
 /// A radiation site's bound type drives the field's cell light: the same
 /// scene lights purple for a `255,0,255` type and green for the default one.
+/// Phobos builds only: other builds never read `[RadiationTypes]`.
+#[cfg(feature = "phobos")]
 #[test]
 fn a_bound_radiation_type_tints_the_field_with_its_own_color() {
     let rules = crate::rules::ruleset::RuleSet::from_ini(&IniFile::from_str(
@@ -345,6 +349,8 @@ fn a_bound_radiation_type_tints_the_field_with_its_own_color() {
                 rad_level: 500,
                 spread: 2,
                 rad_type: bound.map(str::to_owned),
+                firing_house: None,
+                invoker: None,
             },
             0,
             "TEMPERATE",

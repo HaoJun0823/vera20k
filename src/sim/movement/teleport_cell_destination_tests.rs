@@ -1294,8 +1294,8 @@ fn cleg_overlay_cell_requests_match_every_original_command_boundary() {
             );
         }
         assert_eq!(
-            u64::from(flags.damage_levels),
-            native["damage_levels"].as_u64().unwrap()
+            i64::from(flags.damage_levels),
+            native["damage_levels"].as_i64().unwrap()
         );
         assert_eq!(i32::from(flags.land.as_index()), signed(&native["land"]));
     }

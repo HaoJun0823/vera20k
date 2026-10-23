@@ -76,6 +76,15 @@ impl SavedScenarioResources {
         &self.processed_rules
     }
 
+    /// Native type Load calls mutate only this incoming, move-owned registry.
+    /// The app admits the saved digest before reaching this resource phase.
+    pub fn restore_object_image_loads(
+        &mut self,
+        theater: &str,
+    ) -> Result<(), crate::rules::error::RulesError> {
+        self.processed_rules.restore_object_image_loads(theater)
+    }
+
     pub fn fixed_art_hash(&self) -> u64 {
         self.fixed_art_hash
     }

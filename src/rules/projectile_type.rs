@@ -17,6 +17,11 @@
 //! - Part of rules/ — no dependencies on sim/, render/, ui/, etc.
 
 use crate::rules::ini_parser::{IniFile, IniSection};
+use crate::rules::object_image::{ImageTheater, ObjectImageKind, ObjectImageState};
+
+/// Shared inputs captured by ObjectType::LoadSHP5F9070; asset binding resolves
+/// the attempted name independently of constructor or later Image text.
+use crate::rules::object_image::ObjectImageLoad;
 
 /// A projectile definition parsed from a rules.ini section.
 ///
@@ -30,6 +35,9 @@ use crate::rules::ini_parser::{IniFile, IniSection};
 pub struct ProjectileType {
     /// Section name in rules.ini (e.g., "InvisibleLow", "MissileAA").
     pub id: String,
+    /// Inherited `ObjectTypeClass::ReadINI @ 0x005F92D0` AlphaImage buffer
+    /// (`+0x213`, `char[25]`); BulletType reads its base at `0x0046BEE0`.
+    pub(crate) alpha_image: String,
 
     // --- Targeting flags ---
     /// Can hit aircraft. Anti-air weapons need this flag.
@@ -137,9 +145,9 @@ pub struct ProjectileType {
     pub airburst_weapon: Option<String>,
     /// Current native Image25 text; SHP admission is separately retained below.
     pub image: Option<String>,
-    /// Last admitted native5F9070 load, independently of the later Image text.
-    /// None means no reader load; an empty name is an actual .SHP/.GHP attempt.
-    pub image_load: Option<ProjectileImageLoad>,
+    /// Admitted native5F9070 requests, independently of later Image text.
+    /// An empty list means no load; an empty name is an actual .SHP/.GHP attempt.
+    pub image_loads: Vec<ObjectImageLoad>,
     /// Last native5F8110 VXL/HVA load attempt. Empty is an actual empty-name
     /// attempt; None means no reached voxel load since construction.
     voxel_image_load: Option<String>,
@@ -157,25 +165,12 @@ pub struct ProjectileType {
     pub line_trail_color_decrement: i32,
 }
 
-/// Inputs captured at the latest ObjectType::LoadImage5F9070 call. Asset binding
-/// resolves this attempted name; it must not infer a load from constructor text.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct ProjectileImageLoad {
-    pub image: String,
-    pub theater: bool,
-    pub new_theater: bool,
-}
-
-/// Process-resident Bullet image, Color, ART and Degenerates values, owned by
-/// native_processing::ProcessedType.
+/// Process-resident Bullet Color, ART and Degenerates values, owned by
+/// native_processing::ProcessedType alongside its shared ObjectImageState.
 /// Native constructors46BBC0/5F7090 and full ReadINI46BEE0; executable inputs:
 /// tools/projectile_oracle/bridge_render_art_state.{py,json}.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ProjectileArtState {
-    image: String,
-    image_load: Option<ProjectileImageLoad>,
-    #[serde(default)]
-    voxel_image_load: Option<String>,
     /// Bullet ctor46BCA4 and ReadColor474A90 at46BFA5.
     #[serde(default)]
     color_scheme: i32,
@@ -183,9 +178,6 @@ pub(crate) struct ProjectileArtState {
     #[serde(default)]
     degenerates: bool,
     inviso: bool,
-    voxel: bool,
-    theater: bool,
-    new_theater: bool,
     inverse_rotates: bool,
     flat: bool,
     anim_palette: bool,
@@ -200,17 +192,11 @@ pub(crate) struct ProjectileArtState {
 }
 
 impl ProjectileArtState {
-    pub(crate) fn new(native_id: &str) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            image: native_id.chars().take(24).collect(),
-            image_load: None,
-            voxel_image_load: None,
             color_scheme: 0,
             degenerates: false,
             inviso: false,
-            voxel: false,
-            theater: false,
-            new_theater: false,
             inverse_rotates: true,
             flat: false,
             anim_palette: false,
@@ -227,6 +213,8 @@ impl ProjectileArtState {
 
     pub(crate) fn read_pass(
         &mut self,
+        image: &mut ObjectImageState,
+        theater: ImageTheater,
         rules: &IniSection,
         fixed_art: &IniFile,
         color_names: &[String],
@@ -234,14 +222,32 @@ impl ProjectileArtState {
     ) {
         // ObjectType5F92F8..5F933B uses Image25 with the previous Image default.
         // Its ART reads memoize the address of the Image buffer (INI526B10).
-        let object_image = rules.read_string("Image", &self.image, 25);
-        let section = fixed_art.section(&object_image);
-        self.read_object_fields(section);
+        let section = image.read_ini(rules, fixed_art, ObjectImageKind::Ordinary, theater);
         // ObjectRead5F963A..5F964D loads SHP for a non-Voxel Bullet before the
         // subclass updates Inviso or clears Image. Constructor-only types have
-        // never taken this path. Missing files still replace the old image.
-        if !self.voxel {
-            self.record_image_load(&object_image);
+        // never taken this path. The shared owner records that load, including
+        // its alternate-arctic mutation, while ART keeps the cached section.
+        self.read_bullet_fields(image, theater, rules, section, color_names, resolve_trailer);
+    }
+
+    fn read_bullet_fields(
+        &mut self,
+        image: &mut ObjectImageState,
+        theater: ImageTheater,
+        rules: &IniSection,
+        section: Option<&IniSection>,
+        color_names: &[String],
+        mut resolve_trailer: impl FnMut(&str) -> Option<String>,
+    ) {
+        if let Some(section) = section {
+            // ObjectType5F9574..5F95E2, after the base ART/Image selection.
+            // Constructor5F7090 defaults; original executable controls:
+            // tools/projectile_oracle/line_trail.json reader_controls.
+            self.use_line_trail = section.read_bool("UseLineTrail", self.use_line_trail);
+            self.line_trail_color =
+                section.read_color_rgb("LineTrailColor", self.line_trail_color, None);
+            self.line_trail_color_decrement =
+                section.read_int("LineTrailColorDecrement", self.line_trail_color_decrement);
         }
         // Bullet46BF96..46BFAA: constructor0, current-index default and the
         // Colors catalog already registered by this RulesClass pass. Missing
@@ -259,85 +265,50 @@ impl ProjectileArtState {
         // Active retail's preceding Anim sweep679A5D..679A82 resets this cache:
         // even missing D ReadINI427D13 calls526B00. A stack without any prior
         // Anim/other ART read needs the shared INI-cache lifetime mechanism.
-        self.image = rules.read_string("Image", "", 25);
+        image.replace_image(rules, "");
         self.inviso = rules.read_bool("Inviso", self.inviso);
-        self.read_bullet_fields(section, resolve_trailer);
-        self.record_bullet_image_loads();
-    }
-
-    fn record_bullet_image_loads(&mut self) {
+        if let Some(section) = section {
+            // 46C1ED..46C292: only these fields require a nonempty current Image.
+            if !image.image().is_empty() {
+                let incoming = section.read_string("Trailer", "", 128);
+                if !incoming.is_empty() {
+                    self.trailer = resolve_trailer(&incoming);
+                }
+                self.spawn_delay = section.read_int("SpawnDelay", self.spawn_delay);
+                self.inverse_rotates = !section.read_bool("Rotates", !self.inverse_rotates);
+                self.flat = section.read_bool("Flat", self.flat);
+            }
+            // 46C37E..46C3F2: defaults are zero-extended retained bytes, and each
+            // ReadInt result stores AL without a clamp. These calls are unguarded.
+            self.anim_low = section.read_int("AnimLow", i32::from(self.anim_low)) as u8;
+            self.anim_high = section.read_int("AnimHigh", i32::from(self.anim_high)) as u8;
+            self.anim_rate = section.read_int("AnimRate", i32::from(self.anim_rate)) as u8;
+            self.anim_palette = section.read_bool("AnimPalette", self.anim_palette);
+        }
         // 46C3F8..46C406 skips only this second load for Inviso. Its current
         // Image may be empty: native then attempts .SHP and .GHP, clearing +A4
         // when neither exists. Inviso can instead retain the base-prefix load.
         if !self.inviso {
-            self.record_image_load(&self.image.clone());
+            image.load_unowned_shp(ObjectImageKind::Ordinary, theater);
         }
         // 46C40B..46C417: independent of Inviso, after the clearing Image
         // read. A false Voxel flag preserves the prior pair; missing/empty
         // files on a reached load clear it in the asset owner's load result.
-        if self.voxel {
-            self.voxel_image_load = Some(self.image.clone());
+        if image.voxel() {
+            image.load_voxel();
         }
     }
 
-    fn record_image_load(&mut self, image: &str) {
-        self.image_load = Some(ProjectileImageLoad {
-            image: image.to_owned(),
-            theater: self.theater,
-            new_theater: self.new_theater,
-        });
-    }
-
-    fn read_object_fields(&mut self, section: Option<&IniSection>) {
-        if let Some(section) = section {
-            self.theater = section.read_bool("Theater", self.theater);
-            self.new_theater = section.read_bool("NewTheater", self.new_theater);
-            self.voxel = section.read_bool("Voxel", self.voxel);
-            // ObjectType5F9574..5F95E2, after the base ART/Image selection.
-            // Constructor5F7090 defaults; original executable controls:
-            // tools/projectile_oracle/line_trail.json reader_controls.
-            self.use_line_trail = section.read_bool("UseLineTrail", self.use_line_trail);
-            self.line_trail_color =
-                section.read_color_rgb("LineTrailColor", self.line_trail_color, None);
-            self.line_trail_color_decrement =
-                section.read_int("LineTrailColorDecrement", self.line_trail_color_decrement);
-        }
-    }
-
-    fn read_bullet_fields(
-        &mut self,
-        section: Option<&IniSection>,
-        mut resolve_trailer: impl FnMut(&str) -> Option<String>,
-    ) {
-        let Some(section) = section else { return };
-        // 46C1ED..46C292: only these fields require a nonempty current Image.
-        if !self.image.is_empty() {
-            let incoming = section.read_string("Trailer", "", 128);
-            if !incoming.is_empty() {
-                self.trailer = resolve_trailer(&incoming);
-            }
-            self.spawn_delay = section.read_int("SpawnDelay", self.spawn_delay);
-            self.inverse_rotates = !section.read_bool("Rotates", !self.inverse_rotates);
-            self.flat = section.read_bool("Flat", self.flat);
-        }
-        // 46C37E..46C3F2: defaults are zero-extended retained bytes, and each
-        // ReadInt result stores AL without a clamp. These calls are unguarded.
-        self.anim_low = section.read_int("AnimLow", i32::from(self.anim_low)) as u8;
-        self.anim_high = section.read_int("AnimHigh", i32::from(self.anim_high)) as u8;
-        self.anim_rate = section.read_int("AnimRate", i32::from(self.anim_rate)) as u8;
-        self.anim_palette = section.read_bool("AnimPalette", self.anim_palette);
-    }
-
-    pub(crate) fn apply_to(&self, projectile: &mut ProjectileType) {
-        projectile.image = (!self.image.is_empty()).then(|| self.image.clone());
-        projectile.image_load = self.image_load.clone();
-        projectile.voxel_image_load = self.voxel_image_load.clone();
+    pub(crate) fn apply_to(&self, image: &ObjectImageState, projectile: &mut ProjectileType) {
+        projectile.image = (!image.image().is_empty()).then(|| image.image().to_string());
+        projectile.image_loads = image.shp_loads().to_vec();
+        projectile.voxel_image_load = image.voxel_load().map(str::to_string);
         projectile.color_scheme = self.color_scheme;
         projectile.degenerates = self.degenerates;
         projectile.inviso = self.inviso;
-        projectile.voxel = self.voxel;
-        projectile.theater = self.theater;
-        projectile.new_theater = self.new_theater;
+        projectile.voxel = image.voxel();
+        projectile.theater = image.theater();
+        projectile.new_theater = image.new_theater();
         projectile.rotates = self.inverse_rotates;
         projectile.flat = self.flat;
         projectile.anim_palette = self.anim_palette;
@@ -380,6 +351,7 @@ impl ProjectileType {
     ) -> Self {
         let mut result = Self {
             id: id.to_string(),
+            alpha_image: section.read_object_alpha_image(""),
             // Targeting
             aa: section.read_bool("AA", false),
             ag: section.read_bool("AG", true),
@@ -397,12 +369,12 @@ impl ProjectileType {
             shadow: section.read_bool("Shadow", true),
             dropping: section.read_bool("Dropping", false),
             level: section.read_bool("Level", false),
-            inviso: section.read_bool("Inviso", false),
+            inviso: false,
             proximity: section.read_bool("Proximity", false),
             ranged: section.read_bool("Ranged", false),
             rotates: true,
             flak_scatter: section.read_bool("FlakScatter", false),
-            degenerates: section.read_bool("Degenerates", false),
+            degenerates: false,
             bouncy: section.read_bool("Bouncy", false),
             anim_palette: false,
             firers_palette: section.read_bool("FirersPalette", false),
@@ -430,7 +402,7 @@ impl ProjectileType {
             shrapnel_weapon: None,
             airburst_weapon: None,
             image: None,
-            image_load: None,
+            image_loads: Vec::new(),
             voxel_image_load: None,
             voxel: false,
             theater: false,
@@ -442,20 +414,23 @@ impl ProjectileType {
         };
         // Standalone reader callers use the same field kernel. Production
         // RuleSet receives the retained per-pass state from native_processing.
-        let mut art = ProjectileArtState::new(id);
-        art.read_object_fields(image_section);
-        if !art.voxel {
-            art.record_image_load(&section.read_string("Image", id, 25));
-        }
-        art.image = section.read_string("Image", "", 25);
-        art.inviso = section.read_bool("Inviso", false);
-        art.degenerates = result.degenerates;
-        art.read_bullet_fields(image_section, |incoming| {
-            (!incoming.eq_ignore_ascii_case("none") && !incoming.eq_ignore_ascii_case("<none>"))
-                .then(|| incoming.chars().take(24).collect())
-        });
-        art.record_bullet_image_loads();
-        art.apply_to(&mut result);
+        let mut image = ObjectImageState::new(id);
+        image.read_input(section);
+        image.read_art(image_section);
+        image.load_for_read(ObjectImageKind::Ordinary, ImageTheater::Uninitialized);
+        let mut art = ProjectileArtState::new();
+        art.read_bullet_fields(
+            &mut image,
+            ImageTheater::Uninitialized,
+            section,
+            image_section,
+            &[],
+            |incoming| {
+                (!incoming.eq_ignore_ascii_case("none") && !incoming.eq_ignore_ascii_case("<none>"))
+                    .then(|| incoming.chars().take(24).collect())
+            },
+        );
+        art.apply_to(&image, &mut result);
         result
     }
 }

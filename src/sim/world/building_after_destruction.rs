@@ -98,7 +98,7 @@ impl Simulation {
         rules: &RuleSet,
         registry: &OverlayTypeRegistry,
         type_id: InternedId,
-        foundation: &str,
+        foundation: &crate::rules::foundation::Foundation,
         origin: (u16, u16),
         effects: FrameEffects<'_>,
     ) {

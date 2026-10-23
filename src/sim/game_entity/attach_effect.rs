@@ -8,6 +8,10 @@ use std::hash::{Hash, Hasher};
 #[path = "attach_speed_tests.rs"]
 mod speed_tests;
 
+#[cfg(test)]
+#[path = "attach_firepower_tests.rs"]
+mod firepower_tests;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct AttachedEffect {
     warhead: InternedId,
@@ -23,45 +27,58 @@ pub(super) struct AttachEffects {
 }
 
 impl GameEntity {
-    fn attached_speed_from_entries(
+    fn attached_stats_from_entries(
         &self,
         rules: &crate::rules::ruleset::RuleSet,
         interner: &crate::sim::intern::StringInterner,
-    ) -> Result<crate::util::native_x87::NativeF64Bits, &'static str> {
+    ) -> Result<
+        (
+            crate::util::native_x87::NativeF64Bits,
+            crate::util::native_x87::NativeF64Bits,
+        ),
+        &'static str,
+    > {
         use crate::util::native_x87::MaskedX87Chop53 as X;
-        //100460A0 seeds speed from the permanent Ext+90, retaining the
-        // ordered x87 accumulator until its final Foot+580 binary64 store.
+        //100460A0: Ext+80/+90 are permanent crate baselines. Firepower
+        //10046176..180 spills binary64 after EACH ordered entry; Foot speed
+        //1004618F remains on the x87 stack until the final580 store. Native
+        //values: rules_oracle/ares_attach_firepower and ares_attach_speed.
+        let mut firepower = self.crate_multipliers.crate_firepower();
         let mut speed = X::load_f64(self.foot_speed.crate_multiplier());
-        if self.category().is_foot() {
-            for entry in &self.attach_effects.entries {
-                let settings = interner
-                    .try_resolve(entry.warhead)
-                    .and_then(|name| rules.warhead(name))
-                    .and_then(|wh| wh.ares_rules())
-                    .ok_or("attachment warhead is absent from restored rules")?;
+        for entry in &self.attach_effects.entries {
+            let settings = interner
+                .try_resolve(entry.warhead)
+                .and_then(|name| rules.warhead(name))
+                .and_then(|wh| wh.ares_rules())
+                .ok_or("attachment warhead is absent from restored rules")?;
+            firepower = X::store_f64_masked_chop(X::mul(
+                X::load_f64(settings.attach_effect().firepower_multiplier()),
+                X::load_f64(firepower),
+            ));
+            if self.category().is_foot() {
                 speed = X::mul(
                     speed,
                     X::load_f64(settings.attach_effect().speed_multiplier()),
                 );
             }
         }
-        Ok(X::store_f64_masked_chop(speed))
+        Ok((firepower, X::store_f64_masked_chop(speed)))
     }
 
-    /// The one100460A0 speed projection. The canonical ordered attachment
-    /// vector owns factors; FootSpeedState owns baseline and derived output.
-    pub(crate) fn recompute_ares_attached_speed(
+    /// One100460A0 projection from the canonical attachment vector. Each
+    /// scalar's existing owner holds its permanent and committed derived value.
+    pub(crate) fn recompute_ares_attached_stats(
         &mut self,
         rules: &crate::rules::ruleset::RuleSet,
         interner: &crate::sim::intern::StringInterner,
     ) {
-        if !self.category().is_foot() {
-            return; // Native only stores Foot+580 for the Foot flag.
-        }
-        let speed = self
-            .attached_speed_from_entries(rules, interner)
+        let (firepower, speed) = self
+            .attached_stats_from_entries(rules, interner)
             .expect("live attachment belongs to the scenario rules");
-        self.foot_speed.set_attached_speed(speed);
+        self.crate_multipliers.set_attached_firepower(firepower);
+        if self.category().is_foot() {
+            self.foot_speed.set_attached_speed(speed);
+        }
     }
 
     pub(crate) fn attached_effect_anims(&self) -> impl Iterator<Item = u64> + '_ {
@@ -398,10 +415,10 @@ mod receiver {
             if settings.duration() == 0 {
                 return;
             }
-            // Ground WH attachment and Foot speed share the existing owner.
-            // Other stat aggregation, decloak, Temporal and self-effects remain explicit
+            // Ground WH speed/firepower share the existing aggregate owner.
+            // Armor/ROF, decloak, Temporal and self-effects remain explicit
             // later mechanisms; never apply a misleading visual-only substitute.
-            if !settings.visual_speed_path() {
+            if !settings.visual_combat_path() {
                 log::debug!(
                     "Ares AttachEffect {} requires a later dependency chain",
                     warhead.id
@@ -475,9 +492,9 @@ mod receiver {
                     });
                     self.create_attached_effect_anim(target, index, rules);
                     //1005869F follows animation creation; callbacks before
-                    //that call still see the previously committed speed.
+                    //that call still see the previously committed stats.
                     if let Some(victim) = self.substrate.entities.get_mut(target) {
-                        victim.recompute_ares_attached_speed(rules, &self.interner);
+                        victim.recompute_ares_attached_stats(rules, &self.interner);
                     }
                 }
             }
@@ -617,7 +634,7 @@ mod receiver {
             //10058F70 compacts all expired entries before the single
             //10058F79 aggregate. Visibility-only work never recomputes it.
             if expired && let Some(victim) = self.substrate.entities.get_mut(target) {
-                victim.recompute_ares_attached_speed(rules, &self.interner);
+                victim.recompute_ares_attached_stats(rules, &self.interner);
             }
         }
 
@@ -649,9 +666,9 @@ mod receiver {
                     .is_some_and(|extension| extension.attach_effect().discard_on_entry())
             });
             //100588E0's removal result gates1004B197. Merely hiding held
-            //animations leaves the previously committed speed untouched.
+            //animations leaves the previously committed stats untouched.
             if victim.attach_effects.entries.len() != len {
-                victim.recompute_ares_attached_speed(rules, interner);
+                victim.recompute_ares_attached_stats(rules, interner);
             }
         }
 
@@ -670,7 +687,7 @@ mod receiver {
             }
         }
 
-        pub(crate) fn validate_attached_speed_after_restore(
+        pub(crate) fn validate_attached_stats_after_restore(
             &self,
             rules: &RuleSet,
         ) -> Result<(), (u64, &'static str)> {
@@ -680,9 +697,15 @@ mod receiver {
                     continue;
                 }
                 let expected = victim
-                    .attached_speed_from_entries(rules, &self.interner)
+                    .attached_stats_from_entries(rules, &self.interner)
                     .map_err(|reason| (id, reason))?;
-                if victim.foot_speed.effective_multiplier() != expected {
+                if victim.crate_multipliers.firepower() != expected.0 {
+                    return Err((
+                        id,
+                        "saved attached firepower differs from its baseline and effects",
+                    ));
+                }
+                if victim.foot_speed.effective_multiplier() != expected.1 {
                     return Err((
                         id,
                         "saved attached speed differs from its baseline and effects",

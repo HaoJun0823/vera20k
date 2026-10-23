@@ -19,7 +19,6 @@ use super::{
 };
 use crate::map::entities::{EntityCategory, MapEntity};
 use crate::map::resolved_terrain::ResolvedTerrainGrid;
-use crate::rules::foundation::foundation_dimensions;
 use crate::rules::object_type::{Ability, ObjectCategory, ObjectType};
 use crate::rules::overlay_types::OverlayTypeRegistry;
 use crate::rules::ruleset::RuleSet;
@@ -1501,8 +1500,7 @@ impl Simulation {
             return None;
         }
         //458A92 reads Object5F5B90 -> Type45EC20's sentinel list once.
-        let foundation =
-            crate::rules::foundation::foundation_cell_offsets(building.type_facts.foundation());
+        let foundation = building.type_facts.foundation().cell_offsets();
         let origin = (
             crate::util::lepton::lepton_to_cell_packed(coord.x),
             crate::util::lepton::lepton_to_cell_packed(coord.y),
@@ -3066,9 +3064,9 @@ impl crate::sim::world::ObjectSubstrate {
 pub(super) fn deploy_origin_from_unit_cell(
     unit_rx: u16,
     unit_ry: u16,
-    foundation: &str,
+    foundation: &crate::rules::foundation::Foundation,
 ) -> (i16, i16) {
-    let (width, height) = foundation_dimensions(foundation);
+    let (width, height) = foundation.dimensions();
     let (x, y) = (unit_rx as i16, unit_ry as i16);
     if width > 2 || height > 2 {
         (x.wrapping_sub(1), y.wrapping_sub(1))
@@ -3093,8 +3091,12 @@ pub(super) fn deploy_origin_from_unit_cell(
 /// produced the wrong inverse.
 ///
 /// Verified against gamemd 2026-08-05.
-fn undeploy_unit_cell(origin_rx: u16, origin_ry: u16, foundation: &str) -> (u16, u16) {
-    let (width, height) = foundation_dimensions(foundation);
+fn undeploy_unit_cell(
+    origin_rx: u16,
+    origin_ry: u16,
+    foundation: &crate::rules::foundation::Foundation,
+) -> (u16, u16) {
+    let (width, height) = foundation.dimensions();
     if width > 2 || height > 2 {
         (origin_rx.saturating_add(1), origin_ry.saturating_add(1))
     } else {

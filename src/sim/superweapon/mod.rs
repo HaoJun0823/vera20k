@@ -495,6 +495,30 @@ impl SuperWeaponInstance {
         self.ready_tick
     }
 
+    /// `SuperClass::ShouldFlashTab @ 0x006CE1A0` gates the strip's Defense
+    /// flash on `+0x70` suspension, then type `+0xE5` selects charge state
+    /// `+0x7C != 0` or ready flag `+0x6F`. It then applies
+    /// `FlashSidebarTabFrames=` to ready frame `+0x74`. The native signed
+    /// add/comparison wraps at 32 bits before testing `ReadyFrame + N > frame`.
+    fn should_flash_tab(&self, sw: &SuperWeaponType, current_frame: i32) -> bool {
+        if self.is_suspended {
+            return false;
+        }
+        if sw.use_charge_drain {
+            if self.charge_drain_state == 0 {
+                return false;
+            }
+        } else if !self.is_ready {
+            return false;
+        }
+
+        let frames = sw.flash_sidebar_tab_frames;
+        if frames == -1 {
+            return true;
+        }
+        frames != 0 && self.ready_tick.wrapping_add(frames) > current_frame
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_charge_drain_state_for_test(&mut self, value: i32) {
         self.charge_drain_state = value;
@@ -1175,6 +1199,9 @@ pub struct SuperWeaponView {
     pub progress: f32,
     pub is_ready: bool,
     pub is_online: bool,
+    /// Derived `SuperClass::ShouldFlashTab @ 0x006CE1A0` result for the
+    /// current simulation frame; the sidebar owns only the shared flash phase.
+    pub should_flash_tab: bool,
     /// Native CanFire6CC360, independently of the raw charge/display flags.
     pub can_fire: bool,
     /// Derived from the same wallet predicate used at launch, not readiness.
@@ -1190,6 +1217,7 @@ pub fn superweapon_views_for_owner(
     let Some(weapons) = sim.super_weapons.get(owner) else {
         return Vec::new();
     };
+    let current_frame = sim.session.binary_frame() as i32;
     let mut views = Vec::new();
     for inst in weapons.values() {
         if !inst.is_active {
@@ -1208,6 +1236,7 @@ pub fn superweapon_views_for_owner(
             progress: inst.charge_progress(sim.session.binary_frame(), inst.recharge_time(sw_type)),
             is_ready: inst.is_ready,
             is_online: !inst.is_suspended,
+            should_flash_tab: inst.should_flash_tab(sw_type, current_frame),
             can_fire: if paid_source.is_some() {
                 sim.paid_super_weapon_selection(*owner)
                     .is_some_and(|selection| selection.destination == inst.type_id)
@@ -1532,10 +1561,14 @@ fn owned_techno_present(sim: &Simulation, rules: &RuleSet, owner: InternedId, id
         {
             return count > 0;
         }
-        sim.interner.get(&object.id)
+        sim.interner
+            .get(&object.id)
             .zip(sim.houses.get(&owner))
             .is_some_and(|(type_id, house)| {
-                house.tracking().count_owned_present_and_limboed(entity_category, type_id) > 0
+                house
+                    .tracking()
+                    .count_owned_present_and_limboed(entity_category, type_id)
+                    > 0
             })
     })
 }

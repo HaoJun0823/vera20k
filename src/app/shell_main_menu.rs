@@ -750,6 +750,24 @@ impl App {
             .pressed_owner_draw_button = None;
         // A new 0x102 creates its kind-1 statics hidden (0x0060A5B0).
         state.frontend.skirmish_shell_state.statics.reset();
+        // Native constructs 0x102 fresh on every visit, and
+        // `SkirmishDialog__OnSetup497` hands its controls the Session values that
+        // `prepare_multiplayer_settings` just refreshed above. The retained Rust
+        // controls follow that same order, so a durable record changed since the
+        // last visit reaches the page instead of the page keeping its old face.
+        state.frontend.multiplayer_shell_runtime.hydrate_shell(
+            &mut state.frontend.skirmish_shell_state,
+            state.frontend.scenario_catalog.shell_maps(),
+            &state.frontend.skirmish_modes,
+        );
+        crate::ui::skirmish_shell::repair_teams_for_selected_mode(
+            &mut state.frontend.skirmish_shell_state,
+            &state.frontend.skirmish_modes,
+        );
+        crate::ui::skirmish_shell::initialize_rows_for_selected_map(
+            &mut state.frontend.skirmish_shell_state,
+            state.frontend.scenario_catalog.shell_maps(),
+        );
         // The skirmish dialog (0x102) slides its controls in on first paint like
         // every shell dialog; the per-frame slide trigger starts that wave once
         // the skirmish shell becomes the showing screen. Clear any stale wave

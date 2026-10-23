@@ -69,7 +69,7 @@ fn release_fixture() -> Simulation {
     let building = sim.substrate.entities.get_mut(2).unwrap();
     building
         .type_facts
-        .set_foundation_for_test("2x3".to_owned());
+        .set_foundation_for_test("2x3".to_owned().into());
     building.position.set_sub_x_for_test(SimFixed::from_num(64));
     building
         .position

@@ -540,7 +540,9 @@ fn cell_and_building_fire_headings_match_original_coordinate_getters() {
             } else {
                 let mut target = make_structure_entity(2, "TARGET", 8, 5, 125, 125);
                 // Construction stamps the type's `Foundation=2x3`.
-                target.type_facts.set_foundation_for_test("2x3".to_string());
+                target
+                    .type_facts
+                    .set_foundation_for_test("2x3".to_string().into());
                 store.insert(target);
                 TargetKind::Entity(2)
             }));

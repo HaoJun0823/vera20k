@@ -2,9 +2,12 @@
 //!
 //! `SessionClass` loading progress `0x0069AE90` sends 51 bytes; chat's
 //! `0x0055EDBF` construction and `TauntCommandClass::Execute` `0x00536350`
-//! send 455. `Network__ProcessGlobalPackets` `0x0048D1E0` consumes them.
-//! Endpoint admission, routing, loading state and taunt playback belong to
-//! their existing app owners. This module only encodes and reads the fields.
+//! send 455; the beacon placement and deletion records of
+//! `BeaconManagerClass::PlaceBeacon` `0x00430BA0` and `DeleteBeacon`
+//! `0x004311C0` send 61. `Network__ProcessGlobalPackets` `0x0048D1E0`
+//! consumes them. Endpoint admission, routing, loading state, taunt playback
+//! and beacons belong to their existing app owners. This module only encodes
+//! and reads the fields.
 
 use super::{LAN_MESSAGE_LEN, LanMessage, LanMessageError, LanMessageKind, game_name_hash};
 
@@ -28,6 +31,93 @@ pub enum InGameMessageError {
     WrongLoadingKind { actual: u32 },
     #[error("chat is {actual} UTF-16 units, maximum{maximum}")]
     ChatTooLong { actual: usize, maximum: usize },
+    #[error("beacon record has {actual} bytes, expected61")]
+    WrongBeaconLength { actual: usize },
+    #[error("beacon record has message kind{actual:#x}, expected0x20 or0x21")]
+    WrongBeaconKind { actual: u32 },
+}
+
+/// The 61-byte beacon records (`Send_Global_Message(.., 0x3D, ack 1, ..)`).
+pub const BEACON_LEN: usize = 0x3d;
+const BEACON_PLACED_KIND: u32 = 0x20;
+const BEACON_DELETED_KIND: u32 = 0x21;
+const BEACON_COORD_OFFSET: usize = 0x2f;
+const BEACON_SLOT_OFFSET: usize = 0x3b;
+const BEACON_HOUSE_OFFSET: usize = 0x3c;
+
+/// One beacon record's fields. House and slot are the sender's bytes; the
+/// receiver sign-extends both (`MOVSX`, `0x0048D798`/`0x0048D7B8`,
+/// `0x0048D7D5`/`0x0048D7DC`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeaconRecord {
+    /// Kind `0x20` (`0x00430D9F..0x00430E41`): the leptons coordinate at
+    /// `+0x2F`, the slot the placement filled at `+0x3B`, the House at `+0x3C`.
+    Placed {
+        house: i8,
+        slot: i8,
+        coord: [i32; 3],
+    },
+    /// Kind `0x21` (`0x00431367..0x004313E9`): slot `+0x3B`, House `+0x3C`.
+    Deleted { house: i8, slot: i8 },
+}
+
+/// The short beacon view shares the raw record owner of the other LAN
+/// messages; only its first 61 bytes are transmitted. Native builds it in a
+/// stack buffer it never clears, so new unused bytes are zero here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeaconMessage {
+    message: LanMessage,
+}
+
+impl BeaconMessage {
+    /// The sender's narrowed node name at `+0x04`
+    /// (`0x00430DA9..0x00430DE0`) and the record's fields.
+    pub fn new(name: &str, record: BeaconRecord) -> Result<Self, LanMessageError> {
+        let (kind, house, slot) = match record {
+            BeaconRecord::Placed { house, slot, .. } => (BEACON_PLACED_KIND, house, slot),
+            BeaconRecord::Deleted { house, slot } => (BEACON_DELETED_KIND, house, slot),
+        };
+        let mut message = LanMessage::with_name(LanMessageKind::Unknown(kind), name)?;
+        if let BeaconRecord::Placed { coord, .. } = record {
+            for (index, value) in coord.into_iter().enumerate() {
+                message.put_u32(BEACON_COORD_OFFSET + index * 4, value as u32);
+            }
+        }
+        message.bytes[BEACON_SLOT_OFFSET] = slot as u8;
+        message.bytes[BEACON_HOUSE_OFFSET] = house as u8;
+        Ok(Self { message })
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, InGameMessageError> {
+        if bytes.len() != BEACON_LEN {
+            return Err(InGameMessageError::WrongBeaconLength {
+                actual: bytes.len(),
+            });
+        }
+        let mut raw = [0; LAN_MESSAGE_LEN];
+        raw[..BEACON_LEN].copy_from_slice(bytes);
+        let message = LanMessage::from_bytes(raw);
+        let kind = message.u32(0);
+        if !matches!(kind, BEACON_PLACED_KIND | BEACON_DELETED_KIND) {
+            return Err(InGameMessageError::WrongBeaconKind { actual: kind });
+        }
+        Ok(Self { message })
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.message.as_bytes()[..BEACON_LEN]
+    }
+
+    pub fn record(&self) -> BeaconRecord {
+        let house = self.message.bytes[BEACON_HOUSE_OFFSET] as i8;
+        let slot = self.message.bytes[BEACON_SLOT_OFFSET] as i8;
+        if self.message.u32(0) == BEACON_DELETED_KIND {
+            return BeaconRecord::Deleted { house, slot };
+        }
+        let coord =
+            std::array::from_fn(|index| self.message.u32(BEACON_COORD_OFFSET + index * 4) as i32);
+        BeaconRecord::Placed { house, slot, coord }
+    }
 }
 
 /// The short Type0F view shares the same raw record owner as other LAN

@@ -317,7 +317,7 @@ fn place(
     // Ares PlaceUnits centers the foundation on the target before searching.
     // Keep VERA's declared ring order, but use the same anchor coordinate.
     let (width, height) = if payload.category == ObjectCategory::Building {
-        crate::rules::foundation::foundation_dimensions(&ty.foundation)
+        ty.foundation.dimensions()
     } else {
         (1, 1)
     };

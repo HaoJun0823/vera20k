@@ -550,7 +550,7 @@ pub struct TypeFacts {
     /// `Foundation=`, as its rules string: the structure footprint the cell
     /// lists cover; `1x1` for a type without one.
     #[serde(default = "default_foundation")]
-    foundation: String,
+    foundation: crate::rules::foundation::Foundation,
     /// A building's hidden-object counter inputs
     /// (`ObjectType::hidden_occupancy`), so cell-list exit can reverse its
     /// contribution.
@@ -577,8 +577,8 @@ pub struct TypeFacts {
     base_plan_has_undeploy_target: bool,
 }
 
-fn default_foundation() -> String {
-    "1x1".to_string()
+fn default_foundation() -> crate::rules::foundation::Foundation {
+    crate::rules::foundation::Foundation::default()
 }
 
 fn default_base_plan_type_index() -> i32 {
@@ -618,8 +618,8 @@ impl TypeFacts {
         }
     }
 
-    /// `Foundation=`, as its rules string.
-    pub fn foundation(&self) -> &str {
+    /// The resolved type foundation, including Ares cells and ordered exits.
+    pub fn foundation(&self) -> &crate::rules::foundation::Foundation {
         &self.foundation
     }
 
@@ -661,7 +661,7 @@ impl TypeFacts {
 
     /// Install a fixture's `foundation`.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn set_foundation_for_test(&mut self, value: String) {
+    pub fn set_foundation_for_test(&mut self, value: crate::rules::foundation::Foundation) {
         self.foundation = value;
     }
 

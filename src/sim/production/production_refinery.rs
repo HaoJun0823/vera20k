@@ -5,13 +5,11 @@
 use crate::map::entities::EntityCategory;
 use crate::rules::ruleset::RuleSet;
 use crate::sim::find_nearby_cell::NearbySearchOptions;
-use crate::sim::world::FrameEffects;
-use crate::sim::world::{PlacementEvidence, Simulation};
-
-use crate::rules::foundation::foundation_dimensions;
 use crate::sim::houses::Houses;
 use crate::sim::intern::StringInterner;
 use crate::sim::scenario_session::ScenarioSession;
+use crate::sim::world::FrameEffects;
+use crate::sim::world::{PlacementEvidence, Simulation};
 
 /// Native primary FreeUnit facing byte. Under the project facing convention,
 /// 0xC0 is west.
@@ -55,7 +53,7 @@ pub(crate) fn spawn_building_free_unit(
             if entity.category() != EntityCategory::Structure || entity.death.is_dying() {
                 return None;
             }
-            let (width, height) = foundation_dimensions(entity.type_facts.foundation());
+            let (width, height) = entity.type_facts.foundation().dimensions();
             Some((
                 entity.owner(),
                 entity.type_ref(),

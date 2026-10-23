@@ -46,6 +46,8 @@ ares = ["vera20k-core/ares"]
 # Optional Phobos extensions, independent of the Ares capability; neither
 # default nor shipping builds enable this either.
 phobos = ["vera20k-core/phobos"]
+# Placeholder for the NPatch capability; no chain reads it yet.
+npatch = ["vera20k-core/npatch"]
 # The Ctrl+Shift dev chord: renderer-native diagnostic overlays (grid, heightmap,
 # pathgrid, foot path, fog), the debug pause and quicksave/quickload. Captures
 # rely on it (literal Ctrl+Shift+M/N quicksave/quickload).

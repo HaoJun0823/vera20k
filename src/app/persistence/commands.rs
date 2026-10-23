@@ -142,6 +142,7 @@ pub(crate) struct PreparedSave<'a> {
     sanitized: Option<String>,
     timestamp: u64,
     sinking_waterlines: Vec<(u64, i16)>,
+    lighting: crate::app::presentation::lighting::MatchLighting,
     sidebar_order: Option<crate::sim::snapshot::SavedSidebarOrder>,
     tactical_view: crate::sim::snapshot::SavedTacticalView,
     local_view: crate::sim::snapshot::saved_local_view::SavedLocalView,
@@ -209,6 +210,12 @@ fn prepare_save<'a>(
         &presentation.sidebar_gadget_state,
     )?;
     local_view.set_power_bar(presentation.power_bar_anim.saved());
+    local_view.set_credits_counter(
+        state
+            .match_state
+            .local_player_owner()
+            .and_then(|owner| presentation.sidebar_projection.saved_credits_counter(owner)),
+    );
     local_view.set_radar_events(presentation.minimap.as_ref().map_or_else(
         Default::default,
         crate::render::radar::minimap::MinimapRenderer::saved_radar_events,
@@ -247,6 +254,7 @@ fn prepare_save<'a>(
         sanitized,
         timestamp: now,
         sinking_waterlines,
+        lighting: presentation.lighting.clone(),
         sidebar_order,
         tactical_view,
         local_view,
@@ -275,6 +283,7 @@ impl PreparedSave<'_> {
         let clock_save = clock.begin_save(crate::app::match_runtime::frame_pacer::wall_clock_ms());
         self.resources
             .set_elapsed_buckets(clock_save.accumulated_buckets());
+        let anim_intensities = self.lighting.saved_anim_intensities(sim);
         let bytes = crate::sim::snapshot::GameSnapshot::save_validated_with_presentation(
             sim,
             self.map_hash,
@@ -282,6 +291,7 @@ impl PreparedSave<'_> {
             &self.description,
             self.timestamp,
             &self.sinking_waterlines,
+            &anim_intensities,
             self.sidebar_order.as_ref(),
             Some(&self.tactical_view),
             Some(&self.local_view),

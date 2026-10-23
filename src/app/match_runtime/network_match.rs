@@ -125,7 +125,7 @@ pub(crate) fn destroy_connection(
             // EVENT_REMOVEPLAYER from PlayerPtr with the House's index
             // (0x005DA898..0x005DA8F0); it kills the House on every peer.
             let local = sim.session().current_house();
-            let index = sim.houses().order().iter().position(|id| *id == owner);
+            let index = sim.houses().index_of(owner);
             if let (Some(local), Some(index)) = (local, index) {
                 let local = sim.interner().resolve(local).to_string();
                 crate::app::input::commands::schedule_command_in_sim(

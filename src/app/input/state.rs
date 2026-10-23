@@ -303,8 +303,8 @@ impl MatchInputState {
     /// Display Cancel4AAD30 consumes one represented cursor rung: current
     /// placement product, Repair/Sell, then Super. Repair/Sell setters still
     /// refuse a retained placement TYPE after its product expires. The
-    /// caller's existing selection owner handles the final UnselectAll rung.
-    /// Power/Waypoint/Beacon remain unrepresented Display flags.
+    /// caller handles the beacon rung (4AAE47) and the final UnselectAll rung.
+    /// Power/Waypoint remain unrepresented Display flags.
     /// Source: original gamemd.exe4AAD34..4AAE84.
     pub(crate) fn cancel_pointer_mode(
         &mut self,

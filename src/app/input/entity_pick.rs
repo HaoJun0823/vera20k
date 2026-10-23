@@ -1012,13 +1012,7 @@ pub(crate) fn selection_dynamic_prefix(
         return false;
     }
     if entity.tether.partner().is_some()
-        && building_covers_cell(
-            entities,
-            rules,
-            interner,
-            entity.position.rx(),
-            entity.position.ry(),
-        )
+        && building_covers_cell(entities, entity.position.rx(), entity.position.ry())
     {
         return false;
     }
@@ -1051,19 +1045,9 @@ pub(crate) fn is_local_player_selectable_object(
 /// occupier is cleared the moment the building leaves the map, so a dead
 /// refinery must not keep the miner standing on its pad out of a band box.
 ///
-/// The footprint is treated as the plain `Foundation=` rectangle. `Foundation=`
-/// is not free-form — it resolves through a fixed table — and every value that
-/// appears in stock `artmd.ini` is a plain `WxH` name, so the rectangle covers
-/// stock play. The table also carries named entries the stock art never selects
-/// (`3x3Refinery`); whether their native occupancy is the full rectangle is
-/// UNCHECKED, so a mod that selects one is the residual here, not stock YR.
-fn building_covers_cell(
-    entities: &EntityStore,
-    rules: Option<&RuleSet>,
-    interner: Option<&crate::sim::intern::StringInterner>,
-    rx: u16,
-    ry: u16,
-) -> bool {
+/// Read the existing marked-footprint owner. Bounding rectangles must not hide
+/// tethered units standing in a hole of an Ares custom foundation.
+fn building_covers_cell(entities: &EntityStore, rx: u16, ry: u16) -> bool {
     entities.values().any(|candidate| {
         if candidate.category() != EntityCategory::Structure
             || candidate.lifecycle.in_limbo()
@@ -1071,15 +1055,7 @@ fn building_covers_cell(
         {
             return false;
         }
-        let type_str = interner.map_or("", |i| i.resolve(candidate.type_ref()));
-        let foundation = rules
-            .and_then(|r| r.object(type_str))
-            .map(|o| o.foundation.as_str())
-            .unwrap_or("1x1");
-        let (fw, fh) = crate::rules::foundation::foundation_dimensions(foundation);
-        let brx = candidate.position.rx();
-        let bry = candidate.position.ry();
-        rx >= brx && rx < brx.saturating_add(fw) && ry >= bry && ry < bry.saturating_add(fh)
+        candidate.footprint_contains_cell((rx, ry))
     })
 }
 

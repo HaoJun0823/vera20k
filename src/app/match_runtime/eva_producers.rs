@@ -91,10 +91,10 @@
 //!   (`Command::SetBuildingOnLine`; YR has no UI that queues the event) and
 //!   `TriggerAction::Execute` (`sim::trigger_runtime`).
 //!
-//! Reachable in a stock skirmish, not produced in VERA (documented):
-//! - `RadarClass::PlaceBeacon 0x00430D78` (`EVA_BeaconPlaced`), `0x00430F1B`
-//!   (`CreateRadarEvent(0xB)` → `EVA_BeaconDetected`): there are no beacons
-//!   and the `PlaceBeacon` hotkey is a no-op (#1348).
+//! Multiplayer only (GameMode 5 refuses them), produced:
+//! - `BeaconManagerClass::PlaceBeacon 0x00430D78` (`EVA_BeaconPlaced`),
+//!   `0x00430F1B` (`EVA_BeaconDetected` once `CreateRadarEvent(0xB)` admits
+//!   it) → `crate::app::match_runtime::beacons`.
 //!
 //! Excluded (not reachable from stock-skirmish input):
 //! - `FootClass::OnSold 0x004D9F70` → `EVA_UnitSold` (string `0x00822630`,

@@ -3,8 +3,6 @@
 //! Native blocks, widths and supplied Image boundary: refinery_dock.{py,md,json}.
 //! This tests selected data and its installed projection. Original cadence/RNG
 //! and the supplied movement/world boundaries belong to the continuation replay.
-
-use crate::rules::foundation::foundation_id;
 use crate::rules::mission_data::MissionType;
 use serde_json::Value;
 
@@ -363,7 +361,7 @@ fn retail_docking_inputs_match_original_readers_and_installed_art() {
             "{name}: NumberOfDocks"
         );
         assert_eq!(
-            i32::from(foundation_id(&object.foundation)),
+            i32::from(object.foundation.selector()),
             int(&native["foundation"]),
             "{name}: processed Building Foundation"
         );

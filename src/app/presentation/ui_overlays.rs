@@ -443,11 +443,7 @@ pub(crate) fn build_control_group_status_render_instances(
                             [width, height]
                         })
                 })
-                .unwrap_or_else(|| {
-                    crate::rules::foundation::foundation_dimensions_leptons(
-                        entity.type_facts.foundation(),
-                    )
-                });
+                .unwrap_or_else(|| entity.type_facts.foundation().dimensions_leptons());
             let (foundation_x, foundation_y) = crate::util::lepton::project_absolute_lepton_xy(
                 -(width - width / 2),
                 height - height / 2,
@@ -624,8 +620,7 @@ pub(crate) fn build_building_status_render_instances(
         }
         let text = if primary {
             //70AC24's45EC90 uses foundation CELL width, not Dimension2 leptons.
-            let key = if crate::rules::foundation::foundation_dimensions(&object.foundation).0 == 1
-            {
+            let key = if object.foundation.dimensions().0 == 1 {
                 "TXT_PRI"
             } else {
                 "TXT_PRIMARY"

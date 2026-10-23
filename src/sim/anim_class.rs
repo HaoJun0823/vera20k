@@ -1,7 +1,7 @@
 //! Scheduler-owned ordinary SHP animation objects.
 //!
 //! `AnimStore` owns animation storage while `world::LogicVector` owns live AI
-//! order. This module implements the verified AnimClass lifecycle:
+//! order. This module implements the native-derived AnimClass lifecycle:
 //! constructor/reveal, first-AI guard, start delay and its `Start` edge,
 //! `Middle`'s scorch and crater, logic-frame timing, loops, reverse/ping-pong,
 //! Next, trailer, sound identity, owner attachment, conceal, deferred
@@ -15,34 +15,14 @@
 //!
 //! ## Residuals
 //!
-//! RESIDUAL (M11b) — **the per-frame damage arm.** `AnimClass::AI
-//! 0x00424507..0x0042464C` accumulates the type's `Damage=` (parsed, see
-//! `AnimTypeRuntimeConfig::damage`) into `AnimClass+0x188`, which the
-//! constructor seeds to `1.0`, and calls `Apply_area_damage` with a
-//! truncating `Math__ftol` whenever the accumulator reaches 1.0, subtracting
-//! the emitted integer back as a double. The warhead is
-//! `[CombatDamage] C4Warhead` when the anim's own section name is `INVISO`
-//! (string at `0x008182F8`, NOT the neighbouring `RING1` at `0x008182F0`) and
-//! `[CombatDamage] FlameDamage2` otherwise; a `TerrainClass` owner
-//! (`What_Am_I` -> `0x24`) multiplies the per-frame value by 5.
-//! - Bouncing anims skip this arm at42452A..424532, including meteors.
-//! - Trigger: the `FIRE3` anims `BuildingClass::DestructionEffects` starts,
-//!   for an `Explodes=` building, in each cardinal neighbour cell whose own
-//!   overlay has `Explodes=yes` (`0x00441A2B..0x00441B2E`; the neighbour's
-//!   `+0x44` overlay tested at `0x00441A90..0x00441AC2`, name loaded at
-//!   `0x00441AEC`).
-//!   No stock overlay has `Explodes=yes`, the `BURN-S/M/L` family is commented
-//!   out of `[Animations]` and `INVISO` has no stock producer, so stock play
-//!   never reaches it.
-//! - Player effect: `[FIRE3] Damage=.003` plus the `1.0` seed means exactly one
-//!   point of `Fire2` area damage on the fire's first ticked frame and then
-//!   none for another ~334 frames.
-//! - Frequency: none in stock; magnitude 1.
-//! - Downstream risk: low — it applies damage through the existing
-//!   `Apply_area_damage` path and consumes no RNG.
-//!   The `TerrainClass` x5 multiplier has no verified stock producer at all:
-//!   its only source of a terrain-owned anim is `TerrainClass::Catch_Fire @
-//!   0x0071C5B0`, which has no code caller in active YR.
+//! Ordinary damage runs after a due stage advance and before Middle/boundary
+//! through the shared area receiver (AnimAI424513..424654). Authored Overlay
+//! CellAnim provides a live FIRE3 producer; its stock ART Damage is .003.
+//! No common unchanged-stock ordinary positive-Damage producer is established.
+//! RESIDUAL: Terrain CatchFire71C5B0's producer and Terrain-owner attachment/
+//! coordinate integration remain separate work. Detached CellAnim does not
+//! ignite Terrain, attach to it or add it to Logic. That separate fire chain
+//! owns the multiplier's ordinary production activation, timers and detach.
 
 use crate::sim::world::FrameEffects;
 use std::collections::BTreeMap;
@@ -398,6 +378,15 @@ pub struct AnimObject {
     /// and UnInit4255DA suppress effects, independently of drawing/Middle.
     #[serde(default)]
     no_effects: bool,
+    /// Anim+188. Normal ctor421FA4/421FC8 seeds1; default ctor4227FD/
+    ///42280F and Next424877/424885 seed0. Load425280 retains saved bytes.
+    /// Binary64 keeps the reader's fractional precision and full accumulator
+    /// range, including a NoEffects backlog, beyond SimFixed's16.16 range.
+    /// Basic IEEE operations are deterministic; NaN stores are canonicalized.
+    /// https://doc.rust-lang.org/std/primitive.f64.html
+    /// Precision residual: round-to-nearest replaces native PC53/chop. Near
+    /// an integer threshold a long-running fire can emit on a different visit.
+    damage_accumulator: NativeF64Bits,
     /// LogicClass membership is reconstructed from the serialized vector.
     /// ObjectClass::Save does not persist its local membership byte.
     #[serde(skip)]
@@ -713,6 +702,7 @@ impl AnimObject {
             use_cell_drawer: false,
             terrain_attached: false,
             no_effects: false,
+            damage_accumulator: NativeF64Bits::POSITIVE_ZERO,
             in_logic_vector: false,
             owner_entity: None,
             building_slot: None,
@@ -778,6 +768,10 @@ impl AnimObject {
         if self.no_effects {
             b"anim-no-effects-v1".hash(hasher);
             self.no_effects.hash(hasher);
+        }
+        if self.damage_accumulator != NativeF64Bits::ONE {
+            b"anim-damage-accumulator-v1".hash(hasher);
+            self.damage_accumulator.hash(hasher);
         }
         // Unset links add no bytes, preserving earlier streams.
         if self.owner_house.is_some() || self.attached_bullet.is_some() {
@@ -891,23 +885,6 @@ impl AnimStore {
         let anim = self.anims.get_mut(&id)?;
         self.touched.note(id, stored);
         Some(anim)
-    }
-
-    /// Apply OverlayClass's post-constructor CellAnim writes: `+0xD4` selects
-    /// the Tiberium ConvertClass when present and `+0xFC` receives CellClass's
-    /// current ground Z-adjust (`+0x10A`).
-    pub fn set_cell_anim_draw_authority(
-        &mut self,
-        id: AnimId,
-        remap_color: Option<HouseColorIndex>,
-        z_adjust: i32,
-    ) -> bool {
-        let Some(anim) = self.get_mut(id) else {
-            return false;
-        };
-        anim.remap = remap_color.map(AnimRemap::ColorScheme);
-        anim.z_adjust = z_adjust;
-        true
     }
 
     /// A house's colour conversion as the anim's remap (`+0xD4`), frozen at
@@ -1256,10 +1233,10 @@ impl Simulation {
     /// is played, from the single `AnimTypeClass+0x2F8` slot. So an explosion's
     /// sound is a constructor-time effect, not a first-tick one.
     ///
-    /// Returns `None` when the art type never bound (no art section or no SHP,
-    /// see `ArtRegistry::bind_anim_class_assets`); native mints a
-    /// default `AnimTypeClass` in that case whose `End` stays 0, so the anim
-    /// retains its first-AI guard, expires on a later visit, and draws nothing.
+    /// Returns `None` if the type or its required runtime bounds never bound
+    /// (see `ArtRegistry::bind_anim_class_assets`). A missing SHP is a bound
+    /// native null image: its zero-frame animation still constructs and runs
+    /// Start/Middle effects, then retires through the existing AI lifecycle.
     ///
     /// The anim is constructed at the producer's exact impact Z (`world_z`);
     /// `z` is only the level byte of the descriptor.
@@ -1354,11 +1331,7 @@ impl Simulation {
     /// `0x004D7FA6..0x004D8062`), which VERA does not model, so it spawns
     /// nothing there. False when nothing is constructed.
     pub(crate) fn spawn_move_flash(&mut self, rules: &RuleSet, cell: (u16, u16)) -> bool {
-        use crate::sim::scenario_session::ScenarioGameMode;
-        if !matches!(
-            self.session.game_mode(),
-            ScenarioGameMode::Campaign | ScenarioGameMode::Skirmish
-        ) || rules.general.move_flash.name.is_empty()
+        if !self.session.game_mode().is_single_player() || rules.general.move_flash.name.is_empty()
         {
             return false;
         }
@@ -1607,6 +1580,7 @@ impl Simulation {
             use_cell_drawer: descriptor.use_cell_drawer,
             terrain_attached: descriptor.terrain_attached,
             no_effects: false,
+            damage_accumulator: NativeF64Bits::ONE,
             in_logic_vector: false,
             owner_entity: None,
             building_slot: None,
@@ -1894,9 +1868,10 @@ impl Simulation {
             };
             // RESIDUAL: this unwrap relies on the binder having bound the
             // parent's whole `TrailerAnim=` closure. The strict binder
-            // guarantees it; the tolerant one ends a chain at the first
-            // type with no sprite, so a tolerantly bound parent with an
-            // unbindable trailer would panic here. Trigger: modded art
+            // guarantees it; the tolerant one stops on a malformed image
+            // header, so a tolerantly bound parent with an unbindable
+            // trailer would panic here. Missing images now bind successfully
+            // as zero-frame types. Trigger: malformed modded art
             // only; no retail trailer chain starts from a tolerant root.
             self.spawn_anim_at_world(rules, descriptor, world_coord)
                 .expect("validated trailer closure must remain spawnable");
@@ -1961,7 +1936,7 @@ impl Simulation {
         let mut action = VisitAction::None;
         let mut random_loop_delay = None;
         let current_frame = self.session.binary_frame() as i32;
-        let (middle, boundary) = {
+        {
             let Some(anim) = self.substrate.anims.get_mut(id) else {
                 return false;
             };
@@ -1983,21 +1958,34 @@ impl Simulation {
                 .runtime
                 .current_frame
                 .wrapping_add(anim.runtime.frame_step);
+        }
+        let bridge_state_changed =
+            self.anim_frame_damage(id, &config, rules, overlay_registry, frame_effects);
+        // AnimAI42464C checks only ObjectAlive after receiver callbacks.
+        // Ordinary Anim retirement queues retained storage; scalar deletion
+        // removes it. Owner expiry's inactive byte is a later-visit gate.
+        if self.anim(id).is_none() || self.substrate.pending_delete.contains_object(&id) {
+            return bridge_state_changed;
+        }
+        let middle = self.anim(id).is_some_and(|anim| {
             // `0x0042465D..0x00424687`: the committed stage reaching the
             // type's middle frame (`+0x298`, zero meaning Start already ran
             // Middle) calls Middle unless the anim is bouncing (`+0x194`, the
             // constructor's byte, which a `Next=` switch keeps), before the boundary
             // tail.
-            let middle = middle_frame(&config).is_some_and(|middle| {
+            middle_frame(&config).is_some_and(|middle| {
                 config.start.wrapping_add(anim.runtime.current_frame) == middle
-            }) && !(anim.bounce.is_some() || config.is_meteor);
-            (middle, advance_anim_boundary(anim, &config))
-        };
+            }) && anim.bounce.is_none()
+        });
         if middle {
             self.anim_middle(id, &config, rules, overlay_registry);
         }
+        let Some(anim) = self.substrate.anims.get_mut(id) else {
+            return bridge_state_changed;
+        };
+        let boundary = advance_anim_boundary(anim, &config);
         match boundary {
-            AnimBoundary::Continue | AnimBoundary::Bounce => return false,
+            AnimBoundary::Continue | AnimBoundary::Bounce => return bridge_state_changed,
             AnimBoundary::Loop => {
                 random_loop_delay = config.random_loop_delay;
             }
@@ -2045,7 +2033,76 @@ impl Simulation {
             }
             VisitAction::Next(next) => self.switch_anim_type(id, &next, rules, overlay_registry),
         }
-        false
+        bridge_state_changed
+    }
+
+    /// AnimClass::AI424513..424647, after the stage/timer commit. Debit the
+    /// retained fraction before GetCoords/AreaDamage can retire this emitter.
+    /// The body adds no RNG request; receiver consequences keep their owners.
+    fn anim_frame_damage(
+        &mut self,
+        id: AnimId,
+        config: &AnimTypeRuntimeConfig,
+        rules: &RuleSet,
+        overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
+        effects: FrameEffects<'_>,
+    ) -> bool {
+        let Some(anim) = self.anim(id) else {
+            return false;
+        };
+        let damage = f64::from_bits(config.damage.bits());
+        //424513..424532 rejects zero/negative/unordered, then instance+194.
+        if !(damage > 0.0) || anim.bounce.is_some() {
+            return false;
+        }
+        let terrain_owner = anim
+            .owner_entity
+            .is_some_and(|owner| self.terrain_objects.get(owner).is_some());
+        let increment = if terrain_owner { damage * 5.0 } else { damage };
+        let accumulated = f64::from_bits(anim.damage_accumulator.bits()) + increment;
+        // Rust does not specify arithmetic NaN payloads across platforms.
+        let bits = if accumulated.is_nan() {
+            0x7ff8_0000_0000_0000
+        } else {
+            accumulated.to_bits()
+        };
+        let no_effects = anim.no_effects;
+        let type_id = anim.type_id;
+        self.substrate.anims.get_mut(id).unwrap().damage_accumulator =
+            NativeF64Bits::from_bits(bits);
+        if !(accumulated >= 1.0) || no_effects {
+            return false;
+        }
+        //4245AC..4245D5 consumes Math7C5F00's low signed32 result, including
+        // masked conversion/overflow, and subtracts that signed integer.
+        let whole = X87Chop53::ftol_f64_low_masked(accumulated);
+        self.substrate.anims.get_mut(id).unwrap().damage_accumulator =
+            NativeF64Bits::from_bits((accumulated - f64::from(whole)).to_bits());
+        //4245C3..424630 compares the own stored ID exactly, not Image.
+        let warhead_name = if self.interner.resolve(type_id) == "INVISO" {
+            Some(rules.bridge_warheads.c4_name.as_str())
+        } else {
+            rules.combat_damage.flame_damage2()
+        };
+        let Some((name, warhead)) =
+            warhead_name.and_then(|name| rules.warhead(name).map(|warhead| (name, warhead)))
+        else {
+            return false;
+        };
+        let Some(coord) = self.anim_absolute_coord(id) else {
+            return false;
+        };
+        let warhead_ref = self.interner.intern(name);
+        crate::sim::combat::world_receiver::apply_area_damage(
+            self,
+            rules,
+            overlay_registry,
+            crate::sim::projectile::ProjectileCoord::new(coord.x, coord.y, coord.z),
+            whole,
+            warhead,
+            (crate::sim::combat::RAD_NO_ATTACKER, None, warhead_ref),
+            effects,
+        )
     }
 
     /// The end of a `MakeInfantry=` anim's last loop with no `Next=`
@@ -2300,6 +2357,9 @@ impl Simulation {
         }
         self.conceal_anim(id);
         self.substrate.pending_delete.remove_object(id);
+        // Scalar slot deletion451A2C ends its inherited FoggedOut199 flag;
+        // the immutable FoggedObject record does not retain this Anim pointer.
+        self.fog.forget_fogged_live_object(id);
         self.substrate.anims.remove(id);
     }
 
@@ -2623,8 +2683,7 @@ impl Simulation {
                 .get(&image)
                 .map(|entry| entry.damage_fire_offsets.clone())
                 .unwrap_or_default();
-            let (foundation_w, foundation_h) =
-                crate::rules::foundation::foundation_dimensions(&foundation);
+            let (foundation_w, foundation_h) = foundation.dimensions();
             let foundation_sum = i32::from(foundation_w).wrapping_add(i32::from(foundation_h));
             let location = crate::sim::movement::ground_pose::object_location(
                 self.substrate.entities.get(building_id).unwrap(),
@@ -3065,11 +3124,6 @@ impl Simulation {
         if first > radius {
             return;
         }
-        let lighting = self
-            .session
-            .lighting()
-            .profile(crate::sim::scenario_session::ScenarioLightingProfile::Normal)
-            .into();
         for x in first..=radius {
             for y in first..=radius {
                 if crate::util::native_x87::sqrt_approx_length([x, y]) > radius {
@@ -3120,7 +3174,6 @@ impl Simulation {
                         registry,
                         cell,
                         selected,
-                        lighting,
                     );
                 }
                 //424140 executes even when Overlay Unlimbo refused the cell.
@@ -3339,6 +3392,7 @@ impl Simulation {
         let reverse = constructor_reverse || config.reverse;
         if let Some(anim) = self.substrate.anims.get_mut(id) {
             anim.type_id = type_id;
+            anim.damage_accumulator = NativeF64Bits::POSITIVE_ZERO;
             anim.effective_end = effective_end;
             anim.effective_loop_end = effective_loop_end;
             anim.stop_sound_id = stop_sound_id;
@@ -3625,9 +3679,14 @@ pub(crate) const ANIM_MIDDLE_MAX_HEIGHT: i32 = 30;
 /// halved (`AnimTypeClass::Load_Image @ 0x00427B50`). None when it is zero,
 /// where Start runs Middle instead.
 fn middle_frame(config: &AnimTypeRuntimeConfig) -> Option<i32> {
+    // AnimTypeLoad428855 calls generic LoadSHP, not bounds resolver427B50;
+    // an unread type's newly resident header must not replace ctor Middle0.
+    if !config.art_body_read {
+        return None;
+    }
     config
-        .raw_shp_frame_count
-        .map(|raw| raw / 2)
+        .middle_frame
+        .or_else(|| config.raw_shp_frame_count.map(|raw| raw / 2))
         .filter(|&middle| middle != 0)
 }
 
@@ -4175,7 +4234,7 @@ mod tests {
         );
         building
             .type_facts
-            .set_foundation_for_test("4x4".to_string());
+            .set_foundation_for_test("4x4".to_string().into());
         sim.substrate.entities.insert(building);
         sim.reveal(id);
         (sim, rules, id)
@@ -6691,3 +6750,7 @@ mod move_flash_tests;
 #[cfg(test)]
 #[path = "anim_meteor_tests.rs"]
 pub(in crate::sim) mod meteor_tests;
+
+#[cfg(test)]
+#[path = "anim_damage_tests.rs"]
+mod damage_tests;

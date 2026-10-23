@@ -1806,8 +1806,17 @@ fn hash_entity(entity: &GameEntity, frame: u32, hasher: &mut StateHasher) {
     entity.crate_multipliers.armor().bits().hash(hasher);
     // Folded only once a Firepower crate changed it, so the legacy
     // hash stream of every untouched object is preserved.
-    if entity.crate_multipliers.firepower() != crate::util::native_x87::NativeF64Bits::ONE {
+    if entity.crate_multipliers.crate_firepower() != crate::util::native_x87::NativeF64Bits::ONE {
         b"firepower-mult-v1".hash(hasher);
+        entity
+            .crate_multipliers
+            .crate_firepower()
+            .bits()
+            .hash(hasher);
+    }
+    #[cfg(feature = "ares")]
+    if entity.crate_multipliers.firepower() != entity.crate_multipliers.crate_firepower() {
+        b"attached-firepower-v1".hash(hasher);
         entity.crate_multipliers.firepower().bits().hash(hasher);
     }
     entity.berserk.hash(hasher);
@@ -3636,17 +3645,17 @@ mod particle_hash_tests {
         sim_a
             .terrain_objects
             .animations_mut_for_test()
-            .insert((10, 10), state.clone());
+            .insert(10, state.clone());
         sim_b
             .terrain_objects
             .animations_mut_for_test()
-            .insert((10, 10), state);
+            .insert(10, state);
         assert_eq!(sim_a.state_hash(), sim_b.state_hash());
 
         let spawner_b = sim_b
             .terrain_objects
             .animations_mut_for_test()
-            .get_mut(&(10, 10))
+            .get_mut(&10)
             .unwrap();
         spawner_b.advance_for_test(0, &mut crate::sim::rng::SimRng::new(0));
         assert_ne!(

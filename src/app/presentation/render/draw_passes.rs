@@ -28,6 +28,7 @@ pub(super) struct DrawPassData<'a> {
     pub cell_body_draws: &'a [CellBodyDraw],
     pub bridge_shadows: &'a [SpriteInstance],
     pub object_layers: &'a [super::draw_plan_lowering::ObjectLayerPass; 5],
+    pub fogged_objects: &'a super::draw_plan_lowering::ObjectLayerPass,
     pub building_status_text:
         &'a crate::app::presentation::ui_overlays::BuildingStatusTextInstances,
     pub surface_effects: crate::render::terrain_draw::SurfaceLineBatch,
@@ -313,6 +314,45 @@ pub(super) fn dispatch_draw_passes(
     // C_SHADOW.SHP (545214..54524D), never RAILBRDG. Do not synthesize a bridge
     // railing pass from its tables. Retail gate/resource regression:
     // map::theater::theater_tests::active_retail_tile_shadow_route_is_dormant.
+
+    // Native base terrain6D3470 calls FoggedObject::DrawAll4D1890 before
+    // the live Building6D9920 sweep. Snapshots never enter Display layers.
+    if !data.fogged_objects.runs.is_empty() {
+        drop(pass);
+        state
+            .renderer
+            .terrain_draw_renderer
+            .note_external_passes(encoder, 1);
+        merge_passes::draw_native_object_pass(
+            encoder,
+            super::merge_passes::ObjectDrawPhase::Display,
+            view,
+            &state.renderer.depth_view,
+            &mut state.renderer.terrain_draw_renderer,
+            [tac_x, tac_y, tac_w, tac_h],
+            &state.renderer.batch_renderer,
+            pool.get("fogged_objects"),
+            data.fogged_objects,
+            state.match_state.match_presentation.overlay_atlas.as_ref(),
+            state.match_state.match_presentation.unit_atlas.as_ref(),
+            Some(&pose_cache),
+            state.match_state.match_presentation.sprite_atlas.as_ref(),
+            state.match_state.match_presentation.palette_set.as_ref(),
+            state
+                .match_state
+                .match_presentation
+                .building_zshape
+                .as_ref()
+                .map_or(
+                    state.renderer.batch_renderer.default_zshape_bind_group(),
+                    |z| &z.bind_group,
+                ),
+            None,
+            None,
+        );
+        pass = begin_main_load_pass(encoder, view, &state.renderer.depth_view);
+        pass.set_scissor_rect(tac_x, tac_y, tac_w, tac_h);
+    }
 
     // Native6D9920 ->43CEA0/43D290 draws Ground's building bases into the
     // background before rally6D4648. These ranges draw only here; Display's
@@ -645,6 +685,22 @@ pub(super) fn dispatch_draw_passes(
     let mut pass = begin_main_load_pass(encoder, view, &state.renderer.depth_view);
     pass.set_scissor_rect(tac_x, tac_y, tac_w, tac_h);
 
+    // BeaconManager Draw 430AC0 (6D46B6) precedes BandBox. Its flags 600
+    // bypass A and Z; each House row has its own Convert strip.
+    if let Some(art) = state.match_state.match_presentation.beacon_art.as_ref() {
+        for house in 0..crate::app::match_runtime::beacons::BEACON_HOUSES {
+            if let (Some(strip), Some((buffer, count))) =
+                (art.tactical_strip(house), pool.get_page("beacons", house))
+            {
+                state.renderer.batch_renderer.draw_with_buffer_passthrough(
+                    &mut pass,
+                    strip.texture(),
+                    buffer,
+                    count,
+                );
+            }
+        }
+    }
     // BandBox6DA180 is between the two rally passes (native6D46BD).
     // Drag rectangle — screen-fixed, use UI camera (zoom=1.0).
     let drag_tex = state
@@ -1215,8 +1271,9 @@ mod tests {
         let timer_tail = &SOURCE[sparkle..outcome_start];
         assert_eq!(
             timer_tail.matches(".draw").count() + timer_tail.matches("draw_pooled").count(),
-            3,
-            "PixelFX and the two timer submissions precede the native result draw"
+            5,
+            "PixelFX, the two timer submissions and the two Phobos build-description \
+             submissions (empty outside Phobos builds) precede the native result draw"
         );
     }
 

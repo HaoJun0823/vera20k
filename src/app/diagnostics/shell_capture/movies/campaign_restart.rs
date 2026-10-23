@@ -115,6 +115,9 @@ struct Mission {
     menu_difficulty: Option<i32>,
     player_difficulty: Option<i32>,
     countdown: Option<(i32, String)>,
+    /// Wallet and native starting-credit baseline, read from their one owner.
+    money: Option<[i32; 2]>,
+    map_stage: u16,
 }
 
 #[derive(Debug)]
@@ -157,6 +160,17 @@ impl Mission {
                 .campaign_mission_counter()
                 .context("runtime has no campaign mission counter")?,
             seed: sim.session().seed(),
+            map_stage: sim.session().campaign_map_stage(),
+            money: sim
+                .session()
+                .current_house()
+                .and_then(|player| sim.houses().get(&player))
+                .map(|house| {
+                    [
+                        house.economy().available_money(),
+                        house.economy().scenario_credits(),
+                    ]
+                }),
             countdown: sim
                 .session()
                 .scenario_timer_view()
@@ -177,7 +191,8 @@ impl Mission {
         json!({"map_name": self.map_name, "campaign_index": self.campaign_index,
             "mission_counter": self.mission_counter, "seed": self.seed,
             "menu_difficulty_row": self.menu_difficulty,
-            "player_house_difficulty_row": self.player_difficulty, "countdown": self.countdown})
+            "player_house_difficulty_row": self.player_difficulty, "countdown": self.countdown,
+            "money": self.money, "map_stage": self.map_stage})
     }
 }
 
@@ -207,7 +222,26 @@ impl RestartCapture {
         save_directory: &Path,
     ) -> Result<Self> {
         let before = Mission::observe(state)?;
-        let saved_win = state.match_state.map_basic.win.clone();
+        let saved_basic = state.match_state.map_basic.clone();
+        // Controlled reachable counter lag; the wallet is unchanged. Preserve
+        // this display through warm and cold ordinary saved-game admission.
+        let saved_counter = if target == RestartTarget::SavedVictory {
+            let owner = crate::app::input::commands::preferred_local_owner_name(state)
+                .context("campaign credits owner")?;
+            let actual = before.money.context("campaign wallet")?[0].max(0);
+            let projection = &mut state.match_state.match_presentation.sidebar_projection;
+            projection.displayed_credits_or_seed(&owner, actual);
+            let target = if actual == 0 { 1000 } else { 0 };
+            projection.advance_credits(&owner, target);
+            let displayed = projection.displayed_credits_or_seed(&owner, actual);
+            ensure!(
+                displayed != actual,
+                "credits fixture did not create counter lag"
+            );
+            Some((owner, actual, target, displayed))
+        } else {
+            None
+        };
         route.push(
             json!({"frame": frame, "action": "first live observed", "mission": before.receipt()}),
         );
@@ -274,6 +308,13 @@ impl RestartCapture {
             let path =
                 crate::app::persistence::commands::save_game(state, "Campaign continuation", None)
                     .context("save the campaign through the ordinary command")?;
+            if let Some((owner, _, target, _)) = saved_counter.as_ref() {
+                state
+                    .match_state
+                    .match_presentation
+                    .sidebar_projection
+                    .advance_credits(owner, *target);
+            }
             let from_menu = target == RestartTarget::MenuDefeatReplayed;
             if from_menu {
                 App::return_to_main_menu(state);
@@ -284,22 +325,59 @@ impl RestartCapture {
             }
             crate::app::persistence::commands::try_load_save_file(state, &path)
                 .context("restore through the ordinary saved-game loader")?;
+            let counter = if let Some((owner, actual, _, displayed)) = saved_counter.as_ref() {
+                let warm = state
+                    .match_state
+                    .match_presentation
+                    .sidebar_projection
+                    .displayed_credits_or_seed(owner, *actual);
+                ensure!(
+                    warm == *displayed,
+                    "warm load lost saved credits display: {warm} != {displayed}"
+                );
+                ensure!(
+                    Mission::observe(state)?.money == before.money,
+                    "warm load changed the wallet"
+                );
+                App::return_to_main_menu(state);
+                state.match_state.match_presentation.sidebar_projection = Default::default();
+                crate::app::persistence::commands::try_load_save_file(state, &path)
+                    .context("cold counter admission through the menu saved-game loader")?;
+                let cold = state
+                    .match_state
+                    .match_presentation
+                    .sidebar_projection
+                    .displayed_credits_or_seed(owner, *actual);
+                ensure!(
+                    cold == *displayed,
+                    "cold load lost saved credits display: {cold} != {displayed}"
+                );
+                Some(
+                    json!({"wallet":actual,"saved_displayed":displayed,"warm_displayed":warm,"cold_displayed":cold}),
+                )
+            } else {
+                None
+            };
             let loaded = Mission::observe(state)?;
             ensure!(
                 state.match_state.startup.restored(),
                 "save load did not commit"
             );
             ensure!(
-                state.match_state.map_basic.win == saved_win,
-                "save load lost Basic.Win"
+                state.match_state.map_basic == saved_basic,
+                "save load changed Basic metadata"
             );
             ensure!(
                 loaded.map_name == before.map_name
                     && loaded.campaign_index == before.campaign_index
-                    && loaded.mission_counter == before.mission_counter,
-                "saved campaign identity changed"
+                    && loaded.mission_counter == before.mission_counter
+                    && loaded.map_stage == before.map_stage
+                    && loaded.money == before.money,
+                "saved campaign identity or wallet changed"
             );
-            Some(json!({"path": path, "from_menu": from_menu, "mission": loaded.receipt()}))
+            Some(
+                json!({"path": path, "from_menu": from_menu, "mission": loaded.receipt(), "credits_counter":counter}),
+            )
         } else {
             None
         };
@@ -963,7 +1041,9 @@ impl RestartCapture {
                         "scenario": startup.scenario(), "campaign_index": startup.campaign_index(),
                         "mission_counter": startup.mission_counter(),
                         "plays_action_movie": startup.plays_action_movie(),
-                        "incoming_countdown_frames": startup.carry_over().map(|record| record.countdown_frames())}));
+                        "incoming_countdown_frames": startup.carry_over().map(|record| record.countdown_frames()),
+                        "incoming_map_stage": startup.carry_over().map(|record| record.map_stage()),
+                        "incoming_money": startup.carry_over().map(|record| record.money())}));
                     route.push(json!({"frame": frame, "action": "restart loading admitted"}));
                 }
                 if state.frontend.screen == GameScreen::InGame && self.after.is_none() {
@@ -972,6 +1052,31 @@ impl RestartCapture {
                         "the restarted mission was not observed loading"
                     );
                     let after = Mission::observe(state)?;
+                    if self.target == RestartTarget::SavedVictory {
+                        ensure!(
+                            after.map_stage == 1,
+                            "ALL02 did not retain its MAPSELMD stage"
+                        );
+                        let path = crate::app::persistence::commands::save_game(
+                            state,
+                            "Campaign next-stage",
+                            None,
+                        )?;
+                        state
+                            .match_state
+                            .sim_runtime
+                            .as_mut()
+                            .unwrap()
+                            .simulation
+                            .set_campaign_map_stage(0);
+                        crate::app::persistence::commands::try_load_save_file(state, &path)?;
+                        ensure!(
+                            Mission::observe(state)?.map_stage == after.map_stage,
+                            "save/load lost the nonzero receiving stage"
+                        );
+                        route.push(json!({"frame":frame,"action":"next mission stage restored",
+                            "map_stage":after.map_stage}));
+                    }
                     ensure!(
                         after.campaign_index == self.before.campaign_index
                             && if let Some(next) = self.target.next_scenario() {

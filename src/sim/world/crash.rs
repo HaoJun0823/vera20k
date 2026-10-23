@@ -130,12 +130,11 @@ impl Simulation {
     /// Infantry or `Unsorted::IKnowWhatImDoing` (`[0x00A8E7AC]`) is raised,
     /// and `Detach_All(false)`'s announcement (`0x007258D0`, `dl = 0`).
     ///
-    /// RESIDUAL: the live prefix raises the object's Tag events 0x26 and 0x29
-    /// (`TagClass @ 0x006E53A0`); VERA attaches no Tags to objects. Trigger: a
-    /// tagged campaign aircraft crashes while alive (AirportBound with no
-    /// airfield left). Effect: the map's trigger never hears it. Frequency:
-    /// campaign maps only. The shared A8E7AC caller scope also covers native
-    /// runtime placement/destruction; a raised scope suppresses spin draws.
+    /// Original instructions `0x004DEBD3..0x004DEC5F` raise38 with an
+    /// attacker, then41(NULL), then41(attacker), re-reading the attachment
+    /// and ObjectAlive around synchronous actions. UnInit during a callback
+    /// returns true before the remaining crash work. The shared A8E7AC
+    /// placement/destruction scope suppresses spin draws as natively.
     pub(crate) fn foot_crash(
         &mut self,
         id: u64,
@@ -150,8 +149,36 @@ impl Simulation {
         if current_fly_height(entity, self.resolved_terrain.as_ref()) <= 0 {
             return false;
         }
-        let category = entity.category();
         if entity.health.current() > 0 {
+            let context = UninitContext::new(rules, registry).with_effects(frame_effects);
+            if attacker.is_some() {
+                self.dispatch_object_tag_event(id, 38, Some(id), None, context);
+            }
+            if self
+                .substrate
+                .entities
+                .get(id)
+                .is_some_and(|entity| entity.is_object_alive())
+            {
+                self.dispatch_object_tag_event(id, 41, Some(id), None, context);
+            }
+            if attacker.is_some()
+                && self
+                    .substrate
+                    .entities
+                    .get(id)
+                    .is_some_and(|entity| entity.is_object_alive())
+            {
+                self.dispatch_object_tag_event(id, 41, Some(id), attacker, context);
+            }
+            if self
+                .substrate
+                .entities
+                .get(id)
+                .is_none_or(|entity| !entity.is_object_alive())
+            {
+                return true;
+            }
             // `0x004DEC4C`: RecordKill(attacker) books the kill and the loss
             // for the killer's house (no attacker: the loss alone), then
             // `0x004DEC72` zeroes Health unless a Magnetron lifted the object
@@ -160,8 +187,16 @@ impl Simulation {
                 id,
                 crate::sim::combat::KillSource::Techno(attacker),
                 crate::sim::combat::KillCallback::Terminal,
-                UninitContext::new(rules, registry).with_effects(frame_effects),
+                context,
             );
+            if self
+                .substrate
+                .entities
+                .get(id)
+                .is_none_or(|entity| !entity.is_object_alive())
+            {
+                return true;
+            }
             if let Some(entity) = self.substrate.entities.get_mut(id)
                 && !entity.lift.swap_active()
             {
@@ -187,7 +222,14 @@ impl Simulation {
             attacker,
             UninitContext::new(rules, registry).with_effects(frame_effects),
         );
-        if category != EntityCategory::Infantry && !self.object_placement_scope_active() {
+        // RTTI is read after the synchronous tail calls at 0x004DECA2.
+        if self
+            .substrate
+            .entities
+            .get(id)
+            .is_some_and(|entity| entity.category() != EntityCategory::Infantry)
+            && !self.object_placement_scope_active()
+        {
             let sideways = self.scenario_rng.next_range_i32_inclusive(0, 0x7FFF_FFFE);
             let sign = self.scenario_rng.next_range_i32_inclusive(0, 1);
             let forwards = self.scenario_rng.next_range_i32_inclusive(0, 0x7FFF_FFFE);

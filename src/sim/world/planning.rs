@@ -417,7 +417,7 @@ impl Simulation {
         if !self.houses.contains_key(&owner) {
             return None;
         }
-        let house = i8::try_from(self.houses.order().iter().position(|&id| id == owner)?).ok()?;
+        let house = i8::try_from(self.houses.index_of(owner)?).ok()?;
         CommandRecord::encode(
             opcode,
             i32::from(house),

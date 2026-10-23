@@ -34,6 +34,23 @@ use crate::rules::locomotor_type::{LocomotorKind, MovementZone, SpeedType};
 use crate::rules::sound_ini::SoundRegistry;
 use crate::rules::terrain_rules::LandType;
 use crate::util::fixed_math::SimFixed;
+use crate::util::native_x87::NativeF64Bits;
+
+/// The pi/180 double multiplied by `TechnoTypeClass::ReadINI @ 0x00712170`
+/// when storing RollAngle at `+0x3A0` (`FMUL [0x007F4FB8] @ 0x007123BC`).
+const TECHNOTYPE_DEGREES_TO_RADIANS: f64 = f64::from_bits(0x3f91_df46_a252_9d39);
+
+/// ObjectTypeClass::ReadINI5F95DC..5F9616 reads fixed ART under its retained
+/// ImageFile. Missing/invalid values preserve each current constructor/read byte.
+pub(crate) fn read_object_theater_flags(
+    image_art: &IniSection,
+    current: (bool, bool),
+) -> (bool, bool) {
+    (
+        image_art.read_bool("Theater", current.0),
+        image_art.read_bool("NewTheater", current.1),
+    )
+}
 
 /// Which type registry an object belongs to.
 ///
@@ -315,6 +332,10 @@ pub struct ObjectType {
     /// Section name in rules.ini (e.g., "MTNK", "E1", "GAWEAP").
     /// This is the unique identifier used throughout the engine.
     pub id: String,
+    /// Inherited `ObjectTypeClass::ReadINI @ 0x005F92D0` AlphaImage buffer
+    /// (`+0x213`, `char[25]`); the constructor starts empty and later empty
+    /// reads keep the current name.
+    pub(crate) alpha_image: String,
     /// Which type registry this object belongs to.
     pub category: ObjectCategory,
     /// Native `TechnoTypeClass::ReadINI @ 0x00712170` `Category=` result at
@@ -324,6 +345,14 @@ pub struct ObjectType {
     /// Constructor45DEBC..45DEC8 clears it; ReadINI460F87 uses ReadCoord529CA0
     /// with the current triple as default. Other type classes do not read it.
     target_coord_offset: [i32; 3],
+    /// `HalfDamageSmokeLocation1/2=`: BuildingTypeClass constructor initializes
+    /// both triples to zero; `BuildingTypeClass::ReadINI @ 0x0045FE50` reads
+    /// them in order through `Read3Int @ 0x00529CA0` at `0x0045FF13` and
+    /// `0x0045FF3C`, using each current triple as the next pass's default.
+    /// `RulesPassProcessor` owns these Building-family reads and publishes the
+    /// retained values here; other techno families do not read these keys.
+    half_damage_smoke_location1: [i32; 3],
+    half_damage_smoke_location2: [i32; 3],
     /// Display name (CSF string table key or raw text). None if not specified.
     pub name: Option<String>,
     /// Localized display-name CSF key from `UIName=` (e.g. "Name:MTNK").
@@ -495,6 +524,18 @@ pub struct ObjectType {
     /// TechnoType+7FC, read from the current Image section of fixed ARTMD.
     /// The ordered processor owns its retained default (constructor0).
     voxel_shadow_index: i32,
+    /// `PitchSpeed=` (`TechnoType+0x3A8`): constructor `0.25`; each
+    /// `TechnoTypeClass::ReadINI @ 0x00712170` pass uses this current double
+    /// as `ReadDouble`'s default (`0x007123DA..0x007123E8`). Normal Fly
+    /// `Draw_Matrix @ 0x004CF610` gates PitchAngle/RollAngle on current speed
+    /// strictly exceeding this value.
+    pitch_speed: NativeF64Bits,
+    /// `RollAngle=` (`TechnoType+0x3A0`): constructor 30 degrees in radians.
+    /// ReadDouble uses -1 as a sentinel; each pass converts other degrees to
+    /// radians and retains the current value for -1 (`ReadINI @ 0x00712170`,
+    /// `0x007123A2..0x007123C2`). Normal Fly `Draw_Matrix @ 0x004CF610`
+    /// applies it about X while SecondaryFacing's rotation is active.
+    roll_angle: NativeF64Bits,
     /// TechnoType+3B0, ReadINI712379..712391: degrees converted to radians;
     /// -1 preserves the constructor value (20 degrees). Used by Fly approach.
     pub(crate) pitch_angle: SimFixed,
@@ -550,8 +591,14 @@ pub struct ObjectType {
     pub requires_stolen_third_tech: bool,
     /// ObjectType+1F8 `Image=`, the type's ID unless a reached pass names
     /// another; it names the art.ini section of the type's sprite or voxel.
-    /// The ordered Rules processor reads it (`TechnoTypeReferences`).
+    /// The ordered Rules processor owns it (`ObjectImageState`).
     pub image: String,
+    /// Reached first-success SHP requests (ObjectTypeLoadSHP5F9070 or
+    /// TechnoRead715820), independent of current ImageFile.
+    shp_image_loads: Vec<crate::rules::object_image::ObjectImageLoad>,
+    /// Entry ImageFile at the last LoadVoxel5F8110, including a saved load
+    /// that precedes an Arctic SHP mutation.
+    voxel_image_load: Option<String>,
     /// Signed Power read result for Buildings. Constructor45DEF6/45DEFC
     /// starts output/drain at0;461060..4610A0 passes their reconstructed
     /// signed value to ReadInt5276D0. The existing reached-history reader
@@ -564,7 +611,7 @@ pub struct ObjectType {
     /// Bio-Reactor output 100, GAGAP drain 9000).
     pub extra_power: crate::rules::building_extra_power::BuildingExtraPower,
     /// Building foundation footprint (e.g., "3x2", "1x1"). Buildings only.
-    pub foundation: String,
+    pub foundation: crate::rules::foundation::Foundation,
     /// Pixel offset for health bar / selection bracket Y position.
     /// Negative values shift the bar UP (above taller sprites). Default 0.
     /// Parsed from `PixelSelectionBracketDelta` in rules.ini.
@@ -2126,6 +2173,40 @@ fn native_minutes_to_ticks(value: f64) -> u32 {
 }
 
 impl ObjectType {
+    /// Native TechnoType `PitchSpeed` double used by the normal Fly draw gate.
+    pub fn fly_pitch_speed(&self) -> f64 {
+        f64::from_bits(self.pitch_speed.bits())
+    }
+
+    /// Native TechnoType `RollAngle` in radians for normal Fly presentation.
+    pub fn fly_roll_angle_radians(&self) -> f64 {
+        f64::from_bits(self.roll_angle.bits())
+    }
+
+    /// Existing typed PitchAngle value shared with Fly approach and normal
+    /// Fly rendering. Rendering converts only at the f32 matrix boundary.
+    pub fn fly_pitch_angle_radians(&self) -> f32 {
+        self.pitch_angle.to_num::<f32>()
+    }
+
+    pub(crate) fn project_image_state(
+        &mut self,
+        state: &crate::rules::object_image::ObjectImageState,
+    ) {
+        self.image = state.image().to_string();
+        self.shp_image_loads = state.shp_loads().to_vec();
+        self.voxel_image_load = state.voxel_load().map(str::to_string);
+    }
+
+    /// Immutable load request consumed by the client SHP atlas.
+    pub fn shp_image_loads(&self) -> &[crate::rules::object_image::ObjectImageLoad] {
+        &self.shp_image_loads
+    }
+
+    pub(crate) fn voxel_image_load(&self) -> Option<&str> {
+        self.voxel_image_load.as_deref()
+    }
+
     #[cfg(feature = "ares")]
     pub(crate) fn additional_super_weapons(&self) -> &[String] {
         &self.additional_super_weapons
@@ -2473,6 +2554,17 @@ impl ObjectType {
         self.target_coord_offset = offset;
     }
 
+    /// Publish the Building-family ReadINI owner's retained smoke locations.
+    pub(crate) fn set_half_damage_smoke_locations(
+        &mut self,
+        location1: [i32; 3],
+        location2: [i32; 3],
+    ) {
+        debug_assert_eq!(self.category, ObjectCategory::Building);
+        self.half_damage_smoke_location1 = location1;
+        self.half_damage_smoke_location2 = location2;
+    }
+
     pub fn voice_harvest(&self) -> Option<&str> {
         self.voice_harvest.as_deref()
     }
@@ -2709,8 +2801,7 @@ impl ObjectType {
     /// gamemd-derived: `BuildingClass` vtable `+0x80` resolves through
     /// `0x00457620` to `BuildingTypeClass__Is1x1WithUndeploy @ 0x00465D40`.
     pub fn is_1x1_with_undeploy(&self) -> bool {
-        self.undeploys_into.is_some()
-            && crate::rules::foundation::foundation_dimensions(&self.foundation) == (1, 1)
+        self.undeploys_into.is_some() && self.foundation.dimensions() == (1, 1)
     }
 
     /// The slot the per-class House and HouseType factor getters select by the
@@ -2855,11 +2946,14 @@ impl ObjectType {
 
         Self {
             id: id.to_string(),
+            alpha_image: section.read_object_alpha_image(""),
             category,
             techno_category: section.read_techno_type_category(TechnoTypeCategory::Unknown),
             // The process-resident Building reader publishes this below the
             // projection; merged text must not perform a second coordinate read.
             target_coord_offset: [0; 3],
+            half_damage_smoke_location1: [0; 3],
+            half_damage_smoke_location2: [0; 3],
             name: section.read_name("Name", 0x31).map(str::to_owned),
             ui_name: section.read_name("UIName", 0x20).map(str::to_owned),
             cost: section.read_int("Cost", 0),
@@ -2926,13 +3020,41 @@ impl ObjectType {
             flight_level: section.read_int("FlightLevel", -1),
             is_dropship: section.read_bool("IsDropship", false),
             voxel_shadow_index: 0,
-            // `ReadDouble(-1)` (`0x00712364..0x00712399`): -1 keeps the
-            // constructor's 20 degrees.
-            pitch_angle: SimFixed::from_num(
-                match section.read_double("PitchAngle", -1.0) {
-                    -1.0 => 20.0,
-                    degrees => degrees as f32,
-                } * (std::f32::consts::PI / 180.0),
+            pitch_speed: section.read_double_bits(
+                "PitchSpeed",
+                NativeF64Bits::from_bits(0x3fd0_0000_0000_0000),
+            ),
+            // Constructor +0x3A0 is 30 degrees in radians. Native ReadINI
+            // passes -1.0 to ReadDouble then preserves the current field for
+            // that sentinel on every RulesClass::Process pass.
+            roll_angle: NativeF64Bits::from_bits(
+                section
+                    .read_double_with(
+                        "RollAngle",
+                        f64::from_bits(0x3fe0_c152_382d_7365),
+                        |current, degrees| {
+                            if degrees == -1.0 {
+                                current
+                            } else {
+                                degrees * TECHNOTYPE_DEGREES_TO_RADIANS
+                            }
+                        },
+                    )
+                    .to_bits(),
+            ),
+            // `ReadDouble(-1)` in each TechnoTypeClass::ReadINI pass
+            // (`0x00712170`): -1 keeps the current radians, otherwise convert
+            // the degrees before the existing SimFixed storage boundary.
+            pitch_angle: section.read_double_with(
+                "PitchAngle",
+                SimFixed::from_num(20.0_f32 * (std::f32::consts::PI / 180.0)),
+                |current, degrees| {
+                    if degrees == -1.0 {
+                        current
+                    } else {
+                        SimFixed::from_num((degrees as f32) * (std::f32::consts::PI / 180.0))
+                    }
+                },
             ),
             aux_sound1: section
                 .read_name("AuxSound1", 0x80)
@@ -2973,6 +3095,8 @@ impl ObjectType {
             requires_stolen_third_tech: section.read_bool("RequiresStolenThirdTech", false),
             // Constructor value; only the ordered Process owner reads it.
             image: id.to_owned(),
+            shp_image_loads: Vec::new(),
+            voxel_image_load: None,
             power: section.read_int("Power", 0),
             // Only the ordered Rules processor reads it: a later layer's
             // non-negative value keeps an earlier drain.
@@ -2980,10 +3104,7 @@ impl ObjectType {
             // Building ctor45DF13 initializes +EF0=0 (1x1). ReadINI461225
             // reads Foundation from ART only, never this RULES section.
             // Pass processing projects the shared reader; ART binding does not.
-            foundation: crate::rules::foundation::FOUNDATION_TABLE
-                [usize::from(crate::rules::foundation::DEFAULT_FOUNDATION_ID)]
-            .name
-            .to_owned(),
+            foundation: crate::rules::foundation::Foundation::default(),
             pixel_selection_bracket_delta: section.read_int("PixelSelectionBracketDelta", 0),
             // Replaced by the ordered retained Type reader in RuleSet.
             lepton_mind_control_offset: DEFAULT_LEPTON_MIND_CONTROL_OFFSET,
@@ -3769,6 +3890,99 @@ mod absorber_pip_tests;
 #[cfg(test)]
 mod tests {
     #[test]
+    fn fly_bank_rules_read_stock_values_and_keep_each_pass_sentinels() {
+        use crate::rules::ini_parser::IniFile;
+        use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+        use crate::rules::ruleset::RuleSet;
+
+        let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+            return;
+        };
+        for id in ["BPLN", "SPYP"] {
+            let object = retail.rules.object(id).expect("stock aircraft type");
+            assert_eq!(object.fly_pitch_speed(), 0.25, "{id} default PitchSpeed");
+            assert_eq!(object.fly_pitch_angle_radians(), 0.0, "{id} PitchAngle");
+            assert!(
+                (object.fly_roll_angle_radians() - 30.0_f64.to_radians()).abs() < 1.0e-12,
+                "{id} constructor RollAngle"
+            );
+        }
+
+        let mut layers = RulesLayerStack::new(IniFile::from_str(
+            "[VehicleTypes]\n0=BPLN\n[BPLN]\nPitchSpeed=0.5\nRollAngle=45\nPitchAngle=12\n",
+        ));
+        layers.push(
+            RulesLayerKind::Scenario,
+            IniFile::from_str("[BPLN]\nRollAngle=-1\nPitchAngle=-1\n"),
+        );
+        let rules = RuleSet::from_rules_layers(&layers).expect("production layered rules");
+        let object = rules.object("BPLN").expect("registered aircraft type");
+        assert_eq!(object.fly_pitch_speed(), 0.5, "omitted later key retains");
+        assert!(
+            (object.fly_roll_angle_radians() - 45.0_f64.to_radians()).abs() < 1.0e-12,
+            "later -1 retains the earlier angle"
+        );
+        assert!(
+            (object.fly_pitch_angle_radians() - 12.0_f32.to_radians()).abs() < 1.0e-5,
+            "later PitchAngle=-1 retains the earlier angle"
+        );
+    }
+
+    #[test]
+    fn half_damage_smoke_location_retains_stock_battle_building_values() {
+        let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+            return;
+        };
+        let authored = retail
+            .authored_rules
+            .section("GAREFN")
+            .expect("stock Allied refinery section");
+        assert_eq!(
+            authored.read_coord3("HalfDamageSmokeLocation1", [9, 9, 9]),
+            [0, 0, 0]
+        );
+        assert!(!authored.is_present("HalfDamageSmokeLocation2"));
+
+        let building = retail
+            .rules
+            .object("GAREFN")
+            .expect("stock Allied refinery BuildingType");
+        assert_eq!(building.category, super::ObjectCategory::Building);
+        assert_eq!(building.half_damage_smoke_location1, [0, 0, 0]);
+        assert_eq!(building.half_damage_smoke_location2, [0, 0, 0]);
+    }
+
+    #[test]
+    fn half_damage_smoke_location_retains_native_current_values_across_rules_layers() {
+        use crate::rules::ini_parser::IniFile;
+        use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+        use crate::rules::ruleset::RuleSet;
+
+        let mut layers = RulesLayerStack::new(IniFile::from_str(
+            "[BuildingTypes]\n0=HUT\n[VehicleTypes]\n0=HUTVEH\n[HUT]\nHalfDamageSmokeLocation1=11,22,33\n\
+             HalfDamageSmokeLocation2=-4,5,6\n[HUTVEH]\n\
+             HalfDamageSmokeLocation1=91,92,93\nHalfDamageSmokeLocation2=-94,95,96\n",
+        ));
+        layers.push(
+            RulesLayerKind::GameMode,
+            IniFile::from_str("[HUT]\nHalfDamageSmokeLocation1=-7,8,9\n"),
+        );
+        layers.push(
+            RulesLayerKind::Scenario,
+            IniFile::from_str("[HUT]\nStrength=100\n"),
+        );
+
+        let rules = RuleSet::from_rules_layers(&layers).expect("production layered rules");
+        let building = rules.object("HUT").expect("registered BuildingType");
+        assert_eq!(building.half_damage_smoke_location1, [-7, 8, 9]);
+        assert_eq!(building.half_damage_smoke_location2, [-4, 5, 6]);
+        let vehicle = rules.object("HUTVEH").expect("registered VehicleType");
+        assert_eq!(vehicle.category, super::ObjectCategory::Vehicle);
+        assert_eq!(vehicle.half_damage_smoke_location1, [0; 3]);
+        assert_eq!(vehicle.half_damage_smoke_location2, [0; 3]);
+    }
+
+    #[test]
     fn invisible_in_game_forces_building_flags_and_retains_them_across_layers() {
         use crate::rules::ini_parser::IniFile;
         use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
@@ -4368,7 +4582,7 @@ mod tests {
         );
         // This gate consumes a loaded native field; ART input provenance and
         // every table dimension are tested by building_foundation_pass_matches_original_art_reads.
-        obj.foundation = "4x4".to_owned();
+        obj.foundation = "4x4".into();
         assert!(!obj.is_1x1_with_undeploy());
 
         assert!(rules.object("MODDEPLOY").unwrap().is_1x1_with_undeploy());

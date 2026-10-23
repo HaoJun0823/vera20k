@@ -7,8 +7,9 @@
 //! [`NetworkLoadingRequest::Chat`](crate::app::match_runtime::session::NetworkLoadingRequest)
 //! and a received packet arrives as `NetworkMatchEvent::Chat`.
 //!
-//! RESIDUAL: the beacon-message branch of the pre-hook (`0x0055E4E2`) needs a
-//! beacon of the player's House; VERA has no beacons. WOL's `/page` and
+//! RESIDUAL: the beacon-message branch of the pre-hook (`0x0055E4E2`), with
+//! an own beacon selected, is the beacon-text residual of
+//! [`crate::app::match_runtime::beacons`]. WOL's `/page` and
 //! `/reply` commands (`0x0078A6B0`) and its relay mask (`0x0055F056`) are WOL
 //! backend. The IME queue `0xB730EC` is not modelled; typed text arrives as
 //! the key event's text, every UTF-16 unit of it. Native WM_CHAR delivers one

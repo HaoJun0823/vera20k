@@ -78,8 +78,16 @@ use crate::sim::world::{SimSoundEvent, Simulation};
 ///The row order is native data, including refinery/special foundations that
 ///are not rectangular rings. Both depot exit scanning and factory Unload use
 ///this owner. Native execution: anytown_damage/unit_unlimbo foundation rows.
-pub fn foundation_exit_list(foundation: &str) -> Vec<(i32, i32)> {
-    FOUNDATION_EXIT_ROWS[usize::from(crate::rules::foundation::foundation_def(foundation).id)]
+pub fn foundation_exit_list(foundation: &crate::rules::foundation::Foundation) -> Vec<(i32, i32)> {
+    if let Some(outline) = foundation.custom_outline() {
+        return outline
+            .iter()
+            .copied()
+            .take_while(|&pair| pair != (0x7fff, 0x7fff))
+            .map(|(x, y)| (i32::from(x), i32::from(y)))
+            .collect();
+    }
+    FOUNDATION_EXIT_ROWS[usize::from(foundation.selector())]
         .iter()
         .copied()
         .take_while(|&pair| pair != (0x7FFF, 0x7FFF))
@@ -158,8 +166,16 @@ pub(crate) fn building_has_clear_foundation_exit(
 
 ///Read an actual retained pair, including sentinel/padding. Factory Unload
 ///reads element10 directly rather than walking the terminated exit list.
-pub(crate) fn foundation_exit_pair(foundation: &str, index: usize) -> Option<(i32, i32)> {
-    FOUNDATION_EXIT_ROWS[usize::from(crate::rules::foundation::foundation_def(foundation).id)]
+pub(crate) fn foundation_exit_pair(
+    foundation: &crate::rules::foundation::Foundation,
+    index: usize,
+) -> Option<(i32, i32)> {
+    if let Some(outline) = foundation.custom_outline() {
+        return outline
+            .get(index)
+            .map(|&(x, y)| (i32::from(x), i32::from(y)));
+    }
+    FOUNDATION_EXIT_ROWS[usize::from(foundation.selector())]
         .get(index)
         .copied()
 }
@@ -960,7 +976,7 @@ pub(crate) fn building_dock_cell(
     }
     //44F3B7..44F599: south/north pairs left-to-right, then east/west
     //pairs top-to-bottom, including the corners. Both use fifthmode1.
-    let (width, height) = crate::rules::foundation::foundation_dimensions(&object.foundation);
+    let (width, height) = object.foundation.dimensions();
     let (width, height) = (width as i16, height as i16);
     for x in -1..=width {
         for cell in [relative(x, height), relative(x, -1)] {
@@ -1708,7 +1724,7 @@ mod tests {
                 })
                 .collect();
             assert_eq!(
-                foundation_exit_list(foundation.name),
+                foundation_exit_list(&foundation.name.into()),
                 expected,
                 "{}",
                 foundation.name
@@ -1768,8 +1784,8 @@ mod tests {
             .get_mut(id)
             .unwrap()
             .type_facts
-            .set_foundation_for_test(object.foundation.clone());
-        let (width, height) = crate::rules::foundation::foundation_dimensions(&object.foundation);
+            .set_foundation_for_test(object.foundation.clone().into());
+        let (width, height) = object.foundation.dimensions();
         for y in ry..ry + height {
             for x in rx..rx + width {
                 sim.substrate.occupancy.add(
@@ -1902,7 +1918,7 @@ mod tests {
         unit.mark_live_contact_with(DEPOT);
         unit.set_pending_entry(Some(DEPOT));
 
-        for (x, y) in foundation_exit_list("4x3") {
+        for (x, y) in foundation_exit_list(&"4x3".into()) {
             let cell = (6 + x, 9 + y);
             if !(6..10).contains(&cell.0) || !(9..12).contains(&cell.1) {
                 sim.substrate
@@ -2196,7 +2212,7 @@ mod tests {
             .get_mut(DEPOT)
             .unwrap()
             .type_facts
-            .set_foundation_for_test("3x3".to_string());
+            .set_foundation_for_test("3x3".to_string().into());
         for y in DEPOT_RY..DEPOT_RY + 3 {
             for x in DEPOT_RX..DEPOT_RX + 3 {
                 sim.substrate.occupancy.add(
@@ -3081,7 +3097,6 @@ mod tests {
                 crate::sim::world::ObjectAiCtx {
                     effects: crate::sim::world::FrameEffects::default(),
                     overlay_registry: None,
-                    terrain_spawner_cells: None,
                 },
             );
         }

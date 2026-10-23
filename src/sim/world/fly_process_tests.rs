@@ -275,7 +275,7 @@ fn fixture(input: &serde_json::Value) -> (Simulation, RuleSet) {
         building.lifecycle.set_object_alive_for_test(true);
         building
             .type_facts
-            .set_foundation_for_test(format!("{width}x{height}"));
+            .set_foundation_for_test(format!("{width}x{height}").into());
         building.position.set_exact_z_leptons_for_test(Some(0));
         building
             .radio_contacts
@@ -394,7 +394,7 @@ fn stop_fixture(input: &serde_json::Value) -> (Simulation, RuleSet) {
         structure.lifecycle.set_object_alive_for_test(true);
         structure
             .type_facts
-            .set_foundation_for_test(format!("{width}x{height}"));
+            .set_foundation_for_test(format!("{width}x{height}").into());
         structure.position.set_exact_z_leptons_for_test(Some(0));
         sim.substrate.entities.insert(structure);
         if flag(building, "limbo", false) {

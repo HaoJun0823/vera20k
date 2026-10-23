@@ -408,10 +408,11 @@ pub(crate) fn connect_at_cursor(state: &mut AppState) -> bool {
 }
 
 /// Residual: native Delete (0x00731A10) deletes the retained highlight
-/// AC4BF0 (0x0063AC60), not the node under the cursor.
-pub(crate) fn delete_at_cursor(state: &mut AppState) {
+/// AC4BF0 (0x0063AC60), not the node under the cursor. False when there is
+/// no node, where Delete turns to the selected beacon (0x00731A24).
+pub(crate) fn delete_at_cursor(state: &mut AppState) -> bool {
     if hover_native_screen(state).is_none() {
-        return;
+        return false;
     }
     let point = cursor_native_screen(state);
     if let Some(rt) = state.match_state.sim_runtime.as_mut()
@@ -422,7 +423,9 @@ pub(crate) fn delete_at_cursor(state: &mut AppState) {
     {
         let command = CommandEnvelope::synchronized(record, rt.simulation.session().tick());
         rt.simulation.issue_local_command(command);
+        return true;
     }
+    false
 }
 
 #[cfg(test)]

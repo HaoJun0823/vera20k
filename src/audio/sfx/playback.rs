@@ -223,12 +223,13 @@ pub(super) fn chained_samples(clip: &DecodedAudio, layout: (u16, u16)) -> Option
         }
     }
     let (channels, width) = layout;
-    let samples = super::decode_pcm(&bytes, channels, width * 8);
-    Some(if channels == 1 {
-        samples.iter().flat_map(|&s| [s, s]).collect()
-    } else {
-        samples
-    })
+    let mut pcm = Vec::new();
+    if let Some(mut cursor) = crate::assets::wav_file::WavPcmCursor::pcm(width * 8) {
+        while cursor.decode_next(&bytes, &mut pcm) {}
+    }
+    let mut samples = Vec::new();
+    super::upmix_i16_to_f32_stereo(&mut samples, &pcm, channels);
+    Some(samples)
 }
 
 struct RingState {

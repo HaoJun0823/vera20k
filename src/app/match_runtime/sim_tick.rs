@@ -535,7 +535,7 @@ pub(crate) fn main_tick_owns_audio_pump(state: &AppState, simulation_allowed: bo
 /// [`main_tick_owns_audio_pump`]'s decision: an admitted match in
 /// `g_GameMode` 0 or 5, on a pass no loop of its own pumps.
 fn audio_pump_follows_main_tick(mode: SessionMode, match_admitted: bool, own_loop: bool) -> bool {
-    matches!(mode, SessionMode::Campaign | SessionMode::Skirmish) && match_admitted && !own_loop
+    mode.is_single_player() && match_admitted && !own_loop
 }
 
 /// Pure modal-pump decision: should the simulation advance one frame while a
@@ -1227,6 +1227,11 @@ fn advance_one_simulation_frame(
                 }
                 .expect("simulation frame failed; prior world mutations remain")
             };
+            state
+                .match_state
+                .match_presentation
+                .screen_shake
+                .apply_updates(&output.screen_shake_updates);
             if output.outcome_waiting {
                 // The simulation retains this frame's non-sound facts until
                 // the same House suffix finishes. Its sound prefix has already
@@ -1641,8 +1646,9 @@ fn advance_one_simulation_frame(
         }
 
         for message in hud_messages {
-            // MPlayer_Defeated's local branch sets the chat mask
-            // (0x004FC23E) before it posts its line (0x004FC271).
+            // MPlayer_Defeated's local branch deletes the player's beacons
+            // and leaves beacon mode (0x004FC1C6, 0x004FC1FA), then sets the
+            // chat mask (0x004FC23E) before it posts its line (0x004FC271).
             if let crate::app::input::messages::HudMessage::PlayerDefeated(house) = message
                 && state
                     .match_state
@@ -1651,6 +1657,7 @@ fn advance_one_simulation_frame(
                     .and_then(|runtime| runtime.simulation.session().current_house())
                     == Some(house)
             {
+                super::beacons::local_player_defeated(state);
                 state
                     .match_state
                     .match_presentation
@@ -1694,6 +1701,14 @@ fn advance_one_simulation_frame(
                         state.match_state.match_presentation.sprite_atlas.as_ref(),
                         &runtime.simulation,
                         &state.match_state.match_presentation.house_color_map,
+                    ) || !sprite_atlas::atlas_covers_sprite_keys(
+                        state.match_state.match_presentation.sprite_atlas.as_ref(),
+                        &sprite_atlas::collect_fogged_sprite_keys(
+                            &runtime.simulation,
+                            &runtime.resources.rules,
+                            &state.match_state.match_presentation.house_color_map,
+                        ),
+                        Some(&runtime.resources.rules),
                     )
                 }))
     {
@@ -1859,10 +1874,10 @@ pub(crate) fn update_building_placement_preview(state: &mut AppState) {
     let (fw, fh, foundation_str) = rules
         .object(type_id)
         .map(|obj| {
-            let (w, h) = crate::rules::foundation::foundation_dimensions(&obj.foundation);
+            let (w, h) = obj.foundation.dimensions();
             (w, h, obj.foundation.clone())
         })
-        .unwrap_or((1, 1, "1x1".to_string()));
+        .unwrap_or((1, 1, crate::rules::foundation::Foundation::default()));
     // Log at info level once per type_id change so it's visible in console.
     static LAST_LOG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let hash: u64 = type_id
@@ -1886,8 +1901,7 @@ pub(crate) fn update_building_placement_preview(state: &mut AppState) {
     // UpdateFoundationCenter4A91B0 uses center + the type's active offset.
     // Resolve it before admission/ground/shroud, through the shared owner
     // also used by a fresh LeftUp; rendering consumes the resulting Cells.
-    let (rx, ry) =
-        crate::rules::foundation::placement_origin_at_cursor(&foundation_str, cursor_cell);
+    let (rx, ry) = foundation_str.placement_origin_at_cursor(cursor_cell);
     state.match_state.input.building_placement_preview =
         production::placement_preview_for_owner_with_overlays(
             sim,
@@ -1936,6 +1950,11 @@ pub(crate) fn refresh_entity_atlases(state: &mut AppState) {
         sim,
         &state.match_state.match_presentation.house_color_map,
     );
+    let frozen_keys = sprite_atlas::collect_fogged_sprite_keys(
+        sim,
+        &rt.resources.rules,
+        &state.match_state.match_presentation.house_color_map,
+    );
     let sprite_rebuild = !sprite_atlas::atlas_covers_world(
         state.match_state.match_presentation.sprite_atlas.as_ref(),
         sim.entities(),
@@ -1943,6 +1962,10 @@ pub(crate) fn refresh_entity_atlases(state: &mut AppState) {
         &extra_buildings,
         &anim_remap_keys,
         Some(sim.interner()),
+    ) || !sprite_atlas::atlas_covers_sprite_keys(
+        state.match_state.match_presentation.sprite_atlas.as_ref(),
+        &frozen_keys,
+        bound_rules,
     );
 
     if !unit_rebuild && !sprite_rebuild {
@@ -1999,6 +2022,7 @@ pub(crate) fn refresh_entity_atlases(state: &mut AppState) {
             &extra_buildings,
             &anim_remap_keys,
             &cell_drawer_type_ids,
+            &frozen_keys,
             Some(&cell_palette),
             existing,
             Some(sim.interner()),

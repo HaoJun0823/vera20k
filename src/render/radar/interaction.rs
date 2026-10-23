@@ -898,7 +898,7 @@ mod tests {
         );
         building
             .type_facts
-            .set_foundation_for_test("4x3".to_string());
+            .set_foundation_for_test("4x3".to_string().into());
         building
             .position
             .set_sub_x_for_test(crate::util::fixed_math::SimFixed::from_num(200));

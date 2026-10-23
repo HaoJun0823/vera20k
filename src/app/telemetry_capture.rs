@@ -7,7 +7,7 @@
 //!
 //! The app owns diagnostic samples and log delivery; gameplay state is read-only.
 
-use crate::app::AppState;
+use crate::app::{AppState, BUILD_STAMP};
 use crate::map::entities::EntityCategory;
 use crate::rules::locomotor_type::SpeedType;
 use crate::sim::movement::motion_query;
@@ -137,7 +137,7 @@ pub fn capture_snapshot(state: &AppState) -> Option<TelemetrySnapshot> {
             .current_house()
             .and_then(|owner| sim.ready_outcome_for_owner(owner))
             .map(|outcome| outcome.kind),
-        build_stamp: crate::app::frontend::status_screen::BUILD_STAMP.to_owned(),
+        build_stamp: BUILD_STAMP.to_owned(),
     });
     snapshot.debug = Some(capture_debug(state, &runtime.simulation));
     snapshot.process = Some(capture_process(state));
@@ -424,8 +424,8 @@ fn capture_debug(state: &AppState, sim: &Simulation) -> DebugPanel {
                 .interner()
                 .object_type(entity.type_ref(), rules)
                 .map(|obj| obj.foundation.clone())
-                .unwrap_or_else(|| "1x1".to_string());
-            let (fw, fh) = crate::rules::foundation::foundation_dimensions(&foundation);
+                .unwrap_or_default();
+            let (fw, fh) = foundation.dimensions();
             let (ex, ey) = (entity.position.rx(), entity.position.ry());
             if cursor_rx >= ex
                 && u32::from(cursor_rx) < u32::from(ex) + u32::from(fw)

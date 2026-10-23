@@ -364,12 +364,12 @@ fn assert_retail_wall_fire_profile(
     assert!(flags.wall);
     assert_eq!(flags.armor_is_wood, native_type["armor"] == 6);
     assert_eq!(
-        u64::from(flags.strength),
-        native_type["strength"].as_u64().unwrap()
+        i64::from(flags.strength),
+        native_type["strength"].as_i64().unwrap()
     );
     assert_eq!(
-        u64::from(flags.damage_levels),
-        native_type["damage_levels"].as_u64().unwrap()
+        i64::from(flags.damage_levels),
+        native_type["damage_levels"].as_i64().unwrap()
     );
     let damage_levels = flags.damage_levels;
     if wall_name == "GAWALL" {
@@ -389,7 +389,7 @@ fn assert_retail_wall_fire_profile(
             )]
         );
         assert!(building.prerequisite_override.is_empty());
-        let foundation = crate::rules::foundation::foundation_def(&building.foundation);
+        let foundation = crate::rules::foundation::foundation_def(building.foundation.name());
         assert_eq!((foundation.width, foundation.height), (1, 1));
         assert_eq!(building.to_overlay.as_deref(), Some("GAWALL"));
         assert_eq!(

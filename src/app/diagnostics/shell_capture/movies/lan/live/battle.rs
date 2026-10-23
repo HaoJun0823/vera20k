@@ -2247,8 +2247,7 @@ fn placement_cursor(state: &AppState, yard: u64, type_id: &str) -> Result<(u16, 
             let (Ok(x), Ok(y)) = (u16::try_from(x), u16::try_from(y)) else {
                 continue;
             };
-            let origin =
-                crate::rules::foundation::placement_origin_at_cursor(&object.foundation, (x, y));
+            let origin = object.foundation.placement_origin_at_cursor((x, y));
             let preview = crate::sim::production::placement_preview_for_owner_with_overlays(
                 sim,
                 rules,

@@ -167,6 +167,24 @@ fn voxel_crash_rotation(step: u8, tilt: [f32; 2]) -> Mat4 {
     .expect("finite voxel rotation")
 }
 
+/// Normal-flight `FlyLocomotionClass::Draw_Matrix @ 0x004CF610` uses
+/// SecondaryFacing yaw, then optional PitchAngle `RotateY @ 0x005AF080`, then
+/// the selected signed RollAngle `RotateX @ 0x005AEF60`. Keep this separate
+/// from the crash arm's X-then-Y matrix above; both share the same facing,
+/// lookup-table rotations, affine owner and camera.
+fn voxel_normal_fly_rotation(step: u8, pitch: f32, roll: f32) -> Mat4 {
+    let mut frame = voxel_body_facing(step);
+    if pitch != 0.0 {
+        let (sin, cos) = voxel_table_rotation(pitch);
+        frame = affine::rotate_y(frame, sin, cos);
+    }
+    if roll != 0.0 {
+        let (sin, cos) = voxel_table_rotation(roll);
+        frame = affine::rotate_x(frame, sin, cos);
+    }
+    affine::matrix_product(voxel_camera_view(), frame).expect("finite normal Fly matrix")
+}
+
 /// The locomotor half of [`voxel_crash_rotation`], before the camera.
 fn voxel_crash_locomotor_matrix(step: u8, tilt: [f32; 2]) -> Mat4 {
     let (sin, cos) = voxel_table_rotation(tilt[0]);
@@ -267,6 +285,10 @@ pub enum BodyTilt {
     /// `FlyLocomotionClass` Draw_Matrix's crashing arm (`0x004CF610`): roll
     /// and pitch in radians.
     Fly([f32; 2]),
+    /// Normal-flight `FlyLocomotionClass::Draw_Matrix @ 0x004CF610`: after
+    /// the strict current-speed/PitchSpeed gate, RotateY(PitchAngle) followed
+    /// by signed RotateX(RollAngle), both in radians.
+    FlyNormal { pitch: f32, roll: f32 },
     /// `JumpjetLocomotionClass` Draw_Matrix's `TiltCrashJumpjet=` arm
     /// (`0x0054DCC0`): roll and pitch in radians, and the main voxel's half
     /// sizes ([`crate::rules::voxel_asset_catalog::voxel_tilt_half_sizes`]).
@@ -345,6 +367,7 @@ pub(crate) fn projectile_voxel_matrix(
 fn voxel_params_draw_rotation(params: &VxlRenderParams, step: u8) -> Mat4 {
     match params.body_tilt {
         Some(BodyTilt::Fly(tilt)) => voxel_crash_rotation(step, tilt),
+        Some(BodyTilt::FlyNormal { pitch, roll }) => voxel_normal_fly_rotation(step, pitch, roll),
         Some(BodyTilt::Jumpjet { angles, half_sizes }) => affine::matrix_product(
             voxel_camera_view(),
             voxel_jumpjet_tilt_locomotor_matrix(step, angles, half_sizes),

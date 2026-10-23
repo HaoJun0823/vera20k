@@ -52,7 +52,6 @@ use crate::sim::world::{FrameEffects, SimSoundEvent, Simulation};
 use crate::util::native_x87::{MaskedX87Chop53 as X87, MaskedX87Ordering, NativeF64Bits};
 
 use super::production_sell::{SellOrder, sell_back, undeploys};
-use crate::rules::foundation::foundation_dimensions;
 
 /// A building's repair byte, `BuildingClass+0x6E8`: the repair step pays for
 /// each `RepairStep=` of health while it is on. The constructor clears it;
@@ -305,7 +304,7 @@ pub fn can_repair_building(sim: &Simulation, rules: &RuleSet, id: u64) -> bool {
     object.click_repairable
         && object.repairable
         && entity.health.current() != object.strength
-        && !(foundation_dimensions(&object.foundation) == (1, 1) && undeploys(rules, object))
+        && !(object.foundation.dimensions() == (1, 1) && undeploys(rules, object))
 }
 
 /// Shared TechnoType repair step cost, vt+0xB0 (`0x007120D0`):

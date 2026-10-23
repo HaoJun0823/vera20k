@@ -2,7 +2,8 @@
 //! sell mode once the player's House holds no counted building.
 //!
 //! Building/Defense tabs pulse while retained Factory links hold completed
-//! buildings; Defense also pulses for a ready Super. Infantry never pulses.
+//! buildings; Defense also pulses while a Super passes its native tab-flash
+//! predicate. Infantry never pulses.
 //! Vehicle's aircraft-waiting predicate remains a separate existing residual.
 //! Phase, catch-up and gadget state belong to `SidebarGadgetState`.
 
@@ -67,6 +68,9 @@ pub(crate) fn update_sidebar_gadget_state(state: &mut AppState) {
         return;
     };
     let owner = preferred_local_owner_name(state).unwrap_or_else(|| "Americans".to_string());
+    let owner_iid = sim.interner().get(&owner).unwrap_or_default();
+    let superweapon_views =
+        crate::sim::superweapon::superweapon_views_for_owner(sim, rules, &owner_iid);
     let ready = sim.interner().get(&owner).map_or([false; 2], |owner| {
         state
             .match_state
@@ -74,12 +78,6 @@ pub(crate) fn update_sidebar_gadget_state(state: &mut AppState) {
             .sidebar_projection
             .ready_building_tabs(sim, owner)
     });
-    let flags = [
-        ready[0],
-        ready[1] || has_charged_sw_for_owner(sim, rules, &owner),
-        false,
-        false,
-    ];
     let (tick, frame) = (sim.session().tick(), sim.session().binary_frame() as i32);
     let presentation = &mut state.match_state.match_presentation;
     // StripClass::AI scrolls before its tab poll, once per Sidebar Action.
@@ -93,20 +91,37 @@ pub(crate) fn update_sidebar_gadget_state(state: &mut AppState) {
             .sidebar_projection
             .step_pending_scroll(rows, visits);
     }
-    presentation
-        .sidebar_gadget_state
-        .update_tab_flashes(tick, frame, flags);
+    update_tab_flashes_for_owner(
+        &mut presentation.sidebar_gadget_state,
+        ready,
+        &superweapon_views,
+        tick,
+        frame,
+    );
 }
 
-fn has_charged_sw_for_owner(
-    sim: &crate::sim::world::Simulation,
-    rules: &crate::rules::ruleset::RuleSet,
-    owner: &str,
-) -> bool {
-    let owner_iid = sim.interner().get(owner).unwrap_or_default();
-    crate::sim::superweapon::superweapon_views_for_owner(sim, rules, &owner_iid)
-        .iter()
-        .any(|sw| sw.is_ready)
+/// StripClass::AI @ 0x006A8B30 calls SuperClass::ShouldFlashTab @
+/// 0x006CE1A0 for each Defense-strip Super and stops only when no entry passes.
+/// This is the single Rust update step combining that result with ready
+/// buildings before the shared SidebarGadgetState advances its flash phase.
+fn update_tab_flashes_for_owner(
+    gadgets: &mut SidebarGadgetState,
+    ready_building_tabs: [bool; 2],
+    superweapon_views: &[crate::sim::superweapon::SuperWeaponView],
+    tick: u64,
+    frame: i32,
+) {
+    let has_flash_eligible_super = superweapon_views.iter().any(|sw| sw.should_flash_tab);
+    gadgets.update_tab_flashes(
+        tick,
+        frame,
+        [
+            ready_building_tabs[0],
+            ready_building_tabs[1] || has_flash_eligible_super,
+            false,
+            false,
+        ],
+    );
 }
 
 #[cfg(test)]

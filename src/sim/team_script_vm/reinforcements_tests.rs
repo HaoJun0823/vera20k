@@ -754,8 +754,7 @@ fn infantry_reinforcement_building_exits_release_contacts_and_skip_the_review_ri
             let water = terrain_rules
                 .semantics_for_land_type(crate::rules::terrain_rules::LandType::Water.as_index())
                 .unwrap();
-            let (width, height) =
-                crate::rules::foundation::foundation_dimensions(&producer_type.foundation);
+            let (width, height) = producer_type.foundation.dimensions();
             let terrain = sim.resolved_terrain.as_mut().unwrap();
             for x in 86..86 + width as u16 {
                 for y in 50..50 + height as u16 {

@@ -206,6 +206,12 @@ pub struct SuperWeaponType {
     /// the same retention, `0x006CEBD8`): the cue the Force Shield's launch
     /// plays (`0x006CD176`).
     pub start_sound: Option<String>,
+    /// `FlashSidebarTabFrames=` (`SuperWeaponTypeClass+0xE8`): constructor
+    /// default `-1` at `0x006CE5B0`; `ReadINI @ 0x006CEA20` reads the current
+    /// value with `ReadInt @ 0x005276D0`, without a clamp. The native
+    /// `SuperClass::ShouldFlashTab @ 0x006CE1A0` treats -1 as unlimited, zero
+    /// as disabled, and otherwise tests `ReadyFrame + value > current frame`.
+    pub flash_sidebar_tab_frames: i32,
     /// `AIDefendAgainst=` (`+0xEC`, ReadBool at `0x006CEAF7`, constructor
     /// clear): a launch of this type alerts each computer house whose base is
     /// near the target (`HouseClass::Fire_SW @ 0x004FAE50`'s house loop).
@@ -320,6 +326,9 @@ impl SuperWeaponType {
             unit_delivery: None,
             special_sound: section.read_name("SpecialSound", 0x80).map(str::to_string),
             start_sound: section.read_name("StartSound", 0x80).map(str::to_string),
+            // The native constructor starts at -1; the final projected INI
+            // retains a lower pass when later passes omit this key.
+            flash_sidebar_tab_frames: section.read_int("FlashSidebarTabFrames", -1),
             ai_defend_against: section.read_bool("AIDefendAgainst", false),
             manual_control: section.read_bool("ManualControl", false),
             #[cfg(not(feature = "ares"))]
@@ -584,6 +593,7 @@ DisableableFromShell=yes
         assert!(sw.is_powered);
         assert!(sw.show_timer);
         assert!(sw.disableable_from_shell);
+        assert_eq!(sw.flash_sidebar_tab_frames, -1);
         // The sidebar cameo tooltip shows the localized UIName, not `Name=`
         // and not the section id. Retail value, not a plausible-looking one.
         assert_eq!(sw.ui_name.as_deref(), Some("Name:Storm"));
@@ -591,7 +601,7 @@ DisableableFromShell=yes
     }
 
     #[test]
-    fn retail_battle_nuke_range_fields_follow_production_rules_reader() {
+    fn retail_battle_superweapon_fields_follow_production_rules_reader() {
         let Some(retail) =
             crate::rules::retail_ini_fixture::retail_battle_rules_for_map("XMP03T4.MAP")
         else {
@@ -600,6 +610,40 @@ DisableableFromShell=yes
         let nuke = retail.rules.super_weapon("NukeSpecial").unwrap();
         assert_eq!(nuke.range, 7.0);
         assert_eq!(nuke.line_multiplier, 2);
+        for id in [
+            "ForceShieldSpecial",
+            "SpyPlaneSpecial",
+            "PsychicRevealSpecial",
+        ] {
+            assert_eq!(
+                retail
+                    .rules
+                    .super_weapon(id)
+                    .expect("retail SuperWeaponType")
+                    .flash_sidebar_tab_frames,
+                120,
+                "the selected retail map pass omits this RULESMD value"
+            );
+        }
+        assert_eq!(
+            nuke.flash_sidebar_tab_frames, -1,
+            "a type without the key keeps the constructor default"
+        );
+
+        let patch = IniFile::from_str("[ForceShieldSpecial]\nFlashSidebarTabFrames=0\n");
+        let Some(overridden) =
+            crate::rules::retail_ini_fixture::retail_battle_rules_with_map_patch(&patch)
+        else {
+            return;
+        };
+        assert_eq!(
+            overridden
+                .rules
+                .super_weapon("ForceShieldSpecial")
+                .unwrap()
+                .flash_sidebar_tab_frames,
+            0
+        );
     }
 
     #[test]

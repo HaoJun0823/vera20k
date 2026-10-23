@@ -50,15 +50,14 @@ impl SlotScene {
             let sim = scene.sim();
             let terrain = sim.resolved_terrain().unwrap();
             let bounds = sim.playfield_bounds().unwrap();
-            let offsets = crate::rules::foundation::foundation_cell_offsets(
-                &scene
-                    .runtime
-                    .resources
-                    .rules
-                    .object("GAPOWR")
-                    .unwrap()
-                    .foundation,
-            );
+            let offsets = scene
+                .runtime
+                .resources
+                .rules
+                .object("GAPOWR")
+                .unwrap()
+                .foundation
+                .cell_offsets();
             let mut levels = std::collections::BTreeMap::new();
             for tile in terrain.cells().iter().filter(|tile| {
                 crate::sim::cell_rect::cell_is_in_playfield_height_aware(

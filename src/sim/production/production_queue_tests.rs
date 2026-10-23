@@ -2675,7 +2675,7 @@ fn a_producer_without_weapons_factory_takes_the_generic_exit_arm() {
     rules.install_art_data(crate::rules::retail_ini_fixture::art_registry(&art));
     let gaweap = rules.object("GAWEAP").unwrap();
     assert_eq!(exit_arm(gaweap), ExitArm::Generic);
-    let (width, height) = crate::rules::foundation::foundation_dimensions(&gaweap.foundation);
+    let (width, height) = gaweap.foundation.dimensions();
     for human in [true, false] {
         let mut sim = Simulation::with_seed(0x4446_3800);
         sim.intern_rule_type_ids(&rules);

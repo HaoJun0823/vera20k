@@ -318,16 +318,18 @@ pub(crate) fn build_unit_instances(
         };
         // Interpolate continuous attitude, including the last interval back
         // to level. Native admission/type/model choice is left unchanged.
-        let tilt_crash = state
+        let object_type = state
             .rules()
-            .and_then(|r| sim.interner().object_type(entity.type_ref(), r))
-            .is_some_and(|o| o.tilt_crash_jumpjet);
+            .and_then(|rules| sim.interner().object_type(entity.type_ref(), rules));
+        let tilt_crash = object_type.is_some_and(|object| object.tilt_crash_jumpjet);
         if let Some(tilt) = body_pose_with_angles(
             entity,
             band,
             tilt_crash,
             render_pose.angles,
             render_pose.rocket_pitch,
+            object_type,
+            render_pose.fly_bank_direction,
         ) {
             body = BodyDraw::Pose(tilt);
         } else if matches!(body, BodyDraw::Pose(_)) {
@@ -897,7 +899,45 @@ fn body_pose(
         .as_ref()
         .and_then(|l| l.rocket_runtime())
         .map_or(0., |r| r.draw_pitch());
-    body_pose_with_angles(entity, band, tilt_crash_jumpjet, angles, pitch)
+    body_pose_with_angles(entity, band, tilt_crash_jumpjet, angles, pitch, None, None)
+}
+
+/// Normal `FlyLocomotionClass::Draw_Matrix @ 0x004CF610`: its non-crash arm
+/// exits unless native `current speed > PitchSpeed`, then applies the existing
+/// SecondaryFacing yaw, optional type PitchAngle, and RollAngle selected by
+/// the FacingClass timer/direction helpers. PitchSpeed is compared in f64
+/// against the exact Q16.16 current-speed value; no f32 threshold cast.
+fn normal_fly_pose(
+    entity: &crate::sim::game_entity::GameEntity,
+    band: EntityDrawBand,
+    object: &crate::rules::object_type::ObjectType,
+    bank_direction: Option<crate::sim::movement::facing_class::RotationDirection>,
+) -> Option<crate::render::unit_atlas::PoseTilt> {
+    use crate::render::unit_atlas::PoseTilt;
+    use crate::rules::locomotor_type::LocomotorKind;
+    if band == EntityDrawBand::Ground || entity.crash.is_crashing() {
+        return None;
+    }
+    let locomotor = entity.locomotor.as_ref()?;
+    if locomotor.active_kind() != LocomotorKind::Fly {
+        return None;
+    }
+    let speed = locomotor.current_fly_speed()?;
+    let speed = f64::from(speed.to_bits()) / 65_536.0;
+    if !(speed > object.fly_pitch_speed()) {
+        return None;
+    }
+    let pitch = object.fly_pitch_angle_radians();
+    let roll = match bank_direction {
+        Some(crate::sim::movement::facing_class::RotationDirection::Positive) => {
+            object.fly_roll_angle_radians() as f32
+        }
+        Some(crate::sim::movement::facing_class::RotationDirection::Negative) => {
+            -(object.fly_roll_angle_radians() as f32)
+        }
+        None => 0.0,
+    };
+    (pitch != 0.0 || roll != 0.0).then_some(PoseTilt::FlyNormal { pitch, roll })
 }
 
 fn body_pose_with_angles(
@@ -906,9 +946,18 @@ fn body_pose_with_angles(
     tilt_crash_jumpjet: bool,
     angles: [f32; 2],
     pitch: f32,
+    object_type: Option<&crate::rules::object_type::ObjectType>,
+    bank_direction: Option<crate::sim::movement::facing_class::RotationDirection>,
 ) -> Option<crate::render::unit_atlas::PoseTilt> {
     use crate::render::unit_atlas::PoseTilt;
     use crate::rules::locomotor_type::LocomotorKind;
+    // Normal Fly Draw_Matrix has its own airborne/speed gate and does not
+    // depend on RockingState (native `Draw_Matrix @ 0x004CF610`).
+    if let Some(object_type) = object_type
+        && let Some(tilt) = normal_fly_pose(entity, band, object_type, bank_direction)
+    {
+        return Some(tilt);
+    }
     let locomotor = entity.locomotor.as_ref()?;
     if locomotor.rocket_runtime().is_some() {
         return (pitch != 0.0).then_some(PoseTilt::Rocket(pitch));

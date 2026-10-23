@@ -94,7 +94,7 @@ fn fixture(row: &Value) -> (Simulation, RuleSet) {
             if building {
                 target
                     .type_facts
-                    .set_foundation_for_test(foundation.name.to_owned());
+                    .set_foundation_for_test(foundation.name.to_owned().into());
                 assert_eq!(
                     serde_json::json!([foundation.width, foundation.height]),
                     row["foundation_dimensions"]

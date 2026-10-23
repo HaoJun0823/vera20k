@@ -584,8 +584,15 @@ impl ApplicationHandler for App {
                 crate::app::input::keyboard::prepare_terminal_exit(state);
                 Self::close_launcher_options_terminal(state);
                 if Self::native_skirmish_shell_active(state) {
-                    // Pump/quit exits write the last durable snapshot after
-                    // teardown, without a fresh control pack or RNG draw.
+                    // A terminal exit has no Start/Back transaction, so pack the
+                    // page's current controls into the durable record first. The
+                    // pack spends no `Scenario` draw: Random markers keep the
+                    // value already cached behind them.
+                    state.frontend.multiplayer_shell_runtime.pack_durable_state(
+                        &state.frontend.skirmish_shell_state,
+                        state.frontend.scenario_catalog.shell_maps(),
+                        &state.frontend.skirmish_modes,
+                    );
                     Self::teardown_skirmish_shell_for_start(state);
                     state.frontend.multiplayer_shell_runtime.persist_snapshot();
                 }

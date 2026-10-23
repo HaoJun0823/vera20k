@@ -141,6 +141,16 @@ pub struct WarheadType {
     /// `Veinhole=` at +0x17B, ReadBool @0x005295F0 called from ReadINI
     /// @0x0075DA1B; constructor default false (`0x0075D050`).
     pub veinhole: bool,
+    /// `ShakeXlo/ShakeXhi/ShakeYlo/ShakeYhi`, signed `ReadInt` fields at
+    /// WarheadTypeClass+0x17C/+0x180/+0x184/+0x188. ReadINI @0x0075D3A0
+    /// reads them in Xlo, Xhi, Ylo, Yhi order, each with the current field as
+    /// default; the constructor @0x0075CED0 initializes all four to zero.
+    /// BulletClass::DetonateAtCoord @0x004690B0 uses each nonzero pair to
+    /// conditionally draw and write its axis before the special/damage chain.
+    pub shake_x_lo: i32,
+    pub shake_x_hi: i32,
+    pub shake_y_lo: i32,
+    pub shake_y_hi: i32,
 
     // --- Bool fields (verified offsets from WarheadTypeClass::ReadINI) ---
     /// Conventional warhead — no special effects. `WarheadTypeClass+0x14D`,
@@ -437,6 +447,12 @@ impl WarheadType {
             deform_threshold: section.read_int("DeformThreshhold", 0),
             bullets: section.read_bool("Bullets", false),
             veinhole: section.read_bool("Veinhole", false),
+            // ReadInt current defaults fold each projected Rules pass; there
+            // is no post-read clamp in WarheadTypeClass::ReadINI @0x0075D3A0.
+            shake_x_lo: section.read_int("ShakeXlo", 0),
+            shake_x_hi: section.read_int("ShakeXhi", 0),
+            shake_y_lo: section.read_int("ShakeYlo", 0),
+            shake_y_hi: section.read_int("ShakeYhi", 0),
 
             // Bool fields — all default false
             conventional: false,

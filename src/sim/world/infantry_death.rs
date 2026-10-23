@@ -698,6 +698,8 @@ mod corpse_tests {
                 rad_level: 500,
                 spread: 2,
                 rad_type: None,
+                firing_house: None,
+                invoker: None,
             },
             10,
             &sim.session.theater(),

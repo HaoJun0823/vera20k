@@ -98,16 +98,19 @@ mod window_icon;
 /// Main window title. The single-instance gate finds a running copy's window by
 /// this exact title, so `main` hands the same constant to
 /// `util::single_instance::acquire`.
-pub const WINDOW_TITLE: &str = if crate::rules::ARES_ENABLED {
-    if crate::rules::PHOBOS_ENABLED {
-        "VERA20K [Ares+Phobos]"
-    } else {
-        "VERA20K [Ares]"
-    }
-} else if crate::rules::PHOBOS_ENABLED {
-    "VERA20K [Phobos]"
-} else {
-    "VERA20K"
+pub const WINDOW_TITLE: &str = match (
+    crate::rules::ARES_ENABLED,
+    crate::rules::PHOBOS_ENABLED,
+    crate::rules::NPATCH_ENABLED,
+) {
+    (true, true, true) => "VERA20K [Ares+Phobos+NPatch]",
+    (true, true, false) => "VERA20K [Ares+Phobos]",
+    (true, false, true) => "VERA20K [Ares+NPatch]",
+    (true, false, false) => "VERA20K [Ares]",
+    (false, true, true) => "VERA20K [Phobos+NPatch]",
+    (false, true, false) => "VERA20K [Phobos]",
+    (false, false, true) => "VERA20K [NPatch]",
+    (false, false, false) => "VERA20K",
 };
 
 /// Identity stamp shared by the status screen and the telemetry capture. Not a

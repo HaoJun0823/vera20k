@@ -249,6 +249,13 @@ impl IniSection {
         self.entries.get(key).map(String::as_str)
     }
 
+    /// Raw text for a reader whose native default depends on a later asset
+    /// binding step. The caller must pass the returned value through the
+    /// matching `ini_value` reader rather than interpreting it directly.
+    pub(crate) fn raw_value(&self, key: &str) -> Option<&str> {
+        self.get(key)
+    }
+
     /// Test builds only: the raw stored text, for tests that inspect storage.
     #[cfg(any(test, feature = "test-support"))]
     pub fn get_for_test(&self, key: &str) -> Option<&str> {

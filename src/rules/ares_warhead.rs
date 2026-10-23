@@ -143,11 +143,13 @@ impl AttachEffectRules {
     pub(crate) fn speed_multiplier(&self) -> NativeF64Bits {
         self.speed
     }
-    /// Ground WH effects support their ordered Foot speed aggregate. Other
+    pub(crate) fn firepower_multiplier(&self) -> NativeF64Bits {
+        self.firepower
+    }
+    /// Ground WH effects support ordered speed and firepower aggregates. Other
     /// stat/decloak/Temporal/self-effect consumers remain separate mechanisms.
-    pub(crate) fn visual_speed_path(&self) -> bool {
-        self.firepower == NativeF64Bits::ONE
-            && self.armor == NativeF64Bits::ONE
+    pub(crate) fn visual_combat_path(&self) -> bool {
+        self.armor == NativeF64Bits::ONE
             && self.rof == NativeF64Bits::ONE
             && !self.cloakable
             && !self.force_decloak
@@ -242,7 +244,7 @@ mod tests {
             assert_eq!(ae.speed, NativeF64Bits::from_bits(4.0_f64.to_bits()));
             assert!(ae.cloakable);
             assert_eq!((ae.delay, ae.initial_delay), (9, 11));
-            assert!(!ae.visual_speed_path());
+            assert!(!ae.visual_combat_path());
             assert_eq!(
                 rules
                     .warhead("DEFAULT_WH")

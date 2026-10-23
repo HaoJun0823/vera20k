@@ -76,6 +76,9 @@ pub(crate) struct MatchPresentationState {
     /// type (`presentation::super_timers`).
     pub(crate) super_timer_blinks: crate::app::presentation::super_timers::TimerBlinks,
     pub(crate) combat_lights: crate::app::presentation::combat_lights::CombatLightRuntime,
+    /// The sole client owner of native GScreenClass shake offsets; input
+    /// events decay it and Simulation only sends ordered axis writes.
+    pub(crate) screen_shake: super::screen_shake::ScreenShakeState,
     pub(crate) minimap: Option<MinimapRenderer>,
     /// Animated radar chrome — plays 33-frame open/close animation when radar gained/lost.
     pub(crate) radar_anim: Option<crate::render::radar::anim::RadarAnimState>,
@@ -96,6 +99,9 @@ pub(crate) struct MatchPresentationState {
     pub(crate) has_radar: bool,
     /// Selection overlay renderer — highlights and drag rectangle.
     pub(crate) selection_overlay: Option<SelectionOverlay>,
+    /// PBEACON/RDRBEACN in each beacon row's House Convert, loaded with the
+    /// world (`Init_BeaconArt 0x004309D0`).
+    pub(crate) beacon_art: Option<crate::render::beacon_art::BeaconArt>,
     /// Authentic SHROUD.SHP sprite-based shroud edge renderer.
     /// GPU ABuffer — screen-resolution brightness texture for per-pixel shroud darkening.
     /// SHROUD.SHP brightness pixels blitted per-cell, then a full-screen multiply pass
@@ -140,6 +146,9 @@ pub(crate) struct MatchPresentationState {
     /// The in-battle chat target and chat mask, beside the list whose edit
     /// line they route.
     pub(crate) chat: crate::app::input::chat::ChatState,
+    /// The client's `BeaconManagerClass` (`0x0089C3B0`): placed and received
+    /// multiplayer beacons, outside the world hash and saved games.
+    pub(crate) beacons: crate::app::match_runtime::beacons::BeaconManager,
     /// In-scenario modal state — the port of gamemd's in-scenario state
     /// variable. Owns the in-game menu, the abort-mission confirmation and the
     /// parent/child relationship with the `0xBBB` Options dialog.

@@ -239,6 +239,7 @@ pub(crate) struct DisplayEffectInputs<'a> {
     pub detail: &'a std::cell::RefCell<crate::app::presentation::detail::DetailState>,
     pub detail_level: u32,
     pub lighting: &'a crate::map::lighting::CellLightGrid,
+    pub retained_anim_intensities: Option<&'a BTreeMap<u64, i32>>,
     pub house_colors: &'a crate::map::houses::HouseColorMap,
     pub hidden_super_anims: &'a std::collections::BTreeSet<crate::sim::anim_class::AnimId>,
     /// The local Show Hidden option (`Options+0x1F`).
@@ -340,7 +341,9 @@ pub(crate) fn build_display_effect_instances(
             parachute_type.is_some_and(|ty| parachute_canopy_owner(anim, ty).is_some());
         let type_name: &str = sim.interner().resolve(anim.type_id());
         let config = input.rules.art().anim_runtime_config(type_name);
-        if config.is_some_and(|config| !config.art_body_read) {
+        if config
+            .is_some_and(|config| !config.art_body_read && config.raw_shp_frame_count.is_none())
+        {
             continue;
         }
         // AnimDrawIfVisible422C70 rejects delay+184 before Object5F4B10's
@@ -419,6 +422,13 @@ pub(crate) fn build_display_effect_instances(
         ) {
             continue;
         }
+        // AnimDrawIt423014..423026 applies the fog byte after its detail
+        // queries, and only when AnimType.ShouldFogRemove is set.
+        if config.is_none_or(|config| config.should_fog_remove)
+            && local_owner.is_some_and(|viewer| sim.fog().is_object_fogged(viewer, stable_id))
+        {
+            continue;
+        }
         if is_building_anim {
             // DrawIt queries detail before hidden/image/material rejection.
             // An absent prepared piece must not suppress that query.
@@ -448,22 +458,21 @@ pub(crate) fn build_display_effect_instances(
         };
         let remap_color =
             crate::render::sprite_atlas::anim_remap_color(anim, sim.interner(), input.house_colors);
-        let palette_light = if remap_color.is_some() && !is_parachute {
-            Default::default()
-        } else {
-            // Keep the canopy's instance Convert/53-row scheme transport,
-            // including shroud selection, when joining the ordinary Anim draw.
-            crate::app::presentation::lighting::anim_palette_light(
-                input.lighting,
-                (rx, ry),
-                config,
-                anim.use_cell_drawer(),
-                anim.remap().as_ref(),
-            )
-        };
+        let palette_light = crate::app::presentation::lighting::anim_palette_light(
+            input.lighting,
+            (rx, ry),
+            config,
+            anim.use_cell_drawer(),
+            anim.remap().as_ref(),
+            input
+                .retained_anim_intensities
+                .and_then(|samples| samples.get(&stable_id))
+                .copied()
+                .unwrap_or(1000),
+        );
         let key = ShpSpriteKey {
             palette_context: if anim.use_cell_drawer() {
-                crate::render::sprite_atlas::ShpPaletteContext::Cell
+                crate::render::sprite_atlas::ShpPaletteContext::AnimCell
             } else if remap_color.is_some() {
                 crate::render::sprite_atlas::anim_remap_context(anim)
             } else {
@@ -862,7 +871,7 @@ fn build_cell_overlay_bodies(input: &CellOverlayInputs<'_>, bodies: &mut Vec<sup
         // `render::overlay_atlas::resolve_body_frame`.
         let key = rubble_key.unwrap_or_else(|| OverlaySpriteKey {
             name: name.clone(),
-            frame: render_frame,
+            frame: i32::from(render_frame),
         });
         let Some(spr) = input.atlas.get(&key) else {
             continue;
@@ -992,7 +1001,7 @@ pub(crate) fn build_overlay_instances(
         return;
     };
     for obj in sim.terrain_objects().objects().values() {
-        if !obj.is_live() || !obj.in_logic_vector() {
+        if !obj.is_live() {
             continue;
         }
         let name = sim.interner().resolve(obj.type_ref());
@@ -1024,12 +1033,10 @@ pub(crate) fn build_overlay_instances(
         let stage = is_animated.then(|| {
             sim.terrain_objects()
                 .animations()
-                .get(&obj.cell())
+                .get(&obj.stable_id())
                 .map_or(0, |animation| animation.current_frame())
         });
-        let Some(frame) = terrain_draw_frame(stage, obj.health()) else {
-            continue;
-        };
+        let frame = terrain_draw_frame(stage, obj.health());
         let (body, shadow) = atlas.terrain_pieces(name, frame);
         if body.is_none() && shadow.is_none() {
             continue;
@@ -1110,8 +1117,10 @@ pub(crate) fn build_overlay_instances(
 /// below 2 health, else 0. Its crumbling arm never draws: Take_Damage
 /// (0x71B920) starts crumbling on a lethal hit and uninits the object in the
 /// same call.
-fn terrain_draw_frame(stage: Option<i32>, health: i32) -> Option<u8> {
-    stage.map_or(Some(u8::from(health < 2)), |stage| u8::try_from(stage).ok())
+fn terrain_draw_frame(stage: Option<i32>, health: i32) -> i32 {
+    // Original71C208 keeps the whole signed Stage; frame bounds belong to
+    // the image/atlas, not the cell overlay-data byte's0..255 domain.
+    stage.unwrap_or_else(|| i32::from(health < 2))
 }
 
 /// Ordinary Terrain DrawIt 0071C304/0071C34E: both stored frames share one

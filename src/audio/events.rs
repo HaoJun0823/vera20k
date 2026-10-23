@@ -566,10 +566,9 @@ impl GameSoundEvent {
 /// yet**, all read by `RulesClass::ReadAudioVisual @ 0x006691E0`:
 /// - `LeaveGrinderSound` (`+0x26C`) has no VERA producer. Infantry Eaten
 ///   arrival (`0x005198AD..0x005198C9`) emits `EnterGrinderSound` via `VocAt`.
-/// - `PlaceBeaconSound` (`+0x1CC`) — `RadarClass::PlaceBeacon @ 0x00430D8E`
-///   (found by an operand sweep for that `RulesClass` offset, which is capped
-///   and therefore not an exhaustive enumeration of readers). VERA has no
-///   beacons (#1348), so there is no producer to wire. (`MindClearedSound`,
+/// - (`PlaceBeaconSound` (`+0x1CC`) is landed as [`GameSoundEvent::UiSound`]
+///   from `app::match_runtime::beacons` — `BeaconManagerClass::PlaceBeacon
+///   @ 0x00430D7D..0x00430D94`. `MindClearedSound`,
 ///   `MasterMindOverloadDeathSound` and `YuriMindControlSound` are landed as
 ///   [`GameSoundEvent::VocAt`] from `sim/capture_manager.rs`.)
 /// - (The seven `Crate*Sound` keys (`+0x1E4`..`+0x1FC`) are landed as `VocAt`

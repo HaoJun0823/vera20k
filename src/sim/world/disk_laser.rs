@@ -264,9 +264,7 @@ impl Simulation {
                 && let Some(building) = self.substrate.entities.get(target_id)
                 && building.category() == EntityCategory::Structure
             {
-                let (width, height) = crate::rules::foundation::foundation_dimensions(
-                    building.type_facts.foundation(),
-                );
+                let (width, height) = building.type_facts.foundation().dimensions();
                 distance = distance
                     .wrapping_sub((i32::from(width) + i32::from(height)) * 64)
                     .max(0);

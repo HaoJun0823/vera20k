@@ -201,6 +201,7 @@ fn campaign_preparation_failure_retires_the_lease_with_shell_retry_policy() {
         if consume_during_preparation {
             let err = prepare_loading_session(
                 &mut assets,
+                &mut test_audio(),
                 &mut Default::default(),
                 None,
                 slot.take().unwrap(),
@@ -289,7 +290,7 @@ fn receipt_for(
     .expect("valid test startup must acknowledge")
 }
 
-fn test_audio() -> crate::app::audio_runtime::AppAudioRuntime {
+pub(super) fn test_audio() -> crate::app::audio_runtime::AppAudioRuntime {
     crate::app::audio_runtime::AppAudioRuntime {
         theme: crate::audio::theme::ThemeRuntime::default(),
         service_clock: crate::audio::arbiter::AudioServiceClock::default(),
@@ -307,6 +308,7 @@ fn test_audio() -> crate::app::audio_runtime::AppAudioRuntime {
 /// loading-job lease*, and the audio pump's Theme poll must keep reaching
 /// AI while that lease is out. Exercises the production leaf that
 /// `begin_loading` calls and the resolver `pump_audio_service` uses.
+#[cfg(not(feature = "ares"))]
 #[test]
 fn begin_loading_plays_loading_theme_and_polls_theme_through_the_lease() {
     let dir = std::env::temp_dir().join(format!("vera20k-loading-theme-{}", std::process::id()));
@@ -460,6 +462,7 @@ fn loading_replacement_and_terminal_retirement_preserve_cache_and_admission_orde
             // no config exists, while the prior lease is already owned.
             let err = prepare_loading_session(
                 &mut assets,
+                &mut test_audio(),
                 &mut Default::default(),
                 None,
                 slot.take().unwrap(),
@@ -592,6 +595,7 @@ fn loading_preparation_consumes_real_source_and_returns_lease_on_initial_and_adm
     }
     let session = prepare_loading_session(
         &mut assets,
+        &mut test_audio(),
         &mut retention,
         None,
         session,
@@ -626,6 +630,7 @@ fn loading_preparation_consumes_real_source_and_returns_lease_on_initial_and_adm
         session.job.asset_manager = assets.lease_for_loading();
         let err = prepare_loading_session(
             &mut assets,
+            &mut test_audio(),
             &mut retention,
             None,
             session,

@@ -461,7 +461,7 @@ impl Fixture {
             "{boundary}: native41C other-viewer history"
         );
         let object = self.rules.object("GAPOWR").unwrap();
-        let dimensions = crate::rules::foundation::foundation_dimensions(&object.foundation);
+        let dimensions = object.foundation.dimensions();
         assert_eq!(
             [i32::from(dimensions.0), i32::from(dimensions.1)],
             [

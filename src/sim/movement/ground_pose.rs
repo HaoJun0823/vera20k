@@ -520,8 +520,11 @@ pub fn building_render_order_parts(
 /// `(dimension - 1) * 128` leptons along each axis of its foundation. The
 /// Location is its north-west cell's centre, so the result is the
 /// foundation's geometric centre.
-fn foundation_center_xy(location: [i32; 2], foundation: &str) -> [i32; 2] {
-    let (width, height) = crate::rules::foundation::foundation_dimensions(foundation);
+fn foundation_center_xy(
+    location: [i32; 2],
+    foundation: &crate::rules::foundation::Foundation,
+) -> [i32; 2] {
+    let (width, height) = foundation.dimensions();
     [
         location[0].wrapping_add(i32::from(width).wrapping_mul(128).wrapping_sub(128)),
         location[1].wrapping_add(i32::from(height).wrapping_mul(128).wrapping_sub(128)),
@@ -705,9 +708,7 @@ impl Simulation {
                     entity.category() == crate::map::entities::EntityCategory::Structure
                 })
                 .map(|building| {
-                    let (width, height) = crate::rules::foundation::foundation_dimensions(
-                        building.type_facts.foundation(),
-                    );
+                    let (width, height) = building.type_facts.foundation().dimensions();
                     (i32::from(width), i32::from(height))
                 }),
             crate::sim::combat::TargetKind::Cell(..) => None,

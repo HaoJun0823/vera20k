@@ -334,14 +334,26 @@ fn a_sold_allys_building_leaves_its_shared_sight_counted() {
     let Some((rules, mut sim, americans)) = world() else {
         return;
     };
+    let confederation = sim.interner.get("Confederation").unwrap();
+    sim.houses
+        .get_mut(&confederation)
+        .unwrap()
+        .set_is_human_for_test(true);
     *sim.house_alliances_mut_for_test() = crate::map::houses::HouseAllianceMap::from([
         (
             "AMERICANS".to_string(),
-            std::collections::BTreeSet::from(["RUSSIANS".to_string()]),
+            std::collections::BTreeSet::from(["RUSSIANS".to_string(), "CONFEDERATION".to_string()]),
         ),
         (
             "RUSSIANS".to_string(),
-            std::collections::BTreeSet::from(["AMERICANS".to_string()]),
+            std::collections::BTreeSet::from([
+                "AMERICANS".to_string(),
+                "CONFEDERATION".to_string(),
+            ]),
+        ),
+        (
+            "CONFEDERATION".to_string(),
+            std::collections::BTreeSet::from(["AMERICANS".to_string(), "RUSSIANS".to_string()]),
         ),
     ]);
     let id = sim
@@ -350,8 +362,10 @@ fn a_sold_allys_building_leaves_its_shared_sight_counted() {
     let config = sim.sight_reveal_config(&rules);
     sim.refresh_fog(&config, &rules);
     let cells = alternate_cells(&sim, id, americans);
+    assert_eq!(alternate_cells(&sim, id, confederation), cells);
     for &cell in &cells {
         assert_eq!(counter(&sim, americans, cell), -2, "{cell:?}");
+        assert_eq!(counter(&sim, confederation, cell), -2, "{cell:?}");
     }
 
     sim.techno_limbo_with_context(id, UninitContext::new(&rules, None));
@@ -367,6 +381,9 @@ fn a_sold_allys_building_leaves_its_shared_sight_counted() {
         assert_eq!(counter(&sim, americans, (x, y)), -1, "{x},{y}");
         assert!(sim.fog.is_cell_revealed(americans, x, y), "{x},{y}");
         assert!(!sim.fog.is_cell_visible(americans, x, y), "{x},{y}");
+        assert_eq!(counter(&sim, confederation, (x, y)), -1, "{x},{y}");
+        assert!(sim.fog.is_cell_revealed(confederation, x, y), "{x},{y}");
+        assert!(!sim.fog.is_cell_visible(confederation, x, y), "{x},{y}");
     }
 }
 

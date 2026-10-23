@@ -391,6 +391,10 @@ impl MinimapRenderer {
         resolved_terrain: Option<&crate::map::resolved_terrain::ResolvedTerrainGrid>,
         radar_terrain_dirty_cells: &[(u16, u16)],
         radar_terrain_dirty_generation: u64,
+        beacons: Option<(
+            &crate::render::beacon_art::BeaconArt,
+            &[crate::render::beacon_art::BeaconDraw],
+        )>,
     ) -> Option<u64> {
         let fog_generation = if full_visibility {
             0
@@ -638,9 +642,10 @@ impl MinimapRenderer {
         }
 
         // `RadarClass::Update @ 0x00656EC0` composes object pixels, then the
-        // ascending radar-event array, then SpySatellite vision. Rust's SpySat
-        // materialization is already present in the fog/base inputs; the event
-        // outlines must nevertheless remain after object pixels here.
+        // ascending radar-event array, then the beacon loop (`0x00431700` →
+        // `0x00430650` at `0x0065756E`; Ghidra's "SpySatellite" names are
+        // wrong: the receiver is the beacon manager `0x0089C3B0`, gated on the
+        // RDRBEACN counts). The event outlines must remain after object pixels.
         if let Some(surface) = self.native_radar_surface {
             self.radar_events.draw(
                 rgba,
@@ -649,6 +654,21 @@ impl MinimapRenderer {
                 surface.generated_size(),
                 surface.aperture_offset(),
             );
+            // Then the beacons (`0x0065756E -> 0x00431700 -> 0x00430650`),
+            // clipped to the generated surface.
+            for (art, beacon) in beacons
+                .into_iter()
+                .flat_map(|(art, records)| records.iter().map(move |beacon| (art, beacon)))
+            {
+                let center = surface.world_to_surface_pixel(beacon.coord[0], beacon.coord[1], true);
+                art.blit_radar(beacon.house, binary_frame, center, |(x, y), color| {
+                    if let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y))
+                        && let Some((x, y)) = aperture_pixel(Some(surface), (x, y))
+                    {
+                        set_pixel(rgba, size, x, y, color);
+                    }
+                });
+            }
         }
 
         let consumed_radar_terrain_generation = staged_radar_terrain_update.finish_infallible(

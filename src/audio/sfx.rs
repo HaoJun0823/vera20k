@@ -2899,7 +2899,8 @@ fn load_sfx(
         && let Some(bag_audio) = crate::assets::audio_bag::decode_bag_audio(entry, data)
     {
         // Convert i16 → f32 stereo.
-        let stereo = upmix_i16_to_f32_stereo(&bag_audio.samples_i16, bag_audio.channels);
+        let mut stereo = Vec::new();
+        upmix_i16_to_f32_stereo(&mut stereo, &bag_audio.samples_i16, bag_audio.channels);
         return Some(DecodedAudio {
             samples: stereo,
             sample_rate: bag_audio.sample_rate,
@@ -2931,7 +2932,8 @@ fn load_sfx(
     }
 
     // AUD is always mono — upmix to stereo for rodio.
-    let stereo = upmix_i16_to_f32_stereo(&samples, 1);
+    let mut stereo = Vec::new();
+    upmix_i16_to_f32_stereo(&mut stereo, &samples, 1);
     Some(DecodedAudio {
         samples: stereo,
         sample_rate: header.sample_rate as u32,
@@ -2941,21 +2943,19 @@ fn load_sfx(
     })
 }
 
-/// Convert i16 PCM samples to interleaved f32 stereo.
+/// Append i16 PCM samples to `out` as interleaved f32 stereo.
 /// Mono input is duplicated to both channels.
-fn upmix_i16_to_f32_stereo(samples: &[i16], channels: u16) -> Vec<f32> {
+pub(crate) fn upmix_i16_to_f32_stereo(out: &mut Vec<f32>, samples: &[i16], channels: u16) {
     if channels >= 2 {
         // Already stereo (or more) — just convert to f32.
-        samples.iter().map(|&s| s as f32 / 32768.0).collect()
+        out.extend(samples.iter().map(|&s| s as f32 / 32768.0));
     } else {
         // Mono → stereo: duplicate each sample.
-        samples
-            .iter()
-            .flat_map(|&s| {
-                let f = s as f32 / 32768.0;
-                [f, f]
-            })
-            .collect()
+        out.reserve(samples.len() * 2);
+        out.extend(samples.iter().flat_map(|&s| {
+            let f = s as f32 / 32768.0;
+            [f, f]
+        }));
     }
 }
 
@@ -2966,28 +2966,24 @@ fn upmix_i16_to_f32_stereo(samples: &[i16], channels: u16) -> Vec<f32> {
 /// Mono or stereo. This covers all RA2 sound effects and EVA voices.
 pub(crate) fn decode_wav(data: &[u8], filename: &str) -> Option<DecodedAudio> {
     let wav = crate::assets::wav_file::WavFile::parse(data)?;
-    let samples = match wav.format_tag {
-        1 => decode_pcm(wav.data, wav.channels, wav.bits_per_sample),
-        0x11 => decode_ima_adpcm(wav.data, wav.channels, wav.block_align),
-        _ => {
-            log::trace!(
-                "WAV: unsupported format tag {} for {}",
-                wav.format_tag,
-                filename
-            );
-            return None;
-        }
+    let Some(mut cursor) = crate::assets::wav_file::WavPcmCursor::new(&wav) else {
+        log::trace!(
+            "WAV: unsupported format tag {} ({}-bit) for {}",
+            wav.format_tag,
+            wav.bits_per_sample,
+            filename
+        );
+        return None;
     };
-    if samples.is_empty() {
+    let mut pcm = Vec::new();
+    while cursor.decode_next(wav.data, &mut pcm) {}
+    if pcm.is_empty() {
         return None;
     }
-    let stereo = if wav.channels == 1 {
-        samples.iter().flat_map(|&s| [s, s]).collect()
-    } else {
-        samples
-    };
+    let mut samples = Vec::new();
+    upmix_i16_to_f32_stereo(&mut samples, &pcm, wav.channels);
     Some(DecodedAudio {
-        samples: stereo,
+        samples,
         sample_rate: wav.sample_rate,
         channels: 2,
         native_channels: wav.channels,
@@ -2997,38 +2993,6 @@ pub(crate) fn decode_wav(data: &[u8], filename: &str) -> Option<DecodedAudio> {
             wav.bits_per_sample / 8
         },
     })
-}
-
-/// Decode IMA ADPCM WAV data into interleaved f32 samples.
-///
-/// `WAV__ParseHeader @ 0x00408610` maps `wFormatTag == 0x11` onto the same audio
-/// format descriptor the bag index fills, taking the block stride from the fmt
-/// chunk's `nBlockAlign` (`psVar6[6]`). `FUN_00409C40 @ 0x00409C40` then installs
-/// the one block decoder in the image, `IMA_ADPCM__DecodeBlock @ 0x0040AA70`, so
-/// WAV and bag IMA share a decoder natively and share `ima_adpcm::decode_blocks`
-/// here.
-fn decode_ima_adpcm(data: &[u8], channels: u16, block_align: u16) -> Vec<f32> {
-    crate::assets::ima_adpcm::decode_blocks(data, channels, block_align as u32)
-        .into_iter()
-        .map(|s| s as f32 / 32768.0)
-        .collect()
-}
-
-/// Convert raw PCM bytes to f32 samples. Output channel count matches input.
-fn decode_pcm(pcm: &[u8], channels: u16, bits_per_sample: u16) -> Vec<f32> {
-    match (bits_per_sample, channels) {
-        (16, _) => pcm
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
-            .collect(),
-        (8, _) => pcm.iter().map(|&b| (b as f32 - 128.0) / 128.0).collect(),
-        _ => {
-            log::trace!("WAV: unsupported {}bit {}ch PCM", bits_per_sample, channels);
-            Vec::new()
-        }
-    }
 }
 
 #[cfg(test)]

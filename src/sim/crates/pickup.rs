@@ -272,10 +272,12 @@ pub(crate) fn multiplayer_eligible_slot(
         }
         // `0x00481D0B`: an actor already boosted, or unarmed (`Is_Armed`).
         POWERUP_FIREPOWER => {
-            actor.crate_multipliers.firepower() == NativeF64Bits::ONE
-                && object.is_some_and(|object| {
+            actor.crate_multipliers.crate_firepower() == NativeF64Bits::ONE
+                // Installed Firepower1@1005F940 returns481D52 directly,
+                //bypassing stock Is_Armed just as Speed1 bypasses Aircraft.
+                && (crate::rules::ARES_ENABLED || object.is_some_and(|object| {
                     crate::sim::combat::combat_weapon::is_armed(actor, object)
-                })
+                }))
         }
         // `0x00481C91`: a Techno actor whose type is not `Trainable=`, or
         // one already elite.
@@ -426,18 +428,7 @@ pub(crate) fn pickup_crate(
     // `0x00481D86`: removal, then the replacement crate.
     let _ = remove_pickup_crate(sim, rules, registry, cell);
     if multiplayer && sim.session.game_options().crates {
-        let lighting = sim
-            .session
-            .lighting()
-            .profile(crate::sim::scenario_session::ScenarioLightingProfile::Normal)
-            .into();
-        let _ = place_one_random_crate(
-            sim,
-            rules,
-            registry,
-            lighting,
-            ForcedPostPrecheckFailure::None,
-        );
+        let _ = place_one_random_crate(sim, rules, registry, ForcedPostPrecheckFailure::None);
     }
     if powerup == POWERUP_SQUAD {
         powerup = POWERUP_MONEY;
@@ -552,6 +543,8 @@ pub(crate) fn pickup_crate(
             POWERUP_ARMOR => {
                 let owners = effects::apply_multiplier_crate(
                     &mut sim.substrate,
+                    rules,
+                    &sim.interner,
                     center,
                     radius,
                     magnitude,
@@ -597,6 +590,8 @@ pub(crate) fn pickup_crate(
             POWERUP_FIREPOWER => {
                 let owners = effects::apply_multiplier_crate(
                     &mut sim.substrate,
+                    rules,
+                    &sim.interner,
                     center,
                     radius,
                     magnitude,

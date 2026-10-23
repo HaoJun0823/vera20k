@@ -1206,7 +1206,7 @@ pub(crate) fn is_occupied(entity: &GameEntity, obj: &ObjectType) -> bool {
 /// `BuildingClass @ 0x00458E00` (vt+0x404): half the shorter side of the
 /// type's foundation (width `0x0045EC90`, height `0x0045ECA0(0)`), truncated.
 pub(crate) fn half_foundation(obj: &ObjectType) -> i32 {
-    let (width, height) = crate::rules::foundation::foundation_dimensions(&obj.foundation);
+    let (width, height) = obj.foundation.dimensions();
     i32::from(width.min(height)) / 2
 }
 

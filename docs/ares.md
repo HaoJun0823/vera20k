@@ -11,7 +11,12 @@ cargo run --release --bin vera20k --features ares
 ```
 
 Ares builds identify themselves in the window title and startup log. Saves retain the build
-capability and cannot load in the other mode, even with identical retail INIs.
+capability and cannot load in another capability combination, even with identical retail INIs.
+
+Ares is one of three orthogonal capabilities: it combines with `phobos` and `npatch`
+(`--features ares,phobos,npatch`), and every implemented feature must keep working when the others
+are compiled in. The rule and the pattern for two extensions touching one native site are in
+[NPatch placeholder](npatch.md#cross-extension-compatibility).
 
 For ordinary selected-map offline loading, Ares Country loading fields are read
 from the retained Country identity. `File.LoadScreenPAL` and the loading text
@@ -38,6 +43,8 @@ Supported extensions:
 
 - [Ordinary ground and tower EMP](ares-emp.md) (bounded human Drive/Walk, unteamed AI Drive and independent powered defensive buildings)
 - [Custom armor](ares-custom-armor.md)
+- [Supplemental string tables](../tools/rules_oracle/ares_csf.md), shared by
+  game loading and default `asset csf-get` / `csf-grep` queries.
 - [Per-type SHP building palettes](ares-building-palettes.md)
 - [EVA voice tags and Side selection](ares-eva.md)
 - [Generic production prerequisites](ares-prerequisites.md)

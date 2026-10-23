@@ -61,9 +61,10 @@
 //!   whole-map reveal, the radar and Session `+0x300` (see `mplayer_defeated`;
 //!   `local_player_defeated` names the ported readers). The borrowed client
 //!   boundary leaves planning (`0x00637A10`), supplies its2B event to the same
-//!   frame's dispatcher and rejects re-entry (`0x00731A50`). Remaining UI:
-//!   beacons deleted (`0x00431410`), and beacon mode left (`0x004AC960`). The
-//!   chat-mask set (`0x00A8D108..0x00A8D10F`, `0x004FC23E`) is the app's
+//!   frame's dispatcher and rejects re-entry (`0x00731A50`). The beacons'
+//!   deletion (`0x00431410`) and beacon mode's exit (`0x004AC960`) are the
+//!   app's `match_runtime::beacons` owner, run from the PlayerDefeated line.
+//!   The chat-mask set (`0x00A8D108..0x00A8D10F`, `0x004FC23E`) is the app's
 //!   `input::chat` owner, run from the PlayerDefeated line; dialog 0x73
 //!   reads the mask whenever it draws (`0x004FC239..0x004FC25D` refresh). The command bar is
 //!   saved/closed6D1660 but restored4FC591→6D1610 on the common sole-human
@@ -71,14 +72,14 @@
 //!   close/restore paths remain outside this chain. Session+300 already guards
 //!   band-box/type/navigation selection, Cheer input and the command-bar
 //!   opener (`0x006D08F5`). Its F0 close remains allowed. Remaining UI readers
-//!   include beacon and taunt (`0x00731A30`, `0x0053636C`),
+//!   include taunt (`0x0053636C`),
 //!   `RadarClass::SetRadarMode` (`0x00656CCC`), MakeAlly's
 //!   alliance line (`0x004F9E49`) and the dialog and session readers
 //!   (`0x004F1534`, `0x00657F4A`, `0x0078D52A`, `0x004E20BA`, `0x004F10FD`,
 //!   `0x0055EE60` and others). Trigger: the local player is defeated. Effect:
 //!   for the savour delay (retail `SavourDelay=.1`) those UI states and
-//!   commands may stay as they were. Frequency: once on a local loss; beacon,
-//!   dialog and multiplayer consequences need their own connected mechanisms.
+//!   commands may stay as they were. Frequency: once on a local loss; dialog
+//!   and multiplayer consequences need their own connected mechanisms.
 
 use crate::rules::overlay_types::OverlayTypeRegistry;
 use crate::rules::ruleset::RuleSet;

@@ -18,7 +18,6 @@ use super::production_tech::{
 };
 use super::production_types::*;
 use super::wall_placement;
-use crate::rules::foundation::foundation_dimensions;
 
 pub fn placement_preview_for_owner_with_overlays(
     sim: &Simulation,
@@ -30,7 +29,7 @@ pub fn placement_preview_for_owner_with_overlays(
     overlay_registry: Option<&OverlayTypeRegistry>,
 ) -> Option<BuildingPlacementPreview> {
     let obj = rules.object(type_id)?;
-    let (width, height) = foundation_dimensions(&obj.foundation);
+    let (width, height) = obj.foundation.dimensions();
     // One fork covers admission, ground/shroud reads and wall filler queries;
     // none of the cursor's nested lookups may stamp simulation's live Dummy.
     let native_cells = sim
@@ -61,55 +60,67 @@ pub fn placement_preview_for_owner_with_overlays(
     // The cursor paints each cell with `CellClass::Is_Clear_To_Build`
     // (`BuildingPlacement_per_cell_draw`, `0x0047EE93`) for the placing house.
     let mut cells = Vec::with_capacity(usize::from(width) * usize::from(height));
-    let mut all_unshrouded = true;
+    //4A9070 is a separate rectangle visibility query using declared width
+    //and height. It cannot reuse just the sparse active marker cells.
+    let all_unshrouded = sim.session.current_house().is_none_or(|viewer| {
+        native_cells.as_ref().is_none_or(|query| {
+            (0..width).all(|dx| {
+                (0..height).all(|dy| {
+                    !crate::sim::vision::cell_is_shrouded(
+                        &sim.fog,
+                        query,
+                        viewer,
+                        (rx.wrapping_add(dx), ry.wrapping_add(dy)),
+                    )
+                })
+            })
+        })
+    });
     if let Some(query) = native_cells.as_ref() {
-        for dy in 0..height {
-            for dx in 0..width {
-                let cx = rx.saturating_add(dx);
-                let cy = ry.saturating_add(dy);
-                let (level, slope) = query.ground_fields(query.lookup((cx as i16, cy as i16)));
-                // Cell47ED33..47ED79 queries the current player's mapped
-                // ground via its actual height-corrected centre. The shared
-                // vision owner handles odd levels and the retained Dummy.
-                // A headless evaluation with no current viewer enrolls no
-                // client visibility; active local gameplay always has one.
-                let unshrouded = sim.session.current_house().is_none_or(|viewer| {
-                    !crate::sim::vision::cell_is_shrouded(&sim.fog, query, viewer, (cx, cy))
-                });
-                all_unshrouded &= unshrouded;
-                let upgrade = obj.building_upgrade().host().is_some();
-                let clear = if upgrade {
-                    // Per-cell preview47EE61 is separate from ordinary
-                    // Cell47C620. An admitted host jumps straight to the
-                    // valid frame; an absent/invalid host stays red even on
-                    // clear ground. It bypasses proximity, never shroud.
-                    owner_id.is_some_and(|owner| {
-                        sim.building_upgrade_host_at((cx, cy), true)
-                            .is_some_and(|host| {
-                                sim.can_install_building_upgrade(host, obj, owner, rules)
-                            })
-                    })
-                } else {
-                    (!obj.wall || wall_overlay_id.is_some())
-                        && crate::sim::build_site::is_clear_to_build(
-                            sim,
-                            rules,
-                            overlay_registry,
-                            query.lookup((cx as i16, cy as i16)),
-                            crate::sim::build_site::building_speed_type(obj),
-                            Some(obj),
-                            owner_id,
-                            Some(query),
-                            None,
-                        )
-                };
-                cells.push(BuildingPlacementCell {
-                    coord: (cx, cy),
-                    valid: (upgrade || in_build_area) && unshrouded && clear,
-                    level: level as i8,
-                    slope,
-                });
-            }
+        for (dx, dy) in obj.foundation.cell_offsets() {
+            let cx = rx.wrapping_add_signed(dx);
+            let cy = ry.wrapping_add_signed(dy);
+            let (level, slope) = query.ground_fields(query.lookup((cx as i16, cy as i16)));
+            // Cell47ED33..47ED79 queries the current player's mapped
+            // ground via its actual height-corrected centre. The shared
+            // vision owner handles odd levels and the retained Dummy.
+            // A headless evaluation with no current viewer enrolls no
+            // client visibility; active local gameplay always has one.
+            let unshrouded = sim.session.current_house().is_none_or(|viewer| {
+                !crate::sim::vision::cell_is_shrouded(&sim.fog, query, viewer, (cx, cy))
+            });
+            let upgrade = obj.building_upgrade().host().is_some();
+            let clear = if upgrade {
+                // Per-cell preview47EE61 is separate from ordinary
+                // Cell47C620. An admitted host jumps straight to the
+                // valid frame; an absent/invalid host stays red even on
+                // clear ground. It bypasses proximity, never shroud.
+                owner_id.is_some_and(|owner| {
+                    sim.building_upgrade_host_at((cx, cy), true)
+                        .is_some_and(|host| {
+                            sim.can_install_building_upgrade(host, obj, owner, rules)
+                        })
+                })
+            } else {
+                (!obj.wall || wall_overlay_id.is_some())
+                    && crate::sim::build_site::is_clear_to_build(
+                        sim,
+                        rules,
+                        overlay_registry,
+                        query.lookup((cx as i16, cy as i16)),
+                        crate::sim::build_site::building_speed_type(obj),
+                        Some(obj),
+                        owner_id,
+                        Some(query),
+                        None,
+                    )
+            };
+            cells.push(BuildingPlacementCell {
+                coord: (cx, cy),
+                valid: (upgrade || in_build_area) && unshrouded && clear,
+                level: level as i8,
+                slope,
+            });
         }
     }
     // Display4A9070/4A94DA publishes visibility independently of proximity;
@@ -459,10 +470,7 @@ pub(crate) fn place_production_with_overlays(
         // for an UnInit'ed object; only local selection tests its alive byte.
         held.entity_id()
     } else {
-        let foundation_str: String = rules
-            .object(type_id)
-            .map(|o| o.foundation.clone())
-            .unwrap_or_else(|| "?".to_string());
+        let foundation = &obj.foundation;
         let z: u8 = sim.terrain_cell_level(rx, ry).unwrap_or(0);
         log::info!(
             "Placing building {} at ({},{}) z={} foundation={}",
@@ -470,7 +478,7 @@ pub(crate) fn place_production_with_overlays(
             rx,
             ry,
             z,
-            foundation_str,
+            foundation,
         );
         // Event::Execute4C70E1..4C710B passes an admitted PLACE straight to
         // House4FB0E0. Its placement refusal occurs after HELLO4FB1F1, and
@@ -499,7 +507,7 @@ pub(crate) fn place_production_with_overlays(
         };
         // Log screen position for debugging placement alignment.
         if let Some(ge) = sim.substrate.entities.get(new_sid) {
-            let (fw, fh) = foundation_dimensions(&foundation_str);
+            let (fw, fh) = foundation.dimensions();
             // The entity anchor — the projection of the building's own coordinate,
             // which is its north-west cell's diamond centre. The drawn art sits half
             // a tile above this (render's building render-coordinate lift); this is
@@ -635,7 +643,7 @@ fn evaluate_building_placement(
         let Some(obj) = obj else {
             return Err(BuildingPlacementError::NotBuilding);
         };
-        let (width, height) = foundation_dimensions(&obj.foundation);
+        let (width, height) = obj.foundation.dimensions();
         if obj.category != ObjectCategory::Building {
             return Err(BuildingPlacementError::NotBuilding);
         }
@@ -673,21 +681,18 @@ fn evaluate_building_placement(
             None,
         ) {
             // The error variant only labels the refusal for presentation.
-            let overlaps_structure =
-                crate::rules::foundation::foundation_cell_offsets(&obj.foundation)
-                    .into_iter()
-                    .any(|(dx, dy)| {
-                        sim.cell_objects(
-                            (rx.wrapping_add(dx as u16), ry.wrapping_add(dy as u16)),
-                            MovementLayer::Ground,
-                        )
-                        .any(|member| {
-                            matches!(member, crate::sim::occupancy::CellObjectMember::Entity(id)
-                            if sim.substrate.entities.get(id).is_some_and(|e| {
-                                e.category() == EntityCategory::Structure
-                            }))
-                        })
-                    });
+            let overlaps_structure = obj.foundation.cell_offsets().into_iter().any(|(dx, dy)| {
+                sim.cell_objects(
+                    (rx.wrapping_add(dx as u16), ry.wrapping_add(dy as u16)),
+                    MovementLayer::Ground,
+                )
+                .any(|member| {
+                    matches!(member, crate::sim::occupancy::CellObjectMember::Entity(id)
+                    if sim.substrate.entities.get(id).is_some_and(|e| {
+                        e.category() == EntityCategory::Structure
+                    }))
+                })
+            });
             return Err(if overlaps_structure {
                 BuildingPlacementError::OverlapsStructure
             } else {
@@ -755,7 +760,7 @@ pub fn is_within_build_area(
     {
         return true;
     }
-    let (width, height) = foundation_dimensions(&obj.foundation);
+    let (width, height) = obj.foundation.dimensions();
     let placed_adjacent = obj.adjacent;
     if placed_adjacent < 0 {
         return false;
@@ -786,30 +791,33 @@ pub fn is_within_build_area(
         {
             continue;
         }
-        let (provider_width, provider_height) = foundation_dimensions(&existing.foundation);
-        if provider_intersects_build_area_ring(
-            (rx, ry, width, height),
-            (
-                e.position.rx(),
-                e.position.ry(),
-                provider_width,
-                provider_height,
-            ),
-            placed_adjacent,
-        ) {
+        //4A8F21..4A8FB9 uses declared dimensions for the placed ring;
+        //4A8FC5/4A8FCC queries the first actual ground Building47C520 in
+        //each ring cell. A provider's bounding rectangle fills Custom holes
+        //incorrectly. This order-free existential walk changes no RNG/state.
+        if crate::sim::occupancy::entity_occupancy_cells(e)
+            .into_iter()
+            .any(|cell| {
+                cell_in_build_area_ring((rx, ry, width, height), cell, placed_adjacent)
+                    && sim.substrate.occupancy.first_building_on_layer(
+                        cell.0,
+                        cell.1,
+                        MovementLayer::Ground,
+                    ) == Some(e.stable_id())
+            })
+        {
             return true;
         }
     }
     false
 }
 
-fn provider_intersects_build_area_ring(
+fn cell_in_build_area_ring(
     placed: (u16, u16, u16, u16),
-    provider: (u16, u16, u16, u16),
+    provider_cell: (u16, u16),
     adjacent: i32,
 ) -> bool {
     let (placed_rx, placed_ry, placed_width, placed_height) = placed;
-    let (provider_rx, provider_ry, provider_width, provider_height) = provider;
     let expansion = adjacent.saturating_add(1);
     let placed_min_x = i32::from(placed_rx);
     let placed_min_y = i32::from(placed_ry);
@@ -819,19 +827,9 @@ fn provider_intersects_build_area_ring(
     let min_y = placed_min_y - expansion;
     let max_x = placed_max_x + expansion;
     let max_y = placed_max_y + expansion;
-    let provider_min_x = i32::from(provider_rx);
-    let provider_min_y = i32::from(provider_ry);
-    let provider_max_x = i32::from(provider_rx) + i32::from(provider_width) - 1;
-    let provider_max_y = i32::from(provider_ry) + i32::from(provider_height) - 1;
-
-    let intersects_expanded = provider_min_x <= max_x
-        && provider_max_x >= min_x
-        && provider_min_y <= max_y
-        && provider_max_y >= min_y;
-    let intersects_foundation = provider_min_x <= placed_max_x
-        && provider_max_x >= placed_min_x
-        && provider_min_y <= placed_max_y
-        && provider_max_y >= placed_min_y;
-
-    intersects_expanded && !intersects_foundation
+    let (x, y) = (i32::from(provider_cell.0), i32::from(provider_cell.1));
+    (min_x..=max_x).contains(&x)
+        && (min_y..=max_y).contains(&y)
+        && !((placed_min_x..=placed_max_x).contains(&x)
+            && (placed_min_y..=placed_max_y).contains(&y))
 }

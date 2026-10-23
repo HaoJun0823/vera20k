@@ -67,7 +67,6 @@
 //!   has finite `Ammo=`.
 
 use crate::map::entities::EntityCategory;
-use crate::rules::foundation::foundation_dimensions;
 use crate::rules::object_type::Ability;
 use crate::rules::ruleset::RuleSet;
 use crate::rules::terrain_rules::LandType;
@@ -601,14 +600,14 @@ pub(super) fn building_center_smudge_request(
     rx: u16,
     ry: u16,
     building_z: i32,
-    foundation: &str,
+    foundation: &crate::rules::foundation::Foundation,
 ) -> SmudgeSpawnRequest {
-    let (foundation_w, foundation_h) = foundation_dimensions(foundation);
+    let (foundation_w, foundation_h) = foundation.dimensions();
     SmudgeSpawnRequest::BuildingCenter {
         rx,
         ry,
         building_z,
-        foundation_w: foundation_w as u8,
-        foundation_h: foundation_h as u8,
+        foundation_w,
+        foundation_h,
     }
 }

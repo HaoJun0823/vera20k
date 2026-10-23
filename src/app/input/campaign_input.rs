@@ -34,7 +34,7 @@ pub(crate) fn apply_lock_effect(state: &mut AppState, locked: bool, was_locked: 
             .match_state
             .match_presentation
             .sidebar_gadget_state
-            .disable_selection_modes(false);
+            .disable_cursor_modes();
         state
             .match_state
             .match_presentation

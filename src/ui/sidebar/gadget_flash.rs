@@ -155,6 +155,11 @@ pub struct SidebarGadgetState {
     /// Mutually exclusive with `repair_mode_on`; pending placement refuses changes.
     pub sell_mode_on: bool,
 
+    /// Mirrors Display +0x11B4, beacon placement mode, which only
+    /// SetPlaceBeaconMode 4AC960 sets (`app::input::beacon`). Repair and Sell
+    /// changes clear it (4AC916, 4AC6BB).
+    pub place_beacon_mode_on: bool,
+
     /// Per-button disabled bits. v1: always false.
     pub repair_disabled: bool,
     pub sell_disabled: bool,
@@ -186,7 +191,8 @@ pub(crate) enum SelectionMode {
 impl SidebarGadgetState {
     /// Display SetRepairMode4AC8C0 / SetSellMode4AC660 (-1). A pending
     /// placement TYPE refuses the entire transition. Both toggles clear the
-    /// competing mode, and entry needs House+2F0 (owned-building tracking).
+    /// competing mode and the beacon byte (4AC916 / 4AC6BB), and entry needs
+    /// House+2F0 (owned-building tracking).
     /// Return whether UnselectAll48DC90 must run. The independent Super
     /// pointer and PlanMgrAC4CF4 are not these Display mode bytes.
     /// Source: original gamemd.exe instructions.
@@ -199,6 +205,7 @@ impl SidebarGadgetState {
         if placement_armed {
             return false;
         }
+        self.place_beacon_mode_on = false;
         let enabled = owned_buildings > 0
             && !match mode {
                 SelectionMode::Repair => self.repair_mode_on,
@@ -243,6 +250,19 @@ impl SidebarGadgetState {
             self.repair_mode_on = false;
             self.sell_mode_on = false;
         }
+    }
+
+    /// SetRepairMode(0) and SetSellMode(0), then the direct Power, Planning
+    /// and Beacon byte clears (+0x11B2..+0x11B4) that Begin_Building_Placement
+    /// (4FB883..4FB8A2), SelectClass::Action (6AAF6D..6AAF8B) and the input
+    /// locks (6DEDB2..6DEDD0, 6E268A..6E26A6) share. Only the first two are
+    /// refused while a placement is pending. SetTogglePowerMode (4AC87B) and
+    /// SetWaypointMode (4AC756) also clear the beacon byte, and
+    /// SetPlaceBeaconMode clears +0x11B2/+0x11B3; VERA has no owner for the
+    /// Power or Planning-waypoint modes, so neither path exists here.
+    pub(crate) fn disable_cursor_modes(&mut self) {
+        self.disable_selection_modes(false);
+        self.place_beacon_mode_on = false;
     }
 
     pub fn new() -> Self {

@@ -20,6 +20,8 @@ const MESSAGE_RGB_SYSTEM: [f32; 3] = [1.0, 1.0, 1.0];
 const TYPE_SELECT_MESSAGE_TIMEOUT_MS: u64 = 3_840;
 /// The Supers' lines' `0x96` native 16 ms timer buckets.
 const SUPER_WEAPON_MESSAGE_TIMEOUT_MS: u64 = 0x96 * 16;
+/// PlaceBeacon's help lines' `0xE1` buckets (`0x00430D01`, `0x00430D38`).
+const BEACON_HELP_TIMEOUT_MS: u64 = 0xE1 * 16;
 /// Native falls back to runtime color-scheme 3. Rust stores the undoubled
 /// `[Colors]` entry index, so that scheme is entry 1.
 const TYPE_SELECT_FALLBACK_SCHEME_ENTRY: crate::rules::house_colors::HouseColorIndex =
@@ -224,13 +226,17 @@ pub(crate) enum HudMessage {
         other: crate::sim::intern::InternedId,
         formed: bool,
     },
+    /// PlaceBeacon's `TXT_BEACON_HELP1`/`2` for the local House's beacon
+    /// (`0x00430CF9..0x00430D69`): PlayerPtr's scheme `+0x16054`, style
+    /// 4046, `0xE1` buckets, silent 0.
+    BeaconHelp(&'static str),
 }
 
 impl HudMessage {
     fn csf_key(self) -> &'static str {
         match self {
             Self::LowPower => "TXT_LOW_POWER", // original House4F8D4A
-            Self::SuperWeapon(key) => key,
+            Self::SuperWeapon(key) | Self::BeaconHelp(key) => key,
             Self::PlayerDefeated(_) => "TXT_PLAYER_DEFEATED",
             Self::Alliance { formed: true, .. } => "TXT_HAS_ALLIED",
             Self::Alliance { formed: false, .. } => "TXT_AT_WAR",
@@ -245,6 +251,7 @@ impl HudMessage {
                 message_delay_timeout_ms(rules.general.message_delay_minutes)
             }
             Self::SuperWeapon(_) => Some(SUPER_WEAPON_MESSAGE_TIMEOUT_MS),
+            Self::BeaconHelp(_) => Some(BEACON_HELP_TIMEOUT_MS),
         }
     }
 

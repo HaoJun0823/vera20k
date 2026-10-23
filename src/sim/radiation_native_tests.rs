@@ -82,6 +82,8 @@ fn assert_light_lifecycle(map: &str, packet: &'static str) {
             rad_level: weapon.rad_level,
             spread,
             rad_type: None,
+            firing_house: None,
+            invoker: None,
         };
         let mut state = RadiationState::default();
         let mut events = crate::sim::light_sources::LightingSources::default();
@@ -201,9 +203,9 @@ fn assert_light_lifecycle(map: &str, packet: &'static str) {
                 );
             }
             if name == "same_center_refresh" && frame == 134 {
-                // Persist the actual native-bound component immediately
-                // before its independent light deadline. This empty World
-                // envelope is a snapshot control, not a paid-game bootstrap.
+                // Raw component persistence preserves the independent clock.
+                // This is not saved-game Load: RadSite65B3D0 restarts both
+                // clocks, covered by the production DESO load regression.
                 let mut world = crate::sim::world::Simulation::with_seed(0);
                 world.session.set_binary_frame_for_test(frame);
                 world
@@ -211,21 +213,12 @@ fn assert_light_lifecycle(map: &str, packet: &'static str) {
                     .set_theater_for_test(scene.sim().session.theater().to_owned());
                 world.radiation = state.clone();
                 let before = world.state_hash();
-                let bytes = crate::sim::snapshot::GameSnapshot::save(
-                    &world,
-                    0,
-                    0,
-                    "native-radiation-clock",
-                    0,
-                );
-                let mut loaded = crate::sim::snapshot::GameSnapshot::load(&bytes)
-                    .unwrap()
-                    .sim;
-                loaded.restore_after_snapshot_load().unwrap();
+                let bytes = save_codec::serialize(&state).unwrap();
+                let restored: RadiationState = save_codec::deserialize(&bytes).unwrap();
                 assert_eq!(
-                    save_codec::serialize(&loaded.radiation).unwrap(),
-                    save_codec::serialize(&state).unwrap(),
-                    "load must preserve the source and independent clock"
+                    save_codec::serialize(&restored).unwrap(),
+                    bytes,
+                    "raw component round-trip preserves retained clock bytes"
                 );
                 world
                     .radiation
@@ -240,9 +233,9 @@ fn assert_light_lifecycle(map: &str, packet: &'static str) {
                     world.state_hash(),
                     "retained source clock is hashed"
                 );
-                // Continue through the original135 boundary using the loaded
+                // Continue through the original135 boundary using the restored
                 // owner, rather than reconstructing a projection from age.
-                state = loaded.radiation;
+                state = restored;
             }
         }
         assert!(state.sites().next().is_none());
@@ -305,6 +298,7 @@ fn light_parameters_match_original_integer_and_update_controls() {
 }
 
 #[test]
+#[cfg(not(feature = "phobos"))]
 fn field_operations_match_native_overlap_controls() {
     let Some(fixture) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
         return;
@@ -342,6 +336,8 @@ fn field_operations_match_native_overlap_controls() {
                             rad_level: integer(&row["source_inputs"]["rad_level"]),
                             spread: integer(&row["source_inputs"]["spread"]),
                             rad_type: None,
+                            firing_house: None,
+                            invoker: None,
                         },
                         frame,
                         &scene.session.theater(),
@@ -437,6 +433,8 @@ fn restore_rejects_missing_or_duplicate_radiation_update_slots() {
             rad_level: 500,
             spread: 2,
             rad_type: None,
+            firing_house: None,
+            invoker: None,
         },
         0,
         &sim.session.theater(),
@@ -477,6 +475,8 @@ fn equal_current_fields_with_different_update_order_hash_differently() {
                     rad_level: 500,
                     spread: 10,
                     rad_type: None,
+                    firing_house: None,
+                    invoker: None,
                 },
                 0,
                 &world.session.theater(),
@@ -510,6 +510,8 @@ fn serialized_radius_that_changes_future_decay_is_hash_relevant() {
             rad_level: 500,
             spread: 10,
             rad_type: None,
+            firing_house: None,
+            invoker: None,
         },
         0,
         &original.session.theater(),

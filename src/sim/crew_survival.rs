@@ -194,8 +194,13 @@ impl NoSurvivor {
 
 /// The building's foundation cells in `vt+0x108(0)` list order (the order
 /// Phase B walks), from its origin cell.
-pub(crate) fn foundation_cells(rx: u16, ry: u16, foundation: &str) -> Vec<(u16, u16)> {
-    crate::rules::foundation::foundation_cell_offsets(foundation)
+pub(crate) fn foundation_cells(
+    rx: u16,
+    ry: u16,
+    foundation: &crate::rules::foundation::Foundation,
+) -> Vec<(u16, u16)> {
+    foundation
+        .cell_offsets()
         .into_iter()
         .filter_map(|(dx, dy)| {
             let x = u16::try_from(i32::from(rx) + i32::from(dx)).ok()?;

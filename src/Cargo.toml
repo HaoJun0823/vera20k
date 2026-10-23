@@ -35,6 +35,8 @@ ares = []
 # Compile the supported Phobos behavior; INIs cannot enable an absent capability.
 # Independent of `ares`: Phobos itself does not require Ares.
 phobos = []
+# Placeholder: NPatch-specific readers land with their first chain.
+npatch = []
 # The client's Ctrl+Shift dev chord reaches simulation and utility hooks.
 dev-overlays = []
 # Read-only snapshots and opt-in frame timing for the browser dashboard.

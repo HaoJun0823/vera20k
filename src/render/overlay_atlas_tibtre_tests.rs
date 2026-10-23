@@ -2,6 +2,7 @@
 //! come from original CC_Draw_Shape, not another SHP decoder.
 use super::*;
 use crate::render::terrain_draw_gpu_tests::Gpu;
+use crate::rules::terrain_asset_catalog::TerrainAssetLoadPhase;
 
 #[test]
 #[ignore = "requires all retail theater archives and GPU; original stock SHP decoding and atlas binding"]
@@ -23,15 +24,12 @@ fn retail_tibtre_decode_and_atlas_pairs_match_original_shape_draw() {
         &gpu.queue,
         wgpu::TextureFormat::Bgra8UnormSrgb,
     );
-    let registry = OverlayTypeRegistry::from_ini(&retail.processed_rules, Some(&retail.fixed_art));
+    let registry = retail.rules.overlay_registry().clone();
     for name in ["TEMPERATE", "SNOW", "URBAN", "NEWURBAN", "DESERT", "LUNAR"] {
         let theater = crate::map::theater::load_theater(&mut assets, name).unwrap();
-        retail.rules.bind_terrain_spawner_assets(
-            &retail.processed_rules,
-            &assets,
-            theater.extension,
-            name,
-        );
+        retail
+            .rules
+            .bind_terrain_assets(&assets, theater.extension, TerrainAssetLoadPhase::Fresh);
         let objects: Vec<_> = (1..=3)
             .map(|number| TerrainObject {
                 rx: 0,
@@ -53,10 +51,7 @@ fn retail_tibtre_decode_and_atlas_pairs_match_original_shape_draw() {
             theater.extension,
             name,
             &registry,
-            &retail.rules.tiberium_types,
-            &retail.rules.crate_rules,
-            &retail.processed_rules,
-            retail.rules.art(),
+            &retail.rules,
             None,
             &[],
         )
@@ -115,7 +110,7 @@ fn retail_tibtre_decode_and_atlas_pairs_match_original_shape_draw() {
                     "{file} frame{index}: original RLE source"
                 );
                 if index < 11 {
-                    let (Some(body), Some(shadow)) = atlas.terrain_pieces(&type_name, index as u8)
+                    let (Some(body), Some(shadow)) = atlas.terrain_pieces(&type_name, index as i32)
                     else {
                         panic!("{file} stage {index}: body and stencil");
                     };

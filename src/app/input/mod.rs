@@ -25,6 +25,7 @@ pub(crate) mod state;
 pub(crate) mod superweapon_cameo;
 pub(crate) mod page_user;
 pub(crate) mod taunt;
+pub(crate) mod beacon;
 pub(crate) mod tooltips;
 pub(crate) mod transport_orders;
 

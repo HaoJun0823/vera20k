@@ -234,6 +234,25 @@ pub(crate) fn current_cursor_feedback_kind(state: &AppState) -> Option<CursorFee
     if crate::app::input::planning_mode::node_at_cursor(state).is_some() {
         return Some(CursorFeedbackKind::Default);
     }
+    // DetermineAction's no-selection arm, reached once the node hover
+    // (0x00692F76) passes: beacon mode answers 0x3C over any Cell
+    // (0x006929AF), else a beacon's Cell answers 0x3D, row 0x11 like Select
+    // (0x006927BC..0x006927C5). The planning byte +0x11B3 whose arm
+    // (0x006928A9) would replace 0x3D is never set in YR: its only write of
+    // 1, SetWaypointMode 0x004AC7A7, is only ever called with 0.
+    if selected.is_empty() {
+        if crate::app::input::beacon::mode_active(state) {
+            return Some(CursorFeedbackKind::PlaceBeacon);
+        }
+        let cell = crate::app::match_runtime::sim_tick::screen_point_to_world_cell(
+            state,
+            state.match_state.input.cursor_x,
+            state.match_state.input.cursor_y,
+        );
+        if crate::app::input::beacon::beacon_at_cell(state, cell) {
+            return Some(CursorFeedbackKind::Select);
+        }
+    }
     let (world_x, world_y) = crate::app::match_runtime::sim_tick::screen_point_to_world(
         state,
         state.match_state.input.cursor_x,
@@ -1564,6 +1583,8 @@ pub(crate) fn cursor_id_for_feedback(kind: CursorFeedbackKind) -> Option<CursorI
             CursorId::NoSell
         }),
         CursorFeedbackKind::SuperWeaponTarget(id) => Some(id),
+        // Row 0x4E: mouse.sha frames 435..449 at rate 4.
+        CursorFeedbackKind::PlaceBeacon => Some(CursorId::Beacon),
     }
 }
 

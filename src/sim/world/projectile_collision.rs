@@ -533,8 +533,7 @@ impl ProjectileCollisionWorld<'_> {
                     .then(|| self.interner.object_type(target.type_ref(), self.rules))
                     .flatten()
                     .map(|kind| {
-                        let (width, height) =
-                            crate::rules::foundation::foundation_dimensions(&kind.foundation);
+                        let (width, height) = kind.foundation.dimensions();
                         (i32::from(width), i32::from(height))
                     });
                 (self.location(target), building)
@@ -1247,7 +1246,7 @@ mod tests {
                     // Construction stamps the type's ART `Foundation=`.
                     entity
                         .type_facts
-                        .set_foundation_for_test(dimensions.clone());
+                        .set_foundation_for_test(dimensions.clone().into());
                 }
                 entity
                     .lifecycle
@@ -1323,7 +1322,7 @@ mod tests {
         for row in vectors["nearest"].as_array().unwrap() {
             let mut sim = Simulation::new();
             install_common_raw_terrain(&mut sim, 8, 8, 0, None);
-            let mut foundation = "1x1".to_string();
+            let mut foundation = "1x1".into();
             for (index, object) in row["objects"].as_array().unwrap().iter().enumerate().rev() {
                 // GameEntity is Techno (+14 bit0); Terrain has only bit1.
                 if object["eligible"] == false {
@@ -1364,7 +1363,7 @@ mod tests {
                 if entity.category() == EntityCategory::Structure {
                     entity
                         .type_facts
-                        .set_foundation_for_test(foundation.clone());
+                        .set_foundation_for_test(foundation.clone().into());
                 }
             }
             let mut world = world(&sim);

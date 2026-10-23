@@ -128,8 +128,7 @@ fn dock_exit_coordinate_and_facing(
         [centre(dock.0), centre(dock.1)],
     );
     let facing = crate::util::direction_tables::quantize::round_facing16_to_8(word);
-    let (width, height) =
-        crate::rules::foundation::foundation_dimensions(producer.type_facts.foundation());
+    let (width, height) = producer.type_facts.foundation().dimensions();
     let inward = |cell: i16, base: i16, size: u16| {
         if i32::from(cell) >= i32::from(base) + i32::from(size) {
             cell.wrapping_sub(1)

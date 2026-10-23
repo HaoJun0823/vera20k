@@ -197,7 +197,7 @@ fn attached_speed_native_histories_include_crates_refresh_expiry_and_discard() {
                 rng,
                 "{label}: no animation or added draw"
             );
-            sim.validate_attached_speed_after_restore(&rules).unwrap();
+            sim.validate_attached_stats_after_restore(&rules).unwrap();
         }
     }
 }
@@ -231,7 +231,7 @@ fn attached_speed_parent_bullet_reaches_drive_and_validated_snapshot() {
         .sim;
     loaded.restore_after_snapshot_load().unwrap();
     loaded
-        .validate_attached_speed_after_restore(&rules)
+        .validate_attached_stats_after_restore(&rules)
         .unwrap();
     assert_eq!(
         loaded.entities().get(target).unwrap().foot_speed,
@@ -246,7 +246,7 @@ fn attached_speed_parent_bullet_reaches_drive_and_validated_snapshot() {
         .set_attached_speed(NativeF64Bits::ONE);
     assert!(
         loaded
-            .validate_attached_speed_after_restore(&rules)
+            .validate_attached_stats_after_restore(&rules)
             .is_err(),
         "stale derived speed is rejected, not silently repaired"
     );

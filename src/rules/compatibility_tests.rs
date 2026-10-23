@@ -88,3 +88,36 @@ fn stock_rules_hash_records_the_compiled_capability() {
         rules.simulation_config_hash()
     );
 }
+
+/// Every capability combination round-trips on the wire and reports exactly the
+/// capabilities it was built from, so a build refuses any other combination
+/// while the features themselves stay mixable.
+#[test]
+fn all_capability_combinations_round_trip_and_describe_themselves() {
+    for ares in [false, true] {
+        for phobos in [false, true] {
+            for npatch in [false, true] {
+                let mode = RulesCompatibility::from_capabilities(ares, phobos, npatch);
+                assert_eq!(mode.has_ares(), ares);
+                assert_eq!(mode.has_phobos(), phobos);
+                assert_eq!(mode.has_npatch(), npatch);
+                let wire = serde_json::to_value(mode).unwrap();
+                let restored: RulesCompatibility = serde_json::from_value(wire).unwrap();
+                assert_eq!(restored, mode, "{mode:?} must survive the wire");
+            }
+        }
+    }
+    assert!(
+        RulesCompatibility::default().matches_build(),
+        "the compiled build matches its own mode"
+    );
+    let other = RulesCompatibility::from_capabilities(
+        !ARES_ENABLED,
+        !PHOBOS_ENABLED,
+        !crate::rules::NPATCH_ENABLED,
+    );
+    assert!(
+        !other.matches_build(),
+        "a different combination must be refused"
+    );
+}

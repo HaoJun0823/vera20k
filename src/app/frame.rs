@@ -31,6 +31,61 @@ const MAIN_MENU_SHELL_PRELUDE: &[ShellFramePreludeStep] = &[
 pub(super) struct RuntimeServiceResult {
     pub(super) quit_requested: bool,
     pub(super) main_tick_admitted: bool,
+    /// Offset selected for this service's draw: normal Input result, the
+    /// paused render-before-Input snapshot, or the last presented freeze value.
+    pub(super) screen_shake_offset: Option<[i32; 2]>,
+}
+
+/// The composition's full-height battlefield/command-bar region. Native
+/// UpdatePrimarySurface @0x004F4780 copies the composite into primary pixels
+/// and keeps the sidebar surface fixed; it shifts the complete vertical span,
+/// including the command bar beneath the tactical viewport.
+fn shake_central_rect(state: &AppState, target: &wgpu::Texture) -> [u32; 4] {
+    let source_height = state.render_height();
+    let sidebar_frame = state.sidebar_frame();
+    let central_source_width = sidebar_frame.column().0;
+
+    if let Some(geometry) = state
+        .renderer
+        .upscale_pass
+        .as_ref()
+        .map(|pass| pass.geometry())
+    {
+        let (frame_width, frame_height) = geometry.frame_size();
+        let central_width = central_source_width
+            .saturating_mul(geometry.percent)
+            .saturating_div(100);
+        [
+            geometry.origin.0,
+            geometry.origin.1,
+            central_width.min(frame_width),
+            frame_height.min(target.height().saturating_sub(geometry.origin.1)),
+        ]
+    } else {
+        [
+            0,
+            0,
+            central_source_width.min(target.width()),
+            source_height.min(target.height()),
+        ]
+    }
+}
+
+fn apply_screen_shake(
+    state: &mut AppState,
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::Texture,
+    offset_px: [i32; 2],
+) {
+    let central_rect = shake_central_rect(state, target);
+    let device = &state.renderer.gpu.device;
+    state.renderer.screen_presentation.apply_offset_px(
+        device,
+        encoder,
+        target,
+        central_rect,
+        offset_px,
+    );
 }
 
 impl App {
@@ -46,6 +101,40 @@ impl App {
         simulation_allowed: bool,
     ) -> RuntimeServiceResult {
         let mut main_tick_admitted = false;
+        // GScreen Input reads the current native frame parity but does not
+        // advance it. Hidden background service still owns Input while the
+        // match runs; the focus-freeze sleep path and shell do not.
+        let network_wait_pending = state
+            .match_state
+            .sim_runtime
+            .as_ref()
+            .is_some_and(|rt| rt.simulation.pending_network_wait());
+        let in_game = state.frontend.screen == GameScreen::InGame;
+        // Wait_For_Players still enters GScreen Input at 0x006485B7 and
+        // 0x00649827; repeated services read the same binary-frame parity.
+        let input_is_active = in_game
+            && (!state.platform.focus_freeze_active()
+                || Self::house_outcome_wait_pending(state)
+                || network_wait_pending);
+        let input_frame = input_is_active.then(|| {
+            state
+                .match_state
+                .sim_runtime
+                .as_ref()
+                .map(|rt| rt.simulation.session().binary_frame())
+        });
+        let screen_shake_offset = if in_game {
+            let paused_render_path = state.match_state.match_presentation.in_game_menu.is_open();
+            Some(
+                state
+                    .match_state
+                    .match_presentation
+                    .screen_shake
+                    .service_offset_snapshot(input_frame.flatten(), paused_render_path),
+            )
+        } else {
+            None
+        };
         #[cfg(feature = "telemetry-dashboard")]
         crate::app::telemetry_capture::synchronize_observer(state);
         #[cfg(feature = "debug-tools")]
@@ -86,6 +175,7 @@ impl App {
             }
             return RuntimeServiceResult {
                 main_tick_admitted,
+                screen_shake_offset,
                 ..Default::default()
             };
         }
@@ -108,6 +198,7 @@ impl App {
             }
             return RuntimeServiceResult {
                 main_tick_admitted,
+                screen_shake_offset,
                 ..Default::default()
             };
         }
@@ -156,6 +247,7 @@ impl App {
                 return RuntimeServiceResult {
                     quit_requested: true,
                     main_tick_admitted,
+                    screen_shake_offset,
                 };
             }
         }
@@ -221,6 +313,7 @@ impl App {
                 Self::return_to_main_menu(state);
                 return RuntimeServiceResult {
                     main_tick_admitted,
+                    screen_shake_offset,
                     ..Default::default()
                 };
             }
@@ -231,6 +324,7 @@ impl App {
             {
                 return RuntimeServiceResult {
                     main_tick_admitted,
+                    screen_shake_offset,
                     ..Default::default()
                 };
             }
@@ -247,6 +341,7 @@ impl App {
         RuntimeServiceResult {
             quit_requested: false,
             main_tick_admitted,
+            screen_shake_offset,
         }
     }
 
@@ -833,6 +928,14 @@ impl App {
             &mut encoder,
             &output.texture,
         );
+        if state.frontend.screen == GameScreen::InGame
+            && let Some(offset_px) = runtime_pass.screen_shake_offset
+        {
+            // Native RenderFrame_main finishes composing overlays and its
+            // software cursor before Screen__UpdatePrimarySurface moves the
+            // central primary-client rectangle.
+            apply_screen_shake(state, &mut encoder, &output.texture, offset_px);
+        }
         Self::show_os_cursor_only_without_game_cursor(state, game_render_output.is_some());
 
         let entry_sequence_identity = match shell_capture.as_deref_mut() {
@@ -882,6 +985,7 @@ impl App {
         };
         let retail_screenshot_current_frame =
             std::mem::take(&mut state.match_state.input.retail_screenshot_requested);
+        let screenshot_central_rect = shake_central_rect(state, &output.texture);
         let pending_retail_screenshot = state
             .renderer
             .retail_screenshot_frame_cache
@@ -893,6 +997,8 @@ impl App {
                 state.renderer.gpu.config.width,
                 state.renderer.gpu.config.height,
                 state.renderer.upscale_pass.as_ref(),
+                &mut state.renderer.screen_presentation,
+                screenshot_central_rect,
             )?;
         let capture_timeout = if capture_current_frame {
             Some(if shell_capture_current_frame {
@@ -922,7 +1028,20 @@ impl App {
         state
             .renderer
             .retail_screenshot_frame_cache
-            .commit_presented();
+            .commit_presented(if state.frontend.screen == GameScreen::InGame {
+                runtime_pass.screen_shake_offset.unwrap_or([0, 0])
+            } else {
+                [0, 0]
+            });
+        state
+            .match_state
+            .match_presentation
+            .screen_shake
+            .record_presented(if state.frontend.screen == GameScreen::InGame {
+                runtime_pass.screen_shake_offset.unwrap_or([0, 0])
+            } else {
+                [0, 0]
+            });
         // A family renderer that drew a timer-driven 0x71C frame this pass
         // advances it now that the frame reached the screen.
         state.frontend.shell_monitor.commit_presented();

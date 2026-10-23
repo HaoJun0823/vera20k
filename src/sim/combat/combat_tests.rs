@@ -7269,7 +7269,7 @@ fn a_buildings_death_weapon_detonates_at_its_foundation_centre() {
     derrick.set_type_ref_for_test(sim.interner.intern("DERRICK"));
     derrick
         .type_facts
-        .set_foundation_for_test("3x3".to_string());
+        .set_foundation_for_test("3x3".to_string().into());
     derrick.set_is_voxel_for_test(false);
     derrick.health.set_for_test(100);
     sim.substrate.entities.insert(derrick);
@@ -8096,6 +8096,39 @@ fn irradiate_bound(
             rad_level,
             spread,
             rad_type: rad_type.map(str::to_owned),
+            firing_house: None,
+            invoker: None,
+        },
+        0,
+        sim.session.theater(),
+        rules,
+        sim.resolved_terrain.as_ref(),
+        &mut sim.lighting_sources,
+    );
+}
+
+/// [`irradiate_bound`] with Phobos `RadHasOwner`/`RadHasInvoker` attribution:
+/// the detonation names a firing house and an invoker object.
+#[cfg(feature = "phobos")]
+fn irradiate_attributed(
+    sim: &mut crate::sim::world::Simulation,
+    rules: &RuleSet,
+    (rx, ry): (u16, u16),
+    rad_level: i32,
+    spread: i32,
+    rad_type: Option<&str>,
+    firing_house: Option<crate::sim::intern::InternedId>,
+    invoker: Option<u64>,
+) {
+    sim.radiation.apply_detonation(
+        crate::sim::radiation::RadDetonation {
+            rx,
+            ry,
+            rad_level,
+            spread,
+            rad_type: rad_type.map(str::to_owned),
+            firing_house,
+            invoker,
         },
         0,
         sim.session.theater(),
@@ -8545,6 +8578,8 @@ fn phobos_radiation_rules() -> RuleSet {
 [InfantryTypes]\n0=DESO\n1=E2\n\n\
 [DESO]\nStrength=200\nArmor=plate\nSpeed=4\nPrimary=RadBeamWeapon\nSecondary=RadEruptionWeapon\nDeployer=yes\nDeployFire=yes\nImmuneToRadiation=yes\n\n\
 [E2]\nStrength=300\nArmor=none\nSpeed=4\n\n\
+[VehicleTypes]\n0=MTNK\n\n\
+[MTNK]\nStrength=300\nArmor=heavy\nSpeed=6\n\n\
 [RadEruptionWeapon]\nDamage=1\nROF=60\nRange=4\nAreaFire=yes\nWarhead=RadEruptionWarhead\nRadLevel=500\nRadType=ToxicField\nReport=DesolatorDeploy\n\n\
 [RadEruptionWarhead]\nVerses=100%,100%,100%,20%,10%,10%,0%,0%,0%,100%,100%\nInfDeath=7\nRadiation=yes\nCellSpread=10\n\n\
 [BuildingTypes]\n0=GAPOWR\n1=RADBLDG\n2=IRONBLDG\n\n\
@@ -8552,12 +8587,15 @@ fn phobos_radiation_rules() -> RuleSet {
 [RADBLDG]\nStrength=750\nArmor=none\n\n\
 [IRONBLDG]\nStrength=750\nArmor=none\nImmuneToRadiation=yes\n\n\
 [Radiation]\nRadDurationMultiple=1\nRadApplicationDelay=16\nRadApplicationDelay.Building=16\nRadLevelMax=500\nRadLevelDelay=90\nRadLevelFactor=.2\nRadSiteWarhead=RadSite\n\n\
-[Warheads]\n0=RadSite\n1=RadSiteToxic\n\n\
-[RadiationTypes]\n0=ToxicField\n1=OtherField\n2=VioletField\n3=DemoPurple\n\n\
+[Warheads]\n0=RadSite\n1=RadSiteToxic\n2=RadSiteBlast\n\n\
+[RadiationTypes]\n0=ToxicField\n1=OtherField\n2=VioletField\n3=DemoPurple\n4=OwnerRad\n5=BlastRad\n\n\
 [ToxicField]\nRadLevelFactor=1.0\nRadLevelMax=250\nRadSiteWarhead=RadSiteToxic\n\n\
 [OtherField]\nRadLevelFactor=0.1\n\n\
 [VioletField]\nRadColor=255,0,255\nRadLightFactor=1.0\nRadTintFactor=1.0\n\n\
 [DemoPurple]\nRadColor=255,0,255\nRadLightFactor=0.6\nRadTintFactor=2.0\nRadDurationMultiple=6\nRadLevelMax=400\n\n\
+[OwnerRad]\nRadLevelFactor=1.0\nRadLevelMax=250\nRadHasOwner=yes\nRadHasInvoker=yes\n\n\
+[BlastRad]\nRadLevelFactor=1.0\nRadLevelMax=250\nRadSiteWarhead=RadSiteBlast\nRadSiteWarhead.Detonate=yes\nRadSiteWarhead.Detonate.Full=no\n\n\
+[RadSiteBlast]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\nCellSpread=3\n\n\
 [RadSiteToxic]\nVerses=100%,100%,100%,50%,10%,10%,0%,0%,0%,100%,100%\nInfDeath=7\nRadiation=yes\n",
     );
     RuleSet::from_ini(&ini).expect("phobos radiation rules should parse")
@@ -9133,7 +9171,9 @@ fn projectile_shrapnel_count_measures_to_the_firers_get_coords() {
     let mut source = make_entity_owned(1, "HQ", 2, 4, 100, "Soviet");
     source.set_category_for_test(EntityCategory::Structure);
     // Construction stamps the type's `Foundation=3x3`.
-    source.type_facts.set_foundation_for_test("3x3".to_string());
+    source
+        .type_facts
+        .set_foundation_for_test("3x3".to_string().into());
     source.lifecycle.set_cell_marked_for_test(true);
     entities.insert(source);
     // The target stands in the bullet's cell, which SpawnShrapnel requires.
@@ -9194,7 +9234,9 @@ fn projectile_shrapnel_aims_at_a_building_foundation_center() {
     let mut target = make_entity_owned(2, "HQ", 6, 4, 100, "Americans");
     target.set_category_for_test(EntityCategory::Structure);
     // Construction stamps the type's `Foundation=2x2`.
-    target.type_facts.set_foundation_for_test("2x2".to_string());
+    target
+        .type_facts
+        .set_foundation_for_test("2x2".to_string().into());
     target.lifecycle.set_cell_marked_for_test(true);
     entities.insert(target);
     let mut occupancy = OccupancyGrid::rebuild(&entities);
@@ -9413,7 +9455,8 @@ fn projectile_shrapnel_needs_a_non_building_first_object_in_the_bullets_cell() {
     building.insert(firer());
     let mut hq = make_entity_owned(2, "HQ", 5, 5, 100, "Americans");
     hq.set_category_for_test(EntityCategory::Structure);
-    hq.type_facts.set_foundation_for_test("1x1".to_string());
+    hq.type_facts
+        .set_foundation_for_test("1x1".to_string().into());
     building.insert(hq);
     assert!(shrapnel_at_cell_5_5(&rules, building, 1).0.is_empty());
 
@@ -9546,9 +9589,14 @@ fn projectile_shrapnel_is_admitted_by_a_tree_heading_the_bullets_cell() {
         vec![make_entity_owned(1, "MTNK", 2, 2, 100, "Soviet")],
     );
     assert!(commit_shrapnel_at_5_5(&mut sim, &rules).is_empty());
-    sim.terrain_objects
-        .cell_index_mut_for_test()
-        .insert((5, 5), 900);
+    // The cell walker follows represented Terrain instances, not dangling
+    // head IDs. This fixture isolates admission rather than map construction.
+    let tree_type = sim.interner.intern("TREE01");
+    sim.terrain_objects.insert_constructed(
+        crate::sim::terrain_object::TerrainObjectState::for_test(900, tree_type, 5, 5),
+        false,
+        true,
+    );
     assert_eq!(commit_shrapnel_at_5_5(&mut sim, &rules).len(), 1);
 }
 
@@ -11018,7 +11066,7 @@ fn a_dying_buildings_debris_leaves_from_its_centre() {
     // Construction stamps the type's `Foundation=3x3`.
     building
         .type_facts
-        .set_foundation_for_test("3x3".to_string());
+        .set_foundation_for_test("3x3".to_string().into());
     let location = (
         8 * 256 + building.position.sub_x().to_num::<i32>(),
         5 * 256 + building.position.sub_y().to_num::<i32>(),
@@ -11525,6 +11573,69 @@ fn retail_snow_theater_substitutes_red_and_blue() {
     );
 }
 
+/// Phobos `RadHasOwner`/`RadHasInvoker`: the site keeps the round's house and
+/// firer, and its damage call carries them.
+#[cfg(feature = "phobos")]
+#[test]
+fn phobos_rad_has_owner_and_invoker_reach_the_site_and_its_damage() {
+    let rules = phobos_radiation_rules();
+    let mut sim = radiation_scene(&rules);
+    let victim = sim
+        .spawn_object("MTNK", "Americans", 5, 5, 0, &rules)
+        .expect("victim spawns");
+    let shooter = sim
+        .spawn_object("E2", "Americans", 8, 8, 0, &rules)
+        .expect("shooter spawns");
+    let owner = sim.interner.get("Americans").expect("owner interned");
+    irradiate_attributed(
+        &mut sim,
+        &rules,
+        (5, 5),
+        500,
+        2,
+        Some("OwnerRad"),
+        Some(owner),
+        Some(shooter),
+    );
+    let (kept_house, kept_invoker) = {
+        let site = sim.radiation.site_at((5, 5)).expect("site");
+        (site.firing_house(), site.invoker())
+    };
+    assert_eq!(kept_house, Some(owner), "RadHasOwner keeps the house");
+    assert_eq!(kept_invoker, Some(shooter), "RadHasInvoker keeps the firer");
+    rad_frame(&mut sim, &rules, 16);
+    let after = sim
+        .substrate
+        .entities
+        .get(victim)
+        .map_or(0, |entity| entity.health.current());
+    assert!(
+        after < 300,
+        "the attributed damage reaches the victim (health {after})"
+    );
+
+    // A type without the flags keeps neither, even though the detonation
+    // named them.
+    let mut plain = radiation_scene(&rules);
+    plain
+        .spawn_object("E2", "Americans", 10, 10, 0, &rules)
+        .expect("plain scene interns its house");
+    let plain_owner = plain.interner.get("Americans").expect("owner interned");
+    irradiate_attributed(
+        &mut plain,
+        &rules,
+        (5, 5),
+        500,
+        2,
+        Some("ToxicField"),
+        Some(plain_owner),
+        Some(shooter),
+    );
+    let site = plain.radiation.site_at((5, 5)).expect("site");
+    assert_eq!(site.firing_house(), None, "the flag decides retention");
+    assert_eq!(site.invoker(), None);
+}
+
 /// Phobos `BuildingClass_AI_Radiation @ 0x43FB23`: a building takes its
 /// foundation's radiation on `RadApplicationDelay.Building` boundaries, and
 /// each type clamps its level at `RadLevelMax` and scales it by its own
@@ -11603,5 +11714,55 @@ fn phobos_building_radiation_respects_the_delay_key_immunity_and_verses() {
         sim.substrate.entities.get(wood).unwrap().health.current(),
         750,
         "the type's warhead verses wood at 0%"
+    );
+}
+
+/// Phobos `RadSiteWarhead.Detonate`: with the key set, a site's damage is a
+/// warhead detonation at the target, so the warhead's `CellSpread` reaches
+/// neighbours the field itself never covered. The direct-receiver form stays
+/// on the target alone.
+#[cfg(feature = "phobos")]
+#[test]
+fn phobos_rad_site_warhead_detonate_splashes_around_the_target() {
+    let rules = phobos_radiation_rules();
+    let mut sim = radiation_scene(&rules);
+    let near = sim
+        .spawn_object("E2", "Americans", 5, 5, 0, &rules)
+        .expect("near victim spawns");
+    let far = sim
+        .spawn_object("E2", "Americans", 8, 5, 0, &rules)
+        .expect("far victim spawns");
+    // spread 0 covers only the centre cell, so the far cell starts clean.
+    irradiate_bound(&mut sim, &rules, (5, 5), 500, 0, Some("BlastRad"));
+    assert_eq!(
+        sim.radiation.cell_level((8, 5)),
+        0.0,
+        "no field on the far cell"
+    );
+    rad_frame(&mut sim, &rules, 16);
+    assert!(
+        sim.substrate.entities.get(near).unwrap().health.current() < 300,
+        "the target takes the detonation"
+    );
+    assert!(
+        sim.substrate.entities.get(far).unwrap().health.current() < 300,
+        "the warhead's CellSpread reaches the neighbour"
+    );
+
+    // Control: the same field without the key hits only the target.
+    let mut plain = radiation_scene(&rules);
+    let near = plain
+        .spawn_object("E2", "Americans", 5, 5, 0, &rules)
+        .expect("near victim spawns");
+    let far = plain
+        .spawn_object("E2", "Americans", 8, 5, 0, &rules)
+        .expect("far victim spawns");
+    irradiate_bound(&mut plain, &rules, (5, 5), 500, 0, Some("ToxicField"));
+    rad_frame(&mut plain, &rules, 16);
+    assert!(plain.substrate.entities.get(near).unwrap().health.current() < 300);
+    assert_eq!(
+        plain.substrate.entities.get(far).unwrap().health.current(),
+        300,
+        "the direct receiver leaves the neighbour alone"
     );
 }

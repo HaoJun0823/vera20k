@@ -574,6 +574,15 @@ impl IniSection {
         Some(strtrim_ascii(truncate_native_bytes(raw, payload)))
     }
 
+    /// `ObjectTypeClass::ReadINI @ 0x005F92D0` reads AlphaImage into its
+    /// 25-byte field with the current text as default; missing/empty reads
+    /// retain it, while literals such as `NONE` remain ordinary names.
+    pub(crate) fn read_object_alpha_image(&self, current: &str) -> String {
+        self.read_string_with("AlphaImage", 0x19, current.to_owned(), |_, value| {
+            value.to_owned()
+        })
+    }
+
     /// Ares 3.0 PCXFile reader100762C0: ReadString through the shared 2048-byte
     /// buffer, then copy31 bytes into char[32] and lowercase. An absent/empty
     /// read retains the previous filename (the projected read_name policy).
@@ -694,9 +703,23 @@ impl IniSection {
         capacity: usize,
         current: [i32; N],
     ) -> [i32; N] {
-        self.read_string_with(key, capacity, current, |mut out, value| {
+        self.read_int_fields_present(key, capacity, current)
+            .unwrap_or(current)
+    }
+
+    /// The same partial decimal scan, retaining ReadString's presence result.
+    /// Ares custom-foundation lists terminate on a missing/empty string, not
+    /// on a failed numeric conversion (which still contributes zeroes).
+    pub fn read_int_fields_present<const N: usize>(
+        &self,
+        key: &str,
+        capacity: usize,
+        current: [i32; N],
+    ) -> Option<[i32; N]> {
+        self.read_string_with(key, capacity, None, |retained, value| {
+            let mut out = retained.unwrap_or(current);
             scan_int_fields(value, &mut out);
-            out
+            Some(out)
         })
     }
 
@@ -862,20 +885,35 @@ impl IniSection {
         mut scan_locals: Option<&mut [i32; 3]>,
     ) -> [u8; 3] {
         self.fold_rules_values(key, default, |current, raw| {
-            let value = strtrim_ascii(truncate_native_bytes(raw, 63));
-            if value.is_empty() {
-                return current;
-            }
-            let retained = scan_locals.is_some();
-            let mut fresh = [0; 3];
-            let out = scan_locals.as_deref_mut().unwrap_or(&mut fresh);
-            let assigned = scan_int_fields(value, out);
-            if retained || assigned == out.len() {
-                out.map(|component| component as u8)
-            } else {
-                current
-            }
+            Self::read_color_rgb_raw(raw, current, scan_locals.as_deref_mut())
         })
+    }
+
+    /// One native ReadColorRGB @0x00474B50 input with the caller's current
+    /// color as its default. TerrainTypeClass defers this read until its
+    /// Image's SHP frame-0 header color has been bound.
+    pub(crate) fn read_color_rgb_value(raw: &str, default: [u8; 3]) -> [u8; 3] {
+        Self::read_color_rgb_raw(raw, default, None)
+    }
+
+    fn read_color_rgb_raw(
+        raw: &str,
+        current: [u8; 3],
+        mut scan_locals: Option<&mut [i32; 3]>,
+    ) -> [u8; 3] {
+        let value = strtrim_ascii(truncate_native_bytes(raw, 63));
+        if value.is_empty() {
+            return current;
+        }
+        let retained = scan_locals.is_some();
+        let mut fresh = [0; 3];
+        let out = scan_locals.as_deref_mut().unwrap_or(&mut fresh);
+        let assigned = scan_int_fields(value, out);
+        if retained || assigned == out.len() {
+            out.map(|component| component as u8)
+        } else {
+            current
+        }
     }
 
     /// ReadSpeed (P19): `read_int(-1)` sentinel; -1 -> default; else clamp 0..100,

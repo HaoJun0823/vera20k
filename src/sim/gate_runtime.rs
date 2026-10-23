@@ -112,7 +112,11 @@ pub(crate) fn request_gate_open_for_cell(
 
 ///44E3A0: GetFoundation(false), then main Ground lists. Any pointer other
 ///than the Gate obstructs; bridge-layer occupants and Health are not queried.
-fn footprint_has_other_object(sim: &Simulation, id: u64, foundation: &str) -> bool {
+fn footprint_has_other_object(
+    sim: &Simulation,
+    id: u64,
+    foundation: &crate::rules::foundation::Foundation,
+) -> bool {
     let Some(gate) = sim.substrate.entities.get(id) else {
         return false;
     };

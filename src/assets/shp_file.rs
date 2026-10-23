@@ -128,6 +128,24 @@ impl ShpFile {
         Ok(frame_count)
     }
 
+    /// `SHPStruct::GetColor @ 0x0069E860` returns the frame header's raw RGB
+    /// bytes without translating through a palette. An invalid frame index
+    /// returns `(0,0,0)`, matching its initialized default result.
+    pub fn frame_radar_color_from_bytes(data: &[u8], index: usize) -> Result<[u8; 3], AssetError> {
+        let frame_count = Self::frame_count_from_bytes(data)?;
+        if index >= usize::from(frame_count) {
+            return Ok([0; 3]);
+        }
+        let color_offset = 8 + index * 24 + 12;
+        let color =
+            data.get(color_offset..color_offset + 3)
+                .ok_or_else(|| AssetError::ParseError {
+                    format: "SHP".to_string(),
+                    detail: format!("Frame {index} header has no radar-color bytes"),
+                })?;
+        Ok([color[0], color[1], color[2]])
+    }
+
     /// Parse an SHP file from raw bytes.
     ///
     /// Reads the file header, all frame headers, then decodes each frame's

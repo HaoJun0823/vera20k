@@ -44,6 +44,10 @@ fn main() -> Result<()> {
         "Phobos support compiled in: {}",
         vera20k::rules::PHOBOS_ENABLED
     );
+    log::info!(
+        "NPatch support compiled in: {} (placeholder)",
+        vera20k::rules::NPATCH_ENABLED
+    );
     if let Some(path) = &log_path {
         log::info!("Log file: {}", path.display());
     }

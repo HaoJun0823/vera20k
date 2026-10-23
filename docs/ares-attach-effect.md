@@ -1,7 +1,7 @@
 # Ares builtin warhead AttachEffect
 
 The `ares` feature enables ordinary ground-victim AttachEffect lifetime and
-its ordered Foot speed multiplier. Without the feature there is no attachment vector, update,
+its ordered Foot speed and Techno firepower multipliers. Without the feature there is no attachment vector, update,
 damage pre-effect or animation root in the game. Ares snapshots include the new
 state in the automatic snapshot layout digest; old layouts are rejected.
 
@@ -49,7 +49,7 @@ existing Anim UnInit/expiry/sound/deferred-deletion owner.
 
 ## Attached speed
 
-`GameEntity::recompute_ares_attached_speed` owns the speed arm of native
+`GameEntity::recompute_ares_attached_stats` owns the speed arm of native
 `100460A0`. It reads that same ordered instance vector. `FootSpeedState` keeps
 the permanent crate baseline (Ares TechnoExt+90) separate from the derived
 Foot+580 output; only its methods write those private fields. The derived
@@ -99,6 +99,45 @@ not native movement-distance goldens. The parent Airburst detonation reaches
 the shared pre-effect before its later child fan. The unimplemented Airburst
 fan remains a separate projectile residual; this chain does not fabricate it.
 
+## Attached firepower
+
+The same `100460A0` owner now folds FirepowerMultiplier from the permanent
+firepower-crate baseline (Ext+80). Every ordered entry spills binary64 at
+`10046180`; this differs from the Foot speed accumulator's retained x87 stack.
+`CrateMultipliers` privately owns that baseline and the committed Techno+160
+output. The picker and duplicate-recipient check read the baseline, while the
+existing FireAt and EstimateDamage queries read the effective output. House
+and FIREPOWER rank multipliers remain in their existing downstream order.
+There is no second per-shot/target-scan multiplier or effect list.
+
+The accepted crate recipient recomputes immediately before its callback and
+the next recipient, as `1005F997..1005F99D` does. Ares Firepower1 bypasses the
+stock Is_Armed exclusion after its baseline test; the default build keeps that
+exclusion. Refresh, pointer expiry, visibility and destruction retain the
+existing no-aggregate boundaries. Expiry and actual Discard removal recompute
+once through the same owner used by speed.
+
+[Two native histories](../tools/rules_oracle/ares_attach_firepower.json), their
+[producer](../tools/rules_oracle/ares_attach_firepower.py) and
+[metadata](../tools/rules_oracle/ares_attach_firepower.meta.json) cover the
+nonidentity reader, crate before/during an effect, duplicate rejection,
+refresh, expiry, ordered cumulative factors, Discard, House/rank stages and
+negative-damage bypass. The native FireAt damage fragment and full estimator
+read the same actor+160 written by the native aggregate; no expected factor is
+injected. Native coverage excludes whole FireAt, Bullet/health commit and the
+scan scheduler. The separate Rust production integration follows a real parent
+Bullet through the effect, next shot/HP, shared scan debit and recovery.
+Both named firepower tests passed in the integrated R25 Ares-enabled run.
+That batch exited 101 on seven unrelated fixture checks; feature-OFF validation
+and optimized production acceptance remain pending.
+
+Ares saves retain the private optional derived firepower value and validate it
+against the permanent baseline plus canonical ordered entries before restore.
+The automatic layout digest changes for Ares only. The default build's state,
+serde fields and hash stream remain unchanged; effective and baseline values
+that differ add an Ares-only hash record. Pending-delete actors retain native
+DTOR's no-recompute behavior.
+
 ## Evidence and limits
 
 [Native controls](../tools/rules_oracle/ares_attach_effect.json) and their
@@ -113,7 +152,7 @@ RNG, rendering, constructor and Detach cascades are not native-emulated here;
 Rust integration exercises the production owners separately. No whole-mod or
 pixel-parity claim follows from these controls.
 
-The current chain admits only identity firepower/armor/ROF multipliers,
+The current chain admits only identity armor/ROF multipliers,
 with Cloakable, ForceDecloak and TemporalHidesAnim disabled. Other nonneutral aggregate
 consumers, self-effects/Delay/InitialDelay, Temporal hide behavior and airborne
 half-distance collection remain later mechanisms, not silently visual-only

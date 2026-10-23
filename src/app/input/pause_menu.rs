@@ -67,7 +67,7 @@ fn select_template(state: &AppState) -> PauseMenuTemplate {
         .as_ref()
         .is_some_and(|runtime| runtime.simulation.local_player_defeated());
     PauseMenuTemplate::select(
-        matches!(mode, SessionMode::Campaign | SessionMode::Skirmish),
+        mode.is_single_player(),
         mode == SessionMode::Wol,
         local_defeated,
     )

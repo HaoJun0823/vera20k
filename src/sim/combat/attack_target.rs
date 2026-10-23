@@ -295,7 +295,7 @@ pub(crate) fn object_distance_to(
         && let Some(building) = world.substrate.entities.get(id)
         && building.category() == EntityCategory::Structure
     {
-        let (width, height) = foundation_dimensions(building.type_facts.foundation());
+        let (width, height) = building.type_facts.foundation().dimensions();
         // Height query45ECA0 receives false: Bib never adds to this discount.
         return Some(
             distance

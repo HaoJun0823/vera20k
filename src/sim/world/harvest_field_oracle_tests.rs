@@ -100,8 +100,7 @@ fn rules_for_with(
             extra_tiberium.push(name);
         }
     }
-    // The native lexical reader selects the first section with this name;
-    // extend its list rather than creating a second OverlayTypes section.
+    // Extend the list rather than creating a second OverlayTypes section.
     let list_end = overlays.find("\n[").unwrap();
     overlays.insert_str(list_end + 1, &extra_entries);
     text.push_str(&overlays);
@@ -114,6 +113,7 @@ fn rules_for_with(
             land.section_name()
         ));
     }
+    let text = first_sections_only(&text);
     // Scenes share a few rules and ART texts; each is parsed once.
     let key = ("harvest scene rules", text.clone(), art.content_hash());
     let (rules, ini) = crate::test_fixture::once_per_process(key, || {
@@ -163,6 +163,29 @@ pub(super) fn row_scene(input: &Value) -> Scene {
 }
 
 /// [`row_scene`] on rules whose text `edit` extends (more types).
+/// `text` with only the first section of each name. The scenes were checked
+/// against native runs with each name's first section in force; `IniFile`
+/// resolves a repeated name through gamemd's CRC lookup (#2732), which can
+/// pick a later one, such as the later land sections a scene's edit precedes.
+fn first_sections_only(text: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut keep = true;
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        if let Some(name) = line
+            .trim()
+            .strip_prefix('[')
+            .and_then(|l| l.strip_suffix(']'))
+        {
+            keep = seen.insert(name.to_owned());
+        }
+        if keep {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 pub(super) fn row_scene_with(input: &Value, edit: impl FnOnce(&mut String, &mut IniFile)) -> Scene {
     let mut input = input.clone();
     if input.get("linked").is_none() {

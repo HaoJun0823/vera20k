@@ -3721,7 +3721,15 @@ mod tests {
             .get_mut(2)
             .unwrap()
             .type_facts
-            .set_foundation_for_test(retail.rules.object("NATBNK").unwrap().foundation.clone());
+            .set_foundation_for_test(
+                retail
+                    .rules
+                    .object("NATBNK")
+                    .unwrap()
+                    .foundation
+                    .clone()
+                    .into(),
+            );
         // The install's arrival test reads its cell's building list
         // (`0x0047C520`), so the bunker stands on its retail foundation.
         for (rx, ry) in

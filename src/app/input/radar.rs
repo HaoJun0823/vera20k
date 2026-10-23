@@ -110,6 +110,7 @@ impl RadarAction {
             | Kind::Minimap(_)
             | Kind::RepairMode(_)
             | Kind::SellMode(_)
+            | Kind::PlaceBeacon
             | Kind::SuperWeaponTarget(_) => return None,
         })
     }

@@ -655,6 +655,7 @@ mod tests {
                 progress: 1.0,
                 is_ready: true,
                 is_online: online,
+                should_flash_tab: false,
                 can_fire: online,
                 can_afford: affordable,
             }];

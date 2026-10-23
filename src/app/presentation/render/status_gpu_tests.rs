@@ -693,7 +693,7 @@ fn native_building_status_labels(fixture: &'static str) {
                 let name = actor["type_name"].as_str().unwrap();
                 let object = rules.object(name).unwrap();
                 assert_eq!(
-                    crate::rules::foundation::foundation_dimensions(&object.foundation).0,
+                    object.foundation.dimensions().0,
                     row["native_foundation_width"].as_u64().unwrap() as u16
                 );
                 let type_ref = sim.intern(name);
@@ -720,7 +720,7 @@ fn native_building_status_labels(fixture: &'static str) {
                 );
                 entity
                     .type_facts
-                    .set_foundation_for_test(object.foundation.clone());
+                    .set_foundation_for_test(object.foundation.clone().into());
                 entity.position.put_location(DriveCoord {
                     x: xyz[0],
                     y: xyz[1],
@@ -1124,7 +1124,7 @@ fn native_status_controls(fixture: &'static str, type_name: &str, category: Enti
                 );
                 entity
                     .type_facts
-                    .set_foundation_for_test(object.foundation.clone());
+                    .set_foundation_for_test(object.foundation.clone().into());
                 entity.position.put_location(DriveCoord {
                     x: xyz[0],
                     y: xyz[1],

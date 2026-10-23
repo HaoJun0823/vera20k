@@ -22,9 +22,13 @@
 //! User-requested YR parity exception: preserve this expanded gameplay playlist
 //! during future parity work unless the user explicitly asks to change it.
 
+use std::ops::Range;
+
 use crate::assets::asset_manager::AssetManager;
 use crate::assets::aud_file;
-use crate::audio::sfx::decode_wav;
+use crate::assets::mix_archive::SharedBytes;
+use crate::assets::wav_file::{WavFile, WavPcmCursor};
+use crate::audio::sfx::upmix_i16_to_f32_stereo;
 use crate::rules::ini_parser::{IniFile, IniSection};
 use crate::util::native_x87::X87Chop53;
 
@@ -145,12 +149,122 @@ pub(crate) struct ThemeGates {
     pub(crate) startup_suppressed: bool,
 }
 
-/// Device-independent PCM payload ready for optional physical submission.
-#[derive(Debug)]
+/// A song ready for optional physical submission, pulled as interleaved
+/// stereo samples.
+///
+/// gamemd-derived: `ThemeClass::Play_Song @ 0x00720BB0` hands the file to
+/// `StreamPlayer__PlayFile @ 0x00407B60`, which streams it through the one
+/// block decoder `IMA_ADPCM__DecodeBlock @ 0x0040AA70` rather than decoding it
+/// whole. Preparation reads the WAV header and decodes the first piece, whose
+/// failure is the whole decode's empty result; the rest decodes as the output
+/// pulls, on the device thread. The VERA-only AUD fallback arrives whole.
 pub(crate) struct PreparedTrack {
     pub(crate) stem: String,
-    pub(crate) samples: Vec<f32>,
     pub(crate) sample_rate: u32,
+    /// Decoded samples; those from `pulled` on are still to play.
+    pcm: Vec<f32>,
+    pulled: usize,
+    /// The WAV payload left to decode; `None` once decoded through, or for
+    /// a track decoded whole.
+    stream: Option<WavStream>,
+}
+
+/// A WAV song's payload, read from a share of its archive storage so neither
+/// thread copies it.
+struct WavStream {
+    file: SharedBytes,
+    payload: Range<usize>,
+    channels: u16,
+    cursor: WavPcmCursor,
+    piece: Vec<i16>,
+}
+
+impl PreparedTrack {
+    /// A track decoded whole up front.
+    pub(crate) fn decoded(stem: String, samples: Vec<f32>, sample_rate: u32) -> Self {
+        Self {
+            stem,
+            sample_rate,
+            pcm: samples,
+            pulled: 0,
+            stream: None,
+        }
+    }
+
+    /// A WAV song decoding as it is pulled; `None` wherever the whole-file
+    /// `decode_wav` fails or yields no samples, or the rate is zero.
+    pub(super) fn streamed(stem: &str, file: &SharedBytes) -> Option<Self> {
+        let wav = WavFile::parse(file)?;
+        let cursor = WavPcmCursor::new(&wav)?;
+        if wav.sample_rate == 0 {
+            return None;
+        }
+        let mut track = Self {
+            stem: stem.to_string(),
+            sample_rate: wav.sample_rate,
+            pcm: Vec::new(),
+            pulled: 0,
+            stream: Some(WavStream {
+                payload: wav.data_range(),
+                channels: wav.channels,
+                file: file.clone(),
+                cursor,
+                piece: Vec::new(),
+            }),
+        };
+        track.decode_next();
+        if track.exhausted() {
+            return None;
+        }
+        file.read_ahead();
+        Some(track)
+    }
+
+    /// Every sample has been pulled.
+    pub(crate) fn exhausted(&self) -> bool {
+        self.pulled >= self.pcm.len()
+    }
+
+    /// Replace the pulled samples with the next decoded piece, leaving the
+    /// track exhausted when the payload has none.
+    fn decode_next(&mut self) {
+        let Some(stream) = self.stream.as_mut() else {
+            return;
+        };
+        self.pcm.clear();
+        self.pulled = 0;
+        stream.piece.clear();
+        let payload = &stream.file[stream.payload.clone()];
+        if stream.cursor.decode_next(payload, &mut stream.piece) {
+            upmix_i16_to_f32_stereo(&mut self.pcm, &stream.piece, stream.channels);
+        } else {
+            self.stream = None;
+        }
+    }
+}
+
+impl Iterator for PreparedTrack {
+    type Item = f32;
+
+    /// Decodes the next piece as soon as the last decoded sample is pulled,
+    /// so [`PreparedTrack::exhausted`] holds only at the true end.
+    fn next(&mut self) -> Option<f32> {
+        let sample = *self.pcm.get(self.pulled)?;
+        self.pulled += 1;
+        if self.exhausted() {
+            self.decode_next();
+        }
+        Some(sample)
+    }
+}
+
+impl std::fmt::Debug for PreparedTrack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedTrack")
+            .field("stem", &self.stem)
+            .field("sample_rate", &self.sample_rate)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -464,6 +578,38 @@ impl ThemeRuntime {
         self.play_song(index, gates, physical, &mut prepare)
     }
 
+    /// ReadTheme4758F0's name/default tail after the production ReadString128.
+    /// A nonempty unknown name becomes-1; only missing/empty keeps the default.
+    fn read_theme_name(&self, name: Option<&str>, default: i32) -> i32 {
+        name.filter(|name| !name.is_empty())
+            .map_or(default, |name| self.from_name(name))
+    }
+
+    /// Installed Ares1002FB80/1002FC20: ordered Side then Country, or one
+    /// campaign Basic name. Exactly-2 retains retail LOADING; unknown-1 must
+    /// reach the same Play_Song owner. Native: rules_oracle/ares_loading_themes.
+    #[cfg(feature = "ares")]
+    pub(crate) fn play_ares_loading_theme<'a>(
+        &mut self,
+        names: impl IntoIterator<Item = Option<&'a str>>,
+        assets: &AssetManager,
+        gates: ThemeGates,
+        physical: MusicOutputState,
+        wall_ms: u64,
+    ) -> ThemeAction {
+        self.initialize_catalog(assets);
+        let selected = names
+            .into_iter()
+            .fold(THEME_AUTO, |prior, name| self.read_theme_name(name, prior));
+        let selected = if selected == THEME_AUTO {
+            self.from_name("LOADING")
+        } else {
+            selected
+        };
+        let mut prepare = |stem: &str| prepare_track(stem, assets);
+        self.play_song(selected, gates, physical, wall_ms, &mut prepare)
+    }
+
     /// `Main__PrepareSession @ 0x0052D9A0`: `Play(From_Name("INTRO"))`.
     pub(crate) fn play_menu_theme(
         &mut self,
@@ -486,9 +632,7 @@ impl ThemeRuntime {
         physical: MusicOutputState,
     ) -> ThemeAction {
         self.initialize_catalog(assets);
-        let index = requested_section
-            .map(str::trim)
-            .map_or(THEME_NONE, |section| self.from_name(section));
+        let index = self.read_theme_name(requested_section.map(str::trim), THEME_NONE);
         let admitted = self.admitted(gates);
         let action = if index == THEME_NONE {
             self.stop(gates, true, physical)
@@ -846,52 +990,32 @@ impl ThemeRuntime {
     }
 }
 
-/// Load and decode a track before optional physical submission.
+/// Resolve a track for optional physical submission; a WAV song decodes only
+/// its first piece here (see [`PreparedTrack`]).
 fn prepare_track(track_name: &str, assets: &AssetManager) -> Option<PreparedTrack> {
     for filename in [format!("{track_name}.wav"), format!("{track_name}.aud")] {
-        let Some(data) = assets.get_ref(&filename) else {
+        let Some(file) = assets.get_shared(&filename) else {
             continue;
         };
 
-        if data.len() >= 44
-            && &data[0..4] == b"RIFF"
-            && let Some(decoded) = decode_wav(data, &filename)
-            && decoded.sample_rate != 0
-            && !decoded.samples.is_empty()
-        {
-            return Some(PreparedTrack {
-                stem: track_name.to_string(),
-                samples: decoded.samples,
-                sample_rate: decoded.sample_rate,
-            });
+        if let Some(track) = PreparedTrack::streamed(track_name, &file) {
+            return Some(track);
         }
 
-        let Some((header, samples)) = aud_file::decode_aud(data) else {
+        let Some((header, samples)) = aud_file::decode_aud(&file) else {
             continue;
         };
         if samples.is_empty() || header.sample_rate == 0 {
             log::warn!("Track {track_name} decoded to 0 samples");
             return None;
         }
-        let stereo = if header.is_stereo() {
-            samples
-                .iter()
-                .map(|&sample| sample as f32 / 32768.0)
-                .collect()
-        } else {
-            samples
-                .iter()
-                .flat_map(|&sample| {
-                    let value = sample as f32 / 32768.0;
-                    [value, value]
-                })
-                .collect()
-        };
-        return Some(PreparedTrack {
-            stem: track_name.to_string(),
-            samples: stereo,
-            sample_rate: u32::from(header.sample_rate),
-        });
+        let mut stereo = Vec::new();
+        upmix_i16_to_f32_stereo(&mut stereo, &samples, header.channels());
+        return Some(PreparedTrack::decoded(
+            track_name.to_string(),
+            stereo,
+            u32::from(header.sample_rate),
+        ));
     }
     log::warn!("Music track not found: resolved='{track_name}'");
     None
@@ -1013,11 +1137,11 @@ mod tests {
     }
 
     fn prepared(stem: &str) -> Option<PreparedTrack> {
-        Some(PreparedTrack {
-            stem: stem.to_string(),
-            samples: vec![0.0, 0.0],
-            sample_rate: 22_050,
-        })
+        Some(PreparedTrack::decoded(
+            stem.to_string(),
+            vec![0.0, 0.0],
+            22_050,
+        ))
     }
 
     fn no_draw(_low: i32, _high: i32) -> i32 {
@@ -1220,6 +1344,57 @@ mod tests {
         std::fs::remove_dir_all(dir).expect("remove theme test assets");
     }
 
+    /// `StreamPlayer__PlayFile @ 0x00407B60` streams: preparing a song decodes
+    /// only its first piece, and pulling it yields exactly the whole-file
+    /// decode across block boundaries, the flushed short tail, the stereo
+    /// interleave and upmixed PCM runs, ending only after the last sample.
+    #[test]
+    fn a_prepared_song_decodes_one_piece_and_streams_the_whole_decode() {
+        let dir = std::env::temp_dir().join(format!("vera20k-theme-stream-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("test asset dir");
+        let wav = |tag: u16, channels: u16, block_align: u16, bits: u16, data: &[u8]| {
+            let mut file = b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0".to_vec();
+            file.extend(tag.to_le_bytes());
+            file.extend(channels.to_le_bytes());
+            file.extend(22_050u32.to_le_bytes());
+            file.extend(0u32.to_le_bytes());
+            file.extend(block_align.to_le_bytes());
+            file.extend(bits.to_le_bytes());
+            file.extend(b"data");
+            file.extend((data.len() as u32).to_le_bytes());
+            file.extend(data);
+            file
+        };
+        // Stereo IMA: three 24-byte blocks (a valid preamble pair, then two
+        // 8-byte L/R groups: 17 frames) and a 12-byte tail flushed as a block.
+        let mut ima = Vec::new();
+        for block in 0..3u8 {
+            ima.extend([0x00, 0x10 * (block + 1), 10, 0, 0x00, 0xF0, 20, 0]);
+            ima.extend((0..16u8).map(|i| block.wrapping_mul(37).wrapping_add(i * 11)));
+        }
+        ima.extend([0x34, 0x12, 30, 0, 0xCD, 0xAB, 40, 0, 0x5A, 0xA5, 0x3C, 0xC3]);
+        // Mono 16-bit PCM past one 4096-byte run, with an odd trailing byte.
+        let pcm: Vec<u8> = (0..5_001u32).map(|i| (i * 7) as u8).collect();
+        for (name, file, first_piece, total) in [
+            ("Ima", wav(0x11, 2, 24, 4, &ima), 34, 4 * 34),
+            ("Pcm", wav(1, 1, 2, 16, &pcm), 2 * 2048, 2 * 2500),
+        ] {
+            std::fs::write(dir.join(format!("{name}.wav")), &file).expect("write wav");
+            let assets = AssetManager::from_loose_root_for_test(&dir);
+            let mut track = prepare_track(name, &assets).expect("song prepares");
+            assert_eq!(track.pcm.len(), first_piece, "{name} decodes one piece");
+            let whole = crate::audio::sfx::decode_wav(&file, name).unwrap().samples;
+            assert_eq!(whole.len(), total);
+            for (index, &want) in whole.iter().enumerate() {
+                assert!(!track.exhausted(), "{name} ended early at {index}");
+                assert_eq!(track.next(), Some(want), "{name} sample {index}");
+            }
+            assert!(track.exhausted());
+            assert_eq!(track.next(), None);
+        }
+        std::fs::remove_dir_all(dir).expect("remove theme test assets");
+    }
+
     #[test]
     #[ignore = "slow; run when changing what it covers"]
     fn retail_ra2_music_reaches_catalog_and_shared_decoder() {
@@ -1306,7 +1481,9 @@ mod tests {
             );
             let prepared = prepare_track(&entry.sound, &assets).expect("RA2 music decodes");
             assert_eq!(prepared.sample_rate, 22_050);
-            assert!(!prepared.samples.is_empty());
+            let file = assets.get_ref(&format!("{}.wav", entry.sound)).unwrap();
+            let whole = crate::audio::sfx::decode_wav(file, key).unwrap().samples;
+            assert!(prepared.eq(whole), "{key} streams its whole decode");
         }
         let intro = assets
             .resolve_ref("Drok.wav")

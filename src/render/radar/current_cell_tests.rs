@@ -551,10 +551,7 @@ fn retail_bridge_end_headers_reach_full_and_dirty_radar_sources() {
     };
     crate::map::theater::load_theater(&mut assets, "TEMPERATE")
         .expect("physical temperate theater");
-    let registry = crate::rules::overlay_types::OverlayTypeRegistry::from_ini(
-        &retail.processed_rules,
-        Some(&retail.fixed_art),
-    );
+    let registry = retail.rules.overlay_registry().clone();
     let names = std::collections::BTreeMap::from([(
         100,
         registry.name(100).expect("stock bridge end").to_string(),
@@ -562,10 +559,10 @@ fn retail_bridge_end_headers_reach_full_and_dirty_radar_sources() {
     let colors = crate::render::overlay_atlas::compute_overlay_radar_colors(
         &assets,
         &registry,
+        crate::render::overlay_atlas::OverlayRadarColorSource::Cell,
         &names,
         "tem",
         "TEMPERATE",
-        &retail.processed_rules,
         retail.rules.art(),
     );
     let (grid, resolved) = fixture(None);

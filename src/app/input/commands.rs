@@ -447,10 +447,7 @@ pub(crate) fn place_ready_building_at_cell(
             rules.object(type_id).map(|object| {
                 // LeftUp4ABA16 adds the same type-derived offset as preview,
                 // using this fresh clicked Cell rather than the last draw.
-                let origin = crate::rules::foundation::placement_origin_at_cursor(
-                    &object.foundation,
-                    cursor_cell,
-                );
+                let origin = object.foundation.placement_origin_at_cursor(cursor_cell);
                 let in_build_area = crate::sim::production::is_within_build_area(
                     sim, rules, &owner, object, origin.0, origin.1,
                 );

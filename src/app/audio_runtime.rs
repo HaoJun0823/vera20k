@@ -374,6 +374,22 @@ impl AppAudioRuntime {
         logical_started
     }
 
+    /// Ares loading hook inputs use the existing Theme catalog/stream owner.
+    #[cfg(feature = "ares")]
+    pub(crate) fn play_ares_loading_theme<'a>(
+        &mut self,
+        names: impl IntoIterator<Item = Option<&'a str>>,
+        assets: &AssetManager,
+        wall_ms: u64,
+    ) {
+        let gates = self.theme_gates();
+        let physical = self.music_output_state();
+        let action = self
+            .theme
+            .play_ares_loading_theme(names, assets, gates, physical, wall_ms);
+        self.apply_theme_action(action);
+    }
+
     /// Start_Scenario tail after shared `bind_match_theme_context`: `Stop(1)` /
     /// `Queue_Song([Basic] Theme)`. Later AI borrows the installed Main stream.
     pub(crate) fn request_scenario_theme(
@@ -833,14 +849,12 @@ mod tests {
     /// stream fade, whatever the score volume, until the ended ramp stops it.
     #[test]
     fn the_quit_fade_lasts_the_theme_ramp_at_a_low_score_volume() {
-        let Some(mut music) = MusicPlayer::new() else {
-            return;
-        };
-        assert!(music.submit(PreparedTrack {
-            stem: "Silence".into(),
-            samples: vec![0.0; 22_050 * 2 * 10],
-            sample_rate: 22_050,
-        }));
+        let (mut music, _output) = MusicPlayer::offline_for_test();
+        assert!(music.submit(PreparedTrack::decoded(
+            "Silence".into(),
+            vec![0.0; 22_050 * 2 * 10],
+            22_050,
+        )));
         let root = std::env::temp_dir().join(format!("vera20k-quit-fade-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
@@ -891,10 +905,11 @@ mod tests {
     /// call `0x004083D0` inside their hold-flag branch).
     #[test]
     fn movie_hold_halves_both_masters_and_only_a_taken_hold_restores_streams() {
+        let (music, _output) = MusicPlayer::offline_for_test();
         let mut runtime = AppAudioRuntime {
             theme: ThemeRuntime::default(),
             service_clock: AudioServiceClock::default(),
-            music_player: MusicPlayer::new(),
+            music_player: Some(music),
             sfx_player: None,
             launcher_audio_available: false,
             theme_startup_suppressed: false,
@@ -904,22 +919,23 @@ mod tests {
             runtime
                 .music_player
                 .as_ref()
-                .map(MusicPlayer::stream_volume_target)
+                .expect("offline music output")
+                .stream_volume_target()
         };
         runtime.prepare_movie_streams(0);
         assert!(runtime.movie_streams_ready(), "no stream is playing");
         runtime.retire_movie_audio(50);
-        assert!(stream_target(&runtime).is_none_or(|target| target == 0));
+        assert_eq!(stream_target(&runtime), 0);
         runtime.set_movie_audio_held(true, 100);
         let groups = &runtime.master_groups;
         assert_eq!(groups.sound_master.target_value(), 0x2000);
         assert_eq!(groups.eva_master.target_value(), 0x2000);
-        assert!(stream_target(&runtime).is_none_or(|target| target == 0));
+        assert_eq!(stream_target(&runtime), 0);
         runtime.retire_movie_audio(300);
         let groups = &runtime.master_groups;
         assert_eq!(groups.sound_master.target_value(), 0x4000);
         assert_eq!(groups.eva_master.target_value(), 0x4000);
-        assert!(stream_target(&runtime).is_none_or(|target| target == 0x4000));
+        assert_eq!(stream_target(&runtime), 0x4000);
     }
 
     /// An in-game modal opened during a radar hold snaps the effects master to
@@ -963,11 +979,11 @@ mod tests {
         let action = ThemeAction {
             stop_output: true,
             fade_out: true,
-            start: Some(PreparedTrack {
-                stem: "Drok".into(),
-                samples: vec![0.0, 0.0],
-                sample_rate: 22_050,
-            }),
+            start: Some(PreparedTrack::decoded(
+                "Drok".into(),
+                vec![0.0, 0.0],
+                22_050,
+            )),
         };
         let mut output = FakeOutput {
             calls: Vec::new(),

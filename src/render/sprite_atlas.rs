@@ -53,20 +53,23 @@ fn register_effect_anim_frames(
     raw_count: u16,
     scheduler_owned: bool,
     shadow: bool,
+    palette_context: ShpPaletteContext,
 ) -> u16 {
     let count = available_effect_anim_frame_count(raw_count, scheduler_owned, shadow);
     // DrawIt selects the shadow from the physical second half of the SHP.
     // Residency includes that companion without extending animation timing.
     for frame in 0..raw_count {
         needed.insert(ShpSpriteKey {
-            palette_context: crate::render::sprite_atlas::ShpPaletteContext::Legacy,
+            palette_context,
             type_id: anim_type.to_string(),
             facing: 0,
             frame,
             house_color: HouseColorIndex(0),
         });
     }
-    frame_counts.insert(anim_type.to_ascii_uppercase(), count);
+    if palette_context != ShpPaletteContext::Particle {
+        frame_counts.insert(anim_type.to_ascii_uppercase(), count);
+    }
     count
 }
 
@@ -76,19 +79,18 @@ fn effect_anim_shp_candidates(
     theater_ext: &str,
     theater_name: &str,
 ) -> Vec<String> {
-    if art
-        .and_then(|registry| registry.anim_runtime_config(anim_type))
-        .is_some_and(|config| !config.art_body_read)
-    {
-        // AnimType::ReadINI @ 0x00427D22 exits before the image loader for an
-        // unread type. An orphan SHP must not create an atlas entry for it.
-        return Vec::new();
-    }
     let image_id = art.map_or_else(
         || anim_type.to_ascii_uppercase(),
         |registry| registry.resolve_anim_image_id(anim_type),
     );
-    art_data::anim_shp_candidates(art, anim_type, &image_id, theater_ext, theater_name)
+    art_data::effect_shp_candidates(
+        crate::rules::art_data::EffectImageKind::Animation,
+        art,
+        anim_type,
+        &image_id,
+        theater_ext,
+        theater_name,
+    )
 }
 
 /// First existing file among `candidates`, with its bytes.
@@ -108,6 +110,76 @@ fn buildup_shp_candidates(
         .and_then(|entry| entry.buildup.as_deref())
         .map(|buildup| art_data::building_shp_names(buildup, theater_name).to_vec())
         .unwrap_or_default()
+}
+
+/// Collect make-SHP frame requests for this atlas refresh. The BState-0 gate
+/// branch in `BuildingClass::GetCurrentFrame @0x0043EF90` selects the frame;
+/// `_MAKE` is the atlas key for the registered BuildingType's ART `Buildup=`.
+fn collect_building_make_asset_requests(
+    needed: &mut HashSet<ShpSpriteKey>,
+    make_frame_counts: &mut HashMap<String, u16>,
+    object_shp_frame_counts: &mut HashMap<String, u16>,
+    shp_files: &mut ShpFiles,
+    new_objects: &HashSet<(String, HouseColorIndex)>,
+    asset_manager: &AssetManager,
+    rules: Option<&RuleSet>,
+    art: &ArtRegistry,
+    theater_name: &str,
+) {
+    for (type_id, color) in new_objects {
+        // Only registered BuildingTypes have a `BuildingClass` make sequence;
+        // many real building IDs contain `_` (for example GAGATE_A).
+        if !rules
+            .and_then(|rules| rules.object(type_id))
+            .is_some_and(|object| {
+                object.category == crate::rules::object_type::ObjectCategory::Building
+            })
+        {
+            continue;
+        }
+        let make_key: String = format!("{}_MAKE", type_id);
+        let count = match make_frame_counts.get(&make_key) {
+            Some(&count) => count,
+            None => {
+                let candidates = buildup_shp_candidates(art, rules, type_id, theater_name);
+                let Some((file, data)) = find_shp(asset_manager, &candidates) else {
+                    continue;
+                };
+                let Ok(raw_count) = ShpFile::frame_count_from_bytes(data) else {
+                    continue;
+                };
+                // RA2 make SHPs have shadow frames in the second half — only use the first half.
+                let count = if raw_count / 2 > 0 {
+                    raw_count / 2
+                } else {
+                    raw_count
+                };
+                log::debug!("Make SHP for {type_id}: {count} frames from {file}");
+                shp_files.insert(
+                    (ShpImageKind::Object, make_key.to_ascii_uppercase()),
+                    file.to_string(),
+                );
+                object_shp_frame_counts.insert(make_key.to_ascii_uppercase(), raw_count);
+                make_frame_counts.insert(make_key.clone(), count);
+                count
+            }
+        };
+        // The shadow half too: DrawSHP's shadow arm (`0x00705E00`) draws
+        // frame + count/2 of the Buildup like any body image.
+        let raw_count = object_shp_frame_counts
+            .get(&make_key.to_ascii_uppercase())
+            .copied()
+            .unwrap_or(count);
+        for frame in 0..raw_count {
+            needed.insert(ShpSpriteKey {
+                palette_context: ShpPaletteContext::Legacy,
+                type_id: make_key.clone(),
+                facing: 0,
+                frame,
+                house_color: *color,
+            });
+        }
+    }
 }
 
 fn find_shp<'a, 'n>(
@@ -132,7 +204,8 @@ fn scan_building_anim_frame_count(
     theater_name: &str,
 ) -> Option<(u16, u16, String)> {
     let anim_image: String = art_reg.resolve_anim_image_id(anim_type);
-    let candidates: Vec<String> = art_data::anim_shp_candidates(
+    let candidates: Vec<String> = art_data::effect_shp_candidates(
+        crate::rules::art_data::EffectImageKind::Animation,
         Some(art_reg),
         anim_type,
         &anim_image,
@@ -160,7 +233,7 @@ fn scan_building_anim_frame_count(
 fn register_building_anim(
     needed: &mut HashSet<ShpSpriteKey>,
     scanned: &mut HashMap<String, (u16, u16)>,
-    shp_files: &mut HashMap<String, String>,
+    shp_files: &mut ShpFiles,
     asset_manager: &AssetManager,
     art: &ArtRegistry,
     anim_type: &str,
@@ -182,7 +255,7 @@ fn register_building_anim(
     {
         log::debug!("Building anim {anim_type}: {count} frames from {file}");
         scanned.insert(upper.clone(), (count, raw_count));
-        shp_files.insert(upper.clone(), file);
+        shp_files.insert((ShpImageKind::Animation, upper.clone()), file);
     }
     let (count, raw_count) = scanned.get(&upper).copied().unwrap_or((1, 1));
     let config = art.anim_runtime_config(anim_type);
@@ -230,8 +303,18 @@ pub enum ShpPaletteContext {
     #[default]
     Legacy,
     GlobalAnim,
+    /// ParticleRead644F6D owns a different ObjectType shape from a same-named
+    /// AnimType. DrawIt62D015 selects the global ANIM Convert87F6C0.
+    Particle,
+    /// FoggedObject4D2176 selects the literal ANIM.PAL Convert without
+    /// AnimClass's AltPalette override or a producer-specific palette.
+    AnimPalette,
     SelectedScheme,
     Cell,
+    /// AnimClass's selected scheme and cell drawer retain AnimType image
+    /// identity independently of a same-named Techno's palette and Shape.
+    AnimScheme,
+    AnimCell,
     /// BulletClass::Draw 46838D: global PALETTE.PAL Convert87F6C4.
     BulletDefault,
     /// Bullet AnimPalette selects ANIM.PAL without AnimType AltPalette logic.
@@ -249,12 +332,32 @@ pub type AnimRemapKey = (String, ShpPaletteContext, HouseColorIndex);
 
 impl ShpPaletteContext {
     fn is_projectile(self) -> bool {
-        matches!(
-            self,
-            Self::BulletDefault | Self::BulletAnim | Self::BulletFirer
-        )
+        self.image_kind() == ShpImageKind::Projectile
+    }
+
+    fn image_kind(self) -> ShpImageKind {
+        match self {
+            Self::GlobalAnim
+            | Self::AnimPalette
+            | Self::AnimScheme
+            | Self::AnimCell
+            | Self::ExtraScheme(_) => ShpImageKind::Animation,
+            Self::Particle => ShpImageKind::Particle,
+            Self::BulletDefault | Self::BulletAnim | Self::BulletFirer => ShpImageKind::Projectile,
+            Self::Legacy | Self::SelectedScheme | Self::Cell => ShpImageKind::Object,
+        }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum ShpImageKind {
+    Object,
+    Animation,
+    Particle,
+    Projectile,
+}
+
+type ShpFiles = HashMap<(ShpImageKind, String), String>;
 
 /// BulletDraw46838D..468409 selects AnimPalette before FirersPalette. The
 /// latter requires the bullet's retained scheme, not its source's current house.
@@ -288,9 +391,29 @@ pub(crate) fn attached_anim_palette_context(
     config: Option<&art_data::AnimTypeRuntimeConfig>,
 ) -> ShpPaletteContext {
     if config.is_none_or(|c| c.should_use_cell_drawer) {
-        ShpPaletteContext::SelectedScheme
+        ShpPaletteContext::AnimScheme
     } else {
         ShpPaletteContext::GlobalAnim
+    }
+}
+
+/// Frozen DrawAll4D2176 keeps the captured owner's ordinary ColorScheme
+/// only for ShouldUseCellDrawer. The other arm ignores AltPalette.
+pub(crate) fn frozen_anim_palette_context(
+    config: Option<&art_data::AnimTypeRuntimeConfig>,
+) -> ShpPaletteContext {
+    if config.is_none_or(|config| config.should_use_cell_drawer) {
+        ShpPaletteContext::AnimScheme
+    } else {
+        ShpPaletteContext::AnimPalette
+    }
+}
+
+pub(crate) fn building_art_palette_context(art: &art_data::ArtEntry) -> ShpPaletteContext {
+    if art.terrain_palette {
+        ShpPaletteContext::Cell
+    } else {
+        ShpPaletteContext::SelectedScheme
     }
 }
 
@@ -493,7 +616,7 @@ pub struct SpriteAtlas {
     harvest_overlay_loaded: bool,
     /// The file each counted animation, make and parachute type's frames came
     /// from (upper-case type), so its frames render from that file.
-    shp_files: HashMap<String, String>,
+    shp_files: ShpFiles,
     /// ProjectileType image binding is separate from AnimType frame sources.
     projectile_files: HashMap<String, (String, u16)>,
     effects: EffectRegistry,
@@ -547,11 +670,6 @@ fn collect_effect_names(rules: &RuleSet) -> Vec<String> {
         if let Some(ref anim_name) = weapon.occupant_anim {
             push_effect_name(&mut effect_names, anim_name);
         }
-    }
-    // Particle SHPs: ParticleType.Image= goes through the ObjectTypeClass
-    // Image= path -> anim.pal palette. Register every distinct name.
-    for pt in rules.particle_types_iter() {
-        push_effect_name(&mut effect_names, &pt.image);
     }
     effect_names
 }
@@ -894,6 +1012,105 @@ pub fn collect_anim_remap_base_keys(
     anim_remap_base_keys(sim, house_colors).collect()
 }
 
+/// Immutable FoggedObject4D1890 inputs also survive the last live source.
+/// Their ordinary building/Anim palettes are separate atlas variants, with
+/// their exact recorded frames rather than a reconstructed live animation.
+pub(crate) fn collect_fogged_sprite_keys(
+    sim: &crate::sim::world::Simulation,
+    rules: &RuleSet,
+    house_colors: &HouseColorMap,
+) -> HashSet<ShpSpriteKey> {
+    use crate::sim::vision::FoggedDrawKind;
+    let mut keys = HashSet::new();
+    for frozen in sim
+        .fog()
+        .fogged_objects()
+        .values()
+        .filter_map(|record| record.drawing.as_ref())
+    {
+        let color = house_colors
+            .get(sim.interner().resolve(frozen.owner))
+            .copied()
+            .unwrap_or(crate::rules::house_colors::NO_REMAP);
+        for record in &frozen.records {
+            let Ok(frame) = u16::try_from(record.frame) else {
+                continue;
+            };
+            let name = sim.interner().resolve(record.type_ref);
+            let context = match record.kind {
+                FoggedDrawKind::Building => {
+                    let Some(object) = rules.object(name) else {
+                        continue;
+                    };
+                    let art = rules.art().resolve_metadata_entry(name, &object.image);
+                    let context = art.map_or(
+                        ShpPaletteContext::SelectedScheme,
+                        building_art_palette_context,
+                    );
+                    if let Some(bib) = art.and_then(|art| art.bib_shape.as_deref()) {
+                        keys.insert(ShpSpriteKey {
+                            palette_context: context,
+                            type_id: bib.to_ascii_uppercase(),
+                            facing: 0,
+                            frame,
+                            house_color: color,
+                        });
+                    }
+                    context
+                }
+                FoggedDrawKind::Animation => {
+                    frozen_anim_palette_context(rules.art().anim_runtime_config(name))
+                }
+            };
+            keys.insert(ShpSpriteKey {
+                palette_context: context,
+                type_id: name.to_string(),
+                facing: 0,
+                frame,
+                house_color: if context == ShpPaletteContext::AnimPalette {
+                    HouseColorIndex(0)
+                } else {
+                    color
+                },
+            });
+        }
+    }
+    keys
+}
+
+/// A recorded frame or palette can first appear without any object spawn.
+/// A source which could not supply that frame must not trigger rebuild loops.
+pub(crate) fn atlas_covers_sprite_keys(
+    atlas: Option<&SpriteAtlas>,
+    keys: &HashSet<ShpSpriteKey>,
+    rules: Option<&RuleSet>,
+) -> bool {
+    let Some(atlas) = atlas else {
+        return keys.is_empty();
+    };
+    let resolved =
+        |key: &ShpSpriteKey| atlas.entries.contains_key(key) || atlas.unrenderable.contains(key);
+    keys.iter().all(|key| {
+        resolved(key)
+            && (!rules
+                .and_then(|rules| rules.object(&key.type_id))
+                .is_some_and(|object| {
+                    object.category == crate::rules::object_type::ObjectCategory::Building
+                })
+                || atlas
+                    .object_shp_frame_count(&key.type_id)
+                    .and_then(|count| fogged_shadow_key(key, count))
+                    .is_none_or(|shadow| resolved(&shadow)))
+    })
+}
+
+fn fogged_shadow_key(body: &ShpSpriteKey, count: u16) -> Option<ShpSpriteKey> {
+    Some(ShpSpriteKey {
+        frame: body.frame.checked_add(count / 2)?,
+        ..body.clone()
+    })
+}
+
 /// Anim construction and producer palette assignment can occur without an
 /// entity spawn or ownership change. Check their coverage on committed ticks
 /// so those variants reach the ordinary AnimClass draw before its first frame.
@@ -946,7 +1163,7 @@ pub(crate) fn anim_remap_context(anim: &crate::sim::anim_class::AnimObject) -> S
         Some(crate::sim::anim_class::AnimRemap::ExtraBuildingScheme { palette, .. }) => {
             ShpPaletteContext::ExtraScheme(palette)
         }
-        _ => ShpPaletteContext::SelectedScheme,
+        _ => ShpPaletteContext::AnimScheme,
     }
 }
 
@@ -1042,9 +1259,13 @@ fn sprite_palette_for_key(
     match key.palette_context {
         ShpPaletteContext::BulletDefault => SpritePaletteChoice::Bullet,
         ShpPaletteContext::BulletAnim => SpritePaletteChoice::Anim,
+        ShpPaletteContext::AnimPalette => SpritePaletteChoice::Anim,
         ShpPaletteContext::BulletFirer => SpritePaletteChoice::Unit,
-        ShpPaletteContext::SelectedScheme => SpritePaletteChoice::Unit,
-        ShpPaletteContext::Cell => SpritePaletteChoice::CellIso,
+        ShpPaletteContext::SelectedScheme | ShpPaletteContext::AnimScheme => {
+            SpritePaletteChoice::Unit
+        }
+        ShpPaletteContext::Cell | ShpPaletteContext::AnimCell => SpritePaletteChoice::CellIso,
+        ShpPaletteContext::Particle => SpritePaletteChoice::Anim,
         ShpPaletteContext::GlobalAnim => {
             if art
                 .and_then(|a| a.anim_runtime_config(&key.type_id))
@@ -1270,7 +1491,7 @@ fn insert_new_object_keys<'a>(
     theater_name: &str,
     rules: Option<&RuleSet>,
     art: Option<&ArtRegistry>,
-) -> HashMap<String, Option<ShpSource<'a>>> {
+) -> HashMap<(ShpImageKind, String), Option<ShpSource<'a>>> {
     let categories: HashMap<&str, EntityCategory> = entities
         .values()
         .filter(|entity| !entity.is_voxel())
@@ -1309,6 +1530,7 @@ fn insert_new_object_keys<'a>(
                     theater_name,
                     rules,
                     art,
+                    ShpImageKind::Object,
                 );
                 let actions = rules
                     .and_then(|rules| rules.animation_sequence(type_str))
@@ -1323,7 +1545,7 @@ fn insert_new_object_keys<'a>(
                     }
                     _ => Vec::new(),
                 };
-                sources.insert(type_str.clone(), source);
+                sources.insert((ShpImageKind::Object, type_str.clone()), source);
                 frames
             });
             Some(frames.as_slice())
@@ -1346,17 +1568,20 @@ fn insert_new_object_keys<'a>(
             // Resolve the actual theater/rules-selected object source once and
             // retain it for rendering. Its physical frame count establishes
             // the embedded shadow half; Type.Image text alone does not.
-            let source = sources.entry(type_str.clone()).or_insert_with(|| {
-                load_shp_source(
-                    asset_manager,
-                    type_str,
-                    None,
-                    theater_ext,
-                    theater_name,
-                    rules,
-                    art,
-                )
-            });
+            let source = sources
+                .entry((ShpImageKind::Object, type_str.clone()))
+                .or_insert_with(|| {
+                    load_shp_source(
+                        asset_manager,
+                        type_str,
+                        None,
+                        theater_ext,
+                        theater_name,
+                        rules,
+                        art,
+                        ShpImageKind::Object,
+                    )
+                });
             if let Some(raw_count) = source
                 .as_ref()
                 .and_then(|source| u16::try_from(source.shp.frames.len()).ok())
@@ -1382,9 +1607,10 @@ fn insert_new_object_keys<'a>(
 }
 
 /// Groups keys by type, so each type's SHP is decoded whole once, in a stable order.
-fn sprite_key_order(key: &ShpSpriteKey) -> (&str, ShpPaletteContext, u8, u16, u8) {
+fn sprite_key_order(key: &ShpSpriteKey) -> (&str, ShpImageKind, ShpPaletteContext, u8, u16, u8) {
     (
         key.type_id.as_str(),
+        key.palette_context.image_kind(),
         key.palette_context,
         key.house_color.0,
         key.frame,
@@ -1400,24 +1626,11 @@ fn projectile_shp_candidates(
     theater_ext: &str,
     theater_name: &str,
 ) -> Vec<String> {
-    let Some(load) = &projectile.image_load else {
-        return Vec::new();
-    };
-    let theater = load.theater;
-    let upper = load.image.to_ascii_uppercase();
-    let [substituted, generic] = crate::rules::art_data::theater_shp_names(&upper, theater_name);
-    let first = if !theater && load.new_theater {
-        substituted
-    } else {
-        upper
-    };
-    let ext = if theater { theater_ext } else { "SHP" };
-    let mut candidates = vec![format!("{first}.{ext}")];
-    let fallback = format!("{generic}.{ext}");
-    if fallback != candidates[0] {
-        candidates.push(fallback);
-    }
-    candidates
+    projectile
+        .image_loads
+        .iter()
+        .flat_map(|load| load.shp_names(theater_ext, theater_name))
+        .collect()
 }
 
 /// Every frame of every drawable BulletType; a `FirersPalette=` type in each
@@ -1507,6 +1720,7 @@ pub fn build_sprite_atlas(
     extra_building_types: &[&str],
     anim_remap_keys: &HashSet<AnimRemapKey>,
     cell_drawer_type_ids: &HashSet<String>,
+    additional_keys: &HashSet<ShpSpriteKey>,
     cell_palette: Option<&Palette>,
     existing: Option<SpriteAtlas>,
     interner: Option<&crate::sim::intern::StringInterner>,
@@ -1565,13 +1779,57 @@ pub fn build_sprite_atlas(
         .as_ref()
         .map(|atlas| atlas.object_shp_frame_counts.clone())
         .unwrap_or_default();
-    for (type_id, source) in &object_sources {
+    for ((kind, type_id), source) in &object_sources {
         if let Some(source) = source
             && let Ok(frame_count) = u16::try_from(source.shp.frames.len())
         {
             let key = type_id.to_ascii_uppercase();
             object_shp_frame_counts.insert(key.clone(), frame_count);
-            shp_files.insert(key, source.found_name.clone());
+            shp_files.insert((*kind, key), source.found_name.clone());
+        }
+    }
+    // Frozen DrawAll4D1890 uses a saved body frame and the physical image's
+    // second half as its shadow, even when the live Building no longer exists.
+    // Reuse the decoded-source owner for both registration and rendering.
+    needed.extend(additional_keys.iter().cloned());
+    for key in additional_keys {
+        let source = object_sources
+            .entry((key.palette_context.image_kind(), key.type_id.clone()))
+            .or_insert_with(|| {
+                load_shp_source(
+                    asset_manager,
+                    &key.type_id,
+                    None,
+                    theater_ext,
+                    theater_name,
+                    rules,
+                    art,
+                    key.palette_context.image_kind(),
+                )
+            });
+        let Some(source) = source else { continue };
+        let Ok(count) = u16::try_from(source.shp.frames.len()) else {
+            continue;
+        };
+        if key.palette_context.image_kind() == ShpImageKind::Object {
+            object_shp_frame_counts.insert(key.type_id.to_ascii_uppercase(), count);
+        }
+        shp_files.insert(
+            (
+                key.palette_context.image_kind(),
+                key.type_id.to_ascii_uppercase(),
+            ),
+            source.found_name.clone(),
+        );
+        if key.palette_context.image_kind() == ShpImageKind::Object
+            && rules
+                .and_then(|rules| rules.object(&key.type_id))
+                .is_some_and(|object| {
+                    object.category == crate::rules::object_type::ObjectCategory::Building
+                })
+            && let Some(shadow) = fogged_shadow_key(key, count)
+        {
+            needed.insert(shadow);
         }
     }
     let mut projectile_files = previous_atlas
@@ -1638,17 +1896,40 @@ pub fn build_sprite_atlas(
             // BibShape: ground-level pad SHP (e.g., refinery dock GAREFNBB).
             // Use bib name directly as atlas key so render can look it up.
             if let Some(ref bib) = entry.bib_shape {
-                needed.insert(ShpSpriteKey {
-                    palette_context: if entry.terrain_palette {
-                        ShpPaletteContext::Cell
-                    } else {
-                        ShpPaletteContext::SelectedScheme
-                    },
-                    type_id: bib.to_uppercase(),
-                    facing: 0,
-                    frame: 0,
-                    house_color: *house_color,
-                });
+                let name = bib.to_ascii_uppercase();
+                let source = object_sources
+                    .entry((ShpImageKind::Object, name.clone()))
+                    .or_insert_with(|| {
+                        load_shp_source(
+                            asset_manager,
+                            &name,
+                            None,
+                            theater_ext,
+                            theater_name,
+                            rules,
+                            art,
+                            ShpImageKind::Object,
+                        )
+                    });
+                if let Some(source) = source {
+                    let Ok(count) = u16::try_from(source.shp.frames.len()) else {
+                        continue;
+                    };
+                    shp_files.insert(
+                        (ShpImageKind::Object, name.clone()),
+                        source.found_name.clone(),
+                    );
+                    object_shp_frame_counts.insert(name.clone(), count);
+                    for frame in 0..count {
+                        needed.insert(ShpSpriteKey {
+                            palette_context: building_art_palette_context(entry),
+                            type_id: name.clone(),
+                            facing: 0,
+                            frame,
+                            house_color: *house_color,
+                        });
+                    }
+                }
             }
         }
     }
@@ -1656,54 +1937,20 @@ pub fn build_sprite_atlas(
         active_anim_frame_counts.entry(anim_type).or_insert(count);
     }
 
-    // Step 1c: every frame of each building's make (build-up) SHP, a separate
-    // file (e.g., GTCNSTMK.SHP) showing the building assembling.
+    // Step 1c: every frame of each registered building's make (build-up) SHP,
+    // a separate file (e.g., GTCNSTMK.SHP) showing the building assembling.
     if let Some(art_reg) = art {
-        for (type_id, color) in &new_objects {
-            // Skip anim overlay types (they don't have make SHPs).
-            if type_id.contains('_') {
-                continue;
-            }
-            let make_key: String = format!("{}_MAKE", type_id);
-            let count = match make_frame_counts.get(&make_key) {
-                Some(&count) => count,
-                None => {
-                    let candidates = buildup_shp_candidates(art_reg, rules, type_id, theater_name);
-                    let Some((file, data)) = find_shp(asset_manager, &candidates) else {
-                        continue;
-                    };
-                    let Ok(raw_count) = ShpFile::frame_count_from_bytes(data) else {
-                        continue;
-                    };
-                    // RA2 make SHPs have shadow frames in the second half — only use the first half.
-                    let count = if raw_count / 2 > 0 {
-                        raw_count / 2
-                    } else {
-                        raw_count
-                    };
-                    log::debug!("Make SHP for {type_id}: {count} frames from {file}");
-                    shp_files.insert(make_key.to_ascii_uppercase(), file.to_string());
-                    object_shp_frame_counts.insert(make_key.to_ascii_uppercase(), raw_count);
-                    make_frame_counts.insert(make_key.clone(), count);
-                    count
-                }
-            };
-            // The shadow half too: DrawSHP's shadow arm (`0x00705E00`) draws
-            // frame + count/2 of the Buildup like any body image.
-            let raw_count = object_shp_frame_counts
-                .get(&make_key.to_ascii_uppercase())
-                .copied()
-                .unwrap_or(count);
-            for frame in 0..raw_count {
-                needed.insert(ShpSpriteKey {
-                    palette_context: ShpPaletteContext::Legacy,
-                    type_id: make_key.clone(),
-                    facing: 0,
-                    frame,
-                    house_color: *color,
-                });
-            }
-        }
+        collect_building_make_asset_requests(
+            &mut needed,
+            &mut make_frame_counts,
+            &mut object_shp_frame_counts,
+            &mut shp_files,
+            &new_objects,
+            asset_manager,
+            rules,
+            art_reg,
+            theater_name,
+        );
     }
 
     // Step 1c': a war factory's unload art (`ArtEntry::factory_door`), every
@@ -1740,7 +1987,7 @@ pub fn build_sprite_atlas(
                             continue;
                         };
                         object_shp_frame_counts.insert(upper.clone(), count);
-                        shp_files.insert(upper.clone(), file.to_string());
+                        shp_files.insert((ShpImageKind::Object, upper.clone()), file.to_string());
                         count
                     }
                 };
@@ -1763,26 +2010,61 @@ pub fn build_sprite_atlas(
     // palette), not unit.pal — tracked in the effect registry so step 2 can
     // pick the correct palette. Only the SHP header is read here.
     let mut registered_effects = EffectRegistry::default();
-    let effect_names = match previous_atlas {
-        None => rules.map(collect_effect_names).unwrap_or_default(),
+    let effect_names: Vec<(String, ShpImageKind)> = match previous_atlas {
+        None => rules
+            .map(|rules| {
+                let mut names: Vec<_> = collect_effect_names(rules)
+                    .into_iter()
+                    .map(|name| (name, ShpImageKind::Animation))
+                    .collect();
+                let particles: std::collections::BTreeSet<_> = rules
+                    .particle_types_iter()
+                    .map(|particle| particle.image.clone())
+                    .collect();
+                names.extend(
+                    particles
+                        .into_iter()
+                        .map(|name| (name, ShpImageKind::Particle)),
+                );
+                names
+            })
+            .unwrap_or_default(),
         Some(_) => Vec::new(),
     };
-    for name in &effect_names {
+    for (name, kind) in &effect_names {
         // Use the same resolved Image= and Theater=/NewTheater= filename
         // authority as scheduler binding. Stock cell-drawer rows such as
         // WA01X and TUNTOP01 are theater SHPs (`.TEM` on Temperate maps).
-        let candidates = effect_anim_shp_candidates(name, art, theater_ext, theater_name);
-        let required_cell_drawer = cell_drawer_type_ids.contains(&name.to_ascii_uppercase());
+        let candidates = if *kind == ShpImageKind::Animation {
+            effect_anim_shp_candidates(name, art, theater_ext, theater_name)
+        } else {
+            let image = art.map_or_else(
+                || name.clone(),
+                |art| art.resolve_effective_image_id(name, name),
+            );
+            art_data::effect_shp_candidates(
+                art_data::EffectImageKind::Particle,
+                art,
+                name,
+                &image,
+                theater_ext,
+                theater_name,
+            )
+        };
+        let required_cell_drawer = *kind == ShpImageKind::Animation
+            && cell_drawer_type_ids.contains(&name.to_ascii_uppercase());
         match find_shp(asset_manager, &candidates) {
             Some((file, data)) => match ShpFile::frame_count_from_bytes(data) {
                 Ok(raw_count) => {
                     let name_upper = name.to_ascii_uppercase();
-                    let scheduler_owned = art.is_some_and(|registry| {
-                        registry.scheduler_anim_types().contains(&name_upper)
-                    });
-                    let shadow = art
-                        .and_then(|registry| registry.anim_runtime_config(name))
-                        .is_some_and(|config| config.shadow);
+                    let scheduler_owned = *kind == ShpImageKind::Animation
+                        && art.is_some_and(|registry| {
+                            registry.scheduler_anim_types().contains(&name_upper)
+                        });
+                    let shadow = *kind == ShpImageKind::Animation
+                        && art
+                            .and_then(|registry| registry.anim_runtime_config(name))
+                            .is_some_and(|config| config.shadow);
                     // Keep body timing separate from shadow-frame residency.
                     let count = register_effect_anim_frames(
                         &mut needed,
@@ -1791,12 +2073,19 @@ pub fn build_sprite_atlas(
                         raw_count,
                         scheduler_owned,
                         shadow,
+                        if *kind == ShpImageKind::Animation {
+                            ShpPaletteContext::GlobalAnim
+                        } else {
+                            ShpPaletteContext::Particle
+                        },
                     );
-                    registered_effects
-                        .frames
-                        .insert(name_upper.clone(), (name.clone(), raw_count));
-                    registered_effects.type_ids.insert(name.clone());
-                    shp_files.insert(name_upper, file.to_string());
+                    if *kind == ShpImageKind::Animation {
+                        registered_effects
+                            .frames
+                            .insert(name_upper.clone(), (name.clone(), raw_count));
+                        registered_effects.type_ids.insert(name.clone());
+                    }
+                    shp_files.insert((*kind, name_upper), file.to_string());
                     log::debug!("Effect anim SHP {}: {} frames from {}", name, count, file);
                 }
                 Err(error) if required_cell_drawer => {
@@ -1842,7 +2131,10 @@ pub fn build_sprite_atlas(
                         });
                     }
                     active_anim_frame_counts.insert(shp_name.to_string(), frame_count);
-                    shp_files.insert(shp_name.to_ascii_uppercase(), file.to_string());
+                    shp_files.insert(
+                        (ShpImageKind::Animation, shp_name.to_ascii_uppercase()),
+                        file.to_string(),
+                    );
                     log::debug!(
                         "Parachute SHP {}: {} frames loaded (unit palette per AltPalette=yes)",
                         shp_name,
@@ -1877,7 +2169,10 @@ pub fn build_sprite_atlas(
                     frame: INFANTRY_AIR_SHADOW_FRAME,
                     house_color: HouseColorIndex(0),
                 });
-                shp_files.insert(INFANTRY_AIR_SHADOW_SHP.to_string(), file.to_string());
+                shp_files.insert(
+                    (ShpImageKind::Animation, INFANTRY_AIR_SHADOW_SHP.to_string()),
+                    file.to_string(),
+                );
             }
             _ => log::warn!("INFSHDW.SHP frame 1 missing: airborne infantry draw no shadow"),
         }
@@ -1890,15 +2185,14 @@ pub fn build_sprite_atlas(
 
     let mut contextual = Vec::new();
     for key in &needed {
-        if key.palette_context == ShpPaletteContext::Legacy
+        if key.palette_context == ShpPaletteContext::GlobalAnim
             && effects.type_ids.contains(&key.type_id)
         {
             let mut global = key.clone();
-            global.palette_context = ShpPaletteContext::GlobalAnim;
             global.house_color = HouseColorIndex(0);
             contextual.push(global.clone());
             if cell_drawer_type_ids.contains(&key.type_id.to_ascii_uppercase()) {
-                global.palette_context = ShpPaletteContext::Cell;
+                global.palette_context = ShpPaletteContext::AnimCell;
                 contextual.push(global);
             }
         }
@@ -2019,13 +2313,16 @@ pub fn build_sprite_atlas(
         );
     }
     if effect_palette.is_none()
-        && new_keys
-            .iter()
-            .any(|key| key.palette_context == ShpPaletteContext::BulletAnim)
+        && new_keys.iter().any(|key| {
+            matches!(
+                key.palette_context,
+                ShpPaletteContext::BulletAnim | ShpPaletteContext::AnimPalette
+            )
+        })
     {
         return abort_sprite_atlas_refresh(
             previous_atlas,
-            "AnimPalette projectiles require ANIM.PAL".to_string(),
+            "literal animation palettes require ANIM.PAL".to_string(),
         );
     }
 
@@ -2037,27 +2334,28 @@ pub fn build_sprite_atlas(
         .as_ref()
         .map(|atlas| atlas.palettes.clone())
         .unwrap_or_default();
-    let mut source: Option<(&str, bool, Option<ShpSource>)> = None;
+    let mut source: Option<(&str, ShpImageKind, Option<ShpSource>)> = None;
     for (key, palette_choice) in new_keys.iter().zip(palette_choices) {
         let projectile = key.palette_context.is_projectile();
-        if source.as_ref().is_none_or(|(type_id, was_projectile, _)| {
-            *type_id != key.type_id || *was_projectile != projectile
-        }) {
+        let kind = key.palette_context.image_kind();
+        if source
+            .as_ref()
+            .is_none_or(|(type_id, old_kind, _)| *type_id != key.type_id || *old_kind != kind)
+        {
             let file = if projectile {
                 projectile_files
                     .get(&key.type_id)
                     .map(|(file, _)| file.as_str())
             } else {
                 shp_files
-                    .get(&key.type_id.to_ascii_uppercase())
+                    .get(&(kind, key.type_id.to_ascii_uppercase()))
                     .map(String::as_str)
             };
             // Object key collection already decoded this exact source for
             // Infantry admission or Structure/Unit shadow-frame registration.
             // Reuse it instead of decoding the same file a second time.
-            let mut loaded = (!projectile)
-                .then(|| object_sources.remove(&key.type_id))
-                .flatten()
+            let mut loaded = object_sources
+                .remove(&(kind, key.type_id.clone()))
                 .unwrap_or_else(|| {
                     load_shp_source(
                         asset_manager,
@@ -2067,13 +2365,14 @@ pub fn build_sprite_atlas(
                         theater_name,
                         rules,
                         art,
+                        kind,
                     )
                 });
             if projectile && let Some(loaded) = &mut loaded {
                 // BulletDraw468090 has no AnimType/Techno XDrawOffset consumer.
                 loaded.draw_offsets = (0, 0);
             }
-            source = Some((&key.type_id, projectile, loaded));
+            source = Some((&key.type_id, kind, loaded));
         }
         let pal: &Palette = match palette_choice {
             SpritePaletteChoice::Anim => effect_palette.as_ref().unwrap_or(palette),
@@ -2231,7 +2530,8 @@ impl<'a> ShpSource<'a> {
 /// make and parachute SHPs), so frames come from the file they were counted
 /// in. Building bodies resolve through
 /// [`art_data::building_body_shp_candidates`]; other bodies keep the object
-/// naming path through rules/art `Image=`.
+/// load requests retained by the Rules/type-load owner. Explicit raw-image
+/// callers retain the legacy object naming path.
 fn load_shp_source<'a>(
     asset_manager: &'a AssetManager,
     type_id: &str,
@@ -2240,9 +2540,29 @@ fn load_shp_source<'a>(
     theater_name: &str,
     rules: Option<&RuleSet>,
     art: Option<&ArtRegistry>,
+    kind: ShpImageKind,
 ) -> Option<ShpSource<'a>> {
     let candidates: Vec<String> = match file {
         Some(file) => vec![file.to_string()],
+        None if kind == ShpImageKind::Animation => {
+            // AnimTypeLoad428855 and the reached theater postpass own this
+            // shape independently of a same-named Techno's Image.
+            effect_anim_shp_candidates(type_id, art, theater_ext, theater_name)
+        }
+        None if kind == ShpImageKind::Particle => {
+            let image = art.map_or_else(
+                || type_id.to_owned(),
+                |art| art.resolve_effective_image_id(type_id, type_id),
+            );
+            art_data::effect_shp_candidates(
+                art_data::EffectImageKind::Particle,
+                art,
+                type_id,
+                &image,
+                theater_ext,
+                theater_name,
+            )
+        }
         None => {
             // Check if this is a make (build-up) SHP — type_id ends with "_MAKE".
             let is_make: bool = type_id.ends_with("_MAKE");
@@ -2272,6 +2592,15 @@ fn load_shp_source<'a>(
                     theater_ext,
                     theater_name,
                 )
+            } else if let Some(object) = object {
+                // ObjectTypeLoadSHP5F9070 and TechnoRead715820 retain the
+                // reached request order; current Image or a fresh ART redirect
+                // cannot replace it or manufacture another fallback.
+                object
+                    .shp_image_loads()
+                    .iter()
+                    .flat_map(|load| load.shp_names(theater_ext, theater_name))
+                    .collect()
             } else {
                 art_data::object_shp_candidates(art, &image, theater_ext, theater_name)
             }
@@ -2293,7 +2622,17 @@ fn load_shp_source<'a>(
         );
     }
     log::trace!("Loaded SHP: {} ({} bytes)", found_name, shp_data.len());
-    let draw_offsets = art.map(|a| a.draw_offsets(type_id)).unwrap_or((0, 0));
+    let draw_offsets = if kind == ShpImageKind::Animation
+        && art
+            .and_then(|art| art.anim_runtime_config(type_id))
+            .is_some_and(|config| !config.art_body_read)
+    {
+        // AnimTypeLoad428855 does not read orphan ART offsets. Same-name
+        // Techno/Anim atlas identity collisions remain a separate key boundary.
+        (0, 0)
+    } else {
+        art.map(|a| a.draw_offsets(type_id)).unwrap_or((0, 0))
+    };
     let source = match ShpSource::decode(shp_data, found_name.to_string(), draw_offsets) {
         Ok(source) => source,
         Err(e) => {
@@ -2338,6 +2677,7 @@ fn render_shp_sprite<'a>(
         theater_name,
         rules,
         art,
+        key.palette_context.image_kind(),
     )?;
     let mut palettes = ShpPalettes::default();
     let sprite = render_shp_frame(&source, palette, house_remap, key, rules, &mut palettes)?;
@@ -2367,11 +2707,12 @@ fn render_shp_frame<'a>(
     // not establish native invalid-index shape access, which the frame
     // selection receipts stop before. Other generic classes retain their
     // existing standing fallback.
-    let infantry = rules
-        .and_then(|rules| rules.object(&key.type_id))
-        .is_some_and(|object| {
-            object.category == crate::rules::object_type::ObjectCategory::Infantry
-        });
+    let infantry = key.palette_context.image_kind() == ShpImageKind::Object
+        && rules
+            .and_then(|rules| rules.object(&key.type_id))
+            .is_some_and(|object| {
+                object.category == crate::rules::object_type::ObjectCategory::Infantry
+            });
     if (key.palette_context.is_projectile() || infantry) && key.frame as usize >= shp.frames.len() {
         return None;
     }

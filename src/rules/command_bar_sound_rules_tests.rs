@@ -540,3 +540,17 @@ fn physical_command_bar_sounds_use_current_battle_rules_and_fixed_sound_catalog(
         );
     }
 }
+
+#[test]
+fn retail_battle_place_beacon_sound_binds_through_the_audio_visual_pass() {
+    let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+        return;
+    };
+    // Constructor6658E6 starts Rules+1CC at -1; AudioVisual669BA8 reads the
+    // physical RULESMD value and no later Battle/map pass overrides it.
+    assert_eq!(GeneralRules::default().place_beacon_sound, None);
+    assert_eq!(
+        retail.rules.general.place_beacon_sound.as_deref(),
+        Some("BeaconPlaced")
+    );
+}

@@ -1307,7 +1307,7 @@ mod tests {
             let building = sim.substrate.entities.get_mut(2).unwrap();
             building
                 .type_facts
-                .set_foundation_for_test(rules.object("NATBNK").unwrap().foundation.clone());
+                .set_foundation_for_test(rules.object("NATBNK").unwrap().foundation.clone().into());
             building
                 .position
                 .put_location(coord(&input["building_location"]));
@@ -1399,7 +1399,15 @@ mod tests {
             .get_mut(2)
             .unwrap()
             .type_facts
-            .set_foundation_for_test(retail.rules.object("NATBNK").unwrap().foundation.clone());
+            .set_foundation_for_test(
+                retail
+                    .rules
+                    .object("NATBNK")
+                    .unwrap()
+                    .foundation
+                    .clone()
+                    .into(),
+            );
         assert!(matches!(sim.reveal(1), RevealOutcome::Revealed { .. }));
         let building = sim.substrate.entities.get(2).unwrap();
         // Steam459164 calls Building447AC0 even when both raw cells match.

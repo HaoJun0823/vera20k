@@ -42,6 +42,195 @@ fn rng_states(sim: &Simulation) -> Value {
 }
 
 #[test]
+fn retail_no_dock_crash_springs_41_before_record_kill() {
+    use crate::sim::world::LifecycleTestEvent;
+
+    let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+        return;
+    };
+    let rules = retail.rules;
+    let object = rules.object("ORCA").unwrap();
+    assert!(object.airport_bound && !object.dock.is_empty());
+    let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 5);
+    sim.session
+        .set_game_mode(crate::sim::scenario_session::ScenarioGameMode::Skirmish);
+    let aircraft = sim
+        .spawn_object("ORCA", "Americans", 15, 15, 0, &rules)
+        .unwrap();
+    let owner = sim.entities().get(aircraft).unwrap().owner();
+    sim.houses
+        .get_mut(&owner)
+        .unwrap()
+        .set_country_for_test(Some(owner));
+    // Supplied airborne idle-entry boundary; the separate game replay uses
+    // ordinary Move from the ground to reach this no-dock caller naturally.
+    sim.set_object_height(
+        aircraft,
+        object.flight_level(rules.general.flight_level),
+        &rules,
+        None,
+        FrameEffects::default(),
+    );
+    assert_eq!(
+        sim.entities().get(aircraft).unwrap().health.current(),
+        object.strength
+    );
+    install_event_ingress_map(
+        &mut sim,
+        &rules,
+        "[Triggers]\nFIRST=Americans,DEATH,Crash,0,1,1,1,0\n\
+         DEATH=Americans,<none>,Kill,0,1,1,1,0\n\
+         [Tags]\nTAG=1,Crash,FIRST\n\
+         [Events]\nFIRST=1,41,0,0\nDEATH=1,29,0,0\n\
+         [Actions]\nFIRST=1,28,0,41,0,0,0,0,A\n\
+         DEATH=1,28,0,29,0,0,0,0,A\n",
+    );
+    assert_eq!(
+        resolve_trigger_house(&sim, Some("Americans"), &rules),
+        Some(owner)
+    );
+    sim.attach_object_trigger_tag(aircraft, Some("TAG"));
+    let tag = sim.trigger_runtime.attachments[&TagAttachment::Object(aircraft)];
+    sim.trigger_runtime.dispatch_trace.clear();
+    sim.clear_lifecycle_test_events_for_test();
+    sim.scenario_rng = SimRng::new(5);
+    let (_, draws) = crate::sim::rng::trace_draws(|| {
+        crate::sim::aircraft::enter_idle_mode_for(
+            &mut sim,
+            aircraft,
+            &rules,
+            None,
+            FrameEffects::default(),
+        );
+    });
+    // Crash4DEC0F raises41 before RecordKill4DEC51 can raise29. The sole
+    // Repeat1 attachment must detach on41, excluding the linked29 action.
+    assert!(sim.global_variables()[41]);
+    assert!(!sim.global_variables()[29]);
+    assert_eq!(sim.trigger_runtime.dispatch_trace, [(tag, 41)]);
+    assert!(!sim.object_has_trigger_tag(aircraft));
+    assert_eq!(sim.houses[&owner].stats().units_lost(), 1);
+    assert_eq!(sim.lifecycle_test_events_for_test().iter().filter(|event| {
+        matches!(event, LifecycleTestEvent::RecordKillBookkeeping { stable_id } if *stable_id == aircraft)
+    }).count(), 1);
+    let plane = sim.entities().get(aircraft).unwrap();
+    assert_eq!(plane.health.current(), 0);
+    assert!(plane.lifecycle.object_alive() && plane.crash.is_crashing());
+    assert_eq!(
+        draws.len(),
+        3,
+        "the seed5 spin boundary adds no Trigger RNG draws"
+    );
+}
+
+#[test]
+fn live_crash_with_attacker_keeps_both_41_visits() {
+    let (mut sim, rules, overlays, houses) = event_ingress_fixture();
+    let victim = spawn_event_ingress_unit(&mut sim, &rules, houses[0], (15, 15));
+    let attacker = spawn_event_ingress_unit(&mut sim, &rules, houses[1], (17, 15));
+    sim.set_object_height(
+        victim,
+        512,
+        &rules,
+        Some(&overlays),
+        FrameEffects::default(),
+    );
+    install_event_ingress_map(
+        &mut sim,
+        &rules,
+        "[Triggers]\nHIT=Country0,FIRST,Hit,0,1,1,1,0\n\
+         FIRST=Country0,<none>,First,0,1,1,1,0\n\
+         [Events]\nHIT=1,38,0,0\nFIRST=1,41,0,0\n\
+         [Actions]\nHIT=1,28,0,38,0,0,0,0,A\nFIRST=1,28,0,41,0,0,0,0,A\n\
+         [Tags]\nTAG=2,Crash,HIT\n",
+    );
+    sim.attach_object_trigger_tag(victim, Some("TAG"));
+    sim.trigger_runtime.dispatch_trace.clear();
+    assert!(sim.foot_crash(
+        victim,
+        Some(attacker),
+        &rules,
+        Some(&overlays),
+        FrameEffects::default(),
+    ));
+    // Crash4DEBEC/4DEC0F/4DEC36: the persistent Tag survives all three
+    // visits, including the second41 carrying the retained attacker.
+    assert_eq!(
+        sim.trigger_runtime
+            .dispatch_trace
+            .iter()
+            .take(3)
+            .map(|row| row.1)
+            .collect::<Vec<_>>(),
+        [38, 41, 41],
+    );
+    // ResetTimers726400 clears only13/51 completion bits. These discrete
+    // nodes remain latched and may spring again during later RecordKill visits.
+    assert!(sim.global_variables()[38] && sim.global_variables()[41]);
+    assert!(sim.object_has_trigger_tag(victim));
+}
+
+#[test]
+fn crash_stops_when_a_real_tag_action_uninits_before_or_during_record_kill() {
+    for kind in [41, 29] {
+        let (mut sim, rules, overlays, houses) = event_ingress_fixture();
+        let victim = spawn_event_ingress_unit(&mut sim, &rules, houses[0], (15, 15));
+        assert!(!rules.object("TAGUNIT").unwrap().crashable);
+        // Supplied shared-Foot boundary: C4 on this non-Crashable Unit
+        // reaches UnInit, rather than an Aircraft's nested dead-HP Crash.
+        sim.set_object_height(
+            victim,
+            512,
+            &rules,
+            Some(&overlays),
+            FrameEffects::default(),
+        );
+        install_event_ingress_map(
+            &mut sim,
+            &rules,
+            &format!(
+                "[Triggers]\nKILL=Country0,<none>,Kill,0,1,1,1,0\n\
+                 [Events]\nKILL=1,{kind},0,0\n\
+                 [Actions]\nKILL=1,32,0,0,0,0,0,0,A\n[Tags]\nTAG=2,Kill,KILL\n",
+            ),
+        );
+        sim.attach_object_trigger_tag(victim, Some("TAG"));
+        let (accepted, draws) = crate::sim::rng::trace_draws(|| {
+            sim.foot_crash(
+                victim,
+                None,
+                &rules,
+                Some(&overlays),
+                FrameEffects::default(),
+            )
+        });
+        assert!(
+            accepted,
+            "event{kind}: a callback removal still accepts Crash"
+        );
+        let entity = sim.entities().get(victim).unwrap();
+        assert!(!entity.is_object_alive(), "event{kind}: real C4/UnInit");
+        assert_eq!(entity.health.current(), 0);
+        assert!(
+            !entity.crash.is_crashing(),
+            "event{kind}: no outer crash tail"
+        );
+        assert!(entity.rocking.is_none());
+        if kind == 41 {
+            assert_eq!(
+                sim.houses[&houses[0]].stats().units_lost(),
+                1,
+                "the prefix callback's kill is not booked again by outer Crash"
+            );
+        }
+        assert!(
+            draws.is_empty(),
+            "event{kind}: this minimal death adds no spin draws"
+        );
+    }
+}
+
+#[test]
 fn damage_event_predicates_match_original_discrete_controls() {
     let corpus = corpus();
     let cases = corpus["controls"].as_array().unwrap();

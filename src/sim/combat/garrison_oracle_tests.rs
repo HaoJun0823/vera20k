@@ -228,7 +228,7 @@ pub(super) fn for_each_native_case(
         );
         building
             .type_facts
-            .set_foundation_for_test(object.foundation.clone());
+            .set_foundation_for_test(object.foundation.clone().into());
         building
             .veterancy
             .set_rank_for_test((input["building_veterancy"].as_f64().unwrap() * 100.0) as u16);

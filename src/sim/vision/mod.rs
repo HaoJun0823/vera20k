@@ -37,6 +37,8 @@
 //! visibility grid so each cell lookup is O(1) instead of iterating all owners.
 
 mod cell_reveal;
+mod fog_objects;
+pub use fog_objects::{FoggedDrawKind, FoggedDrawRecord, FrozenBuilding};
 mod map_reveal;
 pub(crate) use map_reveal::MapTransition;
 mod planes;
@@ -54,7 +56,7 @@ use cell_reveal::{DummyVisibility, EdgeCells, MapCellEdgeCache};
 pub(crate) use cell_reveal::{ListedEdgeCells, MapCellNotification, MapRevealProjection};
 use shroud_knowledge::ShroudKnowledge;
 pub(crate) use shroud_knowledge::SightAdmission;
-pub(crate) use shroud_knowledge::{SightFacts, SightRefreshTimers};
+pub(crate) use shroud_knowledge::{SightFacts, SightRefreshTimers, SightSource};
 
 use std::collections::BTreeMap;
 
@@ -348,11 +350,9 @@ impl OwnerVisibility {
 
     /// Mark a cell visible and revealed in this frame's sight, and set its
     /// ground bits.
-    ///
-    /// RESIDUAL: a cell's first mapping runs `CellClass::CleanFog` when
-    /// `FogOfWar=` is on, freeing the cell's fogged objects. VERA keeps no
-    /// fogged-object records in production (the footprint store is test-only),
-    /// so there is nothing to clean; a fogged-object port needs that call here.
+    /// Production MapCell mapping delivers CleanFog after its synchronous
+    /// notification through the world sight owner; this derived frame mark
+    /// changes no native Cell visibility or fog-object lifecycle.
     fn mark_sight(&mut self, rx: u16, ry: u16) {
         if let Some(i) = self.index(rx, ry) {
             self.set_ground_bits(i, self.ground_flags[i] | GROUND_VISIBLE | GROUND_OPEN);
@@ -620,9 +620,8 @@ impl OwnerVisibility {
 /// Stable Rust identity for one native FoggedObjectClass allocation.
 pub type FoggedObjectId = u64;
 
-/// Shared frozen-building footprint ownership. Rendering payload is
-/// deliberately absent until `FreezeInFog`'s draw-record fields are closed;
-/// this record only represents the proven cross-cell lifetime contract.
+/// One shared FoggedObjectClass allocation and its ordered Cell links.
+/// The diagnostic source ID never controls the snapshot lifetime.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FoggedObjectFootprintRecord {
     pub id: FoggedObjectId,
@@ -632,6 +631,8 @@ pub struct FoggedObjectFootprintRecord {
     /// Occupy-list order, with the anchor already applied and invalid cells
     /// omitted by the caller that owns map bounds.
     pub occupied_cells: Vec<(u16, u16)>,
+    #[serde(default)]
+    pub drawing: Option<FrozenBuilding>,
 }
 
 /// Last admitted generator identity/geometry, retained to distinguish a new
@@ -703,12 +704,19 @@ pub struct FogState {
     width: u16,
     height: u16,
     by_owner: Planes,
-    /// One native source cache per logical viewer. Inactive entries retain
-    /// cached254/260 after250 is cleared, until actual object teardown.
+    /// A derived per-viewer active contribution index. Its serialized
+    /// `latched` bit indicates that this viewer's cell counts are still held;
+    /// this logical client's native +250/+254/+260 authority is
+    /// `sight_sources`.
     /// Private to the sight owner: its reveal and release events
     /// (`Simulation::update_object_sight_in_view`,
     /// `Simulation::release_object_sight_with_context`) are the only writers.
     sight_admissions: BTreeMap<(u64, InternedId), SightAdmission>,
+    /// One native Techno+250/+254/+260 cache per logical PlayerPtr client.
+    /// The exe runs one such object for each client; the source cache is keyed
+    /// by source and viewer, while `sight_admissions` separately tracks the
+    /// map contribution accepted by that viewer's RevealArea house gate.
+    sight_sources: BTreeMap<(u64, InternedId), SightSource>,
     /// Admissions `TechnoClass::UpdateReveal @ 0x0070AF50` makes for an
     /// alternate house (`RevealToAll=`;
     /// `Simulation::reveal_sight_to_current_house`), keyed like
@@ -740,6 +748,10 @@ pub struct FogState {
     /// Owning allocation table for shared fogged-object IDs.
     #[serde(default)]
     fogged_objects: BTreeMap<FoggedObjectId, FoggedObjectFootprintRecord>,
+    /// Building+6E7 / attached Anim+199, projected per viewer. Native freeze
+    /// and reveal cleanup own these independently of the remembered picture.
+    #[serde(default)]
+    fogged_live_objects: std::collections::BTreeSet<(InternedId, u64)>,
     /// Allocation cursor for the Rust-stable counterpart of native pointers.
     #[serde(default)]
     next_fogged_object_id: FoggedObjectId,
@@ -882,6 +894,10 @@ impl FogState {
         self.next_fogged_object_id.hash(hasher);
         self.fogged_object_cells.hash(hasher);
         self.fogged_objects.hash(hasher);
+        if !self.fogged_live_objects.is_empty() {
+            b"fogged-live-objects-v1".hash(hasher);
+            self.fogged_live_objects.hash(hasher);
+        }
         self.sensors_by_house.hash(hasher);
         // `CellClass+0xAC[house]` disguise-detect counters.
         // Behaviour-affecting like their `SensorsOfHouses` sibling above:
@@ -892,9 +908,10 @@ impl FogState {
         self.cloaked_by_houses.hash(hasher);
     }
 
-    /// Source metadata is published before Map5678E0 can call a receiver.
-    /// These counts are a derived sight index, not native Cell counters or
-    /// ground knowledge. Only the subsequent per-cell writer publishes them.
+    /// Publish one viewer's derived contribution before Map5678E0 can call a
+    /// receiver. The native client cache is stored separately with
+    /// `retain_source_sight`; these counts are neither native Cell counters nor
+    /// ground knowledge. The per-cell writer publishes them.
     pub(crate) fn retain_sight_admission(
         &mut self,
         id: u64,
@@ -902,6 +919,8 @@ impl FogState {
         mut admission: SightAdmission,
         alternate: bool,
     ) {
+        // In this map `latched` means only that this viewer's derived source
+        // counts are active. Its native +250 lives in `sight_sources`.
         admission.latched = true;
         let map = if alternate {
             &mut self.alternate_sight_admissions
@@ -916,8 +935,56 @@ impl FogState {
         self.adjust_sight_sources(viewer, &admission, true);
     }
 
-    /// Clear the latch before any release receiver. Clearing every retained
-    /// contribution first makes a nested Limbo idempotent;254/260 persist.
+    /// One logical client's native +0x250/+0x254/+0x260 cache.
+    pub(crate) fn source_sight(&self, id: u64, viewer: InternedId) -> Option<SightSource> {
+        self.sight_sources.get(&(id, viewer)).copied()
+    }
+
+    /// Whether this logical client's native UpdateReveal +0x250 is set. This
+    /// is separate from [`Self::sight_is_latched`], which asks whether the
+    /// viewer currently owns an accepted derived map contribution.
+    pub(crate) fn source_sight_is_latched(&self, id: u64, viewer: InternedId) -> bool {
+        self.sight_sources
+            .get(&(id, viewer))
+            .is_some_and(|source| source.latched)
+    }
+
+    /// Publish one logical client's native cache before its RevealArea
+    /// callback, including when that viewer's house gate rejects the map write.
+    pub(crate) fn retain_source_sight(
+        &mut self,
+        id: u64,
+        viewer: InternedId,
+        admission: &SightAdmission,
+    ) {
+        assert!(
+            !self.source_sight_is_latched(id, viewer),
+            "source sight is already latched"
+        );
+        self.sight_sources
+            .insert((id, viewer), SightSource::from(admission));
+    }
+
+    /// Native ReReveal clears this logical client's +0x250 before its final
+    /// RevealArea walk and retains cached +0x254/+0x260. A cleared cache stays
+    /// available through `source_sight` for later client-specific callbacks.
+    pub(crate) fn clear_source_sight_latch(
+        &mut self,
+        id: u64,
+        viewer: InternedId,
+    ) -> Option<SightSource> {
+        let source = self.sight_sources.get_mut(&(id, viewer))?;
+        if !source.latched {
+            return None;
+        }
+        source.latched = false;
+        Some(*source)
+    }
+
+    /// Remove one viewer's active contribution and its derived counts. The
+    /// that client's source latch is cleared separately by
+    /// `clear_source_sight_latch` before release callbacks; its +254/+260
+    /// remain cached.
     pub(crate) fn take_sight_admission(
         &mut self,
         id: u64,
@@ -943,6 +1010,17 @@ impl FogState {
         Some(admission)
     }
 
+    /// Drop a viewer's active contribution index when its RevealArea release
+    /// is rejected by the native house gate. The map's retained ShroudKnowledge
+    /// counters deliberately remain, matching the rejected native cell writes.
+    pub(crate) fn abandon_sight_admission(
+        &mut self,
+        id: u64,
+        viewer: InternedId,
+    ) -> Option<SightAdmission> {
+        self.sight_admissions.remove(&(id, viewer))
+    }
+
     fn adjust_sight_sources(&mut self, viewer: InternedId, admission: &SightAdmission, add: bool) {
         let local = viewer == admission.owner;
         self.by_owner.write(
@@ -955,22 +1033,35 @@ impl FogState {
     }
 
     pub(crate) fn source_sight_viewers(&self, id: u64) -> Vec<InternedId> {
-        self.sight_admissions
+        self.sight_sources
             .range(source_keys(id))
-            .filter(|(_, source)| source.latched)
             .map(|(&(_, viewer), _)| viewer)
             .collect()
     }
 
+    /// Existing maps holding an alternate `RevealToAll=` contribution for
+    /// `id`; lifecycle events use these keys to retire only recorded planes.
+    pub(crate) fn alternate_sight_viewers(&self, id: u64) -> Vec<InternedId> {
+        self.alternate_sight_admissions
+            .range(source_keys(id))
+            .map(|(&(_, viewer), _)| viewer)
+            .collect()
+    }
+
+    /// Whether one viewer currently has an active derived cell contribution.
+    /// This intentionally does not answer this client's native +250 latch.
     pub(crate) fn sight_is_latched(&self, id: u64, viewer: InternedId) -> bool {
         self.sight_admissions
             .get(&(id, viewer))
             .is_some_and(|source| source.latched)
     }
 
-    /// Destructor cleanup of cached254/260 and alternate derived indexes.
+    /// Destructor cleanup of cached250/254/260 and per-viewer derived indexes.
     /// Native UnInit/Limbo must have released their live contributions first.
     pub(crate) fn forget_sight_source(&mut self, id: u64) {
+        while let Some((&key, _)) = self.sight_sources.range(source_keys(id)).next() {
+            self.sight_sources.remove(&key);
+        }
         for admissions in [
             &mut self.sight_admissions,
             &mut self.alternate_sight_admissions,
@@ -1018,8 +1109,8 @@ impl FogState {
         }
     }
 
-    /// `viewer`'s cache of source `id` (`+0x250`/`+0x254`/`+0x260`), latched
-    /// or retained after its release.
+    /// `viewer`'s accepted map contribution for source `id`. Native
+    /// +0x250/+0x254/+0x260 metadata is kept by [`Self::source_sight`].
     pub(crate) fn sight_admission(&self, id: u64, viewer: InternedId) -> Option<&SightAdmission> {
         self.sight_admissions.get(&(id, viewer))
     }
@@ -1035,6 +1126,10 @@ impl FogState {
     /// opening keep their composition.
     pub(crate) fn hash_sight_admissions(&self, hasher: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
+        if !self.sight_sources.is_empty() {
+            b"client-sight-sources-v1".hash(hasher);
+            self.sight_sources.hash(hasher);
+        }
         self.sight_admissions.hash(hasher);
         if !self.alternate_sight_admissions.is_empty() {
             b"alternate-sight-admissions-v1".hash(hasher);
@@ -1111,29 +1206,36 @@ impl FogState {
         }
     }
 
-    /// Alternate ReReveal drops the ordinary source index without a native
-    /// leave on those planes. Its native counters deliberately remain held.
+    /// Alternate ReReveal drops the preferred client's ordinary source index
+    /// without a native leave on that plane. Its native counters remain held.
     pub(crate) fn clear_sight_latch(
         &mut self,
         stable_id: u64,
         preferred_viewer: InternedId,
     ) -> Option<SightAdmission> {
         let footprint = self
-            .sight_admissions
-            .get(&(stable_id, preferred_viewer))
-            .cloned()
+            .source_sight(stable_id, preferred_viewer)
+            .map(|source| SightAdmission {
+                latched: source.latched,
+                owner: source.owner,
+                origin: source.origin,
+                radius: source.radius,
+                cells: Vec::new(),
+            })
             .or_else(|| {
                 self.sight_admissions
-                    .range(source_keys(stable_id))
-                    .next()
-                    .map(|(_, source)| source.clone())
+                    .get(&(stable_id, preferred_viewer))
+                    .cloned()
             });
-        for viewer in self.source_sight_viewers(stable_id) {
-            let admission = self.take_sight_admission(stable_id, viewer, false).unwrap();
-            if let Some(vis) = self.by_owner.get_mut(&viewer) {
-                for &(x, y) in &admission.cells {
-                    if let Some(index) = vis.index(x, y) {
-                        vis.publish_knowledge(index);
+        self.clear_source_sight_latch(stable_id, preferred_viewer);
+        if self.sight_is_latched(stable_id, preferred_viewer) {
+            if let Some(admission) = self.take_sight_admission(stable_id, preferred_viewer, false) {
+                let viewer = preferred_viewer;
+                if let Some(vis) = self.by_owner.get_mut(&viewer) {
+                    for &(x, y) in &admission.cells {
+                        if let Some(index) = vis.index(x, y) {
+                            vis.publish_knowledge(index);
+                        }
                     }
                 }
             }
@@ -1141,15 +1243,34 @@ impl FogState {
         footprint
     }
 
-    /// Insert one shared frozen-building footprint record. Named location:
-    /// `BuildingClass::FreezeInFog` installs the same FoggedObjectClass pointer
-    /// into every occupy-list cell, not one allocation per cell.
+    /// Building457AA0 / FoggedObject4D0EF0: one remembered picture shared by
+    /// its foundation cells. No Scenario unique ID or RNG draw is consumed.
+    pub(crate) fn insert_frozen_building(
+        &mut self,
+        viewer: InternedId,
+        source_entity_id: u64,
+        occupied_cells: Vec<(u16, u16)>,
+        drawing: FrozenBuilding,
+    ) -> FoggedObjectId {
+        self.insert_fogged_object(viewer, source_entity_id, occupied_cells, Some(drawing))
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert_fogged_object_footprint(
         &mut self,
         viewer: InternedId,
         source_entity_id: u64,
         occupied_cells: Vec<(u16, u16)>,
+    ) -> FoggedObjectId {
+        self.insert_fogged_object(viewer, source_entity_id, occupied_cells, None)
+    }
+
+    fn insert_fogged_object(
+        &mut self,
+        viewer: InternedId,
+        source_entity_id: u64,
+        occupied_cells: Vec<(u16, u16)>,
+        drawing: Option<FrozenBuilding>,
     ) -> FoggedObjectId {
         let id = self.next_fogged_object_id.max(1);
         self.next_fogged_object_id = id.wrapping_add(1);
@@ -1158,6 +1279,7 @@ impl FogState {
             viewer,
             source_entity_id,
             occupied_cells,
+            drawing,
         };
         for &(rx, ry) in &record.occupied_cells {
             self.fogged_object_cells
@@ -1169,20 +1291,39 @@ impl FogState {
         id
     }
 
+    /// Native live fog flag, independent of a snapshot's source identity.
+    pub fn is_object_fogged(&self, viewer: InternedId, id: u64) -> bool {
+        self.fogged_live_objects.contains(&(viewer, id))
+    }
+
+    pub(crate) fn set_object_fogged(&mut self, viewer: InternedId, id: u64, fogged: bool) {
+        if fogged {
+            self.fogged_live_objects.insert((viewer, id));
+        } else {
+            self.fogged_live_objects.remove(&(viewer, id));
+        }
+    }
+
+    pub(crate) fn forget_fogged_live_object(&mut self, id: u64) {
+        self.fogged_live_objects.retain(|(_, candidate)| *candidate != id);
+    }
+
+    /// Building4519A8..B2 copies its fog flag to a replacement slot Anim.
+    pub(crate) fn inherit_object_fog(&mut self, parent: u64, child: u64) {
+        let viewers: Vec<_> = self.fogged_live_objects.iter()
+            .filter_map(|&(viewer, id)| (id == parent).then_some(viewer)).collect();
+        for viewer in viewers {
+            self.set_object_fogged(viewer, child, true);
+        }
+    }
+
     /// Clear one cell's vector in native reverse order. Each shared record is
     /// first unlinked by exact ID from all footprint cells, then returned to
     /// the caller in destruction/invalidation order. Other empty vectors stay
     /// allocated.
     ///
-    /// **Provenance UNKNOWN.** The address this used to cite, `0x004802D0`, is
-    /// not a function entry — it lands mid-`CALL` inside `FUN_004802A0`, which
-    /// is a tile blitter (it reads `g_IsometricTileTypeClass_Array`, calls
-    /// `IsometricTileTypeClass::SubtileHasDamagedData` and blits to
-    /// `g_PrimarySurface`) and has nothing to do with fogged objects. And
-    /// `ClearFoggedObjects` is not a symbol in this program. The address stays
-    /// unbound rather than swapped for a positive match against an unrelated
-    /// function.
-    #[cfg(any(test, feature = "test-support"))]
+    /// Original CellClass::ClearFoggedObjects486C50, reached from
+    /// CleanFog486BF0; shared references unlink before the allocation dies.
     pub fn clear_fogged_objects_at(
         &mut self,
         viewer: InternedId,
@@ -1982,10 +2123,12 @@ impl FogState {
             self.by_owner.clear();
             self.gap_sources.clear();
             self.sight_admissions.clear();
+            self.sight_sources.clear();
             self.alternate_sight_admissions.clear();
             self.whole_map_revealed_owners.clear();
             self.fogged_object_cells.clear();
             self.fogged_objects.clear();
+            self.fogged_live_objects.clear();
             self.next_fogged_object_id = 0;
             self.reset_sensor_counts();
             self.width = width;

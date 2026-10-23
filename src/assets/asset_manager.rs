@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::assets::audio_bag::AudioIndex;
 use crate::assets::error::AssetError;
-use crate::assets::mix_archive::MixArchive;
+use crate::assets::mix_archive::{MixArchive, SharedBytes};
 use crate::assets::mix_hash::mix_hash;
 
 #[cfg(all(test, feature = "ares"))]
@@ -40,7 +40,7 @@ struct NamedArchive {
 struct LooseAsset {
     path: PathBuf,
     source_name: String,
-    bytes: OnceLock<Option<Box<[u8]>>>,
+    bytes: OnceLock<Option<Arc<[u8]>>>,
 }
 
 impl LooseAsset {
@@ -49,16 +49,18 @@ impl LooseAsset {
     /// and cannot safely coexist with truncation on other platforms. Snapshot
     /// only requested payloads; root indexing must not copy entire MIX archives.
     /// This is Rust storage policy, not native raw-file cache equivalence.
+    fn snapshot(&self) -> &Option<Arc<[u8]>> {
+        self.bytes.get_or_init(|| match std::fs::read(&self.path) {
+            Ok(bytes) => Some(bytes.into()),
+            Err(err) => {
+                log::debug!("Skipping loose {}: {}", self.path.display(), err);
+                None
+            }
+        })
+    }
+
     fn bytes(&self) -> Option<&[u8]> {
-        self.bytes
-            .get_or_init(|| match std::fs::read(&self.path) {
-                Ok(bytes) => Some(bytes.into_boxed_slice()),
-                Err(err) => {
-                    log::debug!("Skipping loose {}: {}", self.path.display(), err);
-                    None
-                }
-            })
-            .as_deref()
+        self.snapshot().as_deref()
     }
 }
 
@@ -639,6 +641,19 @@ impl AssetManager {
         let (named, entry_id) = self.lookup_asset_entry(name)?;
         log::trace!("Found '{}' in {}", name, named.name);
         named.archive.get_by_id(entry_id)
+    }
+
+    /// [`Self::get_ref`]'s file as a share of its storage, for a reader that
+    /// outlives the borrow (a theme song the audio device streams).
+    pub fn get_shared(&self, name: &str) -> Option<SharedBytes> {
+        if let Some(bytes) = self
+            .loose_asset(name)
+            .and_then(|loose| loose.snapshot().clone())
+        {
+            return Some(bytes.into());
+        }
+        let (named, entry_id) = self.lookup_asset_entry(name)?;
+        named.archive.get_shared_by_id(entry_id)
     }
 
     /// Registered archive fallback for mutable loose-file owners. These callers
@@ -2315,7 +2330,7 @@ mod tests {
                 LooseAsset {
                     path: PathBuf::from("RA2MD.CSF"),
                     source_name: "loose:RA2MD.CSF".to_string(),
-                    bytes: OnceLock::from(Some(Box::from(&b"loose"[..]))),
+                    bytes: OnceLock::from(Some(Arc::from(&b"loose"[..]))),
                 },
             )]),
             audio_pairs: Vec::new(),

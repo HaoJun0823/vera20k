@@ -35,6 +35,10 @@ pub(crate) struct RenderPose {
     pub body: u16,
     pub turret: u16,
     pub barrel: u16,
+    /// Bank direction sampled from the native SecondaryFacing owner at this
+    /// binary frame; interpolation carries the current endpoint's discrete
+    /// direction without advancing or duplicating its timer.
+    pub fly_bank_direction: Option<crate::sim::movement::facing_class::RotationDirection>,
     pub angles: [f32; 2],
     pub rocket_pitch: f32,
     pub visual_lift: f32,
@@ -64,6 +68,18 @@ pub(crate) fn body_draw_facing(entity: &GameEntity, binary_frame: u32) -> u16 {
     }
 }
 
+fn fly_bank_direction(
+    entity: &GameEntity,
+    binary_frame: u32,
+) -> Option<crate::sim::movement::facing_class::RotationDirection> {
+    entity
+        .locomotor
+        .as_ref()
+        .filter(|loco| loco.active_kind() == crate::rules::locomotor_type::LocomotorKind::Fly)
+        .and_then(|_| entity.barrel_facing.as_ref())
+        .and_then(|facing| facing.rotation_direction_at(binary_frame))
+}
+
 impl RenderPose {
     fn read(entity: &GameEntity, frame: u32) -> Self {
         let location = object_location(entity, None);
@@ -73,6 +89,7 @@ impl RenderPose {
             screen: [x, y],
             body,
             barrel: entity.barrel_elevation().current(frame),
+            fly_bank_direction: fly_bank_direction(entity, frame),
             angles: entity
                 .rocking
                 .as_ref()
@@ -624,6 +641,7 @@ mod tests {
             body: facing,
             turret: facing,
             barrel: 0,
+            fly_bank_direction: None,
             angles: [0.; 2],
             rocket_pitch: 0.,
             visual_lift: 0.,

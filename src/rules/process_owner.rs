@@ -18,6 +18,10 @@ mod selection_voice_tests;
 #[path = "planning_rules_tests.rs"]
 mod planning_rules_tests;
 
+#[cfg(test)]
+#[path = "object_image_tests.rs"]
+mod object_image_tests;
+
 use std::sync::Arc;
 
 use crate::rules::error::RulesError;
@@ -339,6 +343,39 @@ impl NativeRulesProcessOwner {
             .map(|(_, _, _, side, _, country)| (country.loading(), side))
     }
 
+    /// Ares1002FB80 reads the retained Country's Side then Country directly
+    /// from CCINI_Rules887048 before Read_Scenario684620. These names use
+    /// ReadTheme4758F0's ReadString128; ThemeRuntime owns name/default binding.
+    /// Mode/map Process projections and ParentCountry are not read here.
+    #[cfg(feature = "ares")]
+    pub fn loading_theme_names(
+        &self,
+        country: crate::rules::ruleset::CountryIdx,
+    ) -> [Option<String>; 2] {
+        let state = self
+            .registry
+            .as_ref()
+            .expect("Rules transition reentered")
+            .registry_state();
+        let Some((country, _, _, side, ..)) =
+            state.country_projection().nth(usize::from(country.0))
+        else {
+            return [None, None];
+        };
+        let read = |id: &str| {
+            self.sources
+                .selected_rules_root
+                .section(id)
+                .and_then(|section| section.read_name("LoadingTheme", 128))
+                .map(str::to_owned)
+        };
+        let side = usize::try_from(side)
+            .ok()
+            .and_then(|index| state.side_projection().nth(index))
+            .and_then(|(name, _)| read(name));
+        [side, read(country)]
+    }
+
     /// Early Ares6847B7 loading color, resolved against this same retained
     /// registry before E_multi or the later mode/map Rules reset can change it.
     /// `None` when the Country sets no color, leaving the stock side color.
@@ -382,6 +419,7 @@ impl NativeRulesProcessOwner {
         processed: &ProcessedRulesLayers,
     ) {
         rules.bind_type_sound_references(processed.ini(), &self.sources.fixed_sounds);
+        rules.bind_terrain_type_sound_references(processed, &self.sources.fixed_sounds);
         rules.bind_type_eva_references(processed.ini(), &self.sources.fixed_eva);
     }
 
@@ -428,6 +466,28 @@ impl NativeRulesProcessOwner {
             #[cfg(feature = "ares")]
             NativeRulesRegistryOwner::PreparedNonCampaign { .. } => None,
         }
+    }
+
+    /// TerrainReadMap71CAD2 -> FindOrAllocate71E2A0 mutates the continuing
+    /// family registry, then TerrainCtor71CB6E spends its own identity. The
+    /// caller consumes the move-only new-Type receipt before that instance.
+    pub(crate) fn find_or_allocate_map_terrain_type(
+        &mut self,
+        incoming: &str,
+        rules: &mut RuleSet,
+    ) -> Result<Option<(String, Option<NativeTypeConstructionEvent>)>, RulesError> {
+        let Some(NativeRulesRegistryOwner::Scenario(processed)) = self.registry.as_mut() else {
+            return Err(RulesError::MissingScenarioRegistry);
+        };
+        let Some((terrain, constructor)) = processed.find_or_allocate_map_terrain_type(incoming)
+        else {
+            return Ok(None);
+        };
+        let name = terrain.name.clone();
+        if constructor.is_some() {
+            rules.install_map_terrain_type(terrain);
+        }
+        Ok(Some((name, constructor)))
     }
 
     /// Prepare the compatibility projection without mutating process authority.
@@ -488,6 +548,32 @@ impl NativeRulesProcessOwner {
                 &self.sources.fixed_art,
                 NativeRulesRegistryState::default(),
                 RulesProcessContext::Ordinary,
+                &self.sources.fixed_eva,
+            )
+            .map_err(|failure| failure.into_parts().0)
+    }
+
+    /// RMG InitMapFromSyntheticINI599650 calls ResetTypeRegistriesAndReloadRules
+    /// 6686C0 at59A0F0: root, LANG, then committed Session mode668B8E..668BAA.
+    /// Preview does not Process the synthetic map
+    /// or retain outgoing scenario Type fields. This immutable projection
+    /// supplies preview consumers without replacing the process registry.
+    pub fn random_map_preview_projection(
+        &self,
+        mode_rules_override: Option<&IniFile>,
+        theater_name: &str,
+    ) -> Result<ProcessedRulesLayers, RulesError> {
+        let mut layers = self.startup_layers();
+        if let Some(mode) = mode_rules_override {
+            layers.push(RulesLayerKind::GameMode, mode.clone());
+        }
+        layers
+            .process_with_fixed_art_and_registry_state_recovering(
+                &self.sources.fixed_art,
+                NativeRulesRegistryState::default(),
+                RulesProcessContext::ScenarioReset(
+                    crate::rules::object_image::ImageTheater::from_name(theater_name),
+                ),
                 &self.sources.fixed_eva,
             )
             .map_err(|failure| failure.into_parts().0)
@@ -648,7 +734,9 @@ impl NativeRulesProcessOwner {
         let mut processed = match layers.process_with_fixed_art_and_registry_state_recovering(
             &self.sources.fixed_art,
             pre_reset_state,
-            RulesProcessContext::ScenarioReset,
+            RulesProcessContext::ScenarioReset(crate::rules::object_image::ImageTheater::from_map(
+                map_rules_overrides,
+            )),
             &self.sources.fixed_eva,
         ) {
             Ok(processed) => processed,

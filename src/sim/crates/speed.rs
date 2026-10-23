@@ -57,7 +57,7 @@ pub(crate) fn apply_speed_crate(
             // Installed Speed2 hook1005FA00 stores Ext+90, then calls
             //100460A0 before returning to the ordinary recipient loop.
             #[cfg(feature = "ares")]
-            entity.recompute_ares_attached_speed(rules, interner);
+            entity.recompute_ares_attached_stats(rules, interner);
             announce |= houses
                 .get(&entity.owner())
                 .is_some_and(|house| house.player_control());

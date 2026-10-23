@@ -209,6 +209,9 @@ pub struct GameSnapshot {
     /// and no-init Foot4D3540 preserve this short (naval_lifetime_controls).
     /// Kept in the neutral envelope so sim never depends on a render owner.
     pub sinking_waterlines: Vec<(u64, i16)>,
+    /// Presentation-owned Anim+FC copies. AnimSave4253B0/AbstractSave410320
+    /// retain the signed dword independently of depth+100; no lockstep input.
+    pub anim_intensities: Vec<(u64, i32)>,
     /// Retained local sidebar order is presentation state, outside the lockstep
     /// simulation hash. The app validates/hydrates it before committing a load.
     sidebar_order: Option<SavedSidebarOrder>,
@@ -303,11 +306,13 @@ pub enum SnapshotError {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SnapshotRestoreError {
     #[cfg(feature = "ares")]
-    #[error("object {object_id} has invalid attached speed: {reason}")]
-    InvalidAttachedSpeedState {
+    #[error("object {object_id} has invalid attached stats: {reason}")]
+    InvalidAttachedStatsState {
         object_id: u64,
         reason: &'static str,
     },
+    #[error("invalid retained foundation for object {object_id}")]
+    InvalidFoundation { object_id: u64 },
     #[error("invalid UnitDelivery snapshot state: {0}")]
     InvalidUnitDelivery(&'static str),
     #[error("invalid paid two-stage selection: {0}")]
@@ -415,6 +420,8 @@ pub enum SnapshotRestoreError {
     MissingLogicIdentity { object_id: u64 },
     #[error("DisplayClass object id {object_id} has no restored registry identity")]
     MissingDisplayIdentity { object_id: u64 },
+    #[error("saved Terrain {object_id} references unresolved type {type_name}")]
+    MissingTerrainType { object_id: u64, type_name: String },
     #[error("live {registry} object id {object_id} is absent from LogicVector")]
     MissingRequiredLogicIdentity {
         registry: &'static str,
@@ -520,6 +527,7 @@ pub type SnapshotTerrainAssetPreparation<'a> = dyn FnMut(
 /// The app presentation saved beside the simulation, in `GameSnapshotRef` order.
 type SavedPresentationRef<'a> = (
     &'a [(u64, i16)],
+    &'a [(u64, i32)],
     Option<&'a SavedSidebarOrder>,
     Option<&'a SavedTacticalView>,
     Option<&'a SavedLocalView>,
@@ -541,6 +549,7 @@ struct GameSnapshotRef<'a> {
     compatibility: RulesCompatibility,
     sim: &'a Simulation,
     sinking_waterlines: &'a [(u64, i16)],
+    anim_intensities: &'a [(u64, i32)],
     sidebar_order: Option<&'a SavedSidebarOrder>,
     tactical_view: Option<&'a SavedTacticalView>,
     local_view: Option<&'a SavedLocalView>,
@@ -563,8 +572,14 @@ impl GameSnapshot {
         // Description. The active list admits only an exact internal-version
         // match at 0x00559ED0..0x0055A04A. VERA keeps its Rust-native bincode
         // body while making the same load-bearing envelope identities explicit.
-        let (sinking_waterlines, sidebar_order, tactical_view, local_view, scenario_resources) =
-            presentation;
+        let (
+            sinking_waterlines,
+            anim_intensities,
+            sidebar_order,
+            tactical_view,
+            local_view,
+            scenario_resources,
+        ) = presentation;
         let snapshot = GameSnapshotRef {
             product_magic: SNAPSHOT_PRODUCT_MAGIC,
             envelope_version: SNAPSHOT_ENVELOPE_VERSION,
@@ -581,6 +596,7 @@ impl GameSnapshot {
                 }),
             sim,
             sinking_waterlines,
+            anim_intensities,
             sidebar_order,
             tactical_view,
             local_view,
@@ -610,6 +626,7 @@ impl GameSnapshot {
             description,
             save_timestamp,
             &[],
+            &[],
             None,
             None,
             None,
@@ -626,6 +643,7 @@ impl GameSnapshot {
         description: &str,
         save_timestamp: u64,
         sinking_waterlines: &[(u64, i16)],
+        anim_intensities: &[(u64, i32)],
         sidebar_order: Option<&SavedSidebarOrder>,
         tactical_view: Option<&SavedTacticalView>,
         local_view: Option<&SavedLocalView>,
@@ -640,6 +658,7 @@ impl GameSnapshot {
             save_timestamp,
             (
                 sinking_waterlines,
+                anim_intensities,
                 sidebar_order,
                 tactical_view,
                 local_view,
@@ -680,7 +699,7 @@ impl GameSnapshot {
             map_name,
             map_name,
             save_timestamp,
-            (&[], None, None, None, None),
+            (&[], &[], None, None, None, None),
         )
     }
 
@@ -1664,6 +1683,11 @@ impl Simulation {
     /// order.
     pub fn restore_after_snapshot_load(&mut self) -> Result<(), SnapshotRestoreError> {
         for (_, entity) in self.substrate.entities.iter_sorted() {
+            if !entity.type_facts.foundation().valid() {
+                return Err(SnapshotRestoreError::InvalidFoundation {
+                    object_id: entity.stable_id(),
+                });
+            }
             entity
                 .validate_ares_build_compatibility()
                 .map_err(SnapshotRestoreError::InvalidUnitDelivery)?;
@@ -1834,28 +1858,28 @@ impl Simulation {
                 }
             }
         }
+        self.terrain_objects
+            .validate_membership()
+            .map_err(|reason| SnapshotRestoreError::InvalidCellMembership { reason })?;
         for terrain in self.terrain_objects.objects().values() {
             let in_logic = seen_logic.contains(&terrain.stable_id());
             let pending_delete = pending_delete_ids.contains(&terrain.stable_id());
-            if terrain.is_live() && !in_logic {
-                return Err(SnapshotRestoreError::MissingRequiredLogicIdentity {
-                    registry: "TerrainObjectStore",
-                    object_id: terrain.stable_id(),
-                });
-            }
             if !terrain.is_live() && in_logic {
                 return Err(SnapshotRestoreError::InactiveLogicIdentity {
                     registry: "TerrainObjectStore",
                     object_id: terrain.stable_id(),
                 });
             }
-            if terrain.is_live() && pending_delete {
+            if terrain.object_alive() && pending_delete {
                 return Err(SnapshotRestoreError::DeferredDeleteLogicIdentity {
                     registry: "TerrainObjectStore",
                     object_id: terrain.stable_id(),
                 });
             }
-            if !terrain.is_live() && !pending_delete {
+            // ObjectCtor5F3930 starts Alive even while InLimbo. A zero-cell
+            // TerrainCtor71BC34 skips Unlimbo without scheduling deletion;
+            // ObjectUnInit5F6625, rather than Limbo, clears Alive.
+            if !terrain.object_alive() && !pending_delete {
                 return Err(SnapshotRestoreError::MissingDeferredDeleteIdentity {
                     registry: "TerrainObjectStore",
                     object_id: terrain.stable_id(),
@@ -1920,6 +1944,9 @@ impl Simulation {
         // ParasiteClass Load 6295DB..6295F3 does the same for its suppression
         // and bite timers: a bite is due at once and suppression is dropped.
         let frame = self.session.binary_frame();
+        // RadSiteClass::Load65B3D0 also restarts its level/light clocks;
+        // the saved field and source stay intact until ordinary RadSite AI.
+        self.radiation.restart_timers_after_load(frame);
         for id in self.substrate.entities.keys_sorted() {
             self.substrate.restore_move_sound_state_after_load(id);
             if let Some(entity) = self.substrate.entities.get_mut(id) {
@@ -1956,10 +1983,33 @@ impl Simulation {
         prepare_terrain_assets: Option<&mut SnapshotTerrainAssetPreparation<'_>>,
     ) -> Result<SnapshotMapRestoreOutput, SnapshotRestoreError> {
         self.validate_type_tech_levels(rules)?;
+        // TerrainLoad71CDA0 preserves the separately saved Display/Logic
+        // vectors. Only ObjectUnlimbo5F4FEF..5F5040's eligible spawners need
+        // Logic; validate with restored type state without rebuilding order.
+        for terrain in self.terrain_objects.objects().values() {
+            if !terrain.is_live() {
+                continue;
+            }
+            let type_name = self.interner.resolve(terrain.type_ref());
+            let terrain_type = rules
+                .terrain_object_type_case_insensitive(type_name)
+                .ok_or_else(|| SnapshotRestoreError::MissingTerrainType {
+                    object_id: terrain.stable_id(),
+                    type_name: type_name.to_owned(),
+                })?;
+            if !terrain.in_logic_vector()
+                && terrain.joins_logic_on_unlimbo(terrain_type, self.session.game_mode())
+            {
+                return Err(SnapshotRestoreError::MissingRequiredLogicIdentity {
+                    registry: "TerrainObjectStore",
+                    object_id: terrain.stable_id(),
+                });
+            }
+        }
         #[cfg(feature = "ares")]
-        self.validate_attached_speed_after_restore(rules)
+        self.validate_attached_stats_after_restore(rules)
             .map_err(
-                |(object_id, reason)| SnapshotRestoreError::InvalidAttachedSpeedState {
+                |(object_id, reason)| SnapshotRestoreError::InvalidAttachedStatsState {
                     object_id,
                     reason,
                 },
@@ -2150,13 +2200,8 @@ impl Simulation {
                 component: "ResolvedTerrainGrid",
             },
         )?;
-        let mut source_object_cells: BTreeSet<(u16, u16)> = self
-            .terrain_objects
-            .objects()
-            .values()
-            .filter(|terrain| terrain.is_live())
-            .map(crate::sim::terrain_object::TerrainObjectState::cell)
-            .collect();
+        let mut source_object_cells: BTreeSet<(u16, u16)> =
+            self.terrain_objects.cell_index().keys().copied().collect();
         source_object_cells.extend(
             self.substrate
                 .occupancy
@@ -2219,6 +2264,116 @@ mod tests {
         )
     }
 
+    #[test]
+    fn retail_static_tree_display_survives_load_without_logic_membership() {
+        use crate::sim::world::display_layers::DisplayLayer;
+
+        let Some(battle) =
+            crate::rules::retail_ini_fixture::retail_battle_rules_for_map("Dustbowl.mmx")
+        else {
+            return;
+        };
+        let rules = &battle.rules;
+        let registry = crate::rules::overlay_types::OverlayTypeRegistry::from_ini(
+            &battle.processed_rules,
+            Some(&battle.fixed_art),
+        );
+        let terrain = flat_terrain(8, 8);
+        let mut sim = Simulation::new();
+        sim.overlay_grid = Some(crate::sim::overlay_grid::OverlayGrid::new(8, 8));
+        sim.install_resolved_terrain_for_new_map(terrain.clone());
+        crate::sim::terrain_spawn::construct_terrain_objects(
+            &mut sim,
+            &[
+                crate::map::overlay::TerrainObject {
+                    rx: 3,
+                    ry: 4,
+                    name: "TREE01".into(),
+                },
+                crate::map::overlay::TerrainObject {
+                    rx: 5,
+                    ry: 4,
+                    name: "TIBTRE01".into(),
+                },
+            ],
+            rules,
+            false,
+        );
+        let tree = sim.terrain_objects.id_at((3, 4)).unwrap();
+        let spawner = sim.terrain_objects.id_at((5, 4)).unwrap();
+        assert_eq!(sim.live_object_order_snapshot(), [spawner]);
+        assert_eq!(
+            sim.substrate.display.members(DisplayLayer::GROUND),
+            [tree, spawner]
+        );
+        let bytes = GameSnapshot::save(&sim, 0, 0, "terrain-membership", 0);
+        let mut loaded = GameSnapshot::load(&bytes).unwrap().sim;
+        loaded
+            .restore_after_snapshot_load()
+            .expect("a live static tree needs no Logic slot");
+        loaded.rebuild_caches_after_load(
+            terrain,
+            crate::sim::pathfinding::terrain_speed::TerrainSpeedConfig::default(),
+            rules,
+        );
+        loaded
+            .restore_map_authority_after_snapshot_load(rules, &registry, None)
+            .unwrap();
+        assert_eq!(loaded.live_object_order_snapshot(), [spawner]);
+        assert_eq!(
+            loaded.substrate.display.members(DisplayLayer::GROUND),
+            [tree, spawner]
+        );
+        assert!(!loaded.terrain_objects.get(tree).unwrap().in_logic_vector());
+        let warhead_ref = loaded.interner.intern("HE");
+        loaded.commit_direct_terrain_damage_receiver(
+            rules,
+            Some(&registry),
+            crate::sim::combat::TerrainDamageEvent {
+                stable_id: tree,
+                rx: 3,
+                ry: 4,
+                damage: loaded.terrain_objects.get(tree).unwrap().health(),
+                distance_leptons: 0,
+                warhead_ref,
+                near_center_ic_isolation_eligible: false,
+            },
+            crate::sim::world::FrameEffects::default(),
+        );
+        assert_eq!(
+            loaded.substrate.display.members(DisplayLayer::GROUND),
+            [spawner]
+        );
+        assert_eq!(loaded.live_object_order_snapshot(), [spawner]);
+        assert!(loaded.terrain_objects.id_at((3, 4)).is_none());
+        assert_eq!(loaded.substrate.pending_delete.object_ids(), [tree]);
+
+        loaded.set_logic_order_for_test(Vec::new());
+        loaded.rebuild_logic_membership();
+        assert_eq!(
+            loaded
+                .restore_map_authority_after_snapshot_load(rules, &registry, None)
+                .unwrap_err(),
+            SnapshotRestoreError::MissingRequiredLogicIdentity {
+                registry: "TerrainObjectStore",
+                object_id: spawner,
+            },
+        );
+        assert_eq!(
+            loaded
+                .restore_map_authority_after_snapshot_load(
+                    crate::rules::ruleset::RuleSet::empty_for_test(),
+                    &registry,
+                    None,
+                )
+                .unwrap_err(),
+            SnapshotRestoreError::MissingTerrainType {
+                object_id: spawner,
+                type_name: "TIBTRE01".into(),
+            },
+        );
+    }
+
     mod gsi_17_04_tests {
         use super::flat_terrain;
         use crate::map::basic::{BasicSection, SpecialFlagsSection};
@@ -2248,6 +2403,8 @@ mod tests {
                  [AircraftTypes]\n\
                  [BuildingTypes]\n\
                  [Warheads]\n\
+                 [TerrainTypes]\n0=TREE01\n\
+                 [TREE01]\nFixtureOnly=1\n\
                  [OverlayTypes]\n\
                  0=ORE\n\
                  [ORE]\n\
@@ -2338,17 +2495,12 @@ mod tests {
                 .insert(stable_id, {
                     let mut terrain =
                         TerrainObjectState::for_test(stable_id, type_ref, cell.0, cell.1);
-                    terrain.set_in_logic_vector_for_test(true);
                     terrain.set_occupation_bits_for_test(7);
                     terrain
                 });
             sim.terrain_objects
                 .cell_index_mut_for_test()
                 .insert(cell, stable_id);
-            sim.substrate
-                .logic
-                .try_push(stable_id)
-                .expect("fixture TerrainClass Logic registration");
         }
 
         fn seed_serialized_queue_state(
@@ -3195,12 +3347,12 @@ mod tests {
     fn snapshot_capability_rejects_foreign_mode_before_body_decode() {
         let bytes = GameSnapshot::save_validated(&Simulation::new(), 0, 0, "synthetic", 0);
         let mut header = GameSnapshot::read_header(&bytes).unwrap();
-        header.compatibility = match RulesCompatibility::default() {
-            RulesCompatibility::Retail => RulesCompatibility::Ares,
-            RulesCompatibility::Ares => RulesCompatibility::Retail,
-            RulesCompatibility::Phobos => RulesCompatibility::AresPhobos,
-            RulesCompatibility::AresPhobos => RulesCompatibility::Phobos,
-        };
+        // Flip every capability bit: the result is a foreign mode for any build.
+        header.compatibility = RulesCompatibility::from_capabilities(
+            !crate::rules::ARES_ENABLED,
+            !crate::rules::PHOBOS_ENABLED,
+            !crate::rules::NPATCH_ENABLED,
+        );
         // A complete header with no body proves capability admission runs before
         // Simulation deserialization, even without bound scenario resources.
         let bytes = save_codec::serialize(&header).unwrap();
@@ -6226,7 +6378,7 @@ mod tests {
         );
         building
             .type_facts
-            .set_foundation_for_test("4x3".to_string());
+            .set_foundation_for_test("4x3".to_string().into());
         let mut profile = crate::rules::object_type::BuildingHiddenOccupancyProfile::default();
         profile.add_occupy[0] = Some((-1, 0));
         profile.add_occupy[1] = Some((-1, -1));
@@ -6241,13 +6393,19 @@ mod tests {
         // hidden-occupation persistence on that same post-load cursor.
         sim.scenario_rng = crate::sim::rng::SimRng::new(0);
         let expected_hash = sim.state_hash();
-        sim.substrate
-            .hidden_occupation
-            .exit_building((10, 10), "4x3", profile, Some((32, 32)));
+        sim.substrate.hidden_occupation.exit_building(
+            (10, 10),
+            &"4x3".into(),
+            profile,
+            Some((32, 32)),
+        );
         assert_ne!(sim.state_hash(), expected_hash);
-        sim.substrate
-            .hidden_occupation
-            .enter_building((10, 10), "4x3", profile, Some((32, 32)));
+        sim.substrate.hidden_occupation.enter_building(
+            (10, 10),
+            &"4x3".into(),
+            profile,
+            Some((32, 32)),
+        );
         let mut stored = profile;
         stored.occupy_height = 4;
         sim.substrate
@@ -8306,16 +8464,12 @@ mod tests {
             terrain
         };
         for terrain in [&damaged, &destroyed, &spawner] {
-            sim.terrain_objects
-                .objects_mut_for_test()
-                .insert(terrain.stable_id(), terrain.clone());
-            assert!(sim.register_terrain_object(
-                terrain.stable_id(),
-                crate::rules::ruleset::RuleSet::empty_for_test()
-            ));
-            sim.terrain_objects
-                .cell_index_mut_for_test()
-                .insert(terrain.cell(), terrain.stable_id());
+            sim.terrain_objects.insert_constructed(
+                terrain.clone(),
+                terrain.stable_id() == spawner_id,
+                true,
+            );
+            assert!(sim.register_terrain_object(terrain.stable_id(), &rules));
             mark_terrain_raw_occupation(
                 &mut sim.substrate.raw_cell_occupation,
                 terrain.cell(),
@@ -8324,7 +8478,7 @@ mod tests {
         }
         sim.set_next_stable_object_id_for_test(spawner_id + 1);
         sim.terrain_objects.animations_mut_for_test().insert(
-            spawner_cell,
+            spawner_id,
             TerrainAnimationState::new(
                 spawner_type,
                 crate::util::native_x87::NativeF32Bits::from_bits(0x3b44_9ba6),
@@ -8359,7 +8513,8 @@ mod tests {
             sim.resolved_terrain.as_mut(),
         );
         assert_eq!(result, TerrainDamageResult::Destroyed);
-        assert!(sim.unregister_non_entity_object(destroyed_id));
+        assert!(!sim.unregister_non_entity_object(destroyed_id));
+        assert_eq!(sim.substrate.display.layer_of(destroyed_id), None);
         sim.substrate.pending_delete.queue_object(destroyed_id);
         // Native in-scenario load restarts Scenario RNG from Seed0; isolate
         // destroyed-terrain persistence on that same post-load cursor.
@@ -8407,7 +8562,7 @@ mod tests {
             spawner_id
         );
         assert_eq!(
-            restored.terrain_objects.animations()[&spawner_cell].type_ref(),
+            restored.terrain_objects.animations()[&spawner_id].type_ref(),
             spawner_type
         );
         assert!(

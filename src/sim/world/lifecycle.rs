@@ -537,10 +537,10 @@ impl Simulation {
 pub(super) fn building_base_reservation_rect(
     rx: u16,
     ry: u16,
-    foundation: &str,
+    foundation: &crate::rules::foundation::Foundation,
     spacing: i32,
 ) -> CellRect {
-    let (width, height) = crate::rules::foundation::foundation_dimensions(foundation);
+    let (width, height) = foundation.dimensions();
     CellRect::new(
         native_base_reservation_start(rx, spacing),
         native_base_reservation_start(ry, spacing),
@@ -1571,6 +1571,20 @@ impl Simulation {
             &self.houses,
             stable_id,
         );
+        // BuildingClass::Unlimbo440B81..440C03 freezes an already-fogged
+        // foundation before exposing the new building. Its false visibility
+        // argument prevents newly constructed enemy art leaking into memory.
+        if self.session.game_options().fog_of_war
+            && self
+                .substrate
+                .entities
+                .get(stable_id)
+                .is_some_and(|entity| entity.category() == EntityCategory::Structure)
+        {
+            for viewer in self.fog_viewers() {
+                self.freeze_building_in_fog(viewer, stable_id, false, context);
+            }
+        }
         // Building440D07: recompute from the PRE-append House+68. Failed
         // Mark and the earlier dead arms never reach it.
         if let Some(owner) = self
@@ -2020,7 +2034,7 @@ impl Simulation {
         let foundation = entity.type_facts.foundation().to_owned();
         let hidden_profile = entity.type_facts.building_hidden_occupancy();
         let current_cell = (entity.position.rx(), entity.position.ry());
-        let (width, height) = crate::rules::foundation::foundation_dimensions(&foundation);
+        let (width, height) = foundation.dimensions();
         let mut intersections = Vec::with_capacity(usize::from(width) * usize::from(height));
         for dy in 0..height {
             for dx in 0..width {
@@ -2305,8 +2319,7 @@ impl Simulation {
             entity.type_facts.foundation(),
             spacing,
         );
-        let (foundation_width, foundation_height) =
-            crate::rules::foundation::foundation_dimensions(entity.type_facts.foundation());
+        let (foundation_width, foundation_height) = entity.type_facts.foundation().dimensions();
         let repair_rect = building_base_reservation_repair_rect(
             entity.position.rx(),
             entity.position.ry(),
@@ -3148,14 +3161,18 @@ impl Simulation {
     }
 
     pub(crate) fn register_terrain_object(&mut self, stable_id: u64, rules: &RuleSet) -> bool {
-        if !self
+        let Some(terrain) = self
             .terrain_objects
-            .objects()
-            .get(&stable_id)
-            .is_some_and(|terrain| terrain.is_live())
-        {
+            .get(stable_id)
+            .filter(|terrain| terrain.is_live())
+        else {
             return false;
-        }
+        };
+        let joins_logic = rules
+            .terrain_object_type_case_insensitive(self.interner.resolve(terrain.type_ref()))
+            .is_some_and(|terrain_type| {
+                terrain.joins_logic_on_unlimbo(terrain_type, self.session.game_mode())
+            });
         // Terrain ctor71BC76 reveals at the retained type-adjusted coordinate;
         // Object5F4260 selects Ground even on elevated cells.
         Self::submit_object_display(
@@ -3166,7 +3183,25 @@ impl Simulation {
             DisplayLayer::GROUND,
             rules,
         );
-        self.register_logic_object(stable_id)
+        // ObjectUnlimbo5F4FE2 submits Display before the independent Logic
+        // admission5F4FEF..5F5040; ordinary trees still complete Unlimbo.
+        if joins_logic {
+            self.register_logic_object(stable_id);
+        }
+        true
+    }
+
+    /// Pickup reads the current Type cache, not construction-time instance
+    /// state: TerrainTypeLoad71E22D can bind a formerly null Occupy_List.
+    /// Resource-free synthetic callers retain their explicit legacy policy.
+    fn terrain_occupy_list_bound(&self, stable_id: u64, rules: &RuleSet) -> bool {
+        self.terrain_objects
+            .get(stable_id)
+            .and_then(|terrain| {
+                rules
+                    .terrain_object_type_case_insensitive(self.interner.resolve(terrain.type_ref()))
+            })
+            .is_none_or(|terrain_type| terrain_type.has_occupy_list())
     }
 
     pub fn register_projectile(&mut self, stable_id: u64, flat: bool) -> bool {
@@ -3197,6 +3232,35 @@ impl Simulation {
         self.unregister_logic_object(stable_id)
     }
 
+    /// TerrainLimbo71C930 -> ObjectLimbo5F4D30: Mark(UP), Display removal,
+    /// ambient hard-stop5F4D81, custom detach5F4D89, Logic removal5F4DD3,
+    /// then Limbo flags. The Terrain-specific navigation suffix follows.
+    fn limbo_terrain_with_context(&mut self, stable_id: u64, context: UninitContext<'_>) -> bool {
+        let Some(terrain) = self.terrain_objects.get(stable_id) else {
+            return false;
+        };
+        let cell = terrain.cell();
+        let was_live = terrain.is_live();
+        if was_live {
+            self.notify_pointer_expired(stable_id, context);
+            let occupy_list_bound = self.terrain_occupy_list_bound(stable_id, context.rules());
+            let unmarked = self.terrain_objects.begin_limbo(
+                stable_id,
+                &mut self.substrate.raw_cell_occupation,
+                self.resolved_terrain.as_mut(),
+                occupy_list_bound,
+            );
+            debug_assert!(unmarked);
+            self.substrate.display.remove(stable_id);
+            self.object_sound_conceal(stable_id, context.rules());
+            context.effects().flush_sound(self, context.rules());
+            self.unregister_logic_object(stable_id);
+            self.terrain_objects.finish_limbo(stable_id);
+        }
+        self.finish_terrain_navigation_changes(context.rules(), &[cell]);
+        was_live
+    }
+
     /// Terminal Terrain/Bullet/Wave objects leave Logic immediately but retain
     /// their physical store identity until the common late delete drain.
     ///
@@ -3210,6 +3274,18 @@ impl Simulation {
         if !represented {
             return false;
         }
+        if self
+            .terrain_objects
+            .get(stable_id)
+            .is_some_and(|terrain| terrain.object_alive())
+        {
+            // ObjectUnInit5F6616 and ObjectLimbo5F4D61 announce while this
+            // instance is retained. TerrainLimbo71C930 unlinks only its ID;
+            // a successor keeps its own Logic/Display, Stage and cell query.
+            self.notify_pointer_expired(stable_id, context);
+            self.limbo_terrain_with_context(stable_id, context);
+            self.terrain_objects.finish_uninit(stable_id);
+        }
         if self.classify_object(stable_id) == Some(ObjectKind::Projectile) {
             // `ObjectClass::UnInit @ 0x005F65F0` broadcasts the bullet's
             // expiry before it leaves Logic; an anim riding it ends
@@ -3219,9 +3295,9 @@ impl Simulation {
             // Bullet's membership. The later scalar destructor repeats once.
             self.notify_pointer_expired(stable_id, context);
         }
-        // The same UnInit's Limbo (vt+0xD4) detaches a dying tree's custom
-        // sound (`object_sound`).
-        self.detach_custom_sound(stable_id);
+        if self.classify_object(stable_id) != Some(ObjectKind::Terrain) {
+            self.detach_custom_sound(stable_id);
+        }
         let _ = self.unregister_non_entity_object(stable_id);
         self.substrate.pending_delete.queue_object(stable_id);
         #[cfg(any(test, feature = "test-support"))]
@@ -3236,25 +3312,23 @@ impl Simulation {
         &mut self,
         lethal: crate::sim::terrain_object::TerrainLethalDamage,
         finalizing: &mut std::collections::BTreeSet<u64>,
-        navigation_changed_cells: &mut Vec<(u16, u16)>,
         context: UninitContext<'_>,
     ) -> bool {
-        // 71BB69->5F5311, 71BB73->5F6616, then 5F4D61. Repeated
-        // notifications do not rematch a Bullet already repaired to Cell.
-        for _ in 0..3 {
-            self.notify_pointer_expired(lethal.stable_id, context);
+        if !finalizing.contains(&lethal.stable_id) {
+            return false;
         }
-        let finalized = self.terrain_objects.finalize_lethal(
-            &mut self.substrate.raw_cell_occupation,
-            finalizing,
-            navigation_changed_cells,
-            lethal,
-            self.resolved_terrain.as_mut(),
-        );
+        // 71BB69->5F5311 precedes ordinary UnInit's5F6616/5F4D61.
+        // Repeated announcements do not rematch a repaired Bullet.
+        self.notify_pointer_expired(lethal.stable_id, context);
+        let finalized = self
+            .terrain_objects
+            .get(lethal.stable_id)
+            .is_some_and(|terrain| terrain.object_alive());
         if finalized {
             let retired = self.retire_non_entity_object(lethal.stable_id, context);
             debug_assert!(retired);
         }
+        finalizing.remove(&lethal.stable_id);
         finalized
     }
 
@@ -4475,19 +4549,18 @@ impl Simulation {
                 ObjectKind::Wave => {
                     listeners.extend(self.waves.iter().map(|(&id, _)| (id, kind)));
                 }
+                ObjectKind::Terrain => {
+                    listeners.extend(self.terrain_objects.objects().keys().map(|&id| (id, kind)));
+                }
                 ObjectKind::Smudge => {
                     if let Some(grid) = &self.smudge_grid {
                         listeners.extend(grid.objects().map(|(id, _)| (id, kind)));
                     }
                 }
                 // ObjectClass's PointerExpired (`0x005F5230`), which these
-                // inherit, and Terrain's (`0x0071CFD0`), which adds only its
-                // type, clear nothing these stores hold. A Spotlight's
+                // inherit, clears nothing these stores hold. A Spotlight's
                 // (`0x00436A00`) runs apart, for every expiry.
-                ObjectKind::VoxelAnim
-                | ObjectKind::Particle
-                | ObjectKind::Terrain
-                | ObjectKind::Spotlight => {}
+                ObjectKind::VoxelAnim | ObjectKind::Particle | ObjectKind::Spotlight => {}
             }
         }
         // Each store yields its IDs in order: the run-adaptive stable sort
@@ -5088,9 +5161,9 @@ impl Simulation {
     ///   for its trailing global-vector erase; the `+0x10C` target repair that
     ///   substitutes `Get_CellClass` at the expired object's last cell — the arm
     ///   `ProjectileStore::pointer_expired` receives — is unguarded.
-    /// * `ObjectClass::PointerExpired @ 0x005F5230` itself gates only the
-    ///   `+0x30` chain relink on a nonzero control; VERA models no `+0x30`
-    ///   chain, so it is correct by omission.
+    /// * `ObjectClass::PointerExpired @ 0x005F5230` gates the `+0x30`
+    ///   successor relink on a nonzero control. Terrain's retained cell
+    ///   subsequence follows that gate through the same listener index.
     ///
     /// So a torpedo already in flight at a diving submarine falling to the sub's
     /// last cell instead of tracking it is native behavior, not an approximation.
@@ -5251,6 +5324,7 @@ impl Simulation {
                 particle_systems: &mut self.substrate.particle_systems,
                 projectiles: &mut self.projectiles,
                 waves: &mut self.waves,
+                terrain: &mut self.terrain_objects,
             },
         )
     }
@@ -5490,16 +5564,14 @@ impl Simulation {
                 }
                 ObjectKind::Projectile => self.projectiles.get(listener_id).is_some(),
                 ObjectKind::Wave => self.waves.get(listener_id).is_some(),
+                ObjectKind::Terrain => self.terrain_objects.get(listener_id).is_some(),
                 ObjectKind::Smudge => self
                     .smudge_grid
                     .as_ref()
                     .and_then(|grid| grid.object(listener_id))
                     .is_some(),
                 // Not on the roster ([`ObjectKind`]'s pointer-expiry column).
-                ObjectKind::VoxelAnim
-                | ObjectKind::Particle
-                | ObjectKind::Terrain
-                | ObjectKind::Spotlight => false,
+                ObjectKind::VoxelAnim | ObjectKind::Particle | ObjectKind::Spotlight => false,
             };
             if !present {
                 continue;
@@ -5727,6 +5799,19 @@ impl Simulation {
                         },
                     );
                 }
+            } else if kind == ObjectKind::Terrain {
+                // Both Terrain constructors call ObjectCtor5F3900, whose
+                // 5F3A76..8B registers this listener and5F3B34 sets flag2;
+                // Dispatch725938..95F reaches TerrainPointerExpired71CFD0.
+                let changed = self.terrain_objects.pointer_expired(
+                    listener_id,
+                    expired_id,
+                    control == PointerExpiryControl::Uninit,
+                );
+                debug_assert!(
+                    found || !changed,
+                    "Terrain expiry index missed listener {listener_id}"
+                );
             } else if kind == ObjectKind::Wave {
                 let (owner_cleared, target_cleared) = self
                     .waves
@@ -5788,6 +5873,10 @@ impl Simulation {
     }
 
     pub fn uninit_with_context(&mut self, stable_id: u64, context: UninitContext<'_>) {
+        if self.classify_object(stable_id) == Some(ObjectKind::Terrain) {
+            self.retire_non_entity_object(stable_id, context);
+            return;
+        }
         self.planning_detach_actor(stable_id);
         let kind = match self.classify_object(stable_id) {
             Some(kind @ (ObjectKind::Entity | ObjectKind::Spotlight | ObjectKind::Smudge)) => kind,
@@ -6011,7 +6100,7 @@ impl Simulation {
                 .terrain_objects
                 .objects()
                 .get(&stable_id)
-                .is_some_and(|terrain| !terrain.is_live() && !terrain.in_logic_vector()),
+                .is_some_and(|terrain| !terrain.object_alive() && !terrain.in_logic_vector()),
             ObjectKind::Projectile => self
                 .projectiles
                 .get(stable_id)
@@ -6125,6 +6214,13 @@ impl Simulation {
             // Terrain destructor71B7D6 repeats expiry before leaving its
             // registry. This is later than the live lethal/UnInit callbacks.
             self.notify_pointer_expired(stable_id, context);
+            // TerrainDtor71B7B0 at71B824..71B840 repeats Limbo while GameActive,
+            // even for a never-placed or previously UnInit'd object. Its
+            // suffix still queries/recalculates the retained cell; the
+            // already-InLimbo prefix performs no unmark or extra expiry.
+            if (game_state as u8) != 0 {
+                self.limbo_terrain_with_context(stable_id, context);
+            }
         }
         if kind == Some(ObjectKind::Projectile) {
             // BulletDtor466581 announces expiry before clearing construction
@@ -6322,6 +6418,9 @@ impl Simulation {
         // (4CD4DE) resubmits even an owner concealed earlier in the frame.
         self.substrate.display.remove(stable_id);
         self.fog.forget_sight_source(stable_id);
+        // FoggedObject4D0EF0 has no source-object pointer: its image survives
+        // this destruction until CellClass::CleanFog486BF0 reveals it.
+        self.fog.forget_fogged_live_object(stable_id);
         self.drop_object_custom_sound(stable_id);
         let removed = match kind {
             Some(ObjectKind::Entity) => {

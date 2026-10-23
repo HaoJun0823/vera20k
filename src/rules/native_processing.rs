@@ -21,6 +21,7 @@ use crate::rules::phobos_radiation::RadiationTypeCatalog;
 use crate::rules::sound_ini::EvaRegistry;
 
 use crate::rules::missile_spawn::{MissileFamily, MissileSpawnRules};
+use crate::rules::object_image::{ImageTheater, ObjectImageKind, ObjectImageState};
 use crate::rules::object_type::{
     InfantryInfiltration, InfantryPips, ObjectCategory, WEAPON_SLOT_COUNT,
 };
@@ -144,7 +145,7 @@ pub enum RulesLayerKind {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RulesProcessContext {
     Ordinary,
-    ScenarioReset,
+    ScenarioReset(ImageTheater),
 }
 
 #[derive(Debug, Clone)]
@@ -260,14 +261,16 @@ impl RulesLayerStack {
         context: RulesProcessContext,
         fixed_eva: &EvaRegistry,
     ) -> Result<ProcessedRulesLayers, NativeRulesProcessingFailure> {
-        let (registry_state, mut root_color_add_reread) = match context {
-            RulesProcessContext::Ordinary => (registry_state, None),
-            RulesProcessContext::ScenarioReset => (
+        let (registry_state, mut root_color_add_reread, theater) = match context {
+            RulesProcessContext::Ordinary => (registry_state, None, ImageTheater::Uninitialized),
+            RulesProcessContext::ScenarioReset(theater) => (
                 registry_state.destructive_reset(),
                 Some(&self.layers[0].ini),
+                theater,
             ),
         };
         let mut processor = RulesPassProcessor::with_registry_state(registry_state);
+        processor.image_theater = theater;
         for (index, (kind, ini)) in self.iter_passes().enumerate() {
             if index > 0
                 && kind != RulesLayerKind::LangRule
@@ -296,6 +299,12 @@ impl RulesLayerStack {
         }
         if let Some(root) = root_color_add_reread {
             processor.rules_color_add.apply_pass(root);
+        }
+        if matches!(context, RulesProcessContext::ScenarioReset(_)) {
+            // Read_Map4AD071 / RMG59A201: all Overlay types receive this
+            // postpass after the incoming scenario's ordered Rules reads.
+            processor.init_overlay_theater();
+            processor.init_anim_theater();
         }
         let (ini, native_type_construction_trace, powerups) = processor.finish();
         Ok(ProcessedRulesLayers {
@@ -602,6 +611,162 @@ impl ProcessedRulesLayers {
         self.native_type_construction_trace.registry_state()
     }
 
+    /// Restore the inherited image calls of Terrain, Bullet and TechnoTypes
+    /// from their retained fields. RulesLoad675210 never replays ReadINI.
+    /// Call once on the incoming owned payload, after its saved digest passes.
+    pub(crate) fn restore_object_image_loads(
+        &mut self,
+        theater_name: &str,
+    ) -> Result<(), RulesError> {
+        self.validate_saved_state()?;
+        let theater = ImageTheater::from_name(theater_name);
+        for (&family, members) in &mut self.native_type_construction_trace.registry_state.families {
+            if family.object_category().is_none()
+                && !matches!(
+                    family,
+                    RulesTypeFamily::Terrain
+                        | RulesTypeFamily::Projectile
+                        | RulesTypeFamily::Overlay
+                        | RulesTypeFamily::Animation
+                )
+            {
+                continue;
+            }
+            for member in members {
+                if let Some(terrain) = member.terrain_type_read_state.as_mut() {
+                    // TerrainTypeLoad71E21D..71E22D binds its retained index
+                    // even when no ReadINI ever initialized the cached list.
+                    terrain.restore_occupy_list();
+                }
+                let image = &mut member.object_image;
+                // ObjectLoad5F9856/985C clears shape/ownership after raw load.
+                image.clear_shp();
+                // Terrain71E211/18, Bullet46C6E1/E8, Aircraft41CE72/79,
+                // Unit74805A/61 and Infantry5249AD/B4 load VXL BEFORE SHP,
+                // regardless of the retained Voxel flag. Building4651F6
+                // reaches only generic SHP; its derived visual owner follows.
+                if family != RulesTypeFamily::Building {
+                    image.load_voxel();
+                }
+                let kind = match family {
+                    RulesTypeFamily::Terrain => ObjectImageKind::Terrain,
+                    RulesTypeFamily::Animation => ObjectImageKind::Animation,
+                    _ => ObjectImageKind::Ordinary,
+                };
+                image.load_unowned_shp(kind, theater);
+                if family == RulesTypeFamily::Animation {
+                    // AnimTypeLoad42884E/55 reaches VXL then generic SHP
+                    // even for an unread type. Ctor-only false flags leave
+                    // that image resident without ART or bounds reads.
+                    if image.theater() {
+                        image.load_saved_anim_theater_shp(&member.native_stored_id);
+                    } else if image.new_theater() {
+                        //42894F invokes the distinct bounds/image resolver.
+                        image.load_anim_shp(
+                            &member.native_stored_id,
+                            theater,
+                            crate::rules::object_image::AnimImagePhase::Theater,
+                        );
+                    }
+                    image.init_anim_theater(&member.native_stored_id, theater);
+                }
+                if family == RulesTypeFamily::Overlay {
+                    // OverlayLoad5FEB3E/45 loads VXL before unconditional
+                    // generic SHP, then5FEBEC tries its suffix only on null.
+                    image.append_saved_overlay_shp();
+                    // MouseLoad5BE668 reaches the subsequent theater pass.
+                    image.init_overlay_theater();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The client atlas regression exercises this same resource operation;
+    /// connected saved-resource admission is tested by the persistence owner.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn restore_object_image_loads_for_test(&mut self, theater: &str) -> Result<(), RulesError> {
+        self.restore_object_image_loads(theater)
+    }
+
+    /// Project each actual Terrain member, including constructor-only Types.
+    /// A same-named type in another family owns a different body and image.
+    pub(crate) fn terrain_type_projections(
+        &self,
+    ) -> impl Iterator<Item = crate::rules::terrain_object_type::TerrainObjectType> + '_ {
+        self.native_type_construction_trace
+            .registry_state()
+            .families
+            .get(&RulesTypeFamily::Terrain)
+            .into_iter()
+            .flatten()
+            .filter_map(ProcessedType::terrain_projection)
+    }
+
+    /// The actual family's admitted Rules history, including empty bodies of
+    /// late constructor-only Types; another family's equal ID is independent.
+    pub(crate) fn terrain_type_read_sections(&self) -> impl Iterator<Item = (&str, &IniSection)> {
+        self.member_states(RulesTypeFamily::Terrain, |member| &member.body)
+    }
+
+    /// TerrainReadMap71CAD2 calls FindOrAllocate71E2A0 immediately before
+    /// this row's instance constructor. No Rules/ART pass is replayed here.
+    pub(crate) fn find_or_allocate_map_terrain_type(
+        &mut self,
+        incoming: &str,
+    ) -> Option<(
+        crate::rules::terrain_object_type::TerrainObjectType,
+        Option<NativeTypeConstructionEvent>,
+    )> {
+        if incoming.is_empty() || is_native_none_type_name(incoming) {
+            return None;
+        }
+        let state = &mut self.native_type_construction_trace.registry_state;
+        let mut constructors = Vec::new();
+        let index = find_or_construct_type(
+            &mut state.families,
+            &mut state.techno_type_order,
+            &mut constructors,
+            RulesTypeFamily::Terrain,
+            incoming,
+        );
+        let members = &state.families[&RulesTypeFamily::Terrain];
+        let terrain = members[index]
+            .terrain_projection()
+            .expect("Terrain factory initializes its retained subclass state");
+        if !constructors.is_empty() {
+            let mut registry = IniSection::new("TerrainTypes".into());
+            for (index, member) in members.iter().enumerate() {
+                registry.set(&index.to_string(), &member.native_stored_id);
+            }
+            self.ini.replace_first_section(registry);
+            // Leave shared compatibility text intact: e.g. SMOKEY already
+            // belongs to Anim. Terrain projects its own empty body above.
+        }
+        Some((terrain, constructors.pop()))
+    }
+
+    /// Ordered immutable Overlay projection. ProcessedType retains the input
+    /// fields and resource requests; registry construction performs no reads.
+    pub(crate) fn overlay_type_states(
+        &self,
+    ) -> impl Iterator<Item = (&str, i32, Option<&str>, &ObjectImageState)> {
+        self.native_type_construction_trace
+            .registry_state()
+            .families
+            .get(&RulesTypeFamily::Overlay)
+            .into_iter()
+            .flatten()
+            .map(|member| {
+                (
+                    member.native_stored_id.as_str(),
+                    member.overlay_damage_levels,
+                    member.overlay_cell_anim.as_deref(),
+                    &member.object_image,
+                )
+            })
+    }
+
     pub fn ini(&self) -> &IniFile {
         &self.ini
     }
@@ -685,6 +850,10 @@ impl ProcessedRulesLayers {
         }
         for (&family, members) in &registry.families {
             for member in members {
+                member.object_image.validate_saved_state()?;
+                if let Some(terrain) = &member.terrain_type_read_state {
+                    terrain.validate_saved_state()?;
+                }
                 #[cfg(feature = "ares")]
                 {
                     if member.factory_owners.is_some() != family.object_category().is_some() {
@@ -771,8 +940,7 @@ impl ProcessedRulesLayers {
         let warhead_count = families.get(&RulesTypeFamily::Warhead).map_or(0, Vec::len);
         let particle_count = families.get(&RulesTypeFamily::Particle).map_or(0, Vec::len);
         if families.values().flatten().any(|member| {
-            usize::from(member.building_foundation)
-                >= crate::rules::foundation::FOUNDATION_TABLE.len()
+            !member.building_foundation.valid()
                 || member
                     .weapon
                     .projectile
@@ -810,17 +978,29 @@ impl ProcessedRulesLayers {
             .anim_type_art_read_states()
     }
 
+    /// Retained Image and reached resource requests of the real AnimTypes,
+    /// including ctor-only types and the saved Load428800 boundary.
+    pub(crate) fn anim_type_image_states(&self) -> impl Iterator<Item = (&str, &ObjectImageState)> {
+        self.member_states(RulesTypeFamily::Animation, |member| &member.object_image)
+    }
+
     /// Retained Bullet/ObjectType Image and ART fields after each native pass.
     pub(crate) fn projectile_art_states(
         &self,
-    ) -> impl Iterator<Item = (&str, &ProjectileArtState)> {
+    ) -> impl Iterator<Item = (&str, &ProjectileArtState, &ObjectImageState)> {
         self.native_type_construction_trace
             .registry_state()
             .families
             .get(&RulesTypeFamily::Projectile)
             .into_iter()
             .flatten()
-            .map(|member| (member.native_stored_id.as_str(), &member.projectile_art))
+            .map(|member| {
+                (
+                    member.native_stored_id.as_str(),
+                    &member.projectile_art,
+                    &member.object_image,
+                )
+            })
     }
 
     /// BuildingType+16B0/EA4/EA8/EAC retained by its original reached body.
@@ -842,14 +1022,27 @@ impl ProcessedRulesLayers {
 
     /// BuildingType +EF0 after each reached ReadINI body, retained with its
     /// native process registry rather than reconstructed from merged Rules keys.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn building_foundation_states(&self) -> impl Iterator<Item = (&str, u8)> {
+        self.building_foundation_geometries()
+            .map(|(name, foundation)| (name, foundation.selector()))
+    }
+
+    pub(crate) fn building_foundation_geometries(
+        &self,
+    ) -> impl Iterator<Item = (&str, &crate::rules::foundation::Foundation)> {
         self.native_type_construction_trace
             .registry_state()
             .families
             .get(&RulesTypeFamily::Building)
             .into_iter()
             .flatten()
-            .map(|member| (member.native_stored_id.as_str(), member.building_foundation))
+            .map(|member| {
+                (
+                    member.native_stored_id.as_str(),
+                    &member.building_foundation,
+                )
+            })
     }
 
     /// BuildingType+154B after each reached Rules body; current-default ReadBool.
@@ -925,6 +1118,26 @@ impl ProcessedRulesLayers {
                 (
                     member.native_stored_id.as_str(),
                     member.building_target_coord_offset,
+                )
+            })
+    }
+
+    /// BuildingType's retained HalfDamageSmokeLocation1/2 after the last
+    /// admitted Rules body, projected from the same native type owner.
+    pub(crate) fn building_half_damage_smoke_locations(
+        &self,
+    ) -> impl Iterator<Item = (&str, [i32; 3], [i32; 3])> {
+        self.native_type_construction_trace
+            .registry_state()
+            .families
+            .get(&RulesTypeFamily::Building)
+            .into_iter()
+            .flatten()
+            .map(|member| {
+                (
+                    member.native_stored_id.as_str(),
+                    member.building_half_damage_smoke_location1,
+                    member.building_half_damage_smoke_location2,
                 )
             })
     }
@@ -1216,7 +1429,14 @@ impl ProcessedRulesLayers {
     /// ReadINI pass.
     pub(crate) fn techno_reference_states(
         &self,
-    ) -> impl Iterator<Item = (ObjectCategory, &str, &TechnoTypeReferences)> {
+    ) -> impl Iterator<
+        Item = (
+            ObjectCategory,
+            &str,
+            &TechnoTypeReferences,
+            &ObjectImageState,
+        ),
+    > {
         self.native_type_construction_trace
             .registry_state()
             .families
@@ -1230,6 +1450,7 @@ impl ProcessedRulesLayers {
                         category,
                         member.native_stored_id.as_str(),
                         &member.techno_references,
+                        &member.object_image,
                     )
                 })
             })
@@ -1595,6 +1816,14 @@ impl ProcessedRulesLayers {
             .rules_gravity
     }
 
+    /// Rules+1144 survives Type reset and supplies each admitted Terrain
+    /// reader's fallback when Strength is -1 (ReadGeneral671DD2..671DEB).
+    pub(crate) fn tree_strength(&self) -> i32 {
+        self.native_type_construction_trace
+            .registry_state()
+            .rules_tree_strength
+    }
+
     pub(crate) fn detail(&self) -> DetailRules {
         self.native_type_construction_trace
             .registry_state()
@@ -1611,6 +1840,20 @@ impl ProcessedRulesLayers {
             registry.rules_ambient_change_rate,
             registry.rules_ambient_change_step,
         )
+    }
+
+    /// ReadAudioVisual66A679..66A693/66B49E..66B4BE retains these across
+    /// Process and Type resets; the Rules registry remains their sole owner.
+    pub(crate) fn shroud_growth_inputs(&self) -> (bool, NativeF64Bits) {
+        let registry = self.native_type_construction_trace.registry_state();
+        (registry.rules_shroud_grow, registry.rules_shroud_rate)
+    }
+
+    /// Rules+1648 after the reached ReadAudioVisual66B4CA..66B4E4 passes.
+    pub(crate) fn fog_rate(&self) -> NativeF64Bits {
+        self.native_type_construction_trace
+            .registry_state()
+            .rules_fog_rate
     }
 
     /// Final Difficulty readers after the ordered Process passes. Keeping the
@@ -2285,8 +2528,15 @@ pub(crate) struct NativeRulesRegistryState {
     rules_detail: DetailRules,
     rules_ambient_change_rate: NativeF64Bits,
     rules_ambient_change_step: NativeF64Bits,
+    #[serde(default)]
+    rules_shroud_grow: bool,
+    #[serde(default = "crate::rules::ruleset::default_shroud_rate")]
+    rules_shroud_rate: NativeF64Bits,
+    #[serde(default = "crate::rules::ruleset::default_fog_rate")]
+    rules_fog_rate: NativeF64Bits,
     rules_difficulty_rows: [crate::rules::ruleset::DifficultyRules; 3],
     rules_gravity: i32,
+    rules_tree_strength: i32,
     rules_wind_direction: i32,
     rules_missile_rot_var: f64,
     rules_safety_altitude: i32,
@@ -2355,8 +2605,12 @@ impl Default for NativeRulesRegistryState {
             rules_detail: DetailRules::default(),
             rules_ambient_change_rate: crate::rules::ruleset::DEFAULT_AMBIENT_CHANGE_RATE,
             rules_ambient_change_step: crate::rules::ruleset::DEFAULT_AMBIENT_CHANGE_STEP,
+            rules_shroud_grow: general.shroud_grow,
+            rules_shroud_rate: general.shroud_rate,
+            rules_fog_rate: general.fog_rate,
             rules_difficulty_rows: general.difficulty_rows,
             rules_gravity: general.gravity,
+            rules_tree_strength: general.tree_strength,
             rules_wind_direction: general.wind_direction(),
             rules_missile_rot_var: general.missile_rot_var,
             rules_safety_altitude: general.safety_altitude,
@@ -2718,8 +2972,12 @@ impl NativeRulesRegistryState {
             rules_detail: self.rules_detail,
             rules_ambient_change_rate: self.rules_ambient_change_rate,
             rules_ambient_change_step: self.rules_ambient_change_step,
+            rules_shroud_grow: self.rules_shroud_grow,
+            rules_shroud_rate: self.rules_shroud_rate,
+            rules_fog_rate: self.rules_fog_rate,
             rules_difficulty_rows: self.rules_difficulty_rows,
             rules_gravity: self.rules_gravity,
+            rules_tree_strength: self.rules_tree_strength,
             rules_drop_zone_radius: self.rules_drop_zone_radius,
             rules_wind_direction: self.rules_wind_direction,
             rules_missile_rot_var: self.rules_missile_rot_var,
@@ -2991,6 +3249,15 @@ impl AresExplicitFactory {
 struct ProcessedType {
     native_stored_id: String,
     body: IniSection,
+    // Mandatory on load: a missing Arctic latch cannot be reconstructed from
+    // a flattened Image key or inferred from whether its name ends in A.
+    object_image: ObjectImageState,
+    /// OverlayCtor5FE265 starts at1; OverlayRead5FE8A6..5FE8C3 retains
+    /// the full signed dword through each fixed-ART Image-section read.
+    overlay_damage_levels: i32,
+    /// OverlayTypeClass ctor5FE290 starts null; ReadINI5FE867..5FE8A0
+    /// retains empty reads and stores AnimTypeFindOrAllocate428B80's result.
+    overlay_cell_anim: Option<String>,
     /// Constructor711351=0; fixed ART ReadInt71592A..715948 keeps the
     /// current value as default across Image changes and later Rules passes.
     #[serde(default)]
@@ -3027,11 +3294,21 @@ struct ProcessedType {
     anim_art_read: bool,
     /// One owner for Bullet's two-phase Image/ART reads across rules passes.
     projectile_art: ProjectileArtState,
+    /// Terrain constructor/current fields and ordered admitted reader inputs;
+    /// deferred SHP frame colors bind in TerrainAssetCatalog.
+    #[serde(default)]
+    terrain_type_read_state: Option<crate::rules::terrain_object_type::TerrainTypeReadState>,
     /// BuildingType45DF13 initializes +EF0 to zero; ReadINI461225..46125D
     /// updates it from fixed ART after ObjectType5F933B reads effective Image.
-    building_foundation: u8,
+    building_foundation: crate::rules::foundation::Foundation,
     /// Constructor45DEBC..45DEC8 clears BuildingType+EBC/EC0/EC4.
     building_target_coord_offset: [i32; 3],
+    /// BuildingTypeClass ctor45DD90 clears both triples; reached
+    /// ReadINI45FE50 calls Read3Int at45FF13 and45FF3C with current defaults.
+    #[serde(default)]
+    building_half_damage_smoke_location1: [i32; 3],
+    #[serde(default)]
+    building_half_damage_smoke_location2: [i32; 3],
     /// BuildingType ctor45DFDA=false; ReadBool45FEE5..45FF0D, current default.
     building_has_spotlight: bool,
     /// BuildingType+EE8/+EEC, retained across reached ReadINI4610A0 passes.
@@ -3143,10 +3420,6 @@ struct ProcessedType {
 /// leave every pointer null and every list empty.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct TechnoTypeReferences {
-    /// ObjectType+1F8 (`0x005F92F8..0x005F933B`): ReadString into 25 bytes
-    /// over a copy of the retained text, which starts as the type's ID. It
-    /// names the type's fixed ART section and its asset.
-    image: String,
     /// Last nonempty fixed ART Palette request bound by717820. Constructor
     /// store711680 clears DF0;71582B reads DD0 with empty default/capacity32.
     ///717820..71783E keeps DF0 on an empty read, and otherwise replaces it
@@ -3208,9 +3481,8 @@ pub(crate) struct TechnoTypeReferences {
 }
 
 impl TechnoTypeReferences {
-    fn new(native_stored_id: &str) -> Self {
+    fn new() -> Self {
         Self {
-            image: native_stored_id.to_owned(),
             palette_binding: None,
             death_weapon: None,
             debris_types: Vec::new(),
@@ -3240,7 +3512,6 @@ impl TechnoTypeReferences {
     /// Publish every retained reference onto the type's `ObjectType`, as
     /// stored IDs.
     pub(crate) fn apply_to(&self, object: &mut crate::rules::object_type::ObjectType) {
-        object.image.clone_from(&self.image);
         object.project_custom_palette(self.palette_binding.as_deref());
         object.death_weapon.clone_from(&self.death_weapon);
         object.debris_types.clone_from(&self.debris_types);
@@ -3454,13 +3725,27 @@ struct WeaponReadState {
 }
 
 impl ProcessedType {
+    fn terrain_projection(&self) -> Option<crate::rules::terrain_object_type::TerrainObjectType> {
+        let mut terrain = crate::rules::terrain_object_type::TerrainObjectType::from_retained(
+            &self.native_stored_id,
+            &self.body,
+            self.terrain_type_read_state.as_ref()?,
+            &self.object_image,
+        );
+        terrain.bind_armor(self.armor_id);
+        Some(terrain)
+    }
+
     fn new(native_stored_id: String) -> Self {
         Self {
             body: IniSection::new(native_stored_id.clone()),
+            object_image: ObjectImageState::new(&native_stored_id),
+            overlay_damage_levels: 1,
+            overlay_cell_anim: None,
             voxel_shadow_index: 0,
             tech_level: crate::rules::object_type::DEFAULT_TECH_LEVEL,
-            projectile_art: ProjectileArtState::new(&native_stored_id),
-            techno_references: TechnoTypeReferences::new(&native_stored_id),
+            projectile_art: ProjectileArtState::new(),
+            techno_references: TechnoTypeReferences::new(),
             native_stored_id,
             country_color_scheme: 0,
             country_side_index: -1,
@@ -3474,8 +3759,11 @@ impl ProcessedType {
             #[cfg(feature = "ares")]
             ares_side: None,
             anim_art_read: false,
-            building_foundation: 0,
+            terrain_type_read_state: None,
+            building_foundation: crate::rules::foundation::Foundation::default(),
             building_target_coord_offset: [0; 3],
+            building_half_damage_smoke_location1: [0; 3],
+            building_half_damage_smoke_location2: [0; 3],
             building_has_spotlight: false,
             building_extra_power: Default::default(),
             building_light: Default::default(),
@@ -3524,8 +3812,82 @@ impl ProcessedType {
     }
 }
 
+/// One family lookup/constructor for Process and late native factories.
+fn find_existing_type(
+    families: &HashMap<RulesTypeFamily, Vec<ProcessedType>>,
+    family: RulesTypeFamily,
+    incoming: &str,
+) -> Option<usize> {
+    families
+        .get(&family)?
+        .iter()
+        .position(|member| member.native_stored_id.eq_ignore_ascii_case(incoming))
+}
+
+fn find_or_construct_type(
+    families: &mut HashMap<RulesTypeFamily, Vec<ProcessedType>>,
+    techno_type_order: &mut Vec<(RulesTypeFamily, usize)>,
+    events: &mut Vec<NativeTypeConstructionEvent>,
+    family: RulesTypeFamily,
+    incoming: &str,
+) -> usize {
+    if let Some(index) = find_existing_type(families, family, incoming) {
+        return index;
+    }
+    let members = families.entry(family).or_default();
+    // AbstractTypeClass::Constructor @ 0x00410800 stores only 0x18 bytes.
+    // Lookup above compares that stored ID against the full input, so a
+    // repeated >24-byte spelling can construct another equal stored ID.
+    let native_stored_id = abstract_type_stored_id(incoming);
+    let index = members.len();
+    members.push(ProcessedType::new(native_stored_id.clone()));
+    #[cfg(feature = "ares")]
+    if family == RulesTypeFamily::Side {
+        members[index].ares_side = Some(AresSideState::default());
+    }
+    #[cfg(feature = "ares")]
+    if family == RulesTypeFamily::Country {
+        members[index].country_veterancy.ares.loading =
+            crate::rules::country_loading::AresCountryLoading::for_country_id(&native_stored_id);
+    }
+    #[cfg(feature = "ares")]
+    if family == RulesTypeFamily::Building {
+        members[index].explicit_factory = Some(AresExplicitFactory::default());
+    }
+    if family == RulesTypeFamily::Terrain {
+        members[index].armor_id = ArmorId::WOOD;
+        members[index].terrain_type_read_state =
+            Some(crate::rules::terrain_object_type::TerrainTypeReadState::new());
+    }
+    if crate::rules::ARES_ENABLED && family == RulesTypeFamily::Warhead {
+        members[index].ares_verses = Some(AresWarheadVerses::default());
+        members[index].ares_warhead = Some(Default::default());
+    }
+    if family.object_category().is_some() {
+        #[cfg(feature = "ares")]
+        {
+            members[index].emp_type = Some(Default::default());
+        }
+        #[cfg(feature = "ares")]
+        {
+            members[index].factory_owners = Some(AresFactoryOwners::default());
+        }
+        // TechnoType constructors71181D..711832 /711ABD..711ACB append
+        // to the shared vector at allocation time, including lazy Types.
+        techno_type_order.push((family, index));
+    }
+    if let Some(family) = family.native_constructor_family() {
+        events.push(NativeTypeConstructionEvent {
+            family,
+            native_stored_id,
+        });
+    }
+    index
+}
+
 #[derive(Debug)]
 struct RulesPassProcessor {
+    image_theater: ImageTheater,
     compatibility: RulesCompatibility,
     ares_prerequisites: Option<GenericPrerequisites>,
     /// Ordered Ares armor registry; Process retains it, destructive reset rebuilds it.
@@ -3549,8 +3911,12 @@ struct RulesPassProcessor {
     rules_detail: DetailRules,
     rules_ambient_change_rate: NativeF64Bits,
     rules_ambient_change_step: NativeF64Bits,
+    rules_shroud_grow: bool,
+    rules_shroud_rate: NativeF64Bits,
+    rules_fog_rate: NativeF64Bits,
     rules_difficulty_rows: [crate::rules::ruleset::DifficultyRules; 3],
     rules_gravity: i32,
+    rules_tree_strength: i32,
     rules_wind_direction: i32,
     rules_missile_rot_var: f64,
     rules_safety_altitude: i32,
@@ -3596,6 +3962,7 @@ impl Default for RulesPassProcessor {
 impl RulesPassProcessor {
     fn with_registry_state(registry_state: NativeRulesRegistryState) -> Self {
         Self {
+            image_theater: ImageTheater::Uninitialized,
             compatibility: registry_state.compatibility,
             ares_prerequisites: registry_state.ares_prerequisites,
             ares_armors: registry_state.ares_armors,
@@ -3611,8 +3978,12 @@ impl RulesPassProcessor {
             rules_detail: registry_state.rules_detail,
             rules_ambient_change_rate: registry_state.rules_ambient_change_rate,
             rules_ambient_change_step: registry_state.rules_ambient_change_step,
+            rules_shroud_grow: registry_state.rules_shroud_grow,
+            rules_shroud_rate: registry_state.rules_shroud_rate,
+            rules_fog_rate: registry_state.rules_fog_rate,
             rules_difficulty_rows: registry_state.rules_difficulty_rows,
             rules_gravity: registry_state.rules_gravity,
+            rules_tree_strength: registry_state.rules_tree_strength,
             rules_wind_direction: registry_state.rules_wind_direction,
             rules_missile_rot_var: registry_state.rules_missile_rot_var,
             rules_safety_altitude: registry_state.rules_safety_altitude,
@@ -3752,10 +4123,7 @@ impl RulesPassProcessor {
     }
 
     fn find_existing(&self, family: RulesTypeFamily, incoming: &str) -> Option<usize> {
-        self.families
-            .get(&family)?
-            .iter()
-            .position(|member| member.native_stored_id.eq_ignore_ascii_case(incoming))
+        find_existing_type(&self.families, family, incoming)
     }
 
     fn country_index_of_name(&self, incoming: &str) -> i32 {
@@ -3882,62 +4250,15 @@ impl RulesPassProcessor {
             .then(|| self.find_or_construct(RulesTypeFamily::ParticleSystem, incoming))
     }
 
-    /// The lookup and construction every Type factory shares once its own
-    /// null answers are excluded.
+    /// Every Process and late factory uses the same lookup/constructor body.
     fn find_or_construct(&mut self, family: RulesTypeFamily, incoming: &str) -> usize {
-        if let Some(index) = self.find_existing(family, incoming) {
-            return index;
-        }
-        let members = self.family_mut(family);
-        // AbstractTypeClass::Constructor @ 0x00410800 stores only 0x18 bytes.
-        // Lookup above compares that stored ID against the full input, so a
-        // repeated >24-byte spelling can construct another equal stored ID.
-        let native_stored_id = abstract_type_stored_id(incoming);
-        let index = members.len();
-        members.push(ProcessedType::new(native_stored_id.clone()));
-        #[cfg(feature = "ares")]
-        if family == RulesTypeFamily::Side {
-            members[index].ares_side = Some(AresSideState::default());
-        }
-        #[cfg(feature = "ares")]
-        if family == RulesTypeFamily::Country {
-            members[index].country_veterancy.ares.loading =
-                crate::rules::country_loading::AresCountryLoading::for_country_id(
-                    &native_stored_id,
-                );
-        }
-        #[cfg(feature = "ares")]
-        if family == RulesTypeFamily::Building {
-            members[index].explicit_factory = Some(AresExplicitFactory::default());
-        }
-        if family == RulesTypeFamily::Terrain {
-            members[index].armor_id = ArmorId::WOOD;
-        }
-        if crate::rules::ARES_ENABLED && family == RulesTypeFamily::Warhead {
-            members[index].ares_verses = Some(AresWarheadVerses::default());
-            members[index].ares_warhead = Some(Default::default());
-        }
-        if family.object_category().is_some() {
-            #[cfg(feature = "ares")]
-            {
-                members[index].emp_type = Some(Default::default());
-            }
-            #[cfg(feature = "ares")]
-            {
-                members[index].factory_owners = Some(AresFactoryOwners::default());
-            }
-            // TechnoType constructors71181D..711832 /711ABD..711ACB append
-            // to the shared vector at allocation time, including lazy Types.
-            self.techno_type_order.push((family, index));
-        }
-        if let Some(family) = family.native_constructor_family() {
-            self.native_type_construction_events
-                .push(NativeTypeConstructionEvent {
-                    family,
-                    native_stored_id,
-                });
-        }
-        index
+        find_or_construct_type(
+            &mut self.families,
+            &mut self.techno_type_order,
+            &mut self.native_type_construction_events,
+            family,
+            incoming,
+        )
     }
 
     fn allocate_colors(&mut self, pass: &IniFile) {
@@ -4305,6 +4626,11 @@ impl RulesPassProcessor {
         // as defaults; RulesClass keeps them across Full_Init's reset.
         self.rules_prism_support = self.rules_prism_support.read_pass(section);
         self.rules_spotlight.read_pass(section);
+        // RulesCtor666DF8 starts TreeStrength at25. ReadGeneral671DD2..
+        //671DEB retains the current signed dword; Process668EE8 reaches this
+        // before TypeData668EF0. This same boundary handles General prepasses,
+        // and RulesClass survives the destructive Type reset6686C0.
+        self.rules_tree_strength = section.read_int("TreeStrength", self.rules_tree_strength);
         self.rules_talk_bubble_time = section.read_talk_bubble_time(self.rules_talk_bubble_time);
 
         for &(key, family, is_list) in SITES {
@@ -4582,9 +4908,9 @@ impl RulesPassProcessor {
         // AudioVisual6691E0 runs later in Process, so this uses prior Gravity.
         self.postprocess_weapon_speeds();
         // Building post adds no Type references.
-        self.process_plain_family(RulesTypeFamily::Terrain, pass);
-        self.process_plain_family(RulesTypeFamily::Smudge, pass);
-        self.process_plain_family(RulesTypeFamily::Overlay, pass);
+        self.process_plain_family(RulesTypeFamily::Terrain, pass, fixed_art);
+        self.process_plain_family(RulesTypeFamily::Smudge, pass, fixed_art);
+        self.process_plain_family(RulesTypeFamily::Overlay, pass, fixed_art);
         self.process_particle_family(pass);
         self.process_particle_system_family(pass);
         self.process_voxel_anim_family(pass);
@@ -4982,8 +5308,28 @@ impl RulesPassProcessor {
                 // AbstractType's lookup at 0x00410A7F. Record this actual visit,
                 // not membership or eventual ART existence. See
                 // .local/anim-type-art-read-acceptance.md.
+                let theater = self.image_theater;
                 let member = &mut self.family_mut(RulesTypeFamily::Animation)[index];
                 member.anim_art_read = true;
+                // AnimTypeRead427D1B admits the inherited Object read, then
+                //427D9D..427DDD supplies its own theater flags and image call.
+                // This retains the existing fresh/unowned read projection;
+                // shape-dependent flag rereads on resident owned images are
+                // a separate cached-image lifecycle boundary.
+                member.object_image.read_ini(
+                    section,
+                    fixed_art,
+                    ObjectImageKind::Animation,
+                    theater,
+                );
+                if !member.object_image.image().is_empty() {
+                    member.object_image.read_anim_theater_flags(section);
+                    member.object_image.load_anim_shp(
+                        &member.native_stored_id,
+                        theater,
+                        crate::rules::object_image::AnimImagePhase::ReadIni,
+                    );
+                }
                 let mut references = std::mem::take(&mut member.anim_references);
                 for (key, family, field) in [
                     ("Next", RulesTypeFamily::Animation, &mut references.next),
@@ -5091,9 +5437,20 @@ impl RulesPassProcessor {
                 // pass without the key keeps it. It names each fixed ART
                 // section below; the later ART Image redirect is local to
                 // visual asset loading.
-                let references = &mut self.family_mut(family)[index].techno_references;
-                let image = raw.read_string("Image", &references.image, 0x19);
-                references.image.clone_from(&image);
+                let theater = self.image_theater;
+                let member = &mut self.family_mut(family)[index];
+                member
+                    .object_image
+                    .read_ini(&raw, fixed_art, ObjectImageKind::Ordinary, theater);
+                // TechnoRead7157B5..715825 loads current Image.SHP once
+                // for every RTTI except Building7, independently of Voxel.
+                // Its unconditional store clears a prior parent shape even
+                // on a miss, before Palette71584B and LoadVoxel71609C.
+                if family != RulesTypeFamily::Building {
+                    member.object_image.load_plain_shp();
+                }
+                let image = member.object_image.image().to_string();
+                let references = &mut member.techno_references;
                 // ReadINI712170 reaches715852 on every admitted Rules layer,
                 // after ObjectType's Image read. Empty/missing Palette keeps
                 // the previous binding even when this pass changes Image.
@@ -5108,6 +5465,12 @@ impl RulesPassProcessor {
                 member.voxel_shadow_index = fixed_art
                     .section_or_empty(&image)
                     .read_int("ShadowIndex", member.voxel_shadow_index);
+                // TechnoRead716090..7160A4 reaches LoadVoxel5F8110 only
+                // with the retained Voxel byte. Later Image changes cannot
+                // rename a resource whose load was skipped.
+                if member.object_image.voxel() {
+                    member.object_image.load_voxel();
+                }
                 // Installed suffix hooks716123/716132 ->10040DF0 ->1003DEC0
                 // reach the common TechnoType extension before subclass reads.
                 #[cfg(feature = "ares")]
@@ -5149,18 +5512,31 @@ impl RulesPassProcessor {
                             .read_pass(&raw, fixed_art.section_or_empty(&image));
                         member.building_target_coord_offset = raw
                             .read_coord3("TargetCoordOffset", member.building_target_coord_offset);
-                        member.building_foundation =
-                            crate::rules::foundation::read_building_foundation(
-                                member.building_foundation,
-                                &image,
-                                &native_stored_id,
-                                |section, current| {
-                                    crate::rules::foundation::read_foundation(
-                                        fixed_art.section_or_empty(section),
-                                        current,
-                                    )
-                                },
-                            );
+                        // BuildingTypeClass::ReadINI @0x0045FE50 reads these in
+                        // order with the current triples as Read3Int defaults
+                        // (0x00529CA0 at0x0045FF13/0x0045FF3C).
+                        member.building_half_damage_smoke_location1 = raw.read_coord3(
+                            "HalfDamageSmokeLocation1",
+                            member.building_half_damage_smoke_location1,
+                        );
+                        member.building_half_damage_smoke_location2 = raw.read_coord3(
+                            "HalfDamageSmokeLocation2",
+                            member.building_half_damage_smoke_location2,
+                        );
+                        member.building_foundation.read_stock_pass(
+                            &image,
+                            &native_stored_id,
+                            |section, current| {
+                                crate::rules::foundation::read_foundation(
+                                    fixed_art.section_or_empty(section),
+                                    current,
+                                )
+                            },
+                        );
+                        #[cfg(feature = "ares")]
+                        member
+                            .building_foundation
+                            .read_custom_pass(fixed_art.section_or_empty(&image));
                         if let Some(unit) = self.resolve_scalar_from(
                             &raw,
                             "FreeUnit",
@@ -5678,21 +6054,30 @@ impl RulesPassProcessor {
                 // Full native body46BEE0: base Object ART reads precede the
                 // clearing Image25 read and byte-narrowed Bullet ART fields.
                 // Keep type-reference allocation here in native read order.
-                let mut art = self.families[&RulesTypeFamily::Projectile][index]
-                    .projectile_art
-                    .clone();
-                art.read_pass(&raw, fixed_art, &color_names, |incoming| {
-                    let animation = self.find_or_allocate(RulesTypeFamily::Animation, incoming)?;
-                    Some(
-                        self.families[&RulesTypeFamily::Animation][animation]
-                            .native_stored_id
-                            .clone(),
-                    )
-                });
-                self.families
-                    .get_mut(&RulesTypeFamily::Projectile)
-                    .expect("the live BulletType member exists")[index]
-                    .projectile_art = art;
+                let member = &mut self.family_mut(RulesTypeFamily::Projectile)[index];
+                let mut art =
+                    std::mem::replace(&mut member.projectile_art, ProjectileArtState::new());
+                let mut image =
+                    std::mem::replace(&mut member.object_image, ObjectImageState::new(""));
+                art.read_pass(
+                    &mut image,
+                    self.image_theater,
+                    &raw,
+                    fixed_art,
+                    &color_names,
+                    |incoming| {
+                        let animation =
+                            self.find_or_allocate(RulesTypeFamily::Animation, incoming)?;
+                        Some(
+                            self.families[&RulesTypeFamily::Animation][animation]
+                                .native_stored_id
+                                .clone(),
+                        )
+                    },
+                );
+                let member = &mut self.family_mut(RulesTypeFamily::Projectile)[index];
+                member.projectile_art = art;
+                member.object_image = image;
                 if let Some(weapon) =
                     self.resolve_scalar_from(&raw, "AirburstWeapon", RulesTypeFamily::Weapon, 0x80)
                 {
@@ -5795,11 +6180,85 @@ impl RulesPassProcessor {
         }
     }
 
-    fn process_plain_family(&mut self, family: RulesTypeFamily, pass: &IniFile) {
+    fn process_plain_family(
+        &mut self,
+        family: RulesTypeFamily,
+        pass: &IniFile,
+        fixed_art: &IniFile,
+    ) {
         let mut index = 0;
         while index < self.family_len(family) {
-            self.begin_rules_member_read(family, index, pass);
+            if let Some((_id, raw, _effective)) = self.begin_rules_member_read(family, index, pass)
+            {
+                let theater = self.image_theater;
+                let tree_strength = self.rules_tree_strength;
+                match family {
+                    RulesTypeFamily::Terrain => {
+                        let member = &mut self.family_mut(family)[index];
+                        let state = member.terrain_type_read_state.get_or_insert_with(
+                            crate::rules::terrain_object_type::TerrainTypeReadState::new,
+                        );
+                        state.read_pass(
+                            &raw,
+                            fixed_art,
+                            &mut member.object_image,
+                            theater,
+                            tree_strength,
+                        );
+                    }
+                    RulesTypeFamily::Overlay => {
+                        // OverlayRead5FE78B first calls ObjectRead. Its fixed
+                        // ART cache retains a successful pre-Arctic section;
+                        // only a miss permits lookup under the mutated Image.
+                        let cached_art = self.family_mut(family)[index].object_image.read_ini(
+                            &raw,
+                            fixed_art,
+                            ObjectImageKind::Ordinary,
+                            theater,
+                        );
+                        // OverlayTypeClass::ReadINI5FE88A/5FE897 resolves
+                        // this Rules reference after ObjectRead. Empty keeps
+                        // the pointer; nonempty uses the sole Anim factory.
+                        let cell_anim = self.resolve_scalar_from(
+                            &raw,
+                            "CellAnim",
+                            RulesTypeFamily::Animation,
+                            0x80,
+                        );
+                        let member = &mut self.family_mut(family)[index];
+                        if let Some(cell_anim) = cell_anim {
+                            member.overlay_cell_anim = cell_anim;
+                        }
+                        let art = cached_art.unwrap_or_else(|| {
+                            fixed_art.section_or_empty(member.object_image.image())
+                        });
+                        member.overlay_damage_levels =
+                            art.read_int("DamageLevels", member.overlay_damage_levels);
+                        //5FE8F1..5FE92D: plain Image.SHP, independently of
+                        // Voxel; no Arctic prefix or generic retry here.
+                        if !member.object_image.theater() {
+                            member.object_image.load_plain_shp();
+                        }
+                    }
+                    _ => {}
+                }
+            }
             index += 1;
+        }
+    }
+
+    fn init_overlay_theater(&mut self) {
+        for member in self.family_mut(RulesTypeFamily::Overlay) {
+            member.object_image.init_overlay_theater();
+        }
+    }
+
+    fn init_anim_theater(&mut self) {
+        let theater = self.image_theater;
+        for member in self.family_mut(RulesTypeFamily::Animation) {
+            member
+                .object_image
+                .init_anim_theater(&member.native_stored_id, theater);
         }
     }
 
@@ -5909,12 +6368,10 @@ impl RulesPassProcessor {
         {
             self.select_anim.splash_list = list;
         }
-        // FlameDamage (`0x0066C2A1`) and FlameDamage2 are allocated but not
-        // retained: VERA ports no reader of either pointer.
-        for key in ["FlameDamage", "FlameDamage2"] {
-            let _ = self.resolve_scalar_from(section, key, RulesTypeFamily::Warhead, 0x80);
-        }
-        for key in ["C4Warhead", "CrushWarhead"] {
+        // ReadCombatDamage66C2A1..66C35D, in original read order.
+        // RulesTypeReferences retains each consumed pointer; FlameDamage
+        // still allocates its Type without a published consumer.
+        for key in ["FlameDamage", "FlameDamage2", "C4Warhead", "CrushWarhead"] {
             let warhead = self.resolve_scalar_from(section, key, RulesTypeFamily::Warhead, 0x80);
             self.rules_type_references.read_pointer(key, warhead);
         }
@@ -5986,6 +6443,8 @@ impl RulesPassProcessor {
         // Original 66920D..669258 reads these first, including the cold
         // startup's same AudioVisual call before any complete Process.
         self.rules_detail = self.rules_detail.read_pass(section);
+        // gamemd.exe ReadAudioVisual66A68E/66A693: current byte default.
+        self.rules_shroud_grow = section.read_bool("ShroudGrow", self.rules_shroud_grow);
         // AudioVisual66B385..66B39E: ReadRange474620, current +14BC default.
         // Rules6672FF constructs1024 leptons; literal -1 retains the prior.
         self.rules_drop_zone_radius =
@@ -5993,6 +6452,10 @@ impl RulesPassProcessor {
         // Full AudioVisual6691E0's 66B3C4 read uses the retained signed dword
         // default. Cold startup52D132 calls the same reader before Process.
         self.rules_gravity = section.read_int("Gravity", self.rules_gravity);
+        // ReadAudioVisual66B4CA..66B4E4: retain the current double across
+        // Process and Type resets; authored input is scanned as f32 then widened.
+        self.rules_shroud_rate = section.read_double_bits("ShroudRate", self.rules_shroud_rate);
+        self.rules_fog_rate = section.read_double_bits("FogRate", self.rules_fog_rate);
         // AudioVisual66B5D7..66B625: rate then step; both ReadDouble defaults
         // are the current Rules fields. Missing reads retain; malformed float
         // output is native undefined stack data, using ini_value's safe policy.
@@ -6039,8 +6502,10 @@ impl RulesPassProcessor {
             ("EMPulseWarhead", RulesTypeFamily::Warhead),
             ("EMPulseProjectile", RulesTypeFamily::Projectile),
         ] {
-            // VERA ports no reader of the Nuke and EMPulse pointers; only
-            // their allocations are kept.
+            // ReadSpecialWeapons @ 0x00668FB0 keeps EMPulseWarhead at +0xFA0;
+            // retain that typed ID through RulesTypeReferences. NukeWarhead,
+            // NukeProjectile, NukeDown and EMPulseProjectile remain
+            // allocation-only; no gameplay effect is claimed for this state.
             let resolved = self.resolve_scalar_from(section, key, family, 0x80);
             self.rules_type_references.read_pointer(key, resolved);
         }
@@ -6160,8 +6625,12 @@ impl RulesPassProcessor {
                     rules_detail: self.rules_detail,
                     rules_ambient_change_rate: self.rules_ambient_change_rate,
                     rules_ambient_change_step: self.rules_ambient_change_step,
+                    rules_shroud_grow: self.rules_shroud_grow,
+                    rules_shroud_rate: self.rules_shroud_rate,
+                    rules_fog_rate: self.rules_fog_rate,
                     rules_difficulty_rows: self.rules_difficulty_rows,
                     rules_gravity: self.rules_gravity,
+                    rules_tree_strength: self.rules_tree_strength,
                     rules_wind_direction: self.rules_wind_direction,
                     rules_missile_rot_var: self.rules_missile_rot_var,
                     rules_safety_altitude: self.rules_safety_altitude,

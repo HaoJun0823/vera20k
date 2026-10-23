@@ -113,6 +113,7 @@ pub use world_orders::UnitRepairAction;
 pub use world_orders::{EntryBaseAction, EntryClickAction};
 mod projectile_collision;
 mod shroud_refresh;
+mod fog_objects;
 mod substrate;
 mod techno_ai;
 mod track_cell_recalc;
@@ -151,6 +152,9 @@ mod world_commands;
 /// already hold the object (see `Simulation::order_actor_admits`).
 pub(crate) use world_commands::order_actor_admits_for;
 mod world_hash;
+
+#[cfg(all(test, feature = "ares"))]
+mod custom_foundation_tests;
 mod world_orders;
 mod world_spawn;
 
@@ -429,6 +433,9 @@ pub struct SimFrameOutput {
     pub sound_events_delivered: usize,
     pub fire_events: Vec<SimFireEvent>,
     pub combat_lights: Vec<crate::sim::combat::CombatLightRequest>,
+    /// Ordered axis writes from Bullet DetonateAtCoord; presentation owns the
+    /// retained screen offset and applies these after Logic.
+    pub screen_shake_updates: Vec<crate::sim::combat::ScreenShakeUpdate>,
     pub lighting_events: Vec<crate::sim::light_sources::LightingEvent>,
     /// The retail sync checksum this frame's multiplayer `Queue_AI` computed
     /// for the native history ring; `None` on single-player routes and on
@@ -1388,6 +1395,9 @@ pub struct Simulation {
     /// dedicated presentation handoff rather than fabricated world state.
     #[serde(skip)]
     pub(crate) combat_light_requests: FrameChannel<crate::sim::combat::CombatLightRequest>,
+    /// Ordered Bullet DetonateAtCoord screen-shake writes for this frame.
+    #[serde(skip)]
+    pub(crate) screen_shake_updates: FrameChannel<crate::sim::combat::ScreenShakeUpdate>,
     /// Persistent ordinary shots. This is authoritative save/hash state, not
     /// the render-side fire-event approximation.
     #[serde(default)]
@@ -2100,7 +2110,7 @@ impl Simulation {
                         return None;
                     }
                     let (foundation_w, foundation_h) =
-                        crate::rules::foundation::foundation_dimensions(&object.foundation);
+                        object.foundation.dimensions();
                     Some(
                         crate::sim::passenger::garrison_eject::DestroyedGarrisonBuilding {
                             building_id: stable_id,
@@ -2502,13 +2512,13 @@ impl Simulation {
         /// bridge layer's when its height test picks it), in its current order.
         fn current_order(
             occupancy: &crate::sim::occupancy::OccupancyGrid,
-            terrain_cells: &BTreeMap<(u16, u16), u64>,
+            terrain_objects: &crate::sim::terrain_object::TerrainObjectStore,
             rx: u16,
             ry: u16,
             layer: MovementLayer,
         ) -> Vec<CellObject> {
             occupancy
-                .cell_objects(rx, ry, layer, terrain_cells.get(&(rx, ry)).copied())
+                .cell_objects(rx, ry, layer, terrain_objects.members_at((rx, ry)))
                 .collect()
         }
 
@@ -2575,7 +2585,7 @@ impl Simulation {
 
                 let mut current = current_order(
                     &self.substrate.occupancy,
-                    self.terrain_objects.cell_index(),
+                    &self.terrain_objects,
                     rx,
                     ry,
                     layer,
@@ -2598,7 +2608,7 @@ impl Simulation {
                             if !eligible {
                                 let order = current_order(
                                     &self.substrate.occupancy,
-                                    self.terrain_objects.cell_index(),
+                                    &self.terrain_objects,
                                     rx,
                                     ry,
                                     layer,
@@ -2691,7 +2701,7 @@ impl Simulation {
                     // list link is gone and this walk terminates.
                     let order = current_order(
                         &self.substrate.occupancy,
-                        self.terrain_objects.cell_index(),
+                        &self.terrain_objects,
                         rx,
                         ry,
                         layer,
@@ -3522,6 +3532,11 @@ impl Simulation {
         self.session.reset_campaign_mission_counter_on_shell_exit();
     }
 
+    /// MapSelect5AE1FA/5AE0B8 publishes the selected stage before EvadeSave4C6180.
+    pub fn set_campaign_map_stage(&mut self, stage: u16) {
+        self.session.set_campaign_map_stage(stage);
+    }
+
     /// The outgoing scene's live ambient Rules writes, returned once it stops
     /// ([`ScenarioLightingState::retire_ambient_change_inputs`]).
     pub fn retire_ambient_change_inputs(
@@ -4312,6 +4327,7 @@ impl Simulation {
             lighting_sources: crate::sim::light_sources::LightingSources::default(),
             fire_events: FrameChannel::default(),
             combat_light_requests: FrameChannel::default(),
+            screen_shake_updates: FrameChannel::default(),
             projectiles: crate::sim::projectile::ProjectileStore::new(),
             waves: crate::sim::wave::WaveStore::new(),
             active_wave_links: BTreeMap::new(),
@@ -4975,7 +4991,7 @@ impl Simulation {
         // commits the sight reveal before this action returns.
         for (stable_id, _, reveal) in membership_updates {
             if reveal {
-                self.reveal_uncached_object_sight(stable_id, UninitContext::new(rules, None));
+                self.reveal_uncached_object_sight(stable_id, false, false, None, UninitContext::new(rules, None));
             }
         }
 
@@ -6623,20 +6639,19 @@ impl Simulation {
         // serialized Terrain objects must overwrite that derived projection.
         // Clear every known source first so Limbo/Destroyed objects stay absent,
         // then replay only live objects through the shared occupation writer.
-        let terrain_objects: Vec<_> = self.terrain_objects.objects().values().cloned().collect();
-        for terrain in &terrain_objects {
+        for object in self.terrain_objects.objects().values() {
             crate::sim::terrain_object::unmark_terrain_occupation(
-                terrain,
+                object,
                 Some(&mut resolved_terrain),
             );
         }
-        for terrain in &terrain_objects {
-            if terrain.is_live() {
-                crate::sim::terrain_object::mark_terrain_occupation(
-                    terrain,
-                    Some(&mut resolved_terrain),
-                );
-            }
+        // RecalcZone483C80 selects the first Terrain in saved cell order.
+        // Replaying storage order would select the wrong surviving mask.
+        for &head in self.terrain_objects.cell_index().values() {
+            crate::sim::terrain_object::mark_terrain_occupation(
+                &self.terrain_objects.objects()[&head],
+                Some(&mut resolved_terrain),
+            );
         }
         self.resolved_terrain = Some(resolved_terrain);
         self.terrain_speed_config = terrain_speed_config;
@@ -6917,8 +6932,8 @@ impl Simulation {
     /// receipts publish their Recalc only. A destroyed terrain object follows
     /// `TerrainClass::Limbo` @ `0x0071C930`: Recalc (`0x0071CA2A`), then
     /// AssignOrphanedCellZone (`0x0071CA42`) and the local graph update
-    /// (`0x0071CA51`) while `g_MapEditorMode` is zero. Deaths are published
-    /// after the receiver batch, not inside each Limbo.
+    /// (`0x0071CA51`) outside the ScenarioInit scope. Production Terrain
+    /// Limbo publishes synchronously before the following receiver.
     fn finish_terrain_navigation_changes(
         &mut self,
         rules: &RuleSet,
@@ -6933,6 +6948,13 @@ impl Simulation {
             .iter()
             .chain(terrain_changed_cells)
             .copied()
+            // Dummy Recalc47D2B8 has no path publication or structure scan.
+            // Test allocation without performing the ordered lookup early.
+            .filter(|&(x, y)| {
+                self.resolved_terrain
+                    .as_ref()
+                    .is_none_or(|grid| grid.cell(x, y).is_some())
+            })
             .collect();
         let blocked = navigation::structure_blocked_among(
             &self.substrate.entities,
@@ -6943,10 +6965,33 @@ impl Simulation {
         self.publish_recalculated_cells_with_presence(rules, &overlay_cells, &blocked);
         // Each Limbo's AssignOrphaned sees later deaths' cells unpublished.
         for &cell in terrain_changed_cells {
-            self.publish_cell_and_assign_orphaned_zone(rules, cell, &blocked);
+            // TerrainLimbo71C9F9..71CA2A reaches this suffix even when
+            // already InLimbo. Its canonical lookup must stamp the shared
+            // Dummy, whose Recalc47D2B0 immediately returns (47D2B8).
+            // Resize565C10's allocation diamond excludes cell0, so the
+            // never-Unlimbo'd zero constructor has no real-cell Recalc work.
+            let dummy = self.resolved_terrain.as_ref().is_some_and(|terrain| {
+                terrain.native_cell_identity((cell.0 as i16, cell.1 as i16))
+                    == crate::map::cell_index::NativeCellIdentity::Dummy
+            });
+            let initializing = self.object_placement_scope_active();
+            if !dummy {
+                if initializing {
+                    self.publish_recalculated_cells_with_presence(rules, &[cell], &blocked);
+                } else {
+                    self.publish_cell_and_assign_orphaned_zone(rules, cell, &blocked);
+                }
+            }
+            // Zero's retained zone class7 returns at56D4E8..56D51B;
+            // hierarchy58456A..584571 independently rejects its playfield.
+            // Do not turn absent Dummy cache input into a global rebuild.
+            if !initializing {
+                // 71CA2F..71CA60 gates zone repair and radar6551C0 on
+                // ScenarioInit==0, independently of the InLimbo prefix.
+                self.dirty_cells.mark_radar([cell]);
+            }
         }
     }
-
     /// One Recalc'd cell's navigation publication, then
     /// AssignOrphanedCellZone (`0x0056D460`) and the local graph update
     /// (`0x00584550`): the per-cell tail `TerrainClass::Limbo` and
@@ -7944,7 +7989,7 @@ impl Simulation {
             network_waiting,
             outcome_waiting,
         } = frame;
-        let lighting_events = if outcome_waiting { Vec::new() } else { self.lighting_sources.take_pending() };
+        let lighting_events = if outcome_waiting { Vec::new() } else { self.take_lighting_events() };
         let trigger_effects = if outcome_waiting { Vec::new() } else { std::mem::take(&mut self.trigger_effects) };
         // Preserve the established terminal-frame gate: these are committed
         // light-vector facts and the next admitted frame clears the producer
@@ -7954,6 +7999,10 @@ impl Simulation {
         } else {
             Vec::new()
         };
+        // Shake writes happen synchronously at the detonation prologue, before
+        // a possible later frame wait. They are already-observed process
+        // presentation effects, so hand them off even when Logic suspends.
+        let screen_shake_updates = self.screen_shake_updates.take();
         let lifecycle_outputs = if outcome_waiting { Vec::new() } else { self.lifecycle_outputs.take() };
         let multiplayer_checksum = if outcome_waiting { None } else { self.frame_sync_checksum.take() };
         let overlay_updates = if outcome_waiting { Vec::new() } else { std::mem::take(&mut self.frame_overlay_updates) };
@@ -7976,6 +8025,7 @@ impl Simulation {
             sound_events_delivered,
             fire_events,
             combat_lights,
+            screen_shake_updates,
             lighting_events,
             multiplayer_checksum,
         }
@@ -8023,6 +8073,7 @@ impl Simulation {
         // A failed earlier frame never reached collection; drop its value.
         self.frame_sync_checksum = None;
         self.combat_light_requests.discard();
+        self.screen_shake_updates.discard();
         // The wrapping native frame counter is committed LATE (end of this fn,
         // beside self.session.tick) so every phase sees the same pre-increment
         // frame N. execute_tick stays here: command scheduling below filters on
@@ -8077,11 +8128,13 @@ impl Simulation {
         }
         profile_phase!(TRIGGERS);
 
+        self.tick_shroud_growth(UninitContext::new(rules, overlay_registry).with_effects(effects));
         // Logic55B29A/55B2AD: consume prior pending conceal at the signed
         // pre-increment native frame boundary, before ore, Teams and live objects.
         self.tick_pending_shroud_conceal(
             UninitContext::new(rules, overlay_registry).with_effects(effects),
         );
+        self.tick_fog_regrowth(UninitContext::new(rules, overlay_registry).with_effects(effects));
         profile_phase!(SHROUD);
 
         // Interleaved object-AI pass: each object's mission precedes its own
@@ -8212,16 +8265,10 @@ impl Simulation {
         if let Some(overlay_registry) = overlay_registry {
             #[cfg(any(test, feature = "test-support"))]
             self.trace_master_frame_rung(MasterFrameTestRung::CrateRegen);
-            let normal_lighting = self
-                .session
-                .lighting()
-                .profile(crate::sim::scenario_session::ScenarioLightingProfile::Normal)
-                .into();
             let regen = crate::sim::crates::tick_crate_regeneration(
                 self,
                 rules,
                 overlay_registry,
-                normal_lighting,
             );
             if regen.visible != 0 {
                 // Native Mark mutates live CellClass land/zone/bridge state

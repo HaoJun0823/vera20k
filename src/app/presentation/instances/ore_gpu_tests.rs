@@ -51,16 +51,6 @@ impl Probe {
     ) -> Self {
         let root = PathBuf::from(std::env::var_os("RA2_DIR").expect("physical retail root"));
         let mut assets = AssetManager::new(&root, MediaArchiveMode::STOCK_DIGITAL).unwrap();
-        let mode = crate::rules::ini_parser::IniFile::from_bytes(
-            assets.get_ref("MPBattleMD.ini").unwrap(),
-        )
-        .unwrap();
-        let (_, rules_ini, _, _) = crate::app::loading::init_helpers::load_rules_with_merged_ini(
-            &assets,
-            Some(&mode),
-            Some(&scene.map.ini),
-        )
-        .unwrap();
         let theater =
             crate::map::theater::load_theater(&mut assets, &scene.map.header.theater).unwrap();
         let material_sources = packet["inputs"]["material_sources"].as_array();
@@ -150,10 +140,7 @@ impl Probe {
                 theater.extension,
                 &scene.map.header.theater,
                 registry,
-                &rules.tiberium_types,
-                &rules.crate_rules,
-                &rules_ini,
-                rules.art(),
+                rules,
                 None,
                 &[],
             )
@@ -170,8 +157,6 @@ impl Probe {
                     theater.extension,
                     &scene.map.header.theater,
                     registry,
-                    &rules_ini,
-                    rules.art(),
                     &[],
                 )
                 .expect("production Cell shadow atlas");
@@ -216,6 +201,7 @@ impl Probe {
             crate::map::lighting::parse_lighting(&scene.map.ini),
             2,
             Some((scene.sim().resolved_terrain().unwrap(), scene.sim())),
+            None,
         );
         Self {
             gpu,
@@ -272,6 +258,8 @@ impl Probe {
                 self.size[0],
                 self.size[1],
                 1.0,
+                None,
+                Default::default(),
             );
             let actual_a = self
                 .gpu
@@ -1234,7 +1222,7 @@ fn retail_sloped_ore_rows_match_original_with_zero_tail_boundary() {
         let display = row["display_overlay_id"].as_u64().unwrap() as u8;
         let key = crate::render::overlay_atlas::OverlaySpriteKey {
             name: registry.name(display).unwrap().to_owned(),
-            frame: input["state"].as_u64().unwrap() as u8,
+            frame: i32::from(input["state"].as_u64().unwrap() as u8),
         };
         for batch in &probe.batches {
             assert!(

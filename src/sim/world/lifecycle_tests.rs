@@ -350,7 +350,7 @@ fn insert_reservation_building(
     owner_name: &str,
     rx: u16,
     ry: u16,
-    foundation: &str,
+    foundation: &crate::rules::foundation::Foundation,
     spacing: i32,
 ) -> crate::sim::intern::InternedId {
     let owner = sim.interner.intern(owner_name);
@@ -381,7 +381,7 @@ fn insert_reservation_building(
     );
     entity
         .type_facts
-        .set_foundation_for_test(foundation.to_string());
+        .set_foundation_for_test(foundation.clone());
     entity
         .type_facts
         .set_base_reservation_spacing_for_test(Some(spacing));
@@ -503,7 +503,7 @@ fn receiver_fatal_limbo_clears_sparse_map_dummy_reservation() {
         .as_mut()
         .unwrap()
         .test_set_native_allocated_cells(&allocated);
-    insert_reservation_building(&mut sim, 41, "Americans", 10, 10, "1x1", 1);
+    insert_reservation_building(&mut sim, 41, "Americans", 10, 10, &"1x1".into(), 1);
     assert!(matches!(
         sim.try_reveal_entity(41, common_raw_request(10, 10, 0, 128, 128)),
         RevealOutcome::Revealed { .. }
@@ -563,7 +563,7 @@ fn receiver_garrison_survivor_keeps_height_aware_playfield_membership() {
         building.set_type_ref_for_test(building_type);
         building
             .type_facts
-            .set_foundation_for_test("2x2".to_string());
+            .set_foundation_for_test("2x2".to_string().into());
         let mut cargo = PassengerCargo::new(5, 1.0);
         cargo.board_forced_chain(&[(passenger_id, 1.0)]);
         building.passenger_role = PassengerRole::transport(cargo);
@@ -661,7 +661,15 @@ fn uninit_clears_aircraft_bridge_occupation() {
 fn gsi_04_11_structure_mark_clears_full_smudge_footprints_and_refinery_hole() {
     let mut sim = Simulation::with_seed(1);
     let stable_id = 41;
-    insert_reservation_building(&mut sim, stable_id, "Americans", 5, 5, "3x3Refinery", 0);
+    insert_reservation_building(
+        &mut sim,
+        stable_id,
+        "Americans",
+        5,
+        5,
+        &"3x3Refinery".into(),
+        0,
+    );
 
     let mut grid = crate::sim::smudge_grid::SmudgeGrid::new(16, 16);
     for (rx, ry, frame_offset) in [(4, 5, 0), (5, 5, 1), (4, 6, 2), (5, 6, 3)] {
@@ -1775,7 +1783,7 @@ fn gsi_04_12_common_raw_occupation_building_foundation_is_ground_only() {
         let building = sim.substrate.entities.get_mut(1).expect("building");
         building
             .type_facts
-            .set_foundation_for_test("2x2".to_string());
+            .set_foundation_for_test("2x2".to_string().into());
         building.set_on_bridge(true);
     }
 
@@ -1809,7 +1817,7 @@ fn gsi_04_05_hidden_lifecycle_follows_base_lists_without_expanding_them() {
         let building = sim.substrate.entities.get_mut(1).expect("building");
         building
             .type_facts
-            .set_foundation_for_test("2x2".to_string());
+            .set_foundation_for_test("2x2".to_string().into());
         let mut profile = building
             .type_facts
             .building_hidden_occupancy()
@@ -4716,7 +4724,7 @@ fn lifecycle_authority_uninit_records_once_and_the_drain_removes_the_tracking() 
 #[test]
 fn gsi_04_05_reservation_successful_reveal_marks_expanded_rect_after_lists() {
     let mut sim = Simulation::new();
-    let owner = insert_reservation_building(&mut sim, 101, "Americans", 10, 20, "2x3", 1);
+    let owner = insert_reservation_building(&mut sim, 101, "Americans", 10, 20, &"2x3".into(), 1);
 
     assert!(matches!(
         sim.try_reveal_entity(101, request(10, 20, PlacementEvidence::MarkSucceeded)),
@@ -4839,7 +4847,7 @@ fn gsi_04_16_caoild_reveal_and_owner_change_preserve_waypoint_edges() {
 #[test]
 fn gsi_04_05_reservation_failed_reveal_never_writes() {
     let mut sim = Simulation::new();
-    insert_reservation_building(&mut sim, 102, "Americans", 10, 20, "2x2", 1);
+    insert_reservation_building(&mut sim, 102, "Americans", 10, 20, &"2x2".into(), 1);
 
     assert_eq!(
         sim.try_reveal_entity(102, request(10, 20, PlacementEvidence::MarkFailed)),
@@ -4856,7 +4864,7 @@ fn gsi_04_05_reservation_failed_reveal_never_writes() {
 #[test]
 fn gsi_04_05_reservation_clear_removes_perimeter_but_retains_bounds() {
     let mut sim = Simulation::new();
-    let owner = insert_reservation_building(&mut sim, 111, "Americans", 10, 10, "1x1", 1);
+    let owner = insert_reservation_building(&mut sim, 111, "Americans", 10, 10, &"1x1".into(), 1);
     let _ = sim.try_reveal_entity(111, request(10, 10, PlacementEvidence::MarkSucceeded));
     assert_eq!(
         sim.houses
@@ -4878,12 +4886,12 @@ fn gsi_04_05_reservation_clear_removes_perimeter_but_retains_bounds() {
 #[test]
 fn gsi_04_05_reservation_limbo_clears_before_unlink_repairs_overlap_and_preserves_other_house() {
     let mut sim = Simulation::new();
-    insert_reservation_building(&mut sim, 103, "Americans", 10, 10, "1x1", 1);
+    insert_reservation_building(&mut sim, 103, "Americans", 10, 10, &"1x1".into(), 1);
     let other = sim.interner.intern("Russians");
     sim.houses.get_or_register_for_test(other, || {
         crate::sim::house_state::HouseState::new(other, 1, None, false, 0, 10)
     });
-    insert_reservation_building(&mut sim, 104, "Americans", 12, 10, "1x1", 1);
+    insert_reservation_building(&mut sim, 104, "Americans", 12, 10, &"1x1".into(), 1);
     let _ = sim.try_reveal_entity(103, request(10, 10, PlacementEvidence::MarkSucceeded));
     let _ = sim.try_reveal_entity(104, request(12, 10, PlacementEvidence::MarkSucceeded));
     sim.substrate.base_reservations.reserve(None, 9, 10, 1);
@@ -4928,8 +4936,8 @@ fn gsi_04_05_reservation_repair_scan_reaches_asymmetric_high_edge() {
     );
 
     let mut sim = Simulation::new();
-    insert_reservation_building(&mut sim, 107, "Americans", 10, 20, "4x4", 1);
-    insert_reservation_building(&mut sim, 108, "Americans", 16, 20, "1x1", 2);
+    insert_reservation_building(&mut sim, 107, "Americans", 10, 20, &"4x4".into(), 1);
+    insert_reservation_building(&mut sim, 108, "Americans", 16, 20, &"1x1".into(), 2);
     let _ = sim.try_reveal_entity(107, request(10, 20, PlacementEvidence::MarkSucceeded));
     let _ = sim.try_reveal_entity(108, request(16, 20, PlacementEvidence::MarkSucceeded));
     assert_eq!(sim.substrate.base_reservations.raw_mask(None, 14, 20), 1);
@@ -4945,7 +4953,7 @@ fn gsi_04_05_reservation_repair_scan_reaches_asymmetric_high_edge() {
 #[test]
 fn gsi_04_05_reservation_origins_truncate_after_first_spacing_subtraction() {
     assert_eq!(
-        super::lifecycle::building_base_reservation_rect(0, 0, "1x1", 32_769),
+        super::lifecycle::building_base_reservation_rect(0, 0, &"1x1".into(), 32_769),
         crate::sim::cell_rect::CellRect::new(32_767, 32_767, 65_539, 65_539)
     );
     assert_eq!(
@@ -4958,8 +4966,8 @@ fn gsi_04_05_reservation_origins_truncate_after_first_spacing_subtraction() {
 #[test]
 fn gsi_04_05_reservation_repair_replays_multicell_neighbor_for_every_hit() {
     let mut sim = Simulation::new();
-    insert_reservation_building(&mut sim, 109, "Americans", 10, 10, "1x1", 1);
-    insert_reservation_building(&mut sim, 110, "Americans", 12, 10, "2x2", 1);
+    insert_reservation_building(&mut sim, 109, "Americans", 10, 10, &"1x1".into(), 1);
+    insert_reservation_building(&mut sim, 110, "Americans", 12, 10, &"2x2".into(), 1);
     let _ = sim.try_reveal_entity(109, request(10, 10, PlacementEvidence::MarkSucceeded));
     let _ = sim.try_reveal_entity(110, request(12, 10, PlacementEvidence::MarkSucceeded));
 
@@ -5866,15 +5874,17 @@ fn gsi_05_02_mixed_fixture() -> (Simulation, [u64; 6]) {
     sim.register_live_object(particle_id);
 
     let terrain_id = sim.substrate.allocate_stable_id();
-    sim.terrain_objects
-        .objects_mut_for_test()
-        .insert(terrain_id, {
+    sim.terrain_objects.insert_constructed(
+        {
             let mut terrain =
                 TerrainObjectState::for_test(terrain_id, sim.interner.intern("TREE01"), 8, 9);
             terrain.set_health_for_test(10);
             terrain.set_max_health_for_test(10);
             terrain
-        });
+        },
+        false,
+        true,
+    );
     assert!(
         sim.register_terrain_object(terrain_id, crate::rules::ruleset::RuleSet::empty_for_test())
     );
@@ -6152,11 +6162,11 @@ fn gsi_05_02_tail_appends_run_same_pass_and_terminal_current_skips_successor() {
 }
 
 #[test]
-fn gsi_05_02_terrain_map_construction_registers_before_later_techno() {
+fn gsi_05_02_terrain_spawner_registers_before_later_techno() {
     let rules =
         crate::rules::ruleset::RuleSet::from_ini(&crate::rules::ini_parser::IniFile::from_str(
             "[InfantryTypes]\n[VehicleTypes]\n[AircraftTypes]\n[BuildingTypes]\n\
-             [TerrainTypes]\n0=TREE01\n[TREE01]\nStrength=10\n",
+             [TerrainTypes]\n0=TREE01\n[TREE01]\nStrength=10\nSpawnsTiberium=yes\n",
         ))
         .expect("terrain fixture rules");
     let mut sim = Simulation::new();
@@ -6444,7 +6454,9 @@ fn gsi_05_04_building_get_coords_uses_foundation_center_cell() {
     {
         let target = sim.substrate.entities.get_mut(target_id).unwrap();
         target.set_type_ref_for_test(gapowr);
-        target.type_facts.set_foundation_for_test("2x2".to_string());
+        target
+            .type_facts
+            .set_foundation_for_test("2x2".to_string().into());
     }
     assert!(matches!(
         sim.try_reveal_entity(target_id, common_raw_request(9, 11, 0, 128, 128)),
@@ -6644,7 +6656,7 @@ fn gsi_05_04_combat_fatal_garrison_recursion_keeps_cell_target() {
         building.set_type_ref_for_test(building_type);
         building
             .type_facts
-            .set_foundation_for_test("2x2".to_string());
+            .set_foundation_for_test("2x2".to_string().into());
         building.health.set_for_test(10);
         let mut cargo = PassengerCargo::new(5, 1.0);
         cargo.board_forced_chain(&[(passenger_id, 1.0)]);
@@ -7766,7 +7778,7 @@ fn wave_shared_damage_passes_a_unit_inside_its_war_factory() {
         factory.set_type_ref_for_test(sim.interner.intern("WEAP"));
         factory
             .type_facts
-            .set_foundation_for_test("1x1".to_string());
+            .set_foundation_for_test("1x1".to_string().into());
     }
     assert!(matches!(
         sim.try_reveal_entity(factory_id, common_raw_request(4, 5, 0, 128, 128)),
@@ -7852,7 +7864,7 @@ fn wave_walks_nonbuilding_terrain_building_order_and_terrain_owns_wood_gate() {
             building.set_type_ref_for_test(sim.interner.intern("BLDG"));
             building
                 .type_facts
-                .set_foundation_for_test("1x1".to_string());
+                .set_foundation_for_test("1x1".to_string().into());
         }
         assert!(matches!(
             sim.try_reveal_entity(building_id, common_raw_request(4, 5, 0, 128, 128)),
@@ -8507,7 +8519,7 @@ fn gsi_01_05_wave_reselects_live_cell_list_after_fatal_receiver_unmark() {
         building.set_type_ref_for_test(building_type);
         building
             .type_facts
-            .set_foundation_for_test("2x1".to_string());
+            .set_foundation_for_test("2x1".to_string().into());
         building.health.set_for_test(10);
     }
     assert!(matches!(
@@ -8581,26 +8593,23 @@ fn gsi_01_05_wave_reselects_live_cell_list_after_fatal_receiver_unmark() {
 }
 
 #[test]
-fn gsi_05_02_restore_rejects_each_live_modeled_family_missing_from_logic() {
+fn gsi_05_02_graph_restore_allows_static_terrain_and_requires_fired_objects() {
     let mut terrain = Simulation::new();
     let terrain_id = terrain.substrate.allocate_stable_id();
-    terrain
-        .terrain_objects
-        .objects_mut_for_test()
-        .insert(terrain_id, {
+    terrain.terrain_objects.insert_constructed(
+        {
             let mut terrain =
                 TerrainObjectState::for_test(terrain_id, terrain.interner.intern("TREE01"), 1, 1);
             terrain.set_health_for_test(1);
             terrain.set_max_health_for_test(1);
             terrain
-        });
-    assert_eq!(
-        terrain.restore_after_snapshot_load(),
-        Err(SnapshotRestoreError::MissingRequiredLogicIdentity {
-            registry: "TerrainObjectStore",
-            object_id: terrain_id,
-        })
+        },
+        false,
+        true,
     );
+    terrain
+        .restore_after_snapshot_load()
+        .expect("static Terrain has no required Logic slot");
 
     let mut projectile = Simulation::new();
     let projectile_id = projectile.substrate.allocate_stable_id();
@@ -8889,7 +8898,7 @@ fn insert_naval_build_const_fixture(
     );
     building
         .type_facts
-        .set_foundation_for_test("1x1".to_string());
+        .set_foundation_for_test("1x1".to_string().into());
     building.type_facts.set_build_const_eligible_for_test(true);
     sim.substrate.entities.insert(building);
 }

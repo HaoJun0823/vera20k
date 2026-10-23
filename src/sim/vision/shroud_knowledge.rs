@@ -307,15 +307,15 @@ impl ShroudKnowledge {
     }
 }
 
-/// The existing source producer supplies geometry. Native70AF50 admits one
-/// ordinary contribution under latch250 and stores254XYZ/260radius;70B1D0
-/// clears the admission latch then releases that stored footprint, retaining
-/// the stored geometry. Reconciliation must not
-/// turn an unchanged source into another reveal event.
+/// One viewer's accepted map contribution for a source event. Its `latched`
+/// bit tracks whether the derived cell-count index is active; that logical
+/// client's native +0x250 latch and cached +0x254/+0x260 geometry live in
+/// [`SightSource`]. Reconciliation must not turn an unchanged source into
+/// another reveal event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SightAdmission {
-    /// Native250: release clears the latch but retains cached254/260.
-    /// Old snapshots stored only active admissions.
+    /// Whether this viewer's derived map contribution is still active.
+    /// Older snapshots stored only active contributions.
     #[serde(default = "sight_latched_by_default")]
     pub latched: bool,
     pub owner: InternedId,
@@ -326,6 +326,29 @@ pub(crate) struct SightAdmission {
     /// never acquire rectangular source-count slots. Cleared with the latch;
     /// a native release recomputes geometry from cached origin/radius.
     pub cells: Vec<(u16, u16)>,
+}
+
+/// One logical client's `TechnoClass` sight cache: native +0x250, +0x254 and
+/// +0x260. Ordinary per-viewer [`SightAdmission`] values retain only the
+/// derived contribution that client's map accepted; this is the sole owner of
+/// that client's latch and cached geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) struct SightSource {
+    pub(crate) latched: bool,
+    pub(crate) owner: InternedId,
+    pub(crate) origin: (u16, u16, i32),
+    pub(crate) radius: i32,
+}
+
+impl From<&SightAdmission> for SightSource {
+    fn from(admission: &SightAdmission) -> Self {
+        Self {
+            latched: true,
+            owner: admission.owner,
+            origin: admission.origin,
+            radius: admission.radius,
+        }
+    }
 }
 
 fn sight_latched_by_default() -> bool {

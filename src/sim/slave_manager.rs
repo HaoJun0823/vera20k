@@ -1143,9 +1143,9 @@ impl Simulation {
         let owner = self.substrate.entities.get(master)?;
         let object = self.object_type(owner.type_ref(), rules)?;
         let foundation = if owner.category() == EntityCategory::Structure {
-            crate::rules::foundation::foundation_dimensions(&object.foundation)
+            object.foundation.dimensions()
         } else if let Some(into) = object.deploys_into.as_deref().and_then(|n| rules.object(n)) {
-            crate::rules::foundation::foundation_dimensions(&into.foundation)
+            into.foundation.dimensions()
         } else {
             (1, 1)
         };
@@ -1230,7 +1230,7 @@ impl Simulation {
         let owner = self.substrate.entities.get(master)?;
         let foundation = self
             .object_type(owner.type_ref(), rules)
-            .map(|object| crate::rules::foundation::foundation_dimensions(&object.foundation));
+            .map(|object| object.foundation.dimensions());
         let (x, y) = deploy_center(owner, foundation)?;
         Some((x as u16, y as u16))
     }

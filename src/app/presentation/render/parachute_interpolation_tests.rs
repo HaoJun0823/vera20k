@@ -39,6 +39,7 @@ fn emitted(
             detail: &detail,
             detail_level: 2,
             lighting: light,
+            retained_anim_intensities: Some(&scene.retained_intensities),
             house_colors: colors,
             hidden_super_anims: &hidden,
             show_hidden: false,
@@ -107,7 +108,7 @@ fn retail_parachute_emitter_interpolates_absolute_attachment_once_and_resets_own
     };
     let atlas = SpriteAtlas::from_test_entries(std::collections::HashMap::from([(
         ShpSpriteKey {
-            palette_context: ShpPaletteContext::SelectedScheme,
+            palette_context: ShpPaletteContext::AnimScheme,
             type_id: "PARACH".into(),
             facing: 0,
             frame: 0,
@@ -120,7 +121,7 @@ fn retail_parachute_emitter_interpolates_absolute_attachment_once_and_resets_own
         [((10, 20), 0), ((11, 20), 0)],
         &LightingConfig::default(),
     );
-    let mut scene = Scene::new(rules, 104);
+    let mut scene = Scene::new(rules, 104, &light);
     let first = current_pose(&scene).current();
     assert_eq!(first.coord, [2688, 5248, 104 + 75]);
     let mut interpolation = RenderInterpolation::new(true);

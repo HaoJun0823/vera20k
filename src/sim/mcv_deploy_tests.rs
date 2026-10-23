@@ -1047,9 +1047,11 @@ fn retail_dustbowl_computer_mcv() -> (
     house.set_current_iq_for_test(rules.general.max_iq_levels);
     sim.houses.register(house);
 
-    let (width, height) = crate::rules::foundation::foundation_dimensions(
-        &rules.object("NACNST").expect("retail NACNST").foundation,
-    );
+    let (width, height) = rules
+        .object("NACNST")
+        .expect("retail NACNST")
+        .foundation
+        .dimensions();
     // Retail `[Clear]` and `[Rough]` both read `Buildable=yes`.
     let buildable = [
         crate::rules::terrain_rules::LandType::Clear.as_index(),
@@ -1307,9 +1309,11 @@ fn retail_dustbowl_a_hard_computer_walls_its_yard() {
     let (yard, wall, overlay, mut ring) = {
         let resources = &scenario.runtime.resources;
         let rules = &resources.rules;
-        let (width, height) = crate::rules::foundation::foundation_dimensions(
-            &rules.object("NACNST").expect("retail NACNST").foundation,
-        );
+        let (width, height) = rules
+            .object("NACNST")
+            .expect("retail NACNST")
+            .foundation
+            .dimensions();
         let (x, y) = (i32::from(x), i32::from(y));
         let (right, bottom) = (x + i32::from(width), y + i32::from(height));
         let ring: Vec<u32> = (x - 1..=right)

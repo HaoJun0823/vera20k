@@ -42,7 +42,7 @@ fn bound_saved_world(
     let map = loaded.map;
     let theater =
         theater::load_theater(assets, &map.header.theater).expect("retail saved-world theater");
-    let (mut rules, processed, fixed_art, _) = owner
+    let (mut rules, _, fixed_art, _) = owner
         .load_scenario(
             crate::rules::process_owner::NativeScenarioRulesPrefix::NonCampaign(Some(mode)),
             &map.ini,
@@ -56,8 +56,7 @@ fn bound_saved_world(
         theater.extension,
         &map.header.theater,
     );
-    let overlay_registry =
-        crate::rules::overlay_types::OverlayTypeRegistry::from_ini(&processed, Some(&fixed_art));
+    let overlay_registry = rules.overlay_registry().clone();
     let mut simulation = super::super::tests::load_fixture_simulation(false);
     let terrain = {
         let main_rng = simulation.main_rng().draws();
@@ -91,12 +90,13 @@ fn bound_saved_world(
     );
     init_helpers::bind_rules_asset_closure(
         &mut rules,
-        &processed,
         &fixed_art,
+        &overlay_registry,
         &roots,
         assets,
         theater.extension,
         &map.header.theater,
+        crate::rules::terrain_asset_catalog::TerrainAssetLoadPhase::Saved,
     )
     .expect("retail simulation asset closure");
     let roster =
@@ -247,6 +247,8 @@ fn snapshot_bytes(
     )
     .unwrap();
     view.set_power_bar(native_saved_power());
+    // Authored signed display input: raw save/load must not clamp or seed it.
+    view.set_credits_counter(Some(-7));
     view.set_radar_events(saved_radar_for_fixture());
     GameSnapshot::save_validated_with_presentation(
         &runtime.simulation,
@@ -254,6 +256,7 @@ fn snapshot_bytes(
         rules_hash,
         "retail resources",
         123,
+        &[],
         &[],
         None,
         None,
@@ -277,6 +280,7 @@ fn assert_incoming_resources(
     incoming: &SimRuntime,
     map: &SavedMapMetadata,
 ) {
+    assert_eq!(prepared.credits_counter, Some(-7));
     assert_eq!(
         prepared.power_bar_anim.saved(),
         native_saved_power(),
@@ -306,10 +310,9 @@ fn assert_incoming_resources(
         prepared.resources.rules.object("MTNK").unwrap().strength,
         321
     );
-    assert_eq!(
-        prepared.resources.rules.simulation_config_hash(),
-        incoming.resources.rules.simulation_config_hash()
-    );
+    // TypeLoad can replace image-load attempts after the saved digest has
+    // passed. Compare the retained fields/assets below, not a pre-load digest
+    // with the post-load projection. The wrong-digest control still rejects.
     assert!(
         !prepared
             .resources
@@ -435,7 +438,7 @@ struct IncomingSave {
     repository: SaveRepository,
 }
 
-fn incoming_save() -> Option<IncomingSave> {
+fn incoming_save(theater: &str, extra_rules: &str) -> Option<IncomingSave> {
     let (root, mut assets) = retail_assets()?;
     let mut owner = retail_rules_owner(&assets);
     assets
@@ -447,7 +450,10 @@ fn incoming_save() -> Option<IncomingSave> {
         .expect("retail Battle INI")
         .ini;
     let directory = TestDirectory::new("saved-retail-resources");
-    directory.write("incoming.map", map_text("TEMPERATE", 321, 8).as_bytes());
+    directory.write(
+        "incoming.map",
+        format!("{}{extra_rules}", map_text(theater, 321, 8)).as_bytes(),
+    );
     directory.write("outgoing.map", map_text("SNOW", 654, 6).as_bytes());
     let source_path = directory.path().join("incoming.map");
     let source_name = source_path.to_str().unwrap();
@@ -514,7 +520,7 @@ fn frontend_main() -> crate::sim::rng::MainRng {
 
 #[test]
 fn retail_saved_resources_prepare_cold() {
-    let Some(save) = incoming_save() else {
+    let Some(save) = incoming_save("TEMPERATE", "") else {
         return;
     };
     let IncomingSave {
@@ -581,8 +587,480 @@ fn retail_saved_resources_prepare_cold() {
 }
 
 #[test]
+fn unread_cell_anim_loads_its_own_retail_shape_without_replaying_construction() {
+    use crate::sim::components::AnimClassSpawnDescriptor;
+    use crate::sim::native_identity::NativeUniqueIdCursor;
+    use crate::util::fixed_math::SIM_ZERO;
+
+    let Some(mut save) = incoming_save("TEMPERATE", "[GEM01]\nCellAnim=SEAL\n") else {
+        return;
+    };
+    // A same-named Infantry type/ART section does not perform an Anim read.
+    let rules = &save.incoming.resources.rules;
+    let overlay = rules.overlay_registry();
+    assert_eq!(
+        overlay
+            .flags(overlay.id_for_name("GEM01").unwrap())
+            .unwrap()
+            .cell_anim
+            .as_deref(),
+        Some("SEAL")
+    );
+    let config = rules.art().anim_runtime_config("SEAL").unwrap();
+    assert!(!config.art_body_read);
+    assert_eq!(config.raw_shp_frame_count, None);
+    let shape = save
+        .assets
+        .get_ref("SEAL.SHP")
+        .expect("real retail own-name SHP");
+    let count = i32::from(i16::from_le_bytes([shape[6], shape[7]]));
+    assert!(count > 0);
+    // This persistence fixture supplies an already born Anim through the
+    // common constructor. Ordinary Overlay Mark is covered by crates tests.
+    let sim = &mut save.incoming.simulation;
+    *sim.native_unique_ids_mut_for_test() = Some(NativeUniqueIdCursor::for_synthetic_simulation());
+    let kind = sim.intern("SEAL");
+    let mut descriptor = AnimClassSpawnDescriptor::new(kind, 5, 5, SIM_ZERO, SIM_ZERO, 0);
+    descriptor.loop_count = 1;
+    descriptor.draw_flags = 0x600;
+    let id = sim.spawn_anim_object(rules, descriptor).unwrap();
+    let native = sim.anim(id).unwrap().native_unique_id();
+    let runtime = sim.anim(id).unwrap().runtime().clone();
+    let cursor = sim.native_identity_cursor();
+    let hash = rules.simulation_config_hash();
+    let bytes = snapshot_bytes(&save.incoming, &save.owner, &save.map, None, hash);
+    let clock = || LOAD_CLOCK_MS;
+    let frontend = frontend_main();
+    let cache = TileVariantSelectorCache::default();
+    let view = SavedGamePreparationView {
+        repository: &save.repository,
+        current_simulation: None,
+        frontend_main: &frontend,
+        rules_owner: &save.owner,
+        tile_cache: &cache,
+        load_clock: &clock,
+    };
+    let prepared = save
+        .assets
+        .prepare_saved_load(|assets| PreparedSavedGame::prepare_resources(&bytes, &view, assets))
+        .unwrap();
+    // AnimTypeLoad428855 supplies image residency without ReadINI427D00
+    // or LoadImageAndResolveFrameBounds427B50: all ctor bounds stay zero.
+    let config = prepared
+        .resources
+        .rules
+        .art()
+        .anim_runtime_config("SEAL")
+        .unwrap();
+    assert!(!config.art_body_read);
+    assert_eq!(config.raw_shp_frame_count, Some(count));
+    assert_eq!(
+        (config.end, config.loop_end, config.rate_logic_frames),
+        (0, 0, 1)
+    );
+    let anim = prepared.world.simulation.anim(id).unwrap();
+    assert_eq!(anim.native_unique_id(), native);
+    assert_eq!(anim.runtime(), &runtime);
+    assert_eq!(prepared.world.simulation.native_identity_cursor(), cursor);
+
+    let PreparedSavedResources {
+        world,
+        resources,
+        processed_rules,
+        map,
+        ..
+    } = prepared;
+    let (simulation, _) = world.into_committed(SharedCellDummy::fresh(), &frontend);
+    save.owner.install_saved_scenario_rules(processed_rules);
+    let loaded = SimRuntime {
+        simulation,
+        resources,
+    };
+    let loaded_hash = loaded.resources.rules.simulation_config_hash();
+    let bytes = snapshot_bytes(&loaded, &save.owner, &map, None, loaded_hash);
+    let view = SavedGamePreparationView {
+        repository: &save.repository,
+        current_simulation: None,
+        frontend_main: &frontend,
+        rules_owner: &save.owner,
+        tile_cache: &cache,
+        load_clock: &clock,
+    };
+    let again = save
+        .assets
+        .prepare_saved_load(|assets| PreparedSavedGame::prepare_resources(&bytes, &view, assets))
+        .unwrap();
+    assert_eq!(again.resources.rules.simulation_config_hash(), loaded_hash);
+    assert_eq!(again.world.simulation.native_identity_cursor(), cursor);
+    assert_eq!(again.world.simulation.anim(id).unwrap().runtime(), &runtime);
+    let PreparedSavedResources {
+        world, resources, ..
+    } = again;
+    let (mut sim, _) = world.into_committed(SharedCellDummy::fresh(), &frontend);
+    for _ in 0..4 {
+        sim.advance_tick(
+            &[],
+            Some(&resources.rules),
+            None,
+            Some(&resources.overlay_registry),
+            33,
+        );
+    }
+    assert!(
+        sim.anim(id).is_none(),
+        "zero-End Anim uses normal AI and deferred cleanup"
+    );
+}
+
+#[test]
+fn unknown_terrain_type_load_validates_then_commits_and_resaves_its_same_owner() {
+    use crate::sim::terrain_spawn::{
+        TerrainConstructionMode, TerrainConstructionRules, construct_terrain_objects_with_rules,
+    };
+
+    let Some(mut save) = incoming_save(
+        "TEMPERATE",
+        "[Terrain]\n5005=SMOKEY\n05005=TREE01\n[SMOKEY]\nStrength=9000\n",
+    ) else {
+        return;
+    };
+    // This existing persistence fixture has a declared synthetic prefix; the
+    // headless retail regression covers the complete fresh Scenario prefix.
+    *save.incoming.simulation.native_unique_ids_mut_for_test() =
+        Some(crate::sim::native_identity::NativeUniqueIdCursor::for_synthetic_simulation());
+    let overlays = save.incoming.resources.overlay_registry.clone();
+    let rng = save.incoming.simulation.rng_state();
+    construct_terrain_objects_with_rules(
+        &mut save.incoming.simulation,
+        save.map.terrain_objects(),
+        &mut TerrainConstructionRules::Authored {
+            rules: &mut save.incoming.resources.rules,
+            owner: &mut save.owner,
+        },
+        false,
+        TerrainConstructionMode::Authored(&overlays),
+    )
+    .unwrap();
+    assert_eq!(save.incoming.simulation.rng_state(), rng);
+    let unknown = save
+        .incoming
+        .simulation
+        .terrain_objects()
+        .objects()
+        .values()
+        .find(|object| {
+            save.incoming
+                .simulation
+                .interner()
+                .resolve(object.type_ref())
+                == "SMOKEY"
+        })
+        .unwrap();
+    let unknown_id = unknown.stable_id();
+    let native_id = unknown.native_unique_id();
+    let known_id = save
+        .incoming
+        .simulation
+        .terrain_objects()
+        .id_at((5, 5))
+        .unwrap();
+    assert_ne!(known_id, unknown_id);
+    assert!(
+        !save
+            .incoming
+            .resources
+            .rules
+            .terrain_object_type_case_insensitive("SMOKEY")
+            .unwrap()
+            .has_occupy_list()
+    );
+    let cursor = save.incoming.simulation.native_identity_cursor();
+    let hash = save.incoming.resources.rules.simulation_config_hash();
+    let bytes = snapshot_bytes(&save.incoming, &save.owner, &save.map, None, hash);
+    let bad = snapshot_bytes(&save.incoming, &save.owner, &save.map, None, hash ^ 1);
+    let before = save_codec::serialize(save.owner.saved_scenario_rules().unwrap()).unwrap();
+    let clock = || LOAD_CLOCK_MS;
+    let frontend = frontend_main();
+    let cache = TileVariantSelectorCache::default();
+    let view = SavedGamePreparationView {
+        repository: &save.repository,
+        current_simulation: None,
+        frontend_main: &frontend,
+        rules_owner: &save.owner,
+        tile_cache: &cache,
+        load_clock: &clock,
+    };
+    let rejected = save
+        .assets
+        .prepare_saved_load(|assets| PreparedSavedGame::prepare_resources(&bad, &view, assets));
+    assert!(matches!(
+        rejected,
+        Err(PreparedLoadError::Snapshot(
+            SnapshotError::RulesMismatch { .. }
+        ))
+    ));
+    let prepared = save
+        .assets
+        .prepare_saved_load(|assets| PreparedSavedGame::prepare_resources(&bytes, &view, assets))
+        .unwrap();
+    // TerrainTypeLoad71E22D binds index0 while CellLoad483B9F restores only
+    // the saved known member. The initial saved digest remains mandatory.
+    assert_ne!(prepared.resources.rules.simulation_config_hash(), hash);
+    assert!(
+        prepared
+            .resources
+            .rules
+            .terrain_object_type_case_insensitive("SMOKEY")
+            .unwrap()
+            .has_occupy_list()
+    );
+    assert_eq!(
+        prepared.resources.rules.terrain_shape_filename("SMOKEY"),
+        None
+    );
+    assert_eq!(
+        prepared
+            .world
+            .simulation
+            .terrain_objects()
+            .members_at((5, 5))
+            .collect::<Vec<_>>(),
+        [known_id]
+    );
+    assert_eq!(
+        prepared
+            .world
+            .simulation
+            .terrain_objects()
+            .get(unknown_id)
+            .unwrap()
+            .native_unique_id(),
+        native_id
+    );
+    assert_eq!(prepared.world.simulation.native_identity_cursor(), cursor);
+    assert_eq!(
+        save_codec::serialize(save.owner.saved_scenario_rules().unwrap()).unwrap(),
+        before
+    );
+
+    let PreparedSavedResources {
+        world,
+        resources,
+        processed_rules,
+        map,
+        ..
+    } = prepared;
+    let (simulation, _) = world.into_committed(SharedCellDummy::fresh(), &frontend);
+    save.owner.install_saved_scenario_rules(processed_rules);
+    let runtime = SimRuntime {
+        simulation,
+        resources,
+    };
+    let loaded_hash = runtime.resources.rules.simulation_config_hash();
+    let bytes = snapshot_bytes(&runtime, &save.owner, &map, None, loaded_hash);
+    let view = SavedGamePreparationView {
+        repository: &save.repository,
+        current_simulation: None,
+        frontend_main: &frontend,
+        rules_owner: &save.owner,
+        tile_cache: &cache,
+        load_clock: &clock,
+    };
+    let again = save
+        .assets
+        .prepare_saved_load(|assets| PreparedSavedGame::prepare_resources(&bytes, &view, assets))
+        .unwrap();
+    assert_eq!(again.resources.rules.simulation_config_hash(), loaded_hash);
+    assert_eq!(again.world.simulation.native_identity_cursor(), cursor);
+    assert_eq!(
+        again
+            .world
+            .simulation
+            .terrain_objects()
+            .members_at((5, 5))
+            .collect::<Vec<_>>(),
+        [known_id]
+    );
+    assert_eq!(
+        again
+            .world
+            .simulation
+            .terrain_objects()
+            .get(unknown_id)
+            .unwrap()
+            .native_unique_id(),
+        native_id
+    );
+}
+
+#[test]
+fn arctic_type_load_validates_before_mutation_and_resaves_the_same_owner() {
+    let Some(mut save) = incoming_save(
+        "SNOW",
+        "[BlimpBombP]\nImage=ZBOMB\nInviso=yes\nAlternateArcticArt=yes\n\
+         [GAWALL]\nImage=SEAL\nAlternateArcticArt=yes\n",
+    ) else {
+        return;
+    };
+    let before = save_codec::serialize(save.owner.saved_scenario_rules().unwrap()).unwrap();
+    let bullet = save
+        .incoming
+        .resources
+        .rules
+        .projectile("BlimpBombP")
+        .unwrap();
+    assert!(bullet.voxel && bullet.inviso);
+    assert_eq!(bullet.image.as_deref(), Some("ZBOMB"));
+    let wall = save
+        .incoming
+        .resources
+        .overlay_registry
+        .id_for_name("GAWALL")
+        .unwrap();
+    assert_eq!(
+        save.incoming
+            .resources
+            .overlay_registry
+            .flags(wall)
+            .unwrap()
+            .damage_levels,
+        3
+    );
+    let clock = || LOAD_CLOCK_MS;
+    let frontend = frontend_main();
+    let cache = TileVariantSelectorCache::default();
+    let view = SavedGamePreparationView {
+        repository: &save.repository,
+        current_simulation: None,
+        frontend_main: &frontend,
+        rules_owner: &save.owner,
+        tile_cache: &cache,
+        load_clock: &clock,
+    };
+    let rejected = save.assets.prepare_saved_load(|assets| {
+        PreparedSavedGame::prepare_resources(&save.bad_rules, &view, assets)
+    });
+    assert!(matches!(
+        rejected,
+        Err(PreparedLoadError::Snapshot(
+            SnapshotError::RulesMismatch { .. }
+        ))
+    ));
+    let rejected = save.assets.prepare_saved_load(|assets| {
+        PreparedSavedGame::prepare_resources(&save.bad_follow, &view, assets)
+    });
+    assert!(matches!(
+        rejected,
+        Err(PreparedLoadError::LocalView(
+            SavedLocalViewError::MissingEntityReference {
+                field: "Follow",
+                ..
+            }
+        ))
+    ));
+    assert_eq!(
+        save_codec::serialize(save.owner.saved_scenario_rules().unwrap()).unwrap(),
+        before
+    );
+
+    let prepared = save
+        .assets
+        .prepare_saved_load(|assets| {
+            PreparedSavedGame::prepare_resources(&save.bytes, &view, assets)
+        })
+        .unwrap();
+    // BulletLoad46C6E1/E8 always requests entry VXL before Arctic SHP,
+    // even for saved Voxel/Inviso. Missing ZBOMBA.SHP cannot undo the latch.
+    let bullet = prepared.resources.rules.projectile("BlimpBombP").unwrap();
+    assert_eq!(bullet.image.as_deref(), Some("ZBOMBA"));
+    assert_eq!(bullet.voxel_image_load(), Some("ZBOMB"));
+    assert_eq!(bullet.image_loads[0].image, "ZBOMBA");
+    assert_eq!(
+        prepared.resources.rules.object("GHOST").unwrap().image,
+        "SEALA"
+    );
+    // OverlayLoad5FEB45 followed by InitTheater5BE668 must project the
+    // updated image owner into both gameplay flags and physical binding.
+    assert_eq!(
+        prepared
+            .resources
+            .overlay_registry
+            .flags(wall)
+            .unwrap()
+            .damage_levels,
+        3
+    );
+    let (filename, _) = crate::rules::effect_asset_catalog::load_overlay_shape(
+        &save.assets,
+        &prepared.resources.overlay_registry,
+        "GAWALL",
+        "SNO",
+        "SNOW",
+    )
+    .unwrap();
+    assert_eq!(filename, "SEALA.SHP");
+    assert_eq!(
+        save_codec::serialize(save.owner.saved_scenario_rules().unwrap()).unwrap(),
+        before
+    );
+
+    let PreparedSavedResources {
+        world,
+        resources,
+        processed_rules,
+        map,
+        ..
+    } = prepared;
+    let (simulation, _) = world.into_committed(SharedCellDummy::fresh(), &frontend);
+    save.owner.install_saved_scenario_rules(processed_rules);
+    let runtime = SimRuntime {
+        simulation,
+        resources,
+    };
+    let bytes = snapshot_bytes(
+        &runtime,
+        &save.owner,
+        &map,
+        None,
+        runtime.resources.rules.simulation_config_hash(),
+    );
+    let view = SavedGamePreparationView {
+        rules_owner: &save.owner,
+        repository: &save.repository,
+        current_simulation: None,
+        frontend_main: &frontend,
+        tile_cache: &cache,
+        load_clock: &clock,
+    };
+    let again = save
+        .assets
+        .prepare_saved_load(|assets| PreparedSavedGame::prepare_resources(&bytes, &view, assets))
+        .unwrap();
+    let bullet = again.resources.rules.projectile("BlimpBombP").unwrap();
+    assert_eq!(
+        bullet.image.as_deref(),
+        Some("ZBOMBA"),
+        "saved latch prevents AA"
+    );
+    assert_eq!(
+        bullet.voxel_image_load(),
+        Some("ZBOMBA"),
+        "next Load uses its new entry image"
+    );
+    let (filename, _) = crate::rules::effect_asset_catalog::load_overlay_shape(
+        &save.assets,
+        &again.resources.overlay_registry,
+        "GAWALL",
+        "SNO",
+        "SNOW",
+    )
+    .unwrap();
+    assert_eq!(filename, "SEALA.SHP", "Overlay's saved latch prevents AA");
+}
+
+#[test]
 fn retail_saved_resources_prepare_cross_map_and_roll_back_late_failure() {
-    let Some(save) = incoming_save() else {
+    let Some(save) = incoming_save("TEMPERATE", "") else {
         return;
     };
     let IncomingSave {
