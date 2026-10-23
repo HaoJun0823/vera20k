@@ -155,6 +155,15 @@ pub(super) fn forces(
         if holds_or_fights(entity.mission) {
             continue;
         }
+        // The advance step owns a unit it is pushing: a guard here would pull
+        // it back out of the push.
+        if brain
+            .orders
+            .get(&entity.entity_id)
+            .is_some_and(|sent| sent.target.is_some() && tick < sent.refresh)
+        {
+            continue;
+        }
         let current = brain
             .orders
             .get(&entity.entity_id)
@@ -196,7 +205,7 @@ fn holds_or_fights(mission: MissionId) -> bool {
 /// Whether an object is one these orders step around: an infantry, vehicle or
 /// aircraft that is neither a gatherer nor a Construction Yard maker.
 /// Buildings and terrain are not.
-fn is_combat_unit(rules: &RuleSet, ty: &ObjectType) -> bool {
+pub(super) fn is_combat_unit(rules: &RuleSet, ty: &ObjectType) -> bool {
     matches!(
         ty.category,
         ObjectCategory::Infantry | ObjectCategory::Vehicle | ObjectCategory::Aircraft

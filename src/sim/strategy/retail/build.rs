@@ -40,14 +40,15 @@ use super::RetailBrain;
 const HARVESTERS_PER_REFINERY: usize = 3;
 
 /// How many refineries the economy grows to. Past this the ore within reach
-/// of the base is the limit, not the unloading bays.
-const REFINERY_TARGET: usize = 2;
+/// of the base is the limit, not the unloading bays. A refinery also brings
+/// its own harvester, so each one is income twice over.
+const REFINERY_TARGET: usize = 3;
 
 /// The wallet the house wants in hand before it buys troops. Below it every
 /// credit buys another harvester or another bay, which is what makes the
 /// army affordable later; an army bought out of a thin economy is an army
 /// that stops the income it was bought with.
-const COMBAT_MIN_CREDITS: i32 = 2_500;
+const COMBAT_MIN_CREDITS: i32 = 2_000;
 
 /// One frame's spending: take what is finished out of the yard, start the
 /// next structure, and keep the factories busy.
@@ -155,6 +156,15 @@ fn next_building<'r>(
     rules: &'r RuleSet,
     obs: &Observation<'_>,
 ) -> Option<(&'r ObjectType, InternedId)> {
+    // A brownout is the one state that stops everything else: production
+    // runs at a crawl and the defenses go offline. Whatever else the base
+    // wants, a plant comes first, and it comes first even when nothing else
+    // is left to build.
+    if obs.power_balance() < 0 {
+        if let Some(plant) = first_buildable(rules, obs, &rules.build_power_types) {
+            return Some(plant);
+        }
+    }
     let (ty, type_id) = match candidate(rules, obs) {
         Some(found) => found,
         // Nothing the base wants is buildable yet, and the house has no plant:
@@ -303,6 +313,17 @@ fn class_types<'r>(
         let type_id = obs.type_id(&ty.id)?;
         (obs.can_build(rules, ty, true) != CanBuild::No).then_some((ty, type_id))
     })
+}
+
+/// Whether the base can replace what it loses: a war factory for the
+/// vehicles, a barracks for the infantry.
+///
+/// A push spends the army it was given, and a house with no factory to
+/// replace it has traded its whole force for whatever it killed. That is why
+/// this is the gate on attacking rather than a bigger army alone.
+pub(super) fn can_replace_units(rules: &RuleSet, obs: &Observation<'_>) -> bool {
+    count_in(obs, rules, &rules.build_weapons_types) > 0
+        && count_in(obs, rules, &rules.build_barracks_types) > 0
 }
 
 /// How many of the house's objects are one of `names`.

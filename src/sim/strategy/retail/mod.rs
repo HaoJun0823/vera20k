@@ -17,24 +17,26 @@
 //!   ([`build`]). That module holds the economy; it is this brain's own,
 //!   because the native one is a computer house's and comes with money the
 //!   house has not earned.
-//! - **Use what it has**: engineers take what they can capture, and an idle
-//!   combat unit holds the base ([`orders`]).
+//! - **Use what it has**: engineers take what they can capture, an army large
+//!   enough is sent at the enemy's base ([`advance`]), and while it is not,
+//!   an idle combat unit holds the base ([`orders`]).
 //!
 //! Determinism: the brain owns its generator and never draws from a
 //! simulation stream, and every decision is an integer comparison over the
 //! rules' arrays and the entity store in their own order.
 //!
 //! RESIDUALS:
-//! - The army defends; it does not attack yet. An idle combat unit is put on
-//!   area guard at the base, so a house that has built an army holds it
-//!   rather than spending it. Attacking needs a target choice and a
-//!   commitment rule, and both are their own change.
+//! - The push is one rule: army size, then the nearest enemy structure. It
+//!   has no retreat, no regrouping and no wave timing, so a push that is
+//!   losing keeps going. Each unit's actual fight is the sim's `AttackMove`
+//!   and `Guard`.
 //! - The army sees the whole map: fog honesty is still the open question
 //!   `docs/autoplay.md` records.
 //! - Target selection is one predicate, not the native one: another house's
 //!   object this house is at war with, nearest first, and only inside the
 //!   base radius.
 
+pub(super) mod advance;
 pub(super) mod build;
 pub(super) mod expand;
 pub(super) mod orders;
@@ -97,6 +99,10 @@ impl Brain for RetailBrain {
         expand::deploy_yard_maker(rules, obs, out);
         build::spend(self, rules, obs, out);
         orders::engineers(self, rules, obs, out);
-        orders::forces(self, rules, obs, out);
+        // A house that is pushing owns its whole army for the frame; one that
+        // is not keeps holding its base.
+        if !advance::advance(self, rules, obs, out) {
+            orders::forces(self, rules, obs, out);
+        }
     }
 }
