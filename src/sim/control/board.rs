@@ -2,10 +2,10 @@
 //!
 //! Per frame, in this order:
 //!
-//! 1. the brain's **state** requests are applied through their owners (the
-//!    team block is the only one today);
-//! 2. the brain **thinks** against a fresh projection and answers orders and
+//! 1. the brain **thinks** against a fresh projection and answers orders and
 //!    intents;
+//! 2. what a factory has finished is taken out of it, so a finished build
+//!    never blocks its own category;
 //! 3. attached objects are stepped — garbage-collected, then the rotation for
 //!    this frame — and each routine's answer becomes a goal;
 //! 4. every order and intent is admitted: domain switch, per-frame budget, the
@@ -35,7 +35,18 @@ use crate::sim::control::budget::Budget;
 use crate::sim::control::micro::MicroTable;
 use crate::sim::control::observation::Observation;
 use crate::sim::intern::InternedId;
+use crate::sim::production::ProductionCategory;
 use crate::sim::world::Simulation;
+
+/// The categories whose product leaves a factory as a unit, and which
+/// `Place_Production` therefore takes without a cell: everything a factory
+/// makes that is not a building.
+const MOBILE_CATEGORIES: [ProductionCategory; 4] = [
+    ProductionCategory::Infantry,
+    ProductionCategory::Vehicle,
+    ProductionCategory::Aircraft,
+    ProductionCategory::Ship,
+];
 
 /// Which half of the work the player lets auto play do.
 ///
@@ -90,6 +101,7 @@ fn belongs_to_production(command: &Command) -> bool {
             | Command::SuspendProduction { .. }
             | Command::CycleProducerFocus { .. }
             | Command::PlaceReadyBuilding { .. }
+            | Command::PlaceProducedMobile { .. }
             | Command::CancelProductionByType { .. }
             | Command::SellBuilding { .. }
             | Command::ToggleRepair { .. }
@@ -216,6 +228,23 @@ impl ControlBoard {
                 order.goal,
                 &mut pending,
             );
+        }
+
+        // 2. Delivery: take what the factories have finished out of them. A
+        // factory keeps its product until the house takes it, so a build that
+        // is never taken leaves the category busy for good.
+        for category in MOBILE_CATEGORIES {
+            let finished = Observation::new(sim, owner)
+                .finished_product(category)
+                .is_some();
+            if finished {
+                self.admit(
+                    sim,
+                    &owner_name,
+                    &Command::PlaceProducedMobile { category },
+                    &mut pending,
+                );
+            }
         }
 
         // 3. Managed objects, when the forces half is on.

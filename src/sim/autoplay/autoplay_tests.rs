@@ -11,6 +11,7 @@ use crate::sim::behavior::{Funnel, Goal};
 use crate::sim::command::{Command, CommandEnvelope};
 use crate::sim::control::board::AutoPlayDomains;
 use crate::sim::control::brain::{Brain, Outbox};
+use crate::sim::production::ProductionCategory;
 use crate::sim::control::external::{
     ActionSlot, ENTITY_SLOTS, GLOBAL_SLOTS, OBSERVATION_SCHEMA_VERSION, ObservationBatch,
     ObservationSchema, PolicySource, batch_for,
@@ -103,6 +104,99 @@ fn frame_commands(
     }
     commands
 }
+
+/// A factory holding a finished product: the cameo a player's sidebar shows
+/// as done, and the object the house has not taken out of it yet.
+fn arm_finished(
+    sim: &mut Simulation,
+    owner: InternedId,
+    category: ProductionCategory,
+    type_name: &str,
+) {
+    let type_id = sim.interner.intern(type_name);
+    let factories = sim.production_mut_for_test().factories_mut();
+    assert!(
+        factories.test_enqueue_kernel(owner, category, type_id, 1, 700),
+        "the factory takes the product"
+    );
+    assert!(
+        factories.test_arm_ready(owner, category),
+        "the product is finished and still held"
+    );
+}
+
+#[test]
+fn the_board_takes_a_finished_product_out_of_its_factory() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    arm_finished(&mut sim, owner, ProductionCategory::Vehicle, "MTNK");
+
+    let mut host = host(&mut sim, vec![]);
+    host.step(&mut sim, &rules);
+
+    let queued = sim.pending_command_snapshot();
+    assert!(
+        queued.iter().any(|envelope| matches!(
+            envelope.payload,
+            Command::PlaceProducedMobile {
+                category: ProductionCategory::Vehicle
+            }
+        )),
+        "a finished product must be taken out, or its category stays busy for good"
+    );
+}
+
+/// A house with a yard and a wallet: what the brain spends it on.
+fn yard_with_money(sim: &mut Simulation, rules: &RuleSet, owner: InternedId, credits: i32) {
+    sim.spawn_object("GACNST", "Americans", 16, 16, 64, rules)
+        .expect("a construction yard");
+    sim.houses
+        .get_mut(&owner)
+        .expect("the house")
+        .economy_mut()
+        .set_credits_for_test(credits);
+}
+
+#[test]
+fn the_retail_brain_queues_what_the_base_needs_next() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    yard_with_money(&mut sim, &rules, owner, 10_000);
+
+    let mut brain = RetailBrain::new(0xA17);
+    let commands = frame_commands(&mut brain, &rules, &sim, owner);
+
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::QueueProduction { .. })),
+        "a yard that is free and a wallet that can pay must start something"
+    );
+}
+
+#[test]
+fn the_retail_brain_queues_nothing_it_cannot_pay_for() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    yard_with_money(&mut sim, &rules, owner, 0);
+
+    let mut brain = RetailBrain::new(0xA17);
+    let commands = frame_commands(&mut brain, &rules, &sim, owner);
+
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::QueueProduction { .. })),
+        "an empty wallet must queue nothing: this house earns what it spends"
+    );
+}
+
 
 #[test]
 fn host_queues_commands_with_the_house_owner_and_the_current_tick() {

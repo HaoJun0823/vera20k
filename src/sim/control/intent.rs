@@ -41,6 +41,11 @@ pub enum Intent {
     /// Put the category's running build on hold (`HouseClass::Suspend_Production`).
     /// A player's sidebar does the same; queueing the type again resumes it.
     SuspendProduction { category: ProductionCategory },
+    /// Take the finished product of the category out of its factory
+    /// (`Place_Production`'s mobile arm): the click the sidebar's done cameo
+    /// takes. A factory holds what it has built until the house takes it, so
+    /// a build that is never taken blocks its own category.
+    TakeProduct { category: ProductionCategory },
     /// Place a finished building that waits for a cell (`Place_Production`).
     PlaceBuilding {
         type_id: InternedId,
@@ -59,6 +64,7 @@ impl Intent {
                 Command::CancelProductionByType { type_id, all }
             }
             Self::SuspendProduction { category } => Command::SuspendProduction { category },
+            Self::TakeProduct { category } => Command::PlaceProducedMobile { category },
             Self::PlaceBuilding { type_id, cell } => Command::PlaceReadyBuilding {
                 type_id,
                 rx: cell.0,

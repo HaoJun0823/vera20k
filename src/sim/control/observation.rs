@@ -429,7 +429,13 @@ impl<'a> Observation<'a> {
     /// uses. `count_in_production` decides whether a type already queued counts
     /// against the limit, which is what a policy wants when it is about to ask
     /// for another one.
-    pub(crate) fn can_build(
+    ///
+    /// This is the production path's own test, read through the projection: a
+    /// decision asks the same question the sidebar's build button answers, so
+    /// it cannot talk itself into a build the house would refuse, and it needs
+    /// no second copy of the rules it checks (tech level, prerequisites,
+    /// owner limits, in-production counts).
+    pub fn can_build(
         &self,
         rules: &RuleSet,
         object: &ObjectType,
@@ -443,6 +449,34 @@ impl<'a> Observation<'a> {
             false,
             count_in_production,
         )
+    }
+
+    /// The finished product `category`'s factory still holds: the cameo a
+    /// player's sidebar shows as done.
+    ///
+    /// A factory does not hand its object over on its own. The house has to
+    /// take it — the click on the done cameo, `Place_Production` — and until
+    /// it does the object is built, paid for and counted, the category starts
+    /// nothing else, and the house's money buys nothing new there. A decision
+    /// layer that queues builds and never takes them stalls itself.
+    pub fn finished_product(&self, category: ProductionCategory) -> Option<InternedId> {
+        self.sim
+            .production()
+            .factories()
+            .view(self.house, category)?
+            .complete_object()
+            .map(|object| object.type_id)
+    }
+
+    /// What the house pays for one `object` now: `HouseClass::Cost_Of`, the
+    /// price production charges when it starts the build.
+    ///
+    /// Read from the simulation rather than from the rules' `Cost=`: the price
+    /// carries the house's country cost multiplier, which the rules alone do
+    /// not. A decision that budgets credits against this cannot misprice a
+    /// build for the house it is playing.
+    pub fn cost_of(&self, rules: &RuleSet, object: &ObjectType) -> i32 {
+        self.sim.cost_of(self.house, object, rules)
     }
 
     /// Whether the ground at a cell is walkable in the current path projection.
