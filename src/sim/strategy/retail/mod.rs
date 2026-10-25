@@ -13,8 +13,9 @@
 //! - **Get a base started**: deploy the MCV, so the yard exists to build
 //!   from, and buy another one back when the yard is gone ([`expand`]).
 //! - **Spend the money**: place what the yard has finished, start the next
-//!   structure, keep the factories on harvesters and then on what the army is
-//!   short of ([`build`], over the job weights in `rules::unit_role`). That
+//!   structure, keep the factories on harvesters, then on what the house's own
+//!   teams asked for (`Suggest_New_Object`'s slot) and finally on what the army
+//!   is short of ([`build`], over the job weights in `rules::unit_role`). That
 //!   module holds the economy; it is this brain's own, because the native one
 //!   is a computer house's and comes with money the house has not earned.
 //! - **Use what it has**: engineers take what they can capture, an army large

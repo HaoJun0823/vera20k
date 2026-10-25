@@ -325,6 +325,28 @@ impl<'a> Observation<'a> {
         self.sim.object_type(type_id, rules)
     }
 
+    /// What the house's own choice has a factory of `category` make next:
+    /// `HouseClass::Suggest_New_Object @ 0x004FBD80`, read for a policy driving
+    /// a human house. `HouseClass::Update` fills that choice every eight frames
+    /// from what the house's forming teams still need (`TeamClass::
+    /// Get_Needed_Types`), which is where an engineer, a spy or a transport
+    /// comes from — needs no combat ranking states. The native factory reads
+    /// the slot itself (`BuildingClass::Factory_AI`), and a human house's
+    /// factory never runs that body, so the policy is the reader here.
+    ///
+    /// Unchecked, as the native reader is: the caller still owns `CanBuild`
+    /// and the wallet.
+    pub(crate) fn chosen_product<'r>(
+        &self,
+        rules: &'r RuleSet,
+        category: ObjectCategory,
+    ) -> Option<(&'r ObjectType, InternedId)> {
+        let ty =
+            crate::sim::ai_base_building::suggested_product(self.sim, rules, self.house, category)?;
+        let type_id = self.type_id(&ty.id)?;
+        Some((ty, type_id))
+    }
+
     /// `BaseClass @ 0x0042E780` for a node of the policy's own plan: the
     /// node's building stands at its cell, so `Find_Node` no longer reports it
     /// open. A wall node needs the overlay registry and so reads unsatisfied

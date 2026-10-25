@@ -396,7 +396,8 @@ fn make_units(rules: &RuleSet, obs: &Observation<'_>, roles: &RoleTable, out: &m
     if obs.factory_product(ProductionCategory::Infantry).is_none()
         && obs.credits() >= INFANTRY_MIN_CREDITS
     {
-        let wanted = next_fighter(rules, obs, roles, ObjectCategory::Infantry);
+        let wanted = chosen_product(rules, obs, ObjectCategory::Infantry)
+            .or_else(|| next_fighter(rules, obs, roles, ObjectCategory::Infantry));
         queue_unit(rules, obs, out, wanted);
     }
 }
@@ -424,9 +425,36 @@ fn vehicle_product<'r>(
         return harvester(rules, obs);
     }
     if obs.credits() >= COMBAT_MIN_CREDITS {
-        return next_fighter(rules, obs, roles, ObjectCategory::Vehicle);
+        return chosen_product(rules, obs, ObjectCategory::Vehicle)
+            .or_else(|| next_fighter(rules, obs, roles, ObjectCategory::Vehicle));
     }
     None
+}
+
+/// The type the house's own choice has this factory make, when the house may
+/// still build it and pay for it: `Suggest_New_Object 0x004FBD80`.
+///
+/// This is where the retail team data reaches production. `HouseClass::Update`
+/// fills the house's choice from what its forming teams still need
+/// (`TeamClass::Get_Needed_Types`, over `AIMD.INI`'s TaskForces), so a team
+/// that asks for an engineer, a spy or a transport is answered here — a
+/// ranking over combat weights cannot ask for those at all.
+///
+/// Two guards, both the caller's, because the native reader is unchecked: the
+/// type must still be buildable (a choice can outlive its factory or its
+/// prerequisite) and affordable. A harvester is skipped too — the harvester
+/// count above is the economy's own owner, and the slot can still name one
+/// after the count is met.
+fn chosen_product<'r>(
+    rules: &'r RuleSet,
+    obs: &Observation<'_>,
+    category: ObjectCategory,
+) -> Option<(&'r ObjectType, InternedId)> {
+    let (ty, type_id) = obs.chosen_product(rules, category)?;
+    if ty.resource_gatherer || obs.can_build(rules, ty, true) == CanBuild::No {
+        return None;
+    }
+    Some((ty, type_id))
 }
 
 fn queue_unit(
@@ -758,6 +786,48 @@ mod tests {
             counter(rules.object("APACHE").expect("an Apache")),
             Some(Role::AntiAir),
             "what answers an aircraft is what can reach it"
+        );
+    }
+
+    /// The house's own team needs come before any ranking, and they include
+    /// needs a combat weight cannot state: a team that asks for an engineer is
+    /// answered with an engineer, which no warhead ranking would ever pick.
+    #[test]
+    fn a_factory_makes_what_the_houses_teams_asked_for() {
+        use crate::sim::ai_unit_choice::UnitChoiceKind;
+
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        sim.spawn_object("GAPILE", "Americans", 12, 12, 64, &rules)
+            .expect("a barracks");
+        let engineer = rules
+            .type_array_index(ObjectCategory::Infantry, "ENGINEER")
+            .expect("the retail engineer");
+        let house = sim.houses.get_mut(&owner).expect("the house");
+        house
+            .ai_unit_choices_mut()
+            .set(UnitChoiceKind::Infantry, engineer);
+        house.economy_mut().set_credits_for_test(5_000);
+
+        let obs = Observation::new(&sim, owner);
+        let roles = RoleTable::build(&rules);
+        let mut out = Outbox::default();
+        make_units(&rules, &obs, &roles, &mut out);
+
+        let queued: Vec<&str> = out
+            .intents
+            .iter()
+            .filter_map(|intent| match intent {
+                Intent::QueueProduction { type_id } => Some(sim.interner().resolve(*type_id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            queued,
+            ["ENGINEER"],
+            "the house's own choice is what its barracks makes"
         );
     }
 
