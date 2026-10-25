@@ -156,21 +156,101 @@ pub(super) fn advance(
     true
 }
 
-/// Whether an enemy is close enough to the yard that the army belongs at
-/// home. `true` when the house has no yard to measure from: a house with
-/// nothing to defend has nothing to gain by walking away either.
+/// Whether an enemy is close enough to what this house still holds that the
+/// army belongs at home.
+///
+/// Measured from the yard when one stands, and otherwise from whatever
+/// building the house still has: a house whose yard is gone but whose factory
+/// still stands has plenty left to lose, and an army that walks out while the
+/// enemy is standing on the factory loses that too.
+///
+/// A house with nothing standing is the other way round. It used to count as
+/// under threat and held the army home for the rest of the match, which is
+/// the residual the module header records: once the yard is gone the army is
+/// the only thing the house has, and an army guarding rubble loses slowly
+/// instead of taking the base that would let it rebuild. Nothing standing
+/// means nothing to defend, so the push runs.
 fn base_under_threat(rules: &RuleSet, obs: &Observation<'_>) -> bool {
-    let Some(base) = obs.own_entities().find(|entity| {
+    let yard = obs.own_entities().find(|entity| {
         obs.object_type(rules, entity.type_id)
             .is_some_and(|ty| ty.build_const_eligible)
-    }) else {
-        return true;
+    });
+    let base = match yard {
+        Some(base) => base,
+        None => {
+            let Some(standing) = obs.own_entities().find(|entity| {
+                obs.object_type(rules, entity.type_id)
+                    .is_some_and(|ty| ty.category == ObjectCategory::Building)
+            }) else {
+                return false;
+            };
+            standing
+        }
     };
     obs.enemy_entities().any(|enemy| {
         let dx = i32::from(enemy.cell.0) - i32::from(base.cell.0);
         let dy = i32::from(enemy.cell.1) - i32::from(base.cell.1);
         dx * dx + dy * dy <= THREAT_RADIUS * THREAT_RADIUS
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::world::Simulation;
+
+    /// A retail arena: two houses on 32x32 ground, needed to spawn real object
+    /// types. `None` without `RA2_DIR`, as the rest of the suite does.
+    fn arena(seed: u64) -> Option<(Simulation, RuleSet)> {
+        let retail = crate::rules::retail_ini_fixture::retail_battle_rules()?;
+        let rules = retail.rules;
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, seed);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        Some((sim, rules))
+    }
+
+    /// The whole reason the rule was narrowed: a house whose yard is gone and
+    /// whose base is rubble used to read as under threat for the rest of the
+    /// match, and an army guarding rubble loses slowly instead of taking the
+    /// base that would let the house rebuild.
+    #[test]
+    fn a_house_with_nothing_left_to_defend_is_not_under_threat() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        assert!(
+            !base_under_threat(&rules, &Observation::new(&sim, owner)),
+            "nothing standing means nothing to defend"
+        );
+    }
+
+    /// The same rule with something still standing, measured from the yard: an
+    /// enemy inside the ring holds the army at home.
+    #[test]
+    fn an_enemy_at_the_yard_still_holds_the_army_home() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        sim.spawn_object("GACNST", "Americans", 16, 16, 255, &rules)
+            .expect("an Allied Construction Yard");
+
+        let obs = Observation::new(&sim, owner);
+        assert!(
+            !base_under_threat(&rules, &obs),
+            "an empty field around the yard is no threat"
+        );
+
+        sim.spawn_object("MTNK", "Russians", 20, 16, 255, &rules)
+            .expect("a Soviet tank");
+        let obs = Observation::new(&sim, owner);
+        assert!(
+            base_under_threat(&rules, &obs),
+            "four cells from the yard is inside {THREAT_RADIUS}"
+        );
+    }
 }
 
 /// The enemy structure nearest `from`, ties going to the earlier one in

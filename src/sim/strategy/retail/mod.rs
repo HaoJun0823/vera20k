@@ -62,9 +62,11 @@
 //! - A yard rebuilt from a bought MCV is not defended differently from the
 //!   first one, and the brain does not repair a damaged structure, so a raid
 //!   that reaches the base can take it a second time.
-//! - With no yard at all, `advance` measures no base centre and keeps the
-//!   army home for the rest of the match, even when the maker it needs is
-//!   refused by `CanBuild` and the recovery chain cannot run.
+//! - With no building left standing, `advance` has no base centre to measure,
+//!   and reads the house as not under threat, so the push runs: an army is the
+//!   only thing such a house has. What it does not do is rebuild — the maker
+//!   it needs can still be refused by `CanBuild`, and the recovery chain in
+//!   [`expand`] cannot run without a factory to buy it from.
 
 pub(super) mod advance;
 pub(super) mod build;

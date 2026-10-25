@@ -515,10 +515,14 @@ change improves. Replacing it needs a model of why it wins — which target is
 chosen in which frames — rather than another ranking of the same candidates.
 
 The reference match on the other difficulty tier loses: `--difficulty hard` on
-the same map and seed ends `lost at 32019`, and has done so independently of
-this pass, which only adds read-only queries. That is the gap this measurement
-leaves open: the push is tuned by outcome on one tier, not by a model that
-would explain both.
+the same map and seed ends `lost at 32019`. Its shape, from the same log line:
+the house holds about 30 objects while the computer house grows past 80, power
+falls from 387 to a brownout and the wallet starts piling up, and by 30600
+every command the brain emits is refused (781 of them) — the base is gone and
+no factory is left to build from. So the push is not what fails there; what
+fails is the base surviving long enough to feed one. Narrowing
+`base_under_threat` to a house with nothing standing does not move it, because
+on this map the house still has buildings standing when it matters.
 
 ## Open questions
 
