@@ -26,6 +26,7 @@
 //! Everything here is integer-valued and iterates in storage order, so a
 //! decision built on it stays deterministic.
 
+use crate::map::entities::EntityCategory;
 use crate::rules::object_type::{ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
 use crate::sim::house_state::HouseDifficulty;
@@ -77,6 +78,15 @@ pub(crate) struct EnemyEntity {
     pub entity_id: u64,
     pub type_id: InternedId,
     pub cell: (u16, u16),
+}
+
+/// A building that takes infantry and has room for more: the garrison click's
+/// target. `room` is the carrier-side count, not a rules number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Billet {
+    pub building_id: u64,
+    pub cell: (u16, u16),
+    pub room: u32,
 }
 
 impl<'a> Observation<'a> {
@@ -307,6 +317,121 @@ impl<'a> Observation<'a> {
                 cell: (entity.position.rx(), entity.position.ry()),
             })
         })
+    }
+
+    /// Buildings a spy may walk into: alive, not this house's, and `Spyable=`.
+    ///
+    /// `InfantryClass::What_Action_OnObject`'s infiltration arm
+    /// (`0x0051EE3B..0x0051EEEF`) turns a spy's Attack into Capture only over a
+    /// `Spyable=` building — `Capturable=` is the flag every other infiltrator
+    /// asks for — so the engineer's list is the wrong one for a spy, and a spy
+    /// sent at a merely-`Capturable=` building walks into nothing.
+    ///
+    /// Enmity is [`Self::enemy_entities`]' own: an ally's building and a
+    /// `MultiplayPassive` house's are both left out, because there is no
+    /// treasury behind either to steal from.
+    pub(crate) fn spyable_buildings<'r>(
+        &'r self,
+        rules: &'r RuleSet,
+    ) -> impl Iterator<Item = EnemyEntity> + 'r {
+        let house = self.house;
+        let houses = self.sim.houses();
+        let allied = crate::map::houses::ally_test(
+            self.sim.house_alliances.as_map(),
+            self.sim.interner().resolve(house),
+        );
+        self.sim.entities().values().filter_map(move |entity| {
+            let owner = entity.owner();
+            if owner == house || entity.lifecycle.in_limbo() || entity.health.current() <= 0 {
+                return None;
+            }
+            let target = houses.get(&owner)?;
+            if target.multiplay_passive() || allied(self.sim.interner().resolve(owner)) {
+                return None;
+            }
+            let ty = self.sim.object_type(entity.type_ref(), rules)?;
+            if !ty.spyable || ty.category != ObjectCategory::Building {
+                return None;
+            }
+            Some(EnemyEntity {
+                entity_id: entity.stable_id(),
+                type_id: entity.type_ref(),
+                cell: (entity.position.rx(), entity.position.ry()),
+            })
+        })
+    }
+
+    /// Buildings that take infantry and have room for more, whoever owns them.
+    ///
+    /// Whether a given infantryman may walk into one is not this accessor's
+    /// question: `BuildingClass::CanBeOccupiedBy` owns it, and the policy asks
+    /// it per candidate. Any owner is listed because that owner also refuses
+    /// the ones a house may not enter.
+    pub(crate) fn occupiable_buildings<'r>(
+        &'r self,
+        rules: &'r RuleSet,
+    ) -> impl Iterator<Item = Billet> + 'r {
+        self.sim.entities().values().filter_map(move |entity| {
+            if entity.category() != EntityCategory::Structure
+                || entity.lifecycle.in_limbo()
+                || entity.health.current() <= 0
+            {
+                return None;
+            }
+            let ty = self.sim.object_type(entity.type_ref(), rules)?;
+            if !ty.can_be_occupied {
+                return None;
+            }
+            let cargo = entity.passenger_role.cargo()?;
+            let room = cargo.capacity().saturating_sub(cargo.count());
+            if room == 0 {
+                return None;
+            }
+            Some(Billet {
+                building_id: entity.stable_id(),
+                cell: (entity.position.rx(), entity.position.ry()),
+                room,
+            })
+        })
+    }
+
+    /// `BridgeRepairHut=` buildings whose bridge is actually down.
+    ///
+    /// Walking an engineer into one is the only thing that rebuilds a bridge:
+    /// the hut has no timer, no `Capturable=` and `Immune=yes`, so it never
+    /// appears in [`Self::capturable_buildings`] and no other command reaches
+    /// it. The scan of the damaged span is `bridge_hut_can_repair`'s own;
+    /// repeating it here would be a second answer to the same question.
+    pub(crate) fn bridge_repair_huts<'r>(
+        &'r self,
+        rules: &'r RuleSet,
+    ) -> impl Iterator<Item = Billet> + 'r {
+        self.sim.entities().values().filter_map(move |entity| {
+            if entity.lifecycle.in_limbo() || entity.health.current() <= 0 {
+                return None;
+            }
+            let ty = self.sim.object_type(entity.type_ref(), rules)?;
+            if !ty.bridge_repair_hut {
+                return None;
+            }
+            // `[CABHUT]` is 1x1 (`artmd.ini:4143`), so its cell is the centre
+            // the native scan is keyed by.
+            let cell = (entity.position.rx(), entity.position.ry());
+            if !crate::sim::world::bridge_orchestrator::bridge_hut_can_repair(self.sim, cell) {
+                return None;
+            }
+            Some(Billet {
+                building_id: entity.stable_id(),
+                cell,
+                room: 1,
+            })
+        })
+    }
+
+    /// Whether `infantry_id` may garrison `building_id`:
+    /// `BuildingClass::CanBeOccupiedBy`'s answer for this pair.
+    pub(crate) fn can_garrison(&self, rules: &RuleSet, infantry_id: u64, building_id: u64) -> bool {
+        crate::sim::passenger::building_can_be_occupied_by(self.sim, rules, building_id, infantry_id)
     }
 
     /// The rules' name of a type, for messages: a policy that has to say what

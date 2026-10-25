@@ -126,7 +126,9 @@ each step is a command rather than a house-state write:
 | Raise the teams its triggers pick | the house's own team block (`HouseClass::Update`, `0x004F8A00`), asked as a state intent and applied by the control board through `sim::ai_team_creation` | — (no command) |
 | Ask for a combat unit | `AI_Choose_Unit 0x004F4D40`'s Unit, Infantry and Aircraft branches over the house's forming teams (`TeamClass::Get_Needed_Types`) | `QueueProduction` |
 | Send the army at the nearest enemy object | what an attack click on that object means; native's teams and their scripts are absent. Targets are houses this one is at war with — the ally graph's complement — never a `MultiplayPassive` house, which owns the map's tech buildings, garrisonable houses and parked cars | `Attack` |
-| Send an engineer or a spy into the nearest building it may take | what a Capture click on that building means; `InfantryClass::PerCellProcess` decides between capturing and infiltrating on arrival | `CaptureBuilding` |
+| Send an engineer, or a spy at what is worth the walk, into a building it may take | what a Capture click on that building means; `InfantryClass::PerCellProcess` decides between capturing and infiltrating on arrival. The two clicks differ in what they accept — `Capturable=` for an engineer, `Spyable=` for a spy (`InfantryClass::What_Action_OnObject 0x0051EE3B..0x0051EEEF`) — and the spy's order of targets follows `AIMD.INI`'s own spy teams (`General Spy vs Soviet Power` before `vs Allied War`, `vs Sov Tech`) | `CaptureBuilding` |
+| Walk an engineer into a `BridgeRepairHut=` whose span is down | the engineer's PerCell entry into the hut, which is the only thing that rebuilds a bridge: no timer, no `Capturable=`, no other command reaches it | `CaptureBuilding` |
+| Garrison a building near home | `BuildingClass::CanBeOccupiedBy 0x00457CE0` decides whether this `Occupier=` infantryman may walk in; the entry itself is the same Enter click a player makes | `MegaMission { Enter }` |
 
 ### Two switches
 
@@ -154,14 +156,31 @@ it back.
 The gate filters what a policy emits. `RetailBrain` fills both halves:
 production is the base plan, the spliced plants, the harvesters, the teams its
 own selector raises and the units those teams are short of; forces is the
-`Attack` each combat unit gets on the nearest enemy object and the
-`CaptureBuilding` each engineer gets on the nearest capturable one, refreshed
-when a nearer target appears or after about fifteen seconds. Switching `forces`
-off leaves the army where it stands and stops new orders of that kind; switching
-`production` off stops the base, the factories and the team raises while the army
-keeps its orders. Neither half issues a superweapon strike yet.
+`Attack` each combat unit gets on the nearest enemy object, plus the specialists
+a unit's own flags name — an engineer into a bridge hut or a building it may
+capture, a spy into the building worth most, an `Occupier=` rifleman into a
+garrison near home — each refreshed when a nearer target appears or after about
+fifteen seconds. A unit takes one order a frame: the steps run in that priority
+order and the first answer keeps the unit. Switching `forces` off leaves the army
+where it stands and stops new orders of that kind; switching `production` off
+stops the base, the factories and the team raises while the army keeps its
+orders. Neither half issues a superweapon strike yet.
 
-Residuals, all recorded in the module docs: what the fleet is short of is read
+There is no boarding step, and that is a measurement rather than an omission: an
+idle rifleman climbing into his own empty carrier is a correct Enter click, but
+wiring it cost the reference match nine thousand ticks (`won at 25636` to
+`won at 34897`) and, with the army's strength count corrected to skip units the
+gate would refuse, the match stopped winning inside its 36000-tick cap. What
+goes wrong — the carrier's value once loaded, or where the boarded unit stands
+relative to the push — is not established; the step stays out and recorded.
+
+Residuals, all recorded in the module docs: a garrison is only taken within
+twelve cells of one of the house's own buildings, and the bridge hut has to be
+that near too — both are the policy's own radius, not a rule the game states, and
+neither carries a notion of which garrison or bridge is worth holding. Units
+already inside a carrier or a building are left alone: there is no unload, no
+re-board and no garrison withdrawal, because when to leave is a different
+decision from where to go. What the fleet is short of is read
 from the enemy's *whole* composition, fog aside, on the same footing as the
 target picture below; `unit_role` ranks a type by the mean of its best weapon's
 `Verses=` over an armour bracket, so it does not yet weigh the mix of armour it

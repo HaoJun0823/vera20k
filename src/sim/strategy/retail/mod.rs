@@ -18,9 +18,11 @@
 //!   is short of ([`build`], over the job weights in `rules::unit_role`). That
 //!   module holds the economy; it is this brain's own, because the native one
 //!   is a computer house's and comes with money the house has not earned.
-//! - **Use what it has**: engineers take what they can capture, an army large
-//!   enough is sent at the enemy's base ([`advance`]), and while it is not,
-//!   an idle combat unit holds the base ([`orders`]).
+//! - **Use what it has**: an engineer repairs the bridge whose hut is down at
+//!   home or takes a building it may capture, a spy walks into the building
+//!   worth most, a rifleman garrisons a building near the base, an army large
+//!   enough is sent at the enemy's base ([`advance`]), and while it is not, an
+//!   idle combat unit holds the base ([`orders`]).
 //!
 //! Determinism: the brain owns its generator and never draws from a
 //! simulation stream, and every decision is an integer comparison over the
@@ -120,7 +122,12 @@ impl Brain for RetailBrain {
     fn think(&mut self, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
         expand::deploy_yard_maker(self, rules, obs, out);
         build::spend(self, rules, obs, out);
+        // Specialists first, in the order a bridge at home, a spy's target and a
+        // garrison matter more than another unit standing still; a unit takes
+        // one order a frame, so whoever asks first keeps it.
+        orders::bridges(self, rules, obs, out);
         orders::captures(self, rules, obs, out);
+        orders::garrison(self, rules, obs, out);
         // A house that is pushing owns its whole army for the frame; one that
         // is not keeps holding its base.
         if !advance::advance(self, rules, obs, out) {

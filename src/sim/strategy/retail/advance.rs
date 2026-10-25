@@ -120,6 +120,12 @@ pub(super) fn advance(
         ) {
             continue;
         }
+        // The step that owns a specialist order already spent this unit's frame:
+        // a spy walking into a building and a rifleman boarding a carrier both
+        // outrank the push.
+        if out.orders.iter().any(|order| order.actor == entity.entity_id) {
+            continue;
+        }
         let current = brain
             .orders
             .get(&entity.entity_id)

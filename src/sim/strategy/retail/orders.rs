@@ -1,6 +1,12 @@
-//! The army's direct orders: put an idle combat unit on area guard, and every
-//! unit that takes a building on foot — an engineer capturing, a spy
-//! infiltrating — on the nearest one it may.
+//! The army's direct orders, for the units no team has taken: an idle combat
+//! unit goes on area guard, an engineer walks into the bridge hut whose span is
+//! down or into a building it may capture, a spy walks into the building worth
+//! most, and an `Occupier=` rifleman garrisons a building near the base.
+//!
+//! Each is a click the player already has, issued as the same command: the
+//! Capture click (engineers, spies, bridge huts) and the Enter click (garrisons).
+//! Nothing here decides what a click *does* — `InfantryClass::PerCellProcess`,
+//! `BuildingClass::CanBeOccupiedBy` and the entry queries own that.
 //!
 //! Native teams carry the attack. An `AITrigger` creates a team, its script
 //! assigns missions, and `team_script_vm` writes them onto the members. Those
@@ -50,9 +56,23 @@ pub(crate) struct SentOrder {
     pub(super) refresh: u64,
 }
 
-/// Every unit that walks into an enemy building takes the nearest one it may:
-/// the Capture click, which an engineer's capture and a spy's infiltration both
-/// are.
+/// How near one of the house's own buildings a bridge or a garrison has to be
+/// for the policy to spend a unit on it, in cells. A garrison is only worth
+/// holding where the base is, and a bridge nobody crosses is an engineer spent
+/// for nothing.
+const HOME_REACH_CELLS: i32 = 12;
+
+// Why there is no boarding step here. Wiring one — an idle rifleman climbing
+// into his own empty carrier, a correct Enter click (`Goal::Enter` and
+// `can_enter_transport` both answered as expected) — cost the reference match
+// nine thousand ticks: `won at 25636` became `won at 34897`, and with the army's
+// strength count corrected to skip units the gate would refuse, the match
+// stopped winning inside its 36000-tick cap. Whether the carrier loses value
+// once loaded or the boarded unit is simply not where the push needs it is not
+// established, so the step stays out and recorded rather than guessed at.
+
+/// Every unit that walks into an enemy building takes one it may: the Capture
+/// click, which an engineer's capture and a spy's infiltration both are.
 ///
 /// Natively the capture mission starts from the same order path the player's
 /// click uses; a brain-driven house never receives that click, so the brain
@@ -61,6 +81,12 @@ pub(crate) struct SentOrder {
 /// captures it for an `Engineer=` and infiltrates it for an `Infiltrate=` — so
 /// one order serves both, and neither unit would otherwise do anything: a spy
 /// carries no weapon worth ranking and an engineer carries none at all.
+///
+/// What they walk at differs, because the click's own admission does: a spy
+/// needs `Spyable=` (see [`Observation::spyable_buildings`]) while an engineer
+/// needs `Capturable=`. And a spy's target is picked by what the building is
+/// worth, not by what is nearest — walking the house's only spy into the
+/// derrick next door is how the feature is wasted.
 pub(super) fn captures(
     brain: &mut RetailBrain,
     rules: &RuleSet,
@@ -75,14 +101,21 @@ pub(super) fn captures(
     }) {
         return;
     }
-    let targets: Vec<EnemyEntity> = obs.capturable_buildings(rules).collect();
-    if targets.is_empty() {
-        return;
-    }
+    let engineer_targets: Vec<EnemyEntity> = obs.capturable_buildings(rules).collect();
+    let spy_targets: Vec<(EnemyEntity, u8)> = obs
+        .spyable_buildings(rules)
+        .filter_map(|target| {
+            let ty = obs.object_type(rules, target.type_id)?;
+            Some((target, infiltration_value(rules, ty)))
+        })
+        .collect();
     let mut issued = 0;
     for entity in &own {
         if issued >= FORCE_ORDERS_PER_FRAME {
             break;
+        }
+        if !entity.orderable || ordered_this_frame(out, entity.entity_id) {
+            continue;
         }
         let Some(ty) = obs.object_type(rules, entity.type_id) else {
             continue;
@@ -93,7 +126,18 @@ pub(super) fn captures(
         if obs.team_has_member(entity.entity_id) {
             continue;
         }
-        let Some(target) = nearest_enemy(&targets, entity.cell) else {
+        // A spy takes what is worth most; anyone else takes what is nearest.
+        let chosen = if ty.agent {
+            spy_targets
+                .iter()
+                .max_by_key(|(target, value)| {
+                    (*value, -squared_distance(entity.cell, target.cell))
+                })
+                .map(|(target, _)| *target)
+        } else {
+            nearest_enemy(&engineer_targets, entity.cell)
+        };
+        let Some(target) = chosen else {
             continue;
         };
         let current = brain
@@ -118,6 +162,209 @@ pub(super) fn captures(
         );
         issued += 1;
     }
+}
+
+/// Send an engineer into a `BridgeRepairHut=` whose span is down.
+///
+/// Walking in is the only thing that rebuilds a bridge: the hut carries no
+/// timer and no `Capturable=`, and `BridgeRepairHut` is retail's only consumer
+/// ([`Observation::bridge_repair_huts`]). The engineer is consumed by it, which
+/// is also retail's price, so this only pays for a bridge inside the house's
+/// own reach.
+pub(super) fn bridges(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    out: &mut Outbox,
+) {
+    let tick = obs.tick();
+    let own: Vec<_> = obs.own_entities().collect();
+    if !own
+        .iter()
+        .any(|entity| obs.object_type(rules, entity.type_id).is_some_and(|ty| ty.engineer))
+    {
+        return;
+    }
+    let near: Vec<(u16, u16)> = home_buildings(rules, obs);
+    let huts: Vec<(u64, (u16, u16))> = obs
+        .bridge_repair_huts(rules)
+        .filter(|site| within(near.iter().copied(), site.cell, HOME_REACH_CELLS))
+        .map(|site| (site.building_id, site.cell))
+        .collect();
+    if huts.is_empty() {
+        return;
+    }
+    let mut issued = 0;
+    for entity in &own {
+        if issued >= FORCE_ORDERS_PER_FRAME {
+            break;
+        }
+        let Some(ty) = obs.object_type(rules, entity.type_id) else {
+            continue;
+        };
+        if !ty.engineer
+            || !entity.orderable
+            || obs.team_has_member(entity.entity_id)
+            || ordered_this_frame(out, entity.entity_id)
+            || holds_or_fights(entity.mission)
+        {
+            continue;
+        }
+        let Some(target) = nearest_site(&huts, entity.cell) else {
+            continue;
+        };
+        let current = brain
+            .orders
+            .get(&entity.entity_id)
+            .is_some_and(|sent| sent.target == Some(target) && tick < sent.refresh);
+        if current {
+            continue;
+        }
+        brain.orders.insert(
+            entity.entity_id,
+            SentOrder {
+                target: Some(target),
+                refresh: tick.saturating_add(ORDER_REFRESH_FRAMES),
+            },
+        );
+        out.order(entity.entity_id, Goal::Capture { target });
+        issued += 1;
+    }
+}
+
+/// Idle `Occupier=` infantry garrison a building near the house's own base.
+///
+/// `BuildingClass::CanBeOccupiedBy` decides whether this infantryman may walk
+/// in, so a full building, a red one and a stranger's are all refused by the
+/// owner rather than by a second rule here.
+pub(super) fn garrison(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    out: &mut Outbox,
+) {
+    let tick = obs.tick();
+    let near: Vec<(u16, u16)> = home_buildings(rules, obs);
+    let billets: Vec<_> = obs
+        .occupiable_buildings(rules)
+        .filter(|billet| within(near.iter().copied(), billet.cell, HOME_REACH_CELLS))
+        .collect();
+    if billets.is_empty() {
+        return;
+    }
+    let mut issued = 0;
+    for entity in obs.own_entities() {
+        if issued >= FORCE_ORDERS_PER_FRAME {
+            break;
+        }
+        let Some(ty) = obs.object_type(rules, entity.type_id) else {
+            continue;
+        };
+        if ty.category != ObjectCategory::Infantry
+            || !ty.occupier
+            || !entity.orderable
+            || obs.team_has_member(entity.entity_id)
+            || holds_or_fights(entity.mission)
+            || ordered_this_frame(out, entity.entity_id)
+        {
+            continue;
+        }
+        let Some(billet) = billets
+            .iter()
+            .filter(|billet| squared_distance(entity.cell, billet.cell) <= HOME_REACH_CELLS.pow(2))
+            .filter(|billet| obs.can_garrison(rules, entity.entity_id, billet.building_id))
+            .min_by_key(|billet| squared_distance(entity.cell, billet.cell))
+        else {
+            continue;
+        };
+        let current = brain
+            .orders
+            .get(&entity.entity_id)
+            .is_some_and(|sent| sent.target == Some(billet.building_id) && tick < sent.refresh);
+        if current {
+            continue;
+        }
+        brain.orders.insert(
+            entity.entity_id,
+            SentOrder {
+                target: Some(billet.building_id),
+                refresh: tick.saturating_add(ORDER_REFRESH_FRAMES),
+            },
+        );
+        out.order(
+            entity.entity_id,
+            Goal::Enter {
+                target: billet.building_id,
+            },
+        );
+        issued += 1;
+    }
+}
+
+/// What a spy gets out of a building, in retail's own categories.
+///
+/// The order follows `AIMD.INI`'s own spy teams — `General Spy vs Soviet
+/// Power` / `vs Allied Power` before `vs Allied War` / `vs Soviet War`, and
+/// `vs Sov Tech` after them (`ini/aimd.ini:1058-1158`) — and the categories are
+/// the rules' `BuildCat=` lists, so a mod that moves a building keeps its
+/// weight. A power plant blacks the enemy out, a refinery hands over its ore
+/// and a radar its map; a barracks or a war factory makes its army veteran; a
+/// lab is worth the walk and little more.
+fn infiltration_value(rules: &RuleSet, ty: &ObjectType) -> u8 {
+    if rules.build_power_types.iter().any(|name| *name == ty.id) {
+        4
+    } else if ty.resource_destination || ty.radar {
+        3
+    } else if rules.build_weapons_types.iter().any(|name| *name == ty.id)
+        || rules.build_barracks_types.iter().any(|name| *name == ty.id)
+    {
+        2
+    } else {
+        1
+    }
+}
+
+/// The cells of the house's own buildings: the yard, the plants, the factories,
+/// the defenses. A bridge or a garrison is only worth a unit near one of them.
+fn home_buildings(rules: &RuleSet, obs: &Observation<'_>) -> Vec<(u16, u16)> {
+    obs.own_entities()
+        .filter(|entity| {
+            obs.object_type(rules, entity.type_id)
+                .is_some_and(|ty| ty.category == ObjectCategory::Building)
+        })
+        .map(|entity| entity.cell)
+        .collect()
+}
+
+/// Whether any of `cells` is within `reach` cells (Chebyshev-independent, all
+/// orders in this file use squared Euclidean distance) of `cell`.
+fn within(cells: impl Iterator<Item = (u16, u16)>, cell: (u16, u16), reach: i32) -> bool {
+    cells
+        .into_iter()
+        .any(|other| squared_distance(cell, other) <= reach * reach)
+}
+
+/// The nearest of `(id, cell)` sites, ties broken by id so the answer does not
+/// depend on the order the entity store happens to yield.
+fn nearest_site(sites: &[(u64, (u16, u16))], from: (u16, u16)) -> Option<u64> {
+    sites
+        .iter()
+        .min_by_key(|(id, cell)| (squared_distance(from, *cell), *id))
+        .map(|(id, _)| *id)
+}
+
+/// Squared cell distance: comparisons only, so the square root is not needed.
+fn squared_distance(a: (u16, u16), b: (u16, u16)) -> i32 {
+    let dx = i32::from(a.0) - i32::from(b.0);
+    let dy = i32::from(a.1) - i32::from(b.1);
+    dx * dx + dy * dy
+}
+
+/// Whether an earlier step already gave this unit an order this frame. The
+/// steps run in priority order — a bridge before a capture, a capture before a
+/// guard — and a unit is one unit: the first answer wins.
+fn ordered_this_frame(out: &Outbox, actor: u64) -> bool {
+    out.orders.iter().any(|order| order.actor == actor)
 }
 
 /// Put every idle combat unit no team has taken on area guard where it stands.
@@ -278,8 +525,8 @@ mod tests {
         let spy = sim
             .spawn_object("SPY", "Americans", 8, 8, 64, &rules)
             .expect("a spy");
-        sim.spawn_object("CAOILD", "Russians", 20, 20, 64, &rules)
-            .expect("a capturable derrick");
+        sim.spawn_object("NAPOWR", "Russians", 20, 20, 64, &rules)
+            .expect("a power plant a spy may enter");
         let obs = Observation::new(&sim, owner);
         let mut brain = RetailBrain::new(0xA17);
         let mut out = Outbox::default();
@@ -303,6 +550,82 @@ mod tests {
         assert!(
             !walks_into_buildings(rules.object("E1").expect("a GI")),
             "a rifleman is not"
+        );
+    }
+
+    /// A spy takes what is worth the walk, and only what a spy may enter: the
+    /// power plant over the refinery beside it, and neither over a derrick the
+    /// click would have refused.
+    #[test]
+    fn a_spy_targets_the_building_worth_the_most() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        let spy = sim
+            .spawn_object("SPY", "Americans", 8, 8, 64, &rules)
+            .expect("a spy");
+        // Nearest of all, and `Capturable=`, but not `Spyable=`.
+        let derrick = sim
+            .spawn_object("CAOILD", "Russians", 10, 10, 64, &rules)
+            .expect("a derrick");
+        let refinery = sim
+            .spawn_object("NAREFN", "Russians", 12, 12, 64, &rules)
+            .expect("a refinery");
+        let power = sim
+            .spawn_object("NAPOWR", "Russians", 22, 22, 64, &rules)
+            .expect("a power plant");
+
+        let obs = Observation::new(&sim, owner);
+        let mut brain = RetailBrain::new(0xA17);
+        let mut out = Outbox::default();
+        captures(&mut brain, &rules, &obs, &mut out);
+
+        let target = out
+            .orders
+            .iter()
+            .find(|order| order.actor == spy)
+            .and_then(|order| match order.goal {
+                Goal::Capture { target } => Some(target),
+                _ => None,
+            })
+            .expect("the spy is given a target");
+        assert_eq!(
+            target,
+            power,
+            "the power plant blacks the enemy out; the derrick and the refinery are nearer"
+        );
+        assert_ne!(target, derrick);
+        assert_ne!(target, refinery);
+    }
+
+    /// `Occupier=` infantry garrison the house's own bunker, through the same
+    /// Enter click.
+    #[test]
+    fn riflemen_garrison_a_bunker_of_their_own() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        let gi = sim
+            .spawn_object("E1", "Americans", 10, 12, 64, &rules)
+            .expect("a GI");
+        let bunker = sim
+            .spawn_object("NABNKR", "Americans", 12, 12, 64, &rules)
+            .expect("a battle bunker");
+
+        let obs = Observation::new(&sim, owner);
+        let mut brain = RetailBrain::new(0xA17);
+        let mut out = Outbox::default();
+        garrison(&mut brain, &rules, &obs, &mut out);
+
+        assert!(
+            out.orders
+                .iter()
+                .any(|order| order.actor == gi
+                    && matches!(order.goal, Goal::Enter { target } if target == bunker)),
+            "the rifleman takes the bunker: {:?}",
+            out.orders
         );
     }
 }
