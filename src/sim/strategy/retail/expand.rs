@@ -94,6 +94,11 @@ pub(super) fn deploy_yard_maker(
         return;
     }
     let Some((mcv, yard)) = obs.own_entities().find_map(|entity| {
+        // A maker the player has grouped is theirs to deploy, and one a team
+        // script has recruited is the script's.
+        if obs.owned_by_hand(entity.entity_id) {
+            return None;
+        }
         let ty = obs.object_type(rules, entity.type_id)?;
         let yard = rules.object(ty.deploys_into.as_deref()?)?;
         makes_a_yard(rules, ty).then_some((entity, yard))

@@ -123,7 +123,7 @@ pub(super) fn captures(
         if !walks_into_buildings(ty) {
             continue;
         }
-        if obs.team_has_member(entity.entity_id) {
+        if obs.owned_by_hand(entity.entity_id) {
             continue;
         }
         // A spy takes what is worth most; anyone else takes what is nearest.
@@ -204,7 +204,7 @@ pub(super) fn bridges(
         };
         if !ty.engineer
             || !entity.orderable
-            || obs.team_has_member(entity.entity_id)
+            || obs.owned_by_hand(entity.entity_id)
             || ordered_this_frame(out, entity.entity_id)
             || holds_or_fights(entity.mission)
         {
@@ -263,7 +263,7 @@ pub(super) fn garrison(
         if ty.category != ObjectCategory::Infantry
             || !ty.occupier
             || !entity.orderable
-            || obs.team_has_member(entity.entity_id)
+            || obs.owned_by_hand(entity.entity_id)
             || holds_or_fights(entity.mission)
             || ordered_this_frame(out, entity.entity_id)
         {
@@ -397,9 +397,9 @@ pub(super) fn forces(
         if !is_combat_unit(rules, ty) {
             continue;
         }
-        // A team's script owns its members; this step is for the units no team
-        // has taken.
-        if obs.team_has_member(entity.entity_id) {
+        // A team's script or one of the player's control groups owns its
+        // members; this step is for the units no hand has taken.
+        if obs.owned_by_hand(entity.entity_id) {
             continue;
         }
         // A unit that is already holding or fighting is doing exactly this, and

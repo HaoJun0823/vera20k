@@ -384,6 +384,43 @@ fn the_board_leaves_the_players_own_units_alone() {
     );
 }
 
+/// The gate is the second line, not the first: a policy that only ever gets
+/// refused spends the frame's budget on the player's units and then believes
+/// for `ORDER_REFRESH_FRAMES` that it has sent them. It has to see them.
+#[test]
+fn the_policy_does_not_reach_for_a_unit_the_player_keeps() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let rifleman = sim
+        .spawn_object("E1", "Americans", 16, 16, 64, &rules)
+        .expect("an American rifleman");
+    let kept: std::collections::BTreeSet<u64> = [rifleman].into_iter().collect();
+
+    let mut free = Outbox::default();
+    RetailBrain::new(0xA17).think(&rules, &Observation::new(&sim, owner), &mut free);
+    let mut held = Outbox::default();
+    RetailBrain::new(0xA17).think(
+        &rules,
+        &Observation::new(&sim, owner).with_player_groups(&kept),
+        &mut held,
+    );
+
+    assert!(
+        free.orders.iter().any(|order| order.actor == rifleman),
+        "an idle rifleman nobody keeps is put on area guard: {:?}",
+        free.orders
+    );
+    assert!(
+        held.orders
+            .iter()
+            .all(|order| order.actor != rifleman),
+        "and the same rifleman in one of the player's groups is never proposed: {:?}",
+        held.orders
+    );
+}
+
 #[test]
 fn the_opening_buys_power_or_income_before_anything_else() {
     let Some((mut sim, rules)) = arena(0xA17) else {

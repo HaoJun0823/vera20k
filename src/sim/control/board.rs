@@ -225,7 +225,7 @@ impl ControlBoard {
         // 1. Decisions.
         let mut out = Outbox::default();
         {
-            let obs = Observation::new(sim, owner);
+            let obs = Observation::new(sim, owner).with_player_groups(&self.excluded);
             self.brain.think(rules, &obs, &mut out);
         }
         for intent in out.intents {

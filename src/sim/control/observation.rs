@@ -22,11 +22,19 @@
 //!   navigation projection. It is derived from terrain and blocking objects,
 //!   and it says nothing about whether a cell is currently occupied: use it
 //!   for reachability, not for occupancy.
+//! - `owned_by_hand` reads the objects the local player has taken back — the
+//!   members of the player's control groups, which live in the local view and
+//!   reach this projection through the board (`with_player_groups`) — and the
+//!   `TeamClass` scripts of this house. Neither is simulation state the sim
+//!   owns: a control group is a promise about a unit the player made, so it
+//!   belongs to the player's view, and it is handed in rather than stored.
 //!
 //! Everything here is integer-valued and iterates in storage order, so a
 //! decision built on it stays deterministic.
 
 use crate::map::entities::EntityCategory;
+use std::collections::BTreeSet;
+
 use crate::rules::object_type::{ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
 use crate::sim::house_state::HouseDifficulty;
@@ -40,7 +48,17 @@ use crate::sim::world::Simulation;
 pub struct Observation<'a> {
     sim: &'a Simulation,
     house: InternedId,
+    /// The objects the local player has taken back: the members of the
+    /// player's control groups, which live in the local view and are handed to
+    /// the board each frame. The board's gate refuses a command that names
+    /// one, and a policy that can see them refuses to propose one.
+    player_kept: &'a BTreeSet<u64>,
 }
+
+/// What [`Observation::player_kept`] is for a house with no player behind it:
+/// a headless match, a computer house, and every test that never hands the
+/// board a control group.
+static NO_PLAYER_GROUPS: BTreeSet<u64> = BTreeSet::new();
 
 /// One object the observed house owns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +109,19 @@ pub(crate) struct Billet {
 
 impl<'a> Observation<'a> {
     pub fn new(sim: &'a Simulation, house: InternedId) -> Self {
-        Self { sim, house }
+        Self {
+            sim,
+            house,
+            player_kept: &NO_PLAYER_GROUPS,
+        }
+    }
+
+    /// The same view, over a house whose player has taken some of its objects
+    /// back. The board calls this with the control groups it was handed;
+    /// without it the view is a headless one and nothing is kept.
+    pub(crate) fn with_player_groups(mut self, groups: &'a BTreeSet<u64>) -> Self {
+        self.player_kept = groups;
+        self
     }
 
     /// The house this view is scoped to; the owner every issued command takes.
@@ -526,6 +556,25 @@ impl<'a> Observation<'a> {
             None,
             None,
         )
+    }
+
+    /// Whether a hand other than this policy already owns `entity_id`, so the
+    /// policy orders it nothing at all: a unit in one of the player's control
+    /// groups, or a unit a `TeamClass` script of this house has recruited.
+    ///
+    /// Both are owners the policy would otherwise fight. A control group is a
+    /// promise that the unit is still where the player put it, and the local
+    /// view keeps it. A team's script owns its members: `team_script_vm`'s
+    /// pass has no house gate, so a policy-driven house's teams run like any
+    /// other's — recruit the house's units and drive them.
+    ///
+    /// What this buys over leaving it to the gate: a refused command still
+    /// spends the frame's budget and still counts the unit as sent for
+    /// `ORDER_REFRESH_FRAMES`, so a grouped unit would quietly eat the army's
+    /// orders and hold its own place in the push while doing neither. Every
+    /// place the policy picks a unit to order asks this first.
+    pub(crate) fn owned_by_hand(&self, entity_id: u64) -> bool {
+        self.player_kept.contains(&entity_id) || self.team_has_member(entity_id)
     }
 
     /// Whether a team of this house has recruited `entity_id`.

@@ -184,11 +184,20 @@ takes the host down instead of leaving one driving nothing. Neither switch
 undoes what was already issued — cancelling a queued building or recalling an
 order would be a destructive decision the policy should not make for the player.
 
-A third, per-object switch is the player's own control groups: the frame passes
-them to the board before each step, and the board refuses any command whose actor
-is in one, including a unit it had already ordered. A control group is a promise
-that the unit stays where the player put it, so taking a unit is enough to take
-it back.
+A third, per-object switch is the player's own control groups. The frame flattens
+the ten slots into the board before each step, and the policy never reaches for a
+unit in one: `Observation::owned_by_hand` is the one answer every place that
+picks a unit asks — a control group member, or a unit a `TeamClass` script has
+recruited — and the board's gate refuses one anyway if a policy that does not
+ask ever emits it. A control group is a promise that the unit stays where the
+player put it, so taking a unit is enough to take it back.
+
+The gate alone was not enough: a refused command still spends the frame's
+command budget and still counts the unit as sent for `ORDER_REFRESH_FRAMES`, so
+a grouped unit quietly ate the army's orders and held its own place in the push
+while doing neither. The exclusions are the board's, handed to the projection it
+builds for the brain (`Observation::with_player_groups`), so the decision layer
+sees them through its own read-only surface and no new query crosses a layer.
 
 The gate filters what a policy emits. `RetailBrain` fills both halves:
 production is the base plan, the spliced plants, the harvesters, the teams its

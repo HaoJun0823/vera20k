@@ -67,7 +67,7 @@ pub(super) fn advance(
             obs.object_type(rules, entity.type_id)
                 .is_some_and(|ty| super::orders::is_combat_unit(rules, ty))
         })
-        .filter(|entity| !obs.team_has_member(entity.entity_id))
+        .filter(|entity| !obs.owned_by_hand(entity.entity_id))
         .collect();
     // An army the base cannot replace is not an army, it is the whole house
     // walking out of the gate; and a base with nothing to hold it is a base
