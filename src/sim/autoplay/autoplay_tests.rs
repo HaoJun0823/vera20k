@@ -197,6 +197,223 @@ fn the_retail_brain_queues_nothing_it_cannot_pay_for() {
     );
 }
 
+/// The names of the types the brain asked a factory to start.
+fn queued_names(sim: &Simulation, commands: &[Command]) -> Vec<String> {
+    commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::QueueProduction { type_id } => Some(sim.interner.resolve(*type_id).to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A house past its opening with no yard: a war factory stands and the wallet
+/// is full, which is all a lost yard leaves to rebuild from.
+fn factory_with_money(sim: &mut Simulation, rules: &RuleSet, owner: InternedId, credits: i32) {
+    sim.spawn_object("GAWEAP", "Americans", 12, 12, 64, rules)
+        .expect("a war factory");
+    sim.houses
+        .get_mut(&owner)
+        .expect("the house")
+        .economy_mut()
+        .set_credits_for_test(credits);
+}
+
+#[test]
+fn a_house_that_lost_its_yard_buys_another_maker() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    sim.spawn_object("GADEPT", "Americans", 16, 16, 64, &rules)
+        .expect("a service depot");
+    factory_with_money(&mut sim, &rules, owner, 20_000);
+
+    let mut brain = RetailBrain::new(0xA17);
+    let commands = frame_commands(&mut brain, &rules, &sim, owner);
+    let queued = queued_names(&sim, &commands);
+
+    assert!(
+        queued.iter().any(|name| name == "AMCV"),
+        "nothing the yard builds can start without a yard, so the factory's one \
+         useful product is the MCV that carries DeploysInto= back to one; got {queued:?}"
+    );
+}
+
+#[test]
+fn a_maker_that_cannot_deploy_where_it_stands_is_driven_to_a_site() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    // A ConYard's foundation is put down one cell north-west of the maker, so
+    // a maker on the map's first cell has nowhere to put one: the deploy is
+    // refused, and asking again changes nothing.
+    let mcv = sim
+        .spawn_object("AMCV", "Americans", 1, 1, 64, &rules)
+        .expect("an MCV");
+    factory_with_money(&mut sim, &rules, owner, 0);
+
+    let mut brain = RetailBrain::new(0xA17);
+    let commands = frame_commands(&mut brain, &rules, &sim, owner);
+
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::Move { entity_id, .. } if *entity_id == mcv)),
+        "a blocked maker has to drive to a site the yard fits on before it deploys"
+    );
+    assert!(
+        !commands.iter().any(
+            |command| matches!(command, Command::DeployMcv { entity_id } if *entity_id == mcv)
+        ),
+        "and pressing D where the yard cannot stand is the refusal it already knows"
+    );
+}
+
+#[test]
+fn a_factory_with_no_yard_and_no_maker_starts_what_it_can() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    // No depot, so no MCV is buildable: the factory must keep producing rather
+    // than stand idle waiting for a type `CanBuild` refuses.
+    factory_with_money(&mut sim, &rules, owner, 20_000);
+    sim.spawn_object("GAREFN", "Americans", 8, 8, 64, &rules)
+        .expect("a refinery");
+    for cell in [(20u16, 20u16), (20, 22)] {
+        sim.spawn_object("CMIN", "Americans", cell.0, cell.1, 64, &rules)
+            .expect("a harvester for the bay");
+    }
+
+    let mut brain = RetailBrain::new(0xA17);
+    let commands = frame_commands(&mut brain, &rules, &sim, owner);
+
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::QueueProduction { .. })),
+        "a house with no yard still fights with what its factories make"
+    );
+}
+
+/// The (name, price) of every type the brain asked a factory to start.
+fn queued_with_price(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    commands: &[Command],
+) -> Vec<(String, i32)> {
+    let obs = Observation::new(sim, owner);
+    commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::QueueProduction { type_id } => Some(*type_id),
+            _ => None,
+        })
+        .filter_map(|type_id| {
+            obs.object_type(rules, type_id)
+                .map(|ty| (ty.id.clone(), obs.cost_of(rules, ty)))
+        })
+        .collect()
+}
+
+/// The band the wallet reaches for: under [`POOR_CREDITS`] the cheap band,
+/// past [`RICH_CREDITS`] the dear one, and never a band the house cannot pay
+/// for. The infantry line works at its own, lower floor so a thin wallet still
+/// fields soldiers instead of saving for a tank it will not reach.
+#[test]
+fn the_wallet_decides_how_dear_a_band_the_house_buys() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    sim.spawn_object("GAWEAP", "Americans", 12, 12, 64, &rules)
+        .expect("a war factory");
+    sim.spawn_object("GAREFN", "Americans", 8, 8, 64, &rules)
+        .expect("a refinery");
+    for cell in [(20u16, 20u16), (20, 22)] {
+        sim.spawn_object("CMIN", "Americans", cell.0, cell.1, 64, &rules)
+            .expect("a harvester for the bay");
+    }
+
+    let buy = |sim: &mut Simulation, credits: i32| {
+        sim.houses
+            .get_mut(&owner)
+            .expect("the house")
+            .economy_mut()
+            .set_credits_for_test(credits);
+        let mut brain = RetailBrain::new(0xA17);
+        let commands = frame_commands(&mut brain, &rules, sim, owner);
+        queued_with_price(sim, &rules, owner, &commands)
+    };
+    let thin = buy(&mut sim, 2_100);
+    let thick = buy(&mut sim, 8_000);
+
+    assert!(
+        !thin.is_empty() && thin.iter().all(|(_, price)| *price <= 1_000),
+        "a wallet below the rich ceiling buys the cheap and the line band, not the heavy end; \
+         got {thin:?}"
+    );
+    let thin_dearest = thin.iter().map(|(_, price)| *price).max().unwrap_or(0);
+    assert!(
+        thick.iter().any(|(_, price)| *price >= thin_dearest),
+        "a full wallet reaches at least as far up the price bands as a thin one; \
+         got {thick:?} vs {thin:?}"
+    );
+}
+
+#[test]
+fn the_board_leaves_the_players_own_units_alone() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 16, 16, 64, &rules)
+        .expect("an American tank");
+    let mut host = host(&mut sim, vec![(0, Command::Stop { entity_id: tank })]);
+    host.set_excluded([tank].into_iter().collect());
+
+    host.step(&mut sim, &rules);
+
+    assert!(
+        sim.pending_command_snapshot().is_empty(),
+        "a unit in the player's control group is the player's to command"
+    );
+}
+
+#[test]
+fn the_opening_buys_power_or_income_before_anything_else() {
+    let Some((mut sim, rules)) = arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    yard_with_money(&mut sim, &rules, owner, 10_000);
+
+    let mut brain = RetailBrain::new(0xA17);
+    let commands = frame_commands(&mut brain, &rules, &sim, owner);
+    let queued: Vec<String> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::QueueProduction { type_id } => {
+                Some(sim.interner.resolve(*type_id).to_owned())
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(!queued.is_empty(), "the opening starts something");
+    for name in &queued {
+        assert!(
+            rules.build_power_types.iter().any(|power| power == name)
+                || rules.build_refinery_types.iter().any(|bay| bay == name),
+            "the opening buys power or income first, not {name}"
+        );
+    }
+}
+
 
 #[test]
 fn host_queues_commands_with_the_house_owner_and_the_current_tick() {

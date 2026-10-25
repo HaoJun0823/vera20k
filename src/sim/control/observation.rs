@@ -337,6 +337,19 @@ impl<'a> Observation<'a> {
         crate::sim::ai_base_building::node_satisfied(self.sim, rules, self.house, node, None)
     }
 
+    /// Whether the unit `entity_id` could deploy into `yard` where it stands:
+    /// the placement test `UnitClass::Deploy` applies (`0x00739422..
+    /// 0x00739565`), answered by the receiver's own owner without touching
+    /// the unit.
+    ///
+    /// A brain that presses D on a blocked cell gets nothing back — the
+    /// receiver plays `CannotDeployHere`, clears the deploy latch and queues
+    /// Guard (`0x007394E0..0x0073957A`) — so the decision "drive somewhere
+    /// else first" needs this answer before the order, not after it.
+    pub fn deploy_site_admits(&self, rules: &RuleSet, entity_id: u64, yard: &ObjectType) -> bool {
+        self.sim.deploy_site_admits(entity_id, rules, yard)
+    }
+
     /// Whether `HouseClass::Place_Production` would accept `ty` with its
     /// top-left cell here: the sidebar's build-area adjacency and the
     /// building's own `CanPlaceAt` clear-to-build, the two predicates that

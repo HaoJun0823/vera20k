@@ -35,6 +35,12 @@
 //! - Target selection is one predicate, not the native one: another house's
 //!   object this house is at war with, nearest first, and only inside the
 //!   base radius.
+//! - A yard rebuilt from a bought MCV is not defended differently from the
+//!   first one, and the brain does not repair a damaged structure, so a raid
+//!   that reaches the base can take it a second time.
+//! - With no yard at all, `advance` measures no base centre and keeps the
+//!   army home for the rest of the match, even when the maker it needs is
+//!   refused by `CanBuild` and the recovery chain cannot run.
 
 pub(super) mod advance;
 pub(super) mod build;
@@ -44,6 +50,7 @@ pub(super) mod orders;
 use std::collections::BTreeMap;
 
 use crate::rules::ruleset::RuleSet;
+use crate::rules::unit_role::RoleTable;
 use crate::sim::control::brain::{Brain, Outbox};
 use crate::sim::control::observation::Observation;
 use crate::sim::intern::InternedId;
@@ -70,6 +77,10 @@ pub struct RetailBrain {
     /// cell, by type: a cell the gate admits but the receiver refuses must
     /// not be asked for again.
     pub(super) site_attempts: BTreeMap<InternedId, u32>,
+    /// What each type is for, read out of the warheads once and never
+    /// changed. Built on the first spend, because the rules a scenario plays
+    /// with are the ones the brain is handed there.
+    pub(super) roles: Option<RoleTable>,
 }
 
 impl RetailBrain {
@@ -80,7 +91,14 @@ impl RetailBrain {
             rng: SimRng::new(seed),
             orders: BTreeMap::new(),
             site_attempts: BTreeMap::new(),
+            roles: None,
         }
+    }
+
+    /// The role table for `rules`: what each type is for, so the factories can
+    /// be told what the army is short of rather than what is dearest.
+    pub(super) fn roles(&mut self, rules: &RuleSet) -> &RoleTable {
+        self.roles.get_or_insert_with(|| RoleTable::build(rules))
     }
 
     /// This brain's own draw, for the native decisions it asks.
@@ -96,7 +114,7 @@ impl Brain for RetailBrain {
     }
 
     fn think(&mut self, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
-        expand::deploy_yard_maker(rules, obs, out);
+        expand::deploy_yard_maker(self, rules, obs, out);
         build::spend(self, rules, obs, out);
         orders::engineers(self, rules, obs, out);
         // A house that is pushing owns its whole army for the frame; one that

@@ -194,6 +194,7 @@ pub mod voxel_frame_catalog;
 pub mod warhead_type;
 #[cfg(all(test, not(feature = "ares")))]
 mod warhead_verses_tests;
+pub mod unit_role;
 pub mod weapon_type;
 
 #[cfg(any(test, feature = "test-support"))]
