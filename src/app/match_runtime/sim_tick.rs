@@ -1166,17 +1166,7 @@ fn advance_one_simulation_frame(
         let mut hud_messages = Vec::new();
         // Carried out of the sim borrow so the census can read `state` freely below.
         let mut census_tick: Option<u64> = None;
-        // The player's own units, gathered before the runtime borrow: a unit in
-        // one of the player's control groups is the player's, and auto play
-        // must leave it alone.
-        let player_owned: std::collections::BTreeSet<u64> = state
-            .match_state
-            .input
-            .control_groups
-            .iter()
-            .flatten()
-            .copied()
-            .collect();
+
         if let Some(rt) = state.match_state.sim_runtime.as_mut() {
             let sim = &mut rt.simulation;
             let native_frame = sim.session().binary_frame();
@@ -1197,6 +1187,15 @@ fn advance_one_simulation_frame(
             // Delay-zero AnimClass construction can emit StartSound during the
             // final map-load sweep. Keep it until this first tactical drain;
             // `drain(..)` below still consumes every event exactly once.
+            // The player's own units: a unit in one of the player's control
+            // groups is the player's, and auto play must leave it alone. Read
+            // from the sim, where an assignment lands, so a group assigned in
+            // this frame's commands counts before auto play steps.
+            let player_owned: std::collections::BTreeSet<u64> = sim
+                .projected_control_groups()
+                .into_iter()
+                .flatten()
+                .collect();
             // Auto play is another command producer: it runs before the drain,
             // so what it issues now is among this frame's due commands. It
             // steps only in the lane that drains, so nothing it issues waits
