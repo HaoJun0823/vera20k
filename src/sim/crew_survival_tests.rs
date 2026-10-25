@@ -1509,6 +1509,7 @@ fn a_reselected_escapee_in_planning_mode_selects_its_node_partner() {
                         target_rx: 15,
                         target_ry: 15,
                     },
+                    None,
                 )
                 .expect("planning record");
             let command = sim.decode_native_command_record(&record, 0).unwrap();
@@ -1588,6 +1589,7 @@ fn plan_moves_to(sim: &mut Simulation, rules: &RuleSet, ids: &[u64], cell: (u16,
                     target_rx: cell.0,
                     target_ry: cell.1,
                 },
+                None,
             )
             .expect("planning record");
         let command = sim.decode_native_command_record(&record, 0).unwrap();

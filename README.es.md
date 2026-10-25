@@ -39,8 +39,10 @@ palabra sobre su rumbo.
 - **IA:** Partes de la IA original se encargan de construir bases y de los ataques definidos por
   scripts.
 - **Trabajo en curso:** Fidelidad de la jugabilidad, aspecto visual y rendimiento.
-- **Multijugador:** El juego en red aún no está disponible.
-- **Escala:** Todavía no se han demostrado batallas con 30 jugadores y 20 000 unidades.
+- **Multijugador:** Las compilaciones actuales del código fuente permiten jugar por LAN y en línea en macOS y Linux.
+- **Escala:** Dos partidas consecutivas en línea superaron la validación funcional con
+  30 procesos de cliente independientes y más de 20 000 unidades móviles activas por partida.
+  Los clientes Linux compartieron máquinas virtuales; esto no demuestra un rendimiento fluido en tiempo real.
 
 ## Descargar y jugar
 
@@ -50,6 +52,30 @@ de [Steam](https://store.steampowered.com/app/2229850/) o de la
 [app de EA](https://www.ea.com/games/command-and-conquer/command-and-conquer-the-ultimate-collection)
 e instala VERA20K en una carpeta nueva. Ahí irán también los mods y el contenido nuevo, así que los
 archivos del juego nunca se modifican.
+
+Para iniciar escaramuzas o campañas de YR para un jugador desde un cliente de CnCNet, consulta la
+[configuración del cliente sin conexión](integrations/cncnet/README.md).
+
+## Ajustes
+
+Usa **Options** para el sonido y los controles, y **Vera Options** para las funciones específicas
+de VERA. Las preferencias del jugador, los atajos de teclado y las opciones del lobby se guardan
+en `VERA.INI`:
+
+- **Instalador de Windows:** junto a `vera20k.exe`.
+- **macOS:** `~/Library/Application Support/VERA20k/VERA.INI`.
+- **Linux:** `~/.local/share/VERA20k/VERA.INI`, o en tu carpeta de datos XDG.
+
+`config.toml` define la carpeta del juego y permite seleccionar otra carpeta de ajustes.
+
+Si falta `VERA.INI`, VERA crea el archivo e importa las preferencias existentes una sola vez.
+Si no hay ajustes anteriores, el archivo empieza vacío y VERA usa los valores predeterminados
+integrados hasta que se guardan los ajustes. Los archivos originales `RA2MD.INI` y `KeyboardMD.ini`
+solo se leen para la importación y nunca se sobrescriben.
+
+`VERARULES.INI`, en la misma carpeta, contiene cambios opcionales en la jugabilidad. Al principio
+incluye ejemplos comentados y mantiene la prioridad de las reglas de las misiones y los mapas.
+Consulta [reglas personales](docs/personal-rules.md) para editarlas y anularlas.
 
 ## Arquitectura
 
@@ -66,13 +92,6 @@ Esta separación favorece una jugabilidad determinista.
 Las flechas muestran el flujo de datos:
 
 ![La aplicación envía comandos a la simulación, que devuelve el estado del mundo; la aplicación envía datos de dibujado al renderizado.](docs/images/architecture.es.png)
-
-## Requisitos del sistema
-
-- **Juego:** Red Alert 2: Yuri's Revenge 1.001.
-- **Sistema operativo:** Windows 10+, Linux (glibc 2.35+, p. ej., Ubuntu 22.04 o Steam Deck) o
-  macOS 11+ en Apple Silicon.
-- **Gráficos:** Vulkan, DirectX 12 o Metal.
 
 ## Compilar y ejecutar
 
@@ -109,19 +128,21 @@ De forma predeterminada, VERA20K se comporta igual que el juego original. Toda f
 incluidas las extensiones de mods como Ares, debe permanecer desactivada hasta que se active con una
 de estas opciones:
 
+- **Una opción de VERA para el jugador**, en **Options → Vera Options**, guardada en la sección `[VERA]` de `VERA.INI`.
 - **Una opción de compilación**, como `--features ares` para las [extensiones de Ares](docs/ares.md)
   compatibles.
 - **Una opción del lobby del juego**, elegida para cada partida.
 - **Una clave INI**, definida por un mod o un mapa.
 
-Para iniciar escaramuzas o campañas de YR para un jugador desde un cliente de CnCNet, consulta la
-[configuración del cliente sin conexión](integrations/cncnet/README.md).
+Los ajustes de sonido, gráficos y controles se guardan en `VERA.INI`. Las reglas de juego
+provienen de los ajustes del lobby, los mods o los mapas.
 
 ## Contribuir
 
 Toda ayuda es bienvenida. Puedes escribir código, refactorizar el motor, probar el juego, compartir
 ideas o jugarlo junto al original y decirnos qué no se siente como debería. Abre un PR y nosotros
 nos encargamos a partir de ahí.
+
 Hablamos en [Discord](https://discord.gg/kmjRUn5m5F) y en el grupo de QQ (1097193563).
 
 ## Apoya el proyecto

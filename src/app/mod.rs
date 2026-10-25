@@ -47,11 +47,12 @@ pub(crate) mod diagnostics;
 pub(crate) mod display_target;
 mod frame;
 pub mod frontend;
+mod game_data_check;
 mod handler;
 mod in_game;
-pub(crate) mod lan_service;
 mod initialize;
 pub(crate) mod input;
+pub(crate) mod lan_service;
 pub(crate) mod loading;
 pub(crate) mod match_audio;
 pub mod match_bootstrap;
@@ -124,17 +125,25 @@ pub(crate) use state::{AppState, PlatformState, reset_scenario_exit_runtime};
 /// Top-level application. Implements winit's ApplicationHandler.
 pub struct App {
     state: Option<AppState>,
+    pending_initialization: Option<initialize::InitializationJob>,
     shell_capture: Option<crate::app::diagnostics::shell_capture::ShellCaptureSession>,
     tactical_capture:
         Option<crate::app::diagnostics::tactical_capture::session::TacticalCaptureSession>,
+    /// Render admission for hidden captures; service events may wake earlier.
+    capture_render_not_before: Option<Instant>,
     /// Retained until `resumed()` so the profile's pre-window Video read can
     /// use the command-line screen fields as its current-value defaults.
     startup_options: crate::app::frontend::startup_options::RetailStartupOptions,
     spawn_request: Option<crate::app::frontend::cncnet_spawn::SpawnRequest>,
+    replay_request: Option<crate::app::frontend::launch::ReplayLaunchRequest>,
     startup_failure: Option<String>,
     /// Make sure config.toml names a game folder before the window opens
     /// ([`app_bundle`]).
     ask_for_game_folder: bool,
+    /// Set while `window_event` re-dispatches the mouse events a touch meant
+    /// (`input::touch`). A synthetic `CursorMoved` must not pass for the OS
+    /// pointer, which is what clears the touch-parked cursor.
+    dispatching_touch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,12 +185,16 @@ impl App {
     ) -> Self {
         Self {
             state: None,
+            pending_initialization: None,
             shell_capture: None,
             tactical_capture: None,
+            capture_render_not_before: None,
             startup_options,
             spawn_request: None,
+            replay_request: None,
             startup_failure: None,
             ask_for_game_folder: false,
+            dispatching_touch: false,
         }
     }
 
@@ -190,14 +203,18 @@ impl App {
     ) -> Self {
         Self {
             state: None,
+            pending_initialization: None,
             shell_capture: Some(
                 crate::app::diagnostics::shell_capture::ShellCaptureSession::new(request),
             ),
             tactical_capture: None,
+            capture_render_not_before: None,
             startup_options: crate::app::frontend::startup_options::RetailStartupOptions::default(),
             spawn_request: None,
+            replay_request: None,
             startup_failure: None,
             ask_for_game_folder: false,
+            dispatching_touch: false,
         }
     }
 
@@ -206,16 +223,20 @@ impl App {
     ) -> Self {
         Self {
             state: None,
+            pending_initialization: None,
             shell_capture: None,
             tactical_capture: Some(
                 crate::app::diagnostics::tactical_capture::session::TacticalCaptureSession::new(
                     request,
                 ),
             ),
+            capture_render_not_before: None,
             startup_options: crate::app::frontend::startup_options::RetailStartupOptions::default(),
             spawn_request: None,
+            replay_request: None,
             startup_failure: None,
             ask_for_game_folder: false,
+            dispatching_touch: false,
         }
     }
 
@@ -226,9 +247,17 @@ impl App {
         self.ask_for_game_folder = true;
     }
 
+    pub fn new_replay(request: crate::app::frontend::launch::ReplayLaunchRequest) -> Self {
+        let mut app = Self::default();
+        app.replay_request = Some(request);
+        app
+    }
+
     pub fn finish_capture(&mut self) -> Result<()> {
         if let Some(error) = self.startup_failure.as_ref().or_else(|| {
-            self.state.as_ref().and_then(|state| state.frontend.external_launch_error.as_ref())
+            self.state
+                .as_ref()
+                .and_then(|state| state.frontend.external_launch_error.as_ref())
         }) {
             anyhow::bail!("{error}");
         }

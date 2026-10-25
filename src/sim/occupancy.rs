@@ -324,15 +324,40 @@ impl RawCellOccupationGrid {
     }
 
     pub(crate) fn mark_ground(&mut self, rx: u16, ry: u16, mask: u8) {
-        if mask != 0 {
-            self.cells
-                .get_or_insert_with((rx, ry), Default::default)
-                .ground |= mask;
+        self.mark_ground_at(RawCellKey::Real(rx, ry), mask);
+    }
+
+    /// Literal ground OR, preserving the independent Infantry owner. Terrain
+    /// MarkOccupation71C110 may select Dummy from retained Object.Location
+    /// even when PlaceDown5683C0 admitted a different real footprint cell.
+    pub(crate) fn mark_ground_at(&mut self, key: RawCellKey, mask: u8) {
+        if mask == 0 {
+            return;
+        }
+        match key {
+            RawCellKey::Real(rx, ry) => {
+                self.cells
+                    .get_or_insert_with((rx, ry), Default::default)
+                    .ground |= mask;
+            }
+            RawCellKey::Dummy => self.dummy.ground |= mask,
         }
     }
 
     pub(crate) fn clear_ground(&mut self, rx: u16, ry: u16, mask: u8) {
-        self.update_and_prune(rx, ry, |cell| cell.ground &= !mask);
+        self.clear_ground_at(RawCellKey::Real(rx, ry), mask);
+    }
+
+    /// Literal ground-bit AND, including TerrainLimbo71C9E7..71C9F6's
+    /// retained CellClass receiver. Unlike UnmarkCellOccupancy this leaves
+    /// the Infantry owner untouched, even on the shared Dummy.
+    pub(crate) fn clear_ground_at(&mut self, key: RawCellKey, mask: u8) {
+        match key {
+            RawCellKey::Real(rx, ry) => {
+                self.update_and_prune(rx, ry, |cell| cell.ground &= !mask);
+            }
+            RawCellKey::Dummy => self.dummy.ground &= !mask,
+        }
     }
 
     pub(crate) fn ground_bits(&self, rx: u16, ry: u16) -> u8 {

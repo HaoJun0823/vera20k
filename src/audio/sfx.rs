@@ -2814,9 +2814,8 @@ impl From<&SoundEntry> for EntryFacts {
             loop_count: entry.loop_count,
             delay_ms: entry.delay_ms,
             entry_volume_linear: entry.volume_linear,
-            // VERA reads `Sounds=` names without the audio index, so `+0x0C`
-            // (every name resolved, `AddSample @ 0x004064A0`) is not modelled.
-            samples_ok: !entry.sounds.is_empty(),
+            samples_ok: !entry.sounds.is_empty() && entry.samples_resolved,
+            samples_resolved: entry.samples_resolved,
         }
     }
 }
@@ -2845,6 +2844,7 @@ fn entry_facts(sound_id: &str, registry: &SoundRegistry) -> EntryFacts {
         delay_ms: (0, 0),
         entry_volume_linear: VOLUME_SCALE,
         samples_ok: true,
+        samples_resolved: true,
     }
 }
 
@@ -3432,6 +3432,41 @@ mod tests {
         assert!(facts.control & control::LOOP == 0);
         assert!(!facts.is_loopable());
         assert_eq!(facts.delay_ms, (0, 400));
+    }
+
+    /// `VocClass::AddSample @ 0x004064A0`: a `Sounds=` name the audio index
+    /// lacks stores nothing and clears the entry's `+0x0C` (`0x00406510`), so
+    /// `AllocateFromPool @ 0x00405190` refuses every play (`0x004051B6`) even
+    /// though another name resolved. A 33rd token is refused before its lookup.
+    #[cfg(not(feature = "ares"))]
+    #[test]
+    fn one_unresolvable_sample_name_silences_the_whole_entry() {
+        use crate::assets::audio_bag::{AudioIndex, test_support::build_idx};
+        use crate::rules::sound_ini::MAX_SAMPLES;
+        let index =
+            AudioIndex::from_idx_bag(&build_idx(&[("known", 0, 0, 22050, 0)]), Vec::new()).unwrap();
+        let full = vec!["known"; MAX_SAMPLES].join(" ");
+        let registry = SoundRegistry::from_ini_admitting(
+            &IniFile::from_str(&format!(
+                "[SoundList]\n1=Mixed\n2=Clean\n3=Full\n[Mixed]\nSounds=$known missing\n\
+                 [Clean]\nSounds=#KNOWN\n[Full]\nSounds={full} missing\n"
+            )),
+            Some(&index),
+        );
+        assert_eq!(registry.get("Mixed").unwrap().sounds, ["known"]);
+        let mut arbiter = SoundArbiter::new(0);
+        let mut play = |id: &str| {
+            let request = PlayRequest {
+                key: registry_key(id),
+                facts: entry_facts(id, &registry),
+                volume_linear: VOLUME_SCALE,
+                pan: VOLUME_SCALE / 2,
+            };
+            arbiter.submit(&request, 0).is_some()
+        };
+        assert!(!play("Mixed"));
+        assert!(play("Clean"));
+        assert!(play("Full"));
     }
 
     /// `Control=random` over three samples: one `RandomRanged(0, 2)` draw and
@@ -4142,6 +4177,106 @@ mod tests {
             crate::util::sha256::sha256_hex(&actual),
             native["sha256"].as_str().unwrap()
         );
+    }
+
+    #[test]
+    #[ignore = "requires active-retail RA2_DIR and an audio output device"]
+    fn retail_power_on_position_stop_precedes_one_shot_release() {
+        use std::time::{Duration, Instant};
+
+        // Building43FC34 calls750D40 before destructor43BD1A Release. The
+        // former hard-stops a live positional one-shot at zero gain; the
+        // latter alone leaves its current buffer playing (406096..4060E7).
+        let (_, assets) = crate::rules::retail_ini_fixture::retail_assets().unwrap();
+        let definitions = crate::rules::retail_ini_fixture::retail_audio_definitions().unwrap();
+        let loaded_index = crate::rules::retail_ini_fixture::retail_audio_index();
+        let audio_index = loaded_index.map(|loaded| &loaded.index);
+        let entry = definitions.sounds().get("PowerOn").unwrap();
+        assert_eq!(entry.control, 0);
+        assert_eq!(entry.sounds, ["gpowon"]);
+        let mut player = SfxPlayer::new().expect("selected regression requires audio output");
+        let mut service = TestAudioService::default();
+        let epoch = Instant::now();
+        for position_first in [false, true] {
+            player.stop_all();
+            player
+                .observe_pcm(PcmObservationConfig {
+                    sound_ids: vec!["PowerOn".into()],
+                    max_events: 1,
+                    max_samples_per_event: 262_144,
+                })
+                .unwrap();
+            assert!(player.play_animation_sound_spatial(
+                7,
+                "PowerOn",
+                SpatialGain::CENTRED_FULL,
+                definitions.sounds(),
+            ));
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                service.pump(
+                    &mut player,
+                    epoch.elapsed().as_millis() as u64,
+                    definitions.sounds(),
+                    definitions.eva(),
+                    &assets,
+                    audio_index,
+                );
+                if player.pcm_observer.as_ref().unwrap().pulled_nonzero() {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "the device did not pull PowerOn");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let before = player.pcm_observer.as_ref().unwrap().recorded_samples();
+            if position_first {
+                player.update_looping_sound(7, None, definitions.sounds());
+            }
+            player.release_animation_sound(7);
+            assert!(player.handle_sound_id(7).is_none());
+            while !player.observed_pcm_settled() {
+                service.pump(
+                    &mut player,
+                    epoch.elapsed().as_millis() as u64,
+                    definitions.sounds(),
+                    definitions.eva(),
+                    &assets,
+                    audio_index,
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "the device did not finish PowerOn"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let report = player.finish_pcm_observation().unwrap();
+            assert!(!report.truncated);
+            assert_eq!(report.outputs.len(), 1);
+            let output = &report.outputs[0];
+            assert!(output.source_ended && !output.truncated);
+            assert_eq!(output.resolved_samples, ["gpowon"]);
+            if position_first {
+                assert!(
+                    output.sample_bits.len() < output.source_sample_count,
+                    "zero-gain position must cut the actual source short before Release"
+                );
+            } else {
+                assert!(output.sample_bits.len() >= output.source_sample_count);
+                assert!(
+                    output.sample_bits[before..]
+                        .iter()
+                        .any(|bits| f32::from_bits(*bits) != 0.0),
+                    "Release alone leaves the current one-shot audible"
+                );
+                assert_eq!(output.actions.last().unwrap().kind, "completed");
+            }
+            eprintln!(
+                "PowerOn position_first={position_first}: before={before} pulled={} decoded={}",
+                output.sample_bits.len(),
+                output.source_sample_count
+            );
+        }
+        player.stop_all();
     }
 
     #[test]

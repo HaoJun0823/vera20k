@@ -99,6 +99,8 @@ pub struct HeadlessScenario {
     /// resources - no independently swappable execution inputs remain.
     pub runtime: crate::sim::runtime::SimRuntime,
     pub map: MapFile,
+    /// Identity of the exact map payload consumed by this construction.
+    pub source: crate::map::source::LoadedMapSource,
 }
 
 impl HeadlessScenario {
@@ -178,17 +180,30 @@ pub fn load_with_launch(
     seed: u32,
     launch: crate::sim::scenario_bootstrap::MatchLaunchDescriptor,
 ) -> Result<HeadlessScenario, String> {
-    load_with_launch_and_ini(retail_dir, map_file_name, seed, launch, &Default::default())
+    load_with_launch_and_ini(
+        retail_dir,
+        map_file_name,
+        seed,
+        launch,
+        &Default::default(),
+        crate::sim::scenario_session::ScenarioGameMode::Skirmish,
+        None,
+        None,
+    )
 }
 
-/// Explicit host policy for non-YR callers; no hidden cwd/config reread.
-/// Rules, fixed Art and AI all consume the one resolved provider choice.
+/// Explicit asset policy and launch GameMode; no hidden cwd/config reread.
+/// Rules, fixed Art and AI consume the one resolved provider choice. Replays
+/// retain the recorded mode before any mode-dependent House construction.
 pub fn load_with_launch_and_ini(
     retail_dir: &Path,
     map_file_name: &str,
     seed: u32,
     launch: crate::sim::scenario_bootstrap::MatchLaunchDescriptor,
     ini: &crate::util::ini_roots::IniRootConfig,
+    game_mode: crate::sim::scenario_session::ScenarioGameMode,
+    accepted_native_id_prefix: Option<u32>,
+    process_rules: Option<&mut crate::rules::process_owner::NativeRulesProcessOwner>,
 ) -> Result<HeadlessScenario, String> {
     let mut assets = AssetManager::new(retail_dir, MediaArchiveMode::STOCK_DIGITAL)
         .and_then(|assets| assets.with_ini_roots(ini))
@@ -198,24 +213,73 @@ pub fn load_with_launch_and_ini(
                 retail_dir.display()
             )
         })?;
-    let mut map = crate::map::source::load_map_by_name_or_path_with_assets(
+    load_with_assets(
         retail_dir,
         map_file_name,
-        &assets,
+        seed,
+        launch,
+        &mut assets,
+        game_mode,
+        accepted_native_id_prefix,
+        process_rules,
     )
-    .map_err(|error| format!("load map {map_file_name}: {error}"))?
-    .map;
+}
+
+/// Reuse the production headless scenario load after retail scenario discovery
+/// has already registered loose YRO archives in the caller's AssetManager.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn load_with_registered_scenario_assets(
+    retail_dir: &Path,
+    map_file_name: &str,
+    seed: u32,
+    launch: crate::sim::scenario_bootstrap::MatchLaunchDescriptor,
+    assets: &mut AssetManager,
+) -> Result<HeadlessScenario, String> {
+    load_with_assets(
+        retail_dir,
+        map_file_name,
+        seed,
+        launch,
+        assets,
+        crate::sim::scenario_session::ScenarioGameMode::Skirmish,
+        None,
+        None,
+    )
+}
+
+fn load_with_assets(
+    retail_dir: &Path,
+    map_file_name: &str,
+    seed: u32,
+    launch: crate::sim::scenario_bootstrap::MatchLaunchDescriptor,
+    assets: &mut AssetManager,
+    game_mode: crate::sim::scenario_session::ScenarioGameMode,
+    accepted_native_id_prefix: Option<u32>,
+    process_rules: Option<&mut crate::rules::process_owner::NativeRulesProcessOwner>,
+) -> Result<HeadlessScenario, String> {
+    let loaded_map =
+        crate::map::source::load_map_by_name_or_path_with_assets(retail_dir, map_file_name, assets)
+            .map_err(|error| format!("load map {map_file_name}: {error}"))?;
+    let source = loaded_map.source;
+    let mut map = loaded_map.map;
     // Preserve the process-owned cold Rules registry before theater archive
     // priority changes. The same owner then performs the active noncampaign
     // reset/rebuild and transfers its move-only native-ID receipt.
     let audio_definitions = crate::rules::audio_sources::AudioDefinitions::select(&assets);
-    let (_, _, mut native_rules_owner) = crate::rules::retail_sources::load_startup_rules(
-        &assets,
-        std::sync::Arc::clone(audio_definitions.sounds()),
-        std::sync::Arc::clone(audio_definitions.eva()),
-    )
-    .ok_or_else(|| "load native startup rules".to_string())?
-    .into_parts();
+    let mut cold_rules_owner;
+    let native_rules_owner = if let Some(owner) = process_rules {
+        owner
+    } else {
+        let (_, _, owner) = crate::rules::retail_sources::load_startup_rules(
+            &assets,
+            std::sync::Arc::clone(audio_definitions.sounds()),
+            std::sync::Arc::clone(audio_definitions.eva()),
+        )
+        .ok_or_else(|| "load native startup rules".to_string())?
+        .into_parts();
+        cold_rules_owner = owner;
+        &mut cold_rules_owner
+    };
     let scenario_prefix_plan =
         crate::sim::scenario_bootstrap::prepare_stock_offline_scenario_prefix_plan(
             &launch,
@@ -242,7 +306,7 @@ pub fn load_with_launch_and_ini(
         .map_err(|error| format!("admit rebuilt launch Countries: {error}"))?;
     let team_ai_registry =
         crate::rules::team_ai_ini::TeamAiIniRegistry::load_retail(&assets, &map.ini, true)?;
-    let theater = theater::load_theater(&mut assets, &map.header.theater)
+    let theater = theater::load_theater(assets, &map.header.theater)
         .ok_or_else(|| format!("load theater {}", map.header.theater))?;
     rules.install_art_data(crate::rules::art_data::ArtRegistry::from_ini(&art_ini));
     let infantry_sequences =
@@ -301,6 +365,14 @@ pub fn load_with_launch_and_ini(
     let (mut sim, scenario_prefix_projection) = bootstrap_rng
         .into_stock_offline_staged_simulation(&descriptor, bound_scenario_prefix)
         .map_err(|error| format!("stage stock-offline Simulation: {error}"))?;
+    // CreateHouses687FCE..688092 gives WOL humans their node name; other
+    // modes use "<human player>". The House owner hashes that native identity,
+    // so restoring GameMode after construction cannot reconstruct a WOL start.
+    sim.install_session_mode(game_mode);
+    if let Some(checkpoint) = accepted_native_id_prefix {
+        sim.install_accepted_native_id_prefix(checkpoint)
+            .map_err(|error| format!("replay native-ID prefix: {error}"))?;
+    }
     let shared_cell_dummy = crate::map::resolved_terrain::SharedCellDummy::fresh();
     shared_cell_dummy.reconstruct_for_map_resize();
     sim.bind_shared_cell_dummy(shared_cell_dummy.clone());
@@ -397,7 +469,7 @@ pub fn load_with_launch_and_ini(
         &theater,
         &assets,
         &mut rules,
-        &mut native_rules_owner,
+        native_rules_owner,
         &overlay_registry,
         &overlay_shp_ids,
         signed_new_ini_format,
@@ -462,6 +534,7 @@ pub fn load_with_launch_and_ini(
             },
         },
         map,
+        source,
     })
 }
 
@@ -699,6 +772,312 @@ mod retail_construction_tests {
             state.main,
             SimRng::new(u64::from(seed)).logical_state(),
             "no theater TMP selection means the Main cursor stays at its seed"
+        );
+    }
+
+    #[test]
+    fn retail_signed_terrain_key_constructs_a_live_display_nonmember() {
+        use crate::map::source::test_support::TestDirectory;
+        use crate::util::ini_writer::{replace_ini_section, set_ini_values};
+
+        let Some((ra2, assets)) = crate::rules::retail_ini_fixture::retail_assets() else {
+            return;
+        };
+        let bytes = assets.resolve_ref("XXmas.MAP").unwrap().bytes;
+        let map = MapFile::from_bytes(bytes).unwrap();
+        let control_cell = map.terrain_objects.first().unwrap();
+        let key = (u32::from(control_cell.ry) * 1000 + u32::from(control_cell.rx)).to_string();
+        let bytes = set_ini_values(bytes, "Basic", &[("NewINIFormat", "4")]);
+        let directory = TestDirectory::new("signed-terrain-key");
+        directory.write(
+            "control.map",
+            &replace_ini_section(&bytes, "Terrain", &[(&key, "TREE01")]),
+        );
+        directory.write(
+            "signed.map",
+            &replace_ini_section(&bytes, "Terrain", &[("-1", "TREE01"), (&key, "TREE01")]),
+        );
+        let control = load(
+            &ra2,
+            directory.path().join("control.map").to_str().unwrap(),
+            31,
+        )
+        .unwrap();
+        let signed = load(
+            &ra2,
+            directory.path().join("signed.map").to_str().unwrap(),
+            31,
+        )
+        .unwrap();
+        // ReadMap71CAEF..71CB19 keeps the signed remainder word; ctor71BC34
+        // tests those input words before Get_Cell_Packed41BEA0 derives0,0.
+        assert_eq!(signed.map.terrain_objects.len(), 2);
+        assert_eq!(
+            (
+                signed.map.terrain_objects[0].rx,
+                signed.map.terrain_objects[0].ry
+            ),
+            (u16::MAX, 0)
+        );
+        assert_eq!(signed.sim().terrain_objects().objects().len(), 2);
+        let tree = signed
+            .sim()
+            .terrain_objects()
+            .objects()
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(
+            tree.world_coord(),
+            crate::sim::projectile::ProjectileCoord::new(-128, 128, 0)
+        );
+        assert_eq!(tree.cell(), (0, 0));
+        assert!(tree.object_alive() && tree.is_live() && !tree.in_logic_vector());
+        assert!(
+            signed
+                .sim()
+                .display_layers()
+                .layer_of(tree.stable_id())
+                .is_some()
+        );
+        assert!(signed.sim().terrain_objects().id_at((0, 0)).is_none());
+        assert!(
+            signed
+                .sim()
+                .terrain_objects()
+                .id_at((u16::MAX, 0))
+                .is_none()
+        );
+        let ordinary = signed
+            .sim()
+            .terrain_objects()
+            .id_at((control_cell.rx, control_cell.ry))
+            .unwrap();
+        let baseline = control
+            .sim()
+            .terrain_objects()
+            .objects()
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(tree.native_unique_id(), baseline.native_unique_id());
+        assert_eq!(
+            signed
+                .sim()
+                .terrain_objects()
+                .get(ordinary)
+                .unwrap()
+                .native_unique_id(),
+            baseline.native_unique_id().map(|id| id.wrapping_add(1))
+        );
+        assert_eq!(signed.sim().rng_state(), control.sim().rng_state());
+        assert_eq!(
+            signed.sim().substrate.raw_cell_occupation.ground_bits(0, 0),
+            0
+        );
+        assert_eq!(
+            signed
+                .sim()
+                .substrate
+                .raw_cell_occupation
+                .ground_bits(u16::MAX, 0),
+            0
+        );
+    }
+
+    #[test]
+    fn retail_signed_terrain_alias_uses_the_real_cell_chain_through_restore_and_pickup() {
+        use crate::map::source::test_support::TestDirectory;
+        use crate::sim::snapshot::GameSnapshot;
+        use crate::sim::world::UninitContext;
+        use crate::util::ini_writer::{replace_ini_section, set_ini_values};
+
+        let Some((ra2, assets)) = crate::rules::retail_ini_fixture::retail_assets() else {
+            return;
+        };
+        let bytes = assets.resolve_ref("XXmas.MAP").unwrap().bytes;
+        let bytes = set_ini_values(bytes, "Basic", &[("NewINIFormat", "4")]);
+        let directory = TestDirectory::new("signed-terrain-alias");
+        let bytes = replace_ini_section(
+            &bytes,
+            "Structures",
+            &[(
+                "0",
+                "Neutral,GAPOWR,256,26,60,0,None,1,0,1,0,0,None,None,None,0,0",
+            )],
+        );
+        directory.write(
+            "alias.map",
+            &replace_ini_section(
+                &bytes,
+                "Terrain",
+                &[
+                    ("-65474999", "TREE01"),
+                    ("60026", "TREE01"),
+                    ("-65433999", "TREE01"),
+                ],
+            ),
+        );
+        let scene = load(
+            &ra2,
+            directory.path().join("alias.map").to_str().unwrap(),
+            31,
+        )
+        .unwrap();
+        let sim = scene.sim();
+        let alias = sim.terrain_objects().objects().values().next().unwrap();
+        let alias_id = alias.stable_id();
+        // ReadMap71CB10 narrows quotient-65474 to word62; signed center
+        // (-999*256+128,62*256+128) derives(-998,62). Map5657A0's fixed
+        // index62*512-998 is the ordinary allocated slot(26,60).
+        let coord = alias.world_coord();
+        assert_eq!((coord.x, coord.y), (-255616, 16000));
+        assert_eq!(alias.cell(), ((-998i16) as u16, 62));
+        let ordinary_id = sim.terrain_objects().id_at((26, 60)).unwrap();
+        let hole_id = sim
+            .terrain_objects()
+            .objects()
+            .values()
+            .last()
+            .unwrap()
+            .stable_id();
+        assert_ne!(ordinary_id, alias_id);
+        assert_eq!(
+            coord.z,
+            sim.terrain_objects()
+                .get(ordinary_id)
+                .unwrap()
+                .world_coord()
+                .z,
+            "both locations query the same native ground receiver"
+        );
+        assert_eq!(
+            sim.terrain_objects()
+                .members_at((26, 60))
+                .collect::<Vec<_>>(),
+            [ordinary_id, alias_id]
+        );
+        assert_eq!(sim.terrain_objects().cell_index().len(), 1);
+        use crate::sim::occupancy::CellObjectMember;
+        let building = sim
+            .substrate
+            .occupancy
+            .first_building_on_layer(
+                26,
+                60,
+                crate::sim::movement::locomotor::MovementLayer::Ground,
+            )
+            .unwrap();
+        assert_eq!(
+            sim.next_cell_object(CellObjectMember::Terrain(ordinary_id)),
+            Some(CellObjectMember::Terrain(alias_id))
+        );
+        assert_eq!(
+            sim.next_cell_object(CellObjectMember::Terrain(alias_id)),
+            Some(CellObjectMember::Entity(building)),
+            "canonical Cell+E4 list continues into its appended Building"
+        );
+        let rules = &scene.runtime.resources.rules;
+        let bytes = GameSnapshot::save_validated(
+            sim,
+            0,
+            rules.simulation_config_hash(),
+            "signed Terrain alias",
+            0,
+        );
+        let mut loaded = GameSnapshot::load(&bytes).unwrap().sim;
+        loaded.restore_after_snapshot_load().unwrap();
+        loaded.rebuild_caches_after_load(
+            sim.resolved_terrain().unwrap().clone(),
+            Default::default(),
+            rules,
+        );
+        loaded
+            .restore_map_authority_after_snapshot_load(rules, rules.overlay_registry(), None)
+            .unwrap();
+        loaded.resolve_type_handles(rules);
+        assert_eq!(
+            loaded
+                .terrain_objects()
+                .members_at((26, 60))
+                .collect::<Vec<_>>(),
+            [ordinary_id, alias_id]
+        );
+        let warhead_ref = loaded.interner.intern("HE");
+        loaded.commit_direct_terrain_damage_receiver(
+            rules,
+            Some(rules.overlay_registry()),
+            crate::sim::combat::TerrainDamageEvent {
+                damage_writeback: None,
+                stable_id: alias_id,
+                rx: 26,
+                ry: 60,
+                damage: 1,
+                distance_leptons: 0,
+                warhead_ref,
+                near_center_ic_isolation_eligible: false,
+            },
+            true,
+            Default::default(),
+        );
+        assert_eq!(
+            loaded.terrain_objects().get(alias_id).unwrap().health(),
+            alias.health() - 1
+        );
+        loaded.dirty_cells.clear_radar_for_test();
+        loaded.uninit_with_context(alias_id, UninitContext::with_rules(rules));
+        assert_eq!(
+            loaded
+                .terrain_objects()
+                .members_at((26, 60))
+                .collect::<Vec<_>>(),
+            [ordinary_id]
+        );
+        assert_eq!(loaded.dirty_cells.radar(), [alias.cell()]);
+        loaded.process_pending_delete_with(
+            rules,
+            Some(rules.overlay_registry()),
+            Default::default(),
+            1,
+            true,
+        );
+        assert!(loaded.terrain_objects().get(alias_id).is_none());
+        assert!(loaded.terrain_objects().get(ordinary_id).unwrap().is_live());
+        assert_eq!(
+            loaded.next_cell_object(CellObjectMember::Terrain(ordinary_id)),
+            Some(CellObjectMember::Entity(building))
+        );
+
+        // Native71CA42/51 is independent of Map allocation. This second
+        // source derives(-998,103): Map fixed512 selects the hole(26,101),
+        // but the retained157-stride zone record selects allocated(101,96).
+        let terrain = loaded.resolved_terrain().unwrap();
+        assert!(terrain.native_fixed_cell_index(26, 101).is_none());
+        assert!(terrain.native_fixed_cell_index(101, 96).is_some());
+        let zones = loaded.zone_grid.as_mut().unwrap();
+        let width = usize::from(zones.width());
+        let target = 96 * width + 101;
+        let base = zones.base_topology_mut_for_test();
+        let cluster = base.zone_ids().iter().copied().find(|&id| id > 1).unwrap();
+        base.movement_classes_mut_for_test()[target] =
+            crate::map::resolved_terrain::zone_class::GROUND;
+        base.zone_ids_mut_for_test()[target] = 0;
+        for (dx, dy) in crate::util::direction::DIRECTION_DELTAS {
+            let index = ((96 + dy) as usize) * width + (101 + dx) as usize;
+            base.movement_classes_mut_for_test()[index] =
+                crate::map::resolved_terrain::zone_class::GROUND;
+            base.zone_ids_mut_for_test()[index] = cluster;
+        }
+        loaded.uninit_with_context(hole_id, UninitContext::with_rules(rules));
+        assert_eq!(
+            loaded
+                .zone_grid
+                .as_mut()
+                .unwrap()
+                .base_topology_mut_for_test()
+                .zone_ids()[target],
+            cluster,
+            "AssignOrphaned must repair its retained zone receiver after Dummy Recalc"
         );
     }
 

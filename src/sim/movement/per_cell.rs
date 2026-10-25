@@ -22,7 +22,9 @@ use crate::sim::lifecycle_request::{LifecycleRequest, UninitReason};
 use crate::sim::mission::authority::LiveReadyInputProvider;
 use crate::sim::mission::{MissionId, MissionType};
 use crate::sim::radio::{self, RadioMessage, RadioPayload};
-use crate::sim::world::{FrameAdvanceError, FrameEffects, Simulation, UninitContext};
+use crate::sim::world::{
+    FrameAdvanceError, FrameEffects, SimSoundEvent, Simulation, UninitContext,
+};
 
 /// NavCom (`+0x5A4`) compared by pointer with `object`.
 fn nav_com_is(entity: &crate::sim::game_entity::GameEntity, object: u64) -> bool {
@@ -350,8 +352,8 @@ impl Simulation {
             // The victim's vtable `+0x170` (`0x007418E5`): a Unit's
             // `0x00746D60` runs Death_Explosion (`0x00738680`), then
             // FreeAllMindControlCaptures (`0x00710460`), which is all the
-            // other classes run; VERA releases captives in the victim's
-            // UnInit below.
+            // other classes run. Releases finish before RecordKill can
+            // dispatch the victim's Tags; later Foot UnInit finds no nodes.
             if self
                 .substrate
                 .entities
@@ -361,6 +363,7 @@ impl Simulation {
                 crushed_unit = true;
                 self.unit_death_explosion(rules, victim, &mut Vec::new());
             }
+            self.free_all_captures(victim, rules, registry, effects);
             // `UnitClass::Crush_Or_Prescatter_Cell @ 0x007416A0`: the
             // victim records its kill by the crusher (vtable `+0xE0`,
             // `0x007418F0`) and is UnInit (vtable `+0xF8`, `0x00741910`),
@@ -560,9 +563,23 @@ impl Simulation {
         };
         let nav_com = unit.navigation.nav_com();
         if nav_com.is_some() && nav_com != Some(NavTargetRef::cell(cell.0, cell.1)) {
-            // RESIDUAL:73A96F tests Abstract+14 bit1 before directed opcode
-            //0xE at73A981. This distinct non-current-object receiver requires
-            // that validity state; it is not the null/current-Cell human arm.
+            //73A94C..73A987 re-reads NavCom after synchronous clearance.
+            // Abstract+14 mask1 is Techno: ask that object to dock, ignore
+            // its reply, then reach the shared building Scatter tail.
+            if let Some(NavTargetRef::Object { id: target }) = nav_com
+                && let Some(target) = crate::sim::radio::as_techno(self, target)
+            {
+                crate::sim::radio::transmit(
+                    self,
+                    id,
+                    target,
+                    crate::sim::radio::RadioMessage::CanDock,
+                    crate::sim::radio::RadioPayload::default(),
+                    rules,
+                    effects,
+                );
+            }
+            self.unit_per_cell_building_scatter(id, rules, registry, effects);
             return;
         }
         let Some(object) = self.object_type(unit.type_ref(), rules) else {
@@ -828,8 +845,20 @@ impl Simulation {
                     rules,
                     effects,
                 );
-                // 0x0051A812..0x0051A84A plays VoiceComment's second sound;
-                // retail rules give no type one.
+                // 0x0051A812..0x0051A84A: a type with two or more
+                // VoiceComment sounds plays the second at the arrival's
+                // Location (PlayAt7509E0, no owner gate or draw).
+                if let Some(event) = self.substrate.entities.get(id).and_then(|actor| {
+                    let object = self.object_type(actor.type_ref(), rules)?;
+                    Some(SimSoundEvent::voc_at_location(
+                        object.voice_comment.get(1)?.clone(),
+                        actor,
+                        self.resolved_terrain.as_ref(),
+                    ))
+                }) {
+                    self.sound_events.emit(event);
+                    effects.flush_sound(self, rules);
+                }
                 if let Some(cell) = entry_cell {
                     bridge_state_changed |=
                         self.infantry_full_cell_scatter(id, cell, rules, registry, effects)?;
@@ -1499,18 +1528,16 @@ impl Simulation {
         (rx, ry): (u16, u16),
         context: UninitContext<'_>,
     ) {
-        let Some(viewer) = self.session.current_house() else {
-            return;
-        };
-        let Some(entity) = self.substrate.entities.get(id) else {
-            return;
-        };
-        if entity.discovery.discovered_by_current_house()
-            || !self.fog.is_ground_open(viewer, rx, ry)
-        {
-            return;
+        //6F5140..6F516C runs for PlayerPtr on every native client. Use
+        //each represented human's retained admission and own ground plane.
+        for viewer in self.represented_player_maps() {
+            if self.techno_discovered_by_viewer(id, viewer)
+                || !self.fog.is_ground_open(viewer, rx, ry)
+            {
+                continue;
+            }
+            self.discover_techno(id, viewer, context);
         }
-        self.discover_techno(id, viewer, context);
     }
 
     /// The range stop (`0x004D882F..0x004D896E`): the class

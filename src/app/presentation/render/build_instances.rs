@@ -70,12 +70,15 @@ pub(super) struct UiInstances {
     pub software_cursor: Vec<SpriteInstance>,
     pub drag: Vec<SpriteInstance>,
     pub placement: Vec<SpriteInstance>,
+    /// Phobos placement preview artwork, drawn after the PLACE cells.
+    #[cfg(feature = "phobos")]
+    pub placement_ghost: Vec<SpriteInstance>,
     pub target_line: Vec<SpriteInstance>,
     pub tactical_line_calls: Vec<crate::app::presentation::airstrike_lines::TacticalLineCall>,
     pub factory_rally_first: Vec<SpriteInstance>,
     pub factory_rally_second: Vec<SpriteInstance>,
     /// One stream per beacon row: each row has its own House Convert strip.
-    pub beacons: [Vec<SpriteInstance>; crate::app::match_runtime::beacons::BEACON_HOUSES],
+    pub beacons: Vec<Vec<SpriteInstance>>,
 }
 
 /// Sidebar chrome, cameos, text, minimap, and radar animation.
@@ -349,6 +352,35 @@ pub(super) fn build_world_instances(
                     },
                 );
                 status.group = group_labels.remove(&parent.parent.id).unwrap_or_default();
+                // Phobos DigitalDisplay: built here because the GAME.FNT atlas
+                // lives on the renderer; the value/position owner is
+                // presentation::digital_display.
+                #[cfg(feature = "phobos")]
+                if state.match_state.match_presentation.digital_display_enabled
+                    && let Some(rules) = state.rules()
+                {
+                    let digital =
+                        crate::app::presentation::digital_display::digital_display_instances(
+                            sim,
+                            entity,
+                            rules,
+                            overlay,
+                            &state.renderer.bit_font,
+                            hovered,
+                            local_owner.as_deref(),
+                            crate::app::presentation::ui_overlays::StatusViewport {
+                                camera: [
+                                    state.match_state.input.camera_x,
+                                    state.match_state.input.camera_y,
+                                ],
+                                size: [sw, sh],
+                                ignore_visibility: state.match_state.sandbox_full_visibility,
+                            },
+                            true,
+                        );
+                    status.digital_text = digital.texts;
+                    status.digital_shapes = digital.shapes;
+                }
                 if !entity.sinking.is_active() && !entity.passenger_role.is_inside_transport() {
                     if let (Some(frame), Some(shape)) = (
                         state
@@ -404,6 +436,89 @@ pub(super) fn build_world_instances(
     }
     if let Some(rt) = state.match_state.sim_runtime.as_ref() {
         instances::assign_tether_redraws(&rt.simulation, &mut planned_objects);
+    }
+    // VERA's translucent fog lifts the A buffer's near-black concealment, so
+    // live enemy objects the local viewer cannot see leave the draw plan fully
+    // (body, shadow, attached anim parts and extras) instead of showing through
+    // the fog. Terrain, overlays and revealed map art stay visible.
+    if state.translucent_fog_enabled() && !state.match_state.sandbox_full_visibility {
+        let viewer_name = crate::app::input::commands::preferred_local_owner_name(state);
+        if let (Some(rt), Some(viewer_name)) = (
+            state.match_state.sim_runtime.as_ref(),
+            viewer_name.as_deref(),
+        ) {
+            let sim = &rt.simulation;
+            let rules = &rt.resources.rules;
+            let viewer = sim.interner().get(viewer_name);
+            let fog_of_war = sim.session().game_options().fog_of_war;
+            let concealed = |entity: &crate::sim::game_entity::GameEntity| {
+                let owner = sim.interner().resolve(entity.owner());
+                instances::translucent_fog_conceals(
+                    Some(viewer_name),
+                    sim.fog(),
+                    sim.house_alliances(),
+                    &entity.position,
+                    owner,
+                    false,
+                    viewer,
+                    fog_of_war,
+                )
+            };
+            // Particles owned by an object follow it out of the fog.
+            let particle_owners: std::collections::BTreeMap<u64, Option<u64>> = sim
+                .particle_systems()
+                .display_particles()
+                .map(|(system, particle)| {
+                    (
+                        particle.stable_id(),
+                        system.and_then(|system| system.owner_entity()),
+                    )
+                })
+                .collect();
+            planned_objects.retain(|parent| {
+                let id = parent.parent.id;
+                if let Some(entity) = sim.entities().get(id) {
+                    return !concealed(entity);
+                }
+                if let Some(owner) = particle_owners.get(&id) {
+                    return owner.is_none_or(|owner_id| {
+                        sim.entities().get(owner_id).is_none_or(|e| !concealed(e))
+                    });
+                }
+                let Some(anim) = sim.anim(id) else {
+                    return true;
+                };
+                // Building-attached AnimClass parts (idle components, damage
+                // fire) follow their owner object out of the fog, whether the
+                // attachment is the Anim object pointer or a Building slot.
+                if let Some(owner_id) = anim
+                    .owner_entity()
+                    .or_else(|| anim.building_slot().map(|(owner, _)| owner))
+                {
+                    return sim
+                        .entities()
+                        .get(owner_id)
+                        .is_none_or(|entity| !concealed(entity));
+                }
+                // Standalone effect (explosion, fire, smoke): hidden over an
+                // unseen cell unless rules declare it as a superweapon effect.
+                let name = sim.interner().resolve(anim.type_id());
+                if instances::is_superweapon_effect_anim(name, &rules.general) {
+                    return true;
+                }
+                let Some(coord) = sim.anim_absolute_coord(id) else {
+                    return true;
+                };
+                let cell = instances::lepton_cell(coord.x, coord.y);
+                !instances::translucent_fog_conceals_cell(
+                    viewer,
+                    Some(sim.fog()),
+                    cell.0,
+                    cell.1,
+                    fog_of_war,
+                )
+            });
+        }
     }
     // Native +99 is set before a Building's body opportunity, independently
     // of successful pixels. Empty body frames still have a retained parent.
@@ -736,7 +851,7 @@ pub(super) fn build_ui_instances(state: &AppState, wall_ms: u32) -> UiInstances 
         None => Vec::new(),
     };
 
-    let placement = build_placement_preview(state);
+    let placement_preview = build_placement_preview(state);
 
     let input = &state.match_state.input;
     let camera = [input.camera_x.round() as i32, input.camera_y.round() as i32];
@@ -873,7 +988,9 @@ pub(super) fn build_ui_instances(state: &AppState, wall_ms: u32) -> UiInstances 
     UiInstances {
         software_cursor,
         drag,
-        placement,
+        placement: placement_preview.cells,
+        #[cfg(feature = "phobos")]
+        placement_ghost: placement_preview.ghost,
         target_line,
         tactical_line_calls,
         factory_rally_first,
@@ -884,17 +1001,14 @@ pub(super) fn build_ui_instances(state: &AppState, wall_ms: u32) -> UiInstances 
 
 /// `BeaconManagerClass` Draw `0x00430AC0`, called by TacticalClass::Draw at
 /// `0x006D46B6` just before BandBox.
-fn build_beacon_instances(
-    state: &AppState,
-) -> [Vec<SpriteInstance>; crate::app::match_runtime::beacons::BEACON_HOUSES] {
-    let mut rows: [Vec<SpriteInstance>; crate::app::match_runtime::beacons::BEACON_HOUSES] =
-        Default::default();
+fn build_beacon_instances(state: &AppState) -> Vec<Vec<SpriteInstance>> {
     let (Some(art), Some(runtime)) = (
         state.match_state.match_presentation.beacon_art.as_ref(),
         state.match_state.sim_runtime.as_ref(),
     ) else {
-        return rows;
+        return Vec::new();
     };
+    let mut rows = vec![Vec::new(); art.house_count()];
     let frame = runtime.simulation.session().binary_frame();
     for beacon in crate::app::match_runtime::beacons::draws(state) {
         if let (Some(row), Some(instance)) = (
@@ -907,25 +1021,122 @@ fn build_beacon_instances(
     rows
 }
 
+/// The PLACE cells and, in Phobos builds, the preview artwork drawn after them.
+struct PlacementPreviewInstances {
+    cells: Vec<SpriteInstance>,
+    #[cfg(feature = "phobos")]
+    ghost: Vec<SpriteInstance>,
+}
+
 /// Active PLACE cells. Tactical6D5030 suppresses the building ghost outside
 /// the map editor; Cell47EC90 supplies frame0 or slope+2. Keep one ordered
 /// stream rather than regrouping overlapping cells by admitted color.
-fn build_placement_preview(state: &AppState) -> Vec<SpriteInstance> {
-    let (Some(shape), Some(preview)) = (
-        state
-            .match_state
-            .match_presentation
-            .selection_overlay
-            .as_ref()
-            .and_then(|overlay| overlay.placement_shape()),
-        &state.match_state.input.building_placement_preview,
-    ) else {
-        return Vec::new();
+fn build_placement_preview(state: &AppState) -> PlacementPreviewInstances {
+    let mut out = PlacementPreviewInstances {
+        cells: Vec::new(),
+        #[cfg(feature = "phobos")]
+        ghost: Vec::new(),
     };
+    let Some(preview) = &state.match_state.input.building_placement_preview else {
+        return out;
+    };
+    let shape = state
+        .match_state
+        .match_presentation
+        .selection_overlay
+        .as_ref()
+        .and_then(|overlay| overlay.placement_shape());
     // Residual: native6D53CB suppresses auto-fill when the wall is blocked;
     // the production list still includes those cells. The ordinary2x2 path
     // has no filler cells and shares one current-cell presentation transport.
-    shape.build_building_preview(preview)
+    // Phobos `0x47EFAE` selects the grid translucency from the rules global
+    // plus the client switch, independently of the per-type preview gate.
+    #[cfg(feature = "phobos")]
+    let alpha = state.rules().map_or(1.0, |rules| {
+        rules
+            .placement_preview_globals()
+            .effective_grid_translucency(
+                state.match_state.match_presentation.show_placement_preview,
+            )
+            .opacity()
+    });
+    #[cfg(not(feature = "phobos"))]
+    let alpha = 1.0;
+    if let Some(shape) = shape {
+        out.cells = shape.build_building_preview(preview, alpha);
+    }
+    #[cfg(feature = "phobos")]
+    {
+        out.ghost = build_placement_ghost(state, preview);
+    }
+    out
+}
+
+/// Phobos `TacticalClass_DrawPlacement_PlacementPreview 0x6D528A`: the
+/// per-type preview image at the current placement cell. The rules global,
+/// the client switch and the type's own `PlacementPreview=` must all admit it.
+#[cfg(feature = "phobos")]
+fn build_placement_ghost(
+    state: &AppState,
+    preview: &crate::sim::production::BuildingPlacementPreview,
+) -> Vec<SpriteInstance> {
+    let Some(rules) = state.rules() else {
+        return Vec::new();
+    };
+    let globals = rules.placement_preview_globals();
+    if !globals.enabled || !state.match_state.match_presentation.show_placement_preview {
+        return Vec::new();
+    }
+    let Some(type_id) = state.armed_building_type() else {
+        return Vec::new();
+    };
+    let Some(object) = rules.object(type_id) else {
+        return Vec::new();
+    };
+    if !object.placement_preview() {
+        return Vec::new();
+    }
+    let Some(point) = crate::app::presentation::placement_preview::preview_screen_point(
+        preview,
+        object.placement_preview_offset(),
+    ) else {
+        return Vec::new();
+    };
+    let Some(assets) = state.process_assets.manager() else {
+        return Vec::new();
+    };
+    let local_owner = crate::app::input::commands::preferred_local_owner_name(state);
+    let remap_house = local_owner
+        .as_deref()
+        .and_then(|owner| {
+            state
+                .match_state
+                .match_presentation
+                .house_color_map
+                .get(owner)
+        })
+        .copied();
+    let translucency = object
+        .placement_preview_translucency()
+        .unwrap_or(globals.translucency);
+    let presentation = &state.match_state.match_presentation;
+    let mut art = presentation.placement_preview_art.borrow_mut();
+    art.build_instance(
+        &state.renderer.gpu.device,
+        &state.renderer.gpu.queue,
+        &state.renderer.batch_renderer,
+        assets,
+        rules,
+        type_id,
+        object,
+        &presentation.theater_name,
+        &presentation.theater_ext,
+        remap_house,
+        point,
+        translucency.opacity(),
+    )
+    .into_iter()
+    .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,25 +1243,37 @@ pub(super) fn build_sidebar_instances(state: &mut AppState) -> SidebarInstances 
         .as_ref()
         .map(|csf| csf.text("TXT_HOLD"))
         .unwrap_or_else(|| std::borrow::Cow::Borrowed("On Hold"));
+    // SuperClass::NameReadiness6CC2B0: native drain state labels share the
+    // same status-strip/text owner as ordinary Ready and Hold.
+    let charging_text = state
+        .process_assets
+        .csf
+        .as_ref()
+        .map(|csf| csf.text("TXT_CHARGING"))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("Charging"));
+    let active_text = state
+        .process_assets
+        .csf
+        .as_ref()
+        .map(|csf| csf.text("TXT_FIRESTORM_ON"))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("Firestorm On"));
+    let status_labels = crate::app::presentation::sidebar_build::CameoStatusLabels {
+        ready: ready_text.as_ref(),
+        hold: hold_text.as_ref(),
+        charging: charging_text.as_ref(),
+        active: active_text.as_ref(),
+    };
     let ready_tint = {
         let theme = crate::app::presentation::sidebar_render::current_sidebar_theme(state);
         crate::render::sidebar_text::side_highlight_color(theme)
     };
     let cameo_layers = view
         .as_ref()
-        .map(|v| build_sidebar_cameo_instances(state, v, ready_text.as_ref(), hold_text.as_ref()))
+        .map(|v| build_sidebar_cameo_instances(state, v, status_labels))
         .unwrap_or_default();
     let mut text_layers = view
         .as_ref()
-        .map(|v| {
-            build_sidebar_text_instances(
-                state,
-                v,
-                ready_text.as_ref(),
-                hold_text.as_ref(),
-                ready_tint,
-            )
-        })
+        .map(|v| build_sidebar_text_instances(state, v, status_labels, ready_tint))
         .unwrap_or_default();
     // Credits counter shares the GAME.FNT sidebar-text layer: gamemd draws it
     // with the same BitFont on the sidebar surface, in the same packed side

@@ -24,7 +24,7 @@ pub(crate) struct WolStartUser {
 /// writer exists (C2 draws nothing, `0x797276` is unreferenced debug code).
 /// That is the seed of the last `Init_Random_Number_System` (`0052FC20`):
 /// the resident match's seed, else the process start seed.
-pub(super) fn resident_seed(state: &AppState) -> u32 {
+pub(crate) fn resident_seed(state: &AppState) -> u32 {
     state
         .match_state
         .sim_runtime
@@ -72,7 +72,7 @@ impl App {
             state,
             launch,
             dialog,
-            [NetworkVacancy::Open; 8],
+            [NetworkVacancy::Open; crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT],
             observer_row,
         ) {
             log::error!("Could not admit WOL join: {error:#}");
@@ -211,7 +211,12 @@ pub(crate) fn user_joined(state: &mut AppState, name: String) -> anyhow::Result<
 /// (`0x785764..0x785788`); after OnGameStart nothing more. Its node goes;
 /// the ready records clear and C9's Accept enables (`0x785C64..0x785CF5`);
 /// a guest whose operator left leaves the channel itself
-/// (`0x785CFA..0x785D1C`); the host republishes (`0x785D1F..0x785E81`).
+/// (`0x785CFA..0x785D1C`); the host clears readiness, sends the slot-name
+/// payload (`0x77DB90`) and publishes options (`0x5E32D0(1, 1)`) before the
+/// repaint (`0x783C80`, `0x785D1F..0x785E81`). It does not advertise the
+/// channel (`0x78F000`). The WOL adapter's one options snapshot includes the
+/// complete launch roster, so it carries both native payloads without a
+/// duplicate relay update.
 pub(crate) fn user_left(state: &mut AppState, name: &str, operator: bool) -> anyhow::Result<()> {
     play_player_left(state);
     if state
@@ -232,11 +237,9 @@ pub(crate) fn user_left(state: &mut AppState, name: &str, operator: bool) -> any
     };
     service::service_event(state, service::NetworkSetupEvent::ParticipantLeft { index })?;
     clear_guest_acceptance(state)?;
-    if state.match_state.session.host() {
-        queue(state, NetworkSetupRequest::PublishOptions);
-        queue(state, NetworkSetupRequest::Advertise);
-    } else if operator {
-        queue(state, NetworkSetupRequest::Leave);
+    let host = state.match_state.session.host();
+    if let Some(protocol) = state.frontend.network_setup_protocol.as_mut() {
+        protocol.record_remote_user_left(host, operator);
     }
     Ok(())
 }
@@ -583,7 +586,7 @@ pub(super) fn clear_guest_acceptance(state: &mut AppState) -> anyhow::Result<()>
 pub(super) fn game_started(
     state: &mut AppState,
     users: Vec<WolStartUser>,
-    pings: [i32; 8],
+    pings: Vec<i32>,
 ) -> anyhow::Result<()> {
     // 0x7A7B95: once a start has matched ([0xB77E27]), OnGameStart does
     // nothing more.
@@ -700,13 +703,6 @@ pub(super) fn verify_connected(state: &mut AppState, node: usize) -> anyhow::Res
     Ok(())
 }
 
-/// A click on node `node`'s box of `0x130` (`0x00793280`).
-pub(crate) fn verify_click(state: &mut AppState, node: usize) {
-    if let Ok(verify) = verify_mut(state) {
-        verify.click(node);
-    }
-}
-
 /// `0x00794D0A..`: the negotiation's result. 0 closes `0x130`
 /// (`0x00794F30..0x00794F44`), leaves the game channel (API+0x24 at
 /// `0x007955F1`) and starts the match; 2 opens `0xD0` with
@@ -807,43 +803,52 @@ pub(crate) fn verify_mouse(state: &mut AppState, pressed: bool) {
         state.platform.window.request_redraw();
         return;
     }
-    if !pressed {
-        return;
-    }
     let layout = verify_layout(state);
-    let node = (0..verify.names.len()).find(|node| {
-        crate::ui::skirmish_shell::checkbox_icon_rect(
-            layout.boxes[*node],
-            crate::ui::shell::geom::ShellScale::RETAIL,
-        )
-        .contains(x, y)
-    });
-    if let Some(node) = node {
-        verify_click(state, node);
+    let node = verify_mut(state)
+        .ok()
+        .and_then(|verify| verify.pointer_button(&layout, x, y, pressed, Instant::now()));
+    if node.is_some() {
         App::play_launcher_options_cue(
             state,
             crate::ui::main_menu_dialogs::options::LauncherCue::Checkbox,
         );
-        state.platform.window.request_redraw();
     }
+    state.platform.window.request_redraw();
 }
 
 pub(crate) fn verify_cursor_moved(state: &mut AppState) {
     let (x, y) = state.match_state.input.cursor_px();
     let over = mismatch_ok_at(state, x, y);
-    if let Ok(verify) = verify_mut(state)
-        && verify.mismatch.is_some()
-    {
-        verify.ok.hovered = over;
+    let layout = verify_layout(state);
+    if let Ok(verify) = verify_mut(state) {
+        if verify.mismatch.is_some() {
+            verify.ok.hovered = over;
+        } else {
+            verify.pointer_moved(&layout, x, y);
+        }
         state.platform.window.request_redraw();
     }
+}
+
+pub(crate) fn verify_poll_scroll(state: &mut AppState) -> Option<Instant> {
+    let layout = verify_layout(state);
+    let (x, y) = state.match_state.input.cursor_px();
+    let verify = verify_mut(state).ok()?;
+    if verify.mismatch.is_some() {
+        return None;
+    }
+    let (changed, deadline) = verify.poll_scroll(&layout, x, y, Instant::now());
+    if changed {
+        state.platform.window.request_redraw();
+    }
+    deadline
 }
 
 /// C2/C9 0x540 Enter (notify 0x501): commands first, then a plain line.
 pub(super) fn chat(state: &mut AppState, text: Vec<u16>) {
     // 5EDD00's TrimRight("\n\r") result is what WOL sends.
     let text = wol_chat::trim_line_end(&text).to_vec();
-    if text.is_empty() {
+    if text.is_empty() || crate::app::shell_wol::translation::command(state, &text) {
         return;
     }
     let commands = wol_chat::WolChatCommands {

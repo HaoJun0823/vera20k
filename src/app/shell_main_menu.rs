@@ -89,6 +89,12 @@ impl crate::app::persistence::options::launcher::LauncherPreviewOperations for A
             .interpolation
             .set_enabled(enabled);
     }
+    fn store_mouse_wheel_zoom(&mut self, enabled: bool) {
+        self.persistence.options_profile.mouse_wheel_zoom = enabled;
+        if !enabled {
+            crate::app::input::camera::reset_view_distance(self);
+        }
+    }
     fn store_wol_test_service(&mut self, wol_test_service: bool) {
         // The next Internet visit picks its provider from it.
         self.persistence.options_profile.wol_test_service = wol_test_service;
@@ -121,8 +127,19 @@ impl crate::app::persistence::options::launcher::LauncherParentOperations
     }
 
     fn refresh_detail(&mut self) {
-        // Rust-native display invalidation for native `0x004AE450`. The live
-        // presentation reads the projection above on the requested frame.
+        // Display4AE450 resamples synchronously, before the next Logic visit
+        // can copy a Cell's light into a grapple anim. This local operation
+        // never enters Simulation's replay/sync hash.
+        if let Some(runtime) = self.state.match_state.sim_runtime.as_ref()
+            && let Some(terrain) = runtime.simulation.resolved_terrain()
+        {
+            let presentation = &mut self.state.match_state.match_presentation;
+            presentation.lighting.refresh(
+                terrain,
+                &runtime.simulation,
+                presentation.in_game_options.detail_level,
+            );
+        }
         self.state.platform.window.request_redraw();
     }
 
@@ -480,11 +497,48 @@ impl App {
         }
     }
 
+    /// Cooperative `+0xA4`'s campaign end (`0x00471420`): the side's score
+    /// art again (`0x0072D300`, `ScoreArt__Load`), the empty backdrop, then
+    /// dialog `0xBC7` with the texts its init writes. No theme changes.
+    pub(crate) fn open_campaign_end_page(
+        state: &mut AppState,
+        model: crate::ui::campaign_score_shell::CampaignEndModel,
+    ) {
+        use crate::ui::campaign_score_shell::{CAMPAIGN_END_DIALOG, CampaignScorePage};
+        state.frontend.campaign_score_art = state.process_assets.manager().and_then(|assets| {
+            crate::render::main_menu_shell_chrome::build_campaign_score_art(
+                &state.renderer.gpu,
+                &state.renderer.batch_renderer,
+                assets,
+                model.side,
+                crate::app::frontend::shell_layout::art_key_screen_width(state),
+            )
+        });
+        if state.frontend.campaign_score_art.is_none() {
+            log::warn!("Could not prepare the campaign-end score art; Continue remains available");
+        }
+        let page = CampaignScorePage::open_campaign_end(
+            model,
+            |key| Self::csf_label(state, key, ""),
+            Instant::now(),
+        );
+        state.frontend.campaign_score_page = Some(page);
+        state.frontend.shell_first_paint_slide = None;
+        state.frontend.screen = GameScreen::MissionResult {
+            title: String::new(),
+            detail: String::new(),
+        };
+        state
+            .frontend
+            .shell_controller
+            .reset_to(CAMPAIGN_END_DIALOG, false);
+    }
+
     fn score_layout(state: &AppState) -> crate::ui::score_shell::ScoreLayout {
         crate::app::frontend::shell_layout::score_layout(state)
     }
 
-    /// Continue, the page's only button, through the shared controller.
+    /// Continue and VERA result paging through the shared controller.
     fn score_input(
         state: &mut AppState,
     ) -> (
@@ -493,7 +547,23 @@ impl App {
         (i32, i32),
     ) {
         let layout = Self::score_layout(state);
-        let feed = Self::menu_page_button_feed(&layout.page);
+        let mut feed = Self::menu_page_button_feed(&layout.page);
+        if state
+            .frontend
+            .score_page
+            .as_ref()
+            .is_some_and(|page| page.page_count() > 1)
+        {
+            for id in [
+                crate::ui::score_shell::PREVIOUS_PAGE,
+                crate::ui::score_shell::NEXT_PAGE,
+            ] {
+                feed.push(crate::ui::shell::layout::LaidOutControl {
+                    id,
+                    rect: layout.paging_button(id).expect("paging button"),
+                });
+            }
+        }
         state
             .frontend
             .shell_controller
@@ -526,13 +596,20 @@ impl App {
     /// its slide; the match then ends and the shell resumes.
     pub(super) fn handle_score_shell_mouse_up(state: &mut AppState) {
         let (_, feed, (x, y)) = Self::score_input(state);
-        if state.frontend.shell_controller.on_pointer_up(x, y, &feed)
-            == Some(crate::ui::score_shell::CONTINUE_BUTTON)
-        {
-            Self::leave_shell_dialog(
+        match state.frontend.shell_controller.on_pointer_up(x, y, &feed) {
+            Some(crate::ui::score_shell::CONTINUE_BUTTON) => Self::leave_shell_dialog(
                 state,
                 crate::app::frontend::shell_transition::ShellExitThen::ScoreContinue,
-            );
+            ),
+            Some(
+                id @ (crate::ui::score_shell::PREVIOUS_PAGE | crate::ui::score_shell::NEXT_PAGE),
+            ) => {
+                if let Some(page) = state.frontend.score_page.as_mut() {
+                    page.change_page(id == crate::ui::score_shell::NEXT_PAGE, Instant::now());
+                }
+                state.platform.window.request_redraw();
+            }
+            _ => {}
         }
     }
 
@@ -555,12 +632,12 @@ impl App {
         Vec<crate::ui::shell::layout::LaidOutControl>,
         (i32, i32),
     ) {
-        use crate::ui::campaign_score_shell::{CAMPAIGN_SCORE_CONTROLS, CONTINUE_BUTTON};
-
+        let dialog = Self::campaign_score_dialog(state);
         let layout = Self::campaign_score_layout(state);
         // Hover tracks the value statics' help strings. Keep the separate
         // button-only press feed so those static ids are never pressed.
-        let hover_feed = CAMPAIGN_SCORE_CONTROLS
+        let hover_feed = dialog
+            .controls()
             .iter()
             .filter(|control| control.action.is_some() || control.tooltip_key.is_some())
             .filter_map(|control| {
@@ -573,13 +650,13 @@ impl App {
             })
             .collect();
         let press_feed = vec![crate::ui::shell::layout::LaidOutControl {
-            id: CONTINUE_BUTTON,
+            id: dialog.continue_button(),
             rect: layout.continue_button,
         }];
-        state.frontend.shell_controller.ensure_active(
-            crate::ui::campaign_score_shell::CAMPAIGN_SCORE_DIALOG,
-            false,
-        );
+        state
+            .frontend
+            .shell_controller
+            .ensure_active(dialog.id(), false);
         let cursor = state.match_state.input.cursor_px();
         (layout, hover_feed, press_feed, cursor)
     }
@@ -599,28 +676,47 @@ impl App {
             .shell_controller
             .on_pointer_down(x, y, &press_feed);
         if state.frontend.shell_controller.pressed()
-            == Some(crate::ui::campaign_score_shell::CONTINUE_BUTTON)
+            == Some(Self::campaign_score_dialog(state).continue_button())
         {
             Self::play_main_menu_button_sound(state);
         }
     }
 
+    fn campaign_score_dialog(
+        state: &AppState,
+    ) -> crate::ui::campaign_score_shell::CampaignScoreDialog {
+        state
+            .frontend
+            .campaign_score_page
+            .as_ref()
+            .map_or_else(Default::default, |page| page.dialog)
+    }
+
     /// Native `0x103` Continue (`0x423`, result 1) tears the dialog down with
-    /// its slide before GameExit::Victory advances the campaign.
+    /// its slide before GameExit::Victory advances the campaign; `0xBC7`'s
+    /// (`0x6D1`, result 1) before Main_Game returns to the shell.
     pub(super) fn handle_campaign_score_mouse_up(state: &mut AppState) {
+        use crate::app::frontend::shell_transition::ShellExitThen;
+        use crate::ui::campaign_score_shell::CampaignScoreDialog;
+        let dialog = Self::campaign_score_dialog(state);
         let (_, _, press_feed, (x, y)) = Self::campaign_score_input(state);
         if state
             .frontend
             .shell_controller
             .on_pointer_up(x, y, &press_feed)
-            == Some(crate::ui::campaign_score_shell::CONTINUE_BUTTON)
+            != Some(dialog.continue_button())
         {
-            // `0x423` ends the global VocHandle before the result returns.
-            Self::stop_campaign_score_anim_sound(state);
-            Self::leave_shell_dialog(
-                state,
-                crate::app::frontend::shell_transition::ShellExitThen::CampaignScoreContinue,
-            );
+            return;
+        }
+        match dialog {
+            CampaignScoreDialog::Victory => {
+                // `0x423` ends the global VocHandle before the result returns.
+                Self::stop_campaign_score_anim_sound(state);
+                Self::leave_shell_dialog(state, ShellExitThen::CampaignScoreContinue);
+            }
+            CampaignScoreDialog::CampaignEnd => {
+                Self::leave_shell_dialog(state, ShellExitThen::CampaignEndContinue)
+            }
         }
     }
 
@@ -664,6 +760,9 @@ impl App {
         if let Some(runtime) = state.match_state.sim_runtime.as_mut() {
             runtime.simulation.retire_scenario_started();
         }
+        // The accepted match owns the socket until either exit path returns
+        // it to the visit's shared transport owner, including score Continue.
+        crate::app::lan_service::return_transport(state);
         crate::app::match_runtime::sim_tick::flush_replay_log(state);
         Self::capture_returned_multiplayer_scenario(state);
         state.match_state.startup.clear();
@@ -1124,10 +1223,7 @@ Details: {details}"
         state.frontend.shell_status_line.repaint();
     }
 
-    pub(super) fn handle_main_menu_shell_mouse_up(
-        state: &mut AppState,
-        _event_loop: &ActiveEventLoop,
-    ) {
+    pub(super) fn handle_main_menu_shell_mouse_up(state: &mut AppState) {
         let layout = crate::app::frontend::shell_layout::main_menu_layout(state);
         let feed = Self::main_menu_shell_button_feed(&layout);
         let (x, y) = state.match_state.input.cursor_px();
@@ -1169,11 +1265,7 @@ Details: {details}"
         use crate::ui::shell::layout::LaidOutControl;
         use crate::ui::shell::modal;
         let kind = state.frontend.shell_message_box.as_ref()?.labels.kind();
-        let layout = modal::message_box_layout(
-            kind,
-            state.renderer.gpu.config.width as i32,
-            state.renderer.gpu.config.height as i32,
-        );
+        let layout = crate::app::frontend::shell_layout::shell_message_box_layout(state, kind);
         let mut feed = vec![LaidOutControl {
             id: modal::control::OK,
             rect: layout.ok,
@@ -1235,7 +1327,7 @@ Details: {details}"
         };
         match message_box.purpose {
             // OK -> quit (result 0). Dismiss the confirmation first, persist
-            // settings to RA2MD.INI, then run the graceful cascade (music fade
+            // settings to VERA.INI, then run the graceful cascade (music fade
             // → trailing-voice wait → hard stop → exit) via render_frame instead
             // of exiting immediately. The screen fade-to-black is sub-step 4b-ii-b.
             ShellMessageBoxPurpose::ExitGame
@@ -1478,6 +1570,9 @@ Details: {details}"
             ShellExitThen::WolBack => Self::return_from_wol(state),
             ShellExitThen::ScoreContinue => Self::leave_mission_result_screen(state),
             ShellExitThen::CampaignScoreContinue => Self::leave_mission_result_screen(state),
+            ShellExitThen::CampaignEndContinue => {
+                crate::app::cooperative_round::campaign_end_continue(state)
+            }
             ShellExitThen::WolAction(mode) => Self::commit_wol_action(state, mode),
             ShellExitThen::WolLoginClose(result) => Self::commit_wol_login_close(state, result),
             ShellExitThen::WolLobbyBack => crate::app::shell_wol::lobby::commit_back(state),

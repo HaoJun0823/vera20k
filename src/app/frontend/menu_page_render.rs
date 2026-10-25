@@ -247,7 +247,8 @@ pub(crate) fn active_page_title_text(
         ShellSlideKind::MainMenu
         | ShellSlideKind::Skirmish
         | ShellSlideKind::Score
-        | ShellSlideKind::CampaignScore => {
+        | ShellSlideKind::CampaignScore
+        | ShellSlideKind::CampaignEnd => {
             return String::new();
         }
     };

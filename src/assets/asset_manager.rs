@@ -27,6 +27,10 @@ mod ares_sidebar_tests;
 #[path = "asset_manager_audio_bags_tests.rs"]
 mod audio_bags_tests;
 
+#[cfg(test)]
+#[path = "asset_manager_install_tests.rs"]
+mod install_inspection_tests;
+
 /// A MIX archive with a human-readable name for logging and diagnostics.
 #[derive(Clone)]
 struct NamedArchive {
@@ -50,18 +54,66 @@ impl LooseAsset {
     /// only requested payloads; root indexing must not copy entire MIX archives.
     /// This is Rust storage policy, not native raw-file cache equivalence.
     fn snapshot(&self) -> &Option<Arc<[u8]>> {
-        self.bytes.get_or_init(|| match std::fs::read(&self.path) {
-            Ok(bytes) => Some(bytes.into()),
-            Err(err) => {
-                log::debug!("Skipping loose {}: {}", self.path.display(), err);
-                None
-            }
+        self.bytes.get_or_init(|| {
+            self.read_snapshot(None)
+                .expect("unbounded asset snapshots cannot exceed a read limit")
         })
+    }
+
+    fn read_snapshot(&self, maximum: Option<usize>) -> Result<Option<Arc<[u8]>>, AssetError> {
+        let read = || -> Result<Vec<u8>, AssetError> {
+            let Some(maximum) = maximum else {
+                return Ok(std::fs::read(&self.path)?);
+            };
+            use std::io::Read;
+            let file = std::fs::File::open(&self.path)?;
+            check_asset_read_limit(file.metadata()?.len(), maximum)?;
+            let mut bytes = Vec::new();
+            // A file can grow after metadata inspection. Never allocate or
+            // read the rest of that growth before refusing the source.
+            file.take((maximum as u64).saturating_add(1))
+                .read_to_end(&mut bytes)?;
+            check_asset_read_limit(bytes.len() as u64, maximum)?;
+            Ok(bytes)
+        };
+        match read() {
+            Ok(bytes) => Ok(Some(bytes.into())),
+            Err(AssetError::Io(err)) => {
+                log::debug!("Skipping loose {}: {}", self.path.display(), err);
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn bytes(&self) -> Option<&[u8]> {
         self.snapshot().as_deref()
     }
+
+    fn bytes_bounded(&self, maximum: usize) -> Result<Option<&[u8]>, AssetError> {
+        if self.bytes.get().is_none() {
+            let snapshot = self.read_snapshot(Some(maximum))?;
+            // A budget refusal never poisons the shared first-read snapshot.
+            // Concurrent readers still use whichever snapshot was set first.
+            let _ = self.bytes.set(snapshot);
+        }
+        let bytes = self
+            .bytes
+            .get()
+            .expect("snapshot was initialized")
+            .as_deref();
+        if let Some(bytes) = bytes {
+            check_asset_read_limit(bytes.len() as u64, maximum)?;
+        }
+        Ok(bytes)
+    }
+}
+
+fn check_asset_read_limit(actual: u64, maximum: usize) -> Result<(), AssetError> {
+    if actual > maximum as u64 {
+        return Err(AssetError::ReadLimitExceeded { maximum, actual });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -347,6 +399,21 @@ const KNOWN_NESTED_MIX_NAMES: &[&str] = &[
 /// Active Yuri's Revenge requires both masters, in this order.
 pub const MASTER_ARCHIVES: [&str; 2] = ["ra2md.mix", "ra2.mix"];
 
+/// One startup archive that an install inspection could not mount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveIssue {
+    pub name: String,
+    pub required: bool,
+    pub detail: String,
+}
+
+enum StartupArchivePolicy<'a> {
+    OptionalWarnings,
+    Inspect(&'a mut Vec<ArchiveIssue>),
+    #[cfg(test)]
+    FailFast,
+}
+
 /// Whether `dir` is a Yuri's Revenge install folder: it holds both master
 /// archives, however the install spells their case. A folder chooser checks
 /// this before any archive is opened.
@@ -415,42 +482,58 @@ impl AssetManager {
 
     /// Load the core runtime archive stack for one native media-selection mode.
     pub fn new(ra2_dir: &Path, media_mode: MediaArchiveMode) -> Result<Self, AssetError> {
-        let mut manager = Self {
-            archives: Vec::new(),
-            archive_catalog: Vec::new(),
-            lookup_index: HashMap::new(),
-            mix_file_cache: Mutex::new(HashMap::new()),
-            loose_files: Self::open_loose_root(ra2_dir)?,
-            audio_pairs: Vec::new(),
-            ini_roots: Default::default(),
-            active_theater: None,
-            active_theater_archives: Vec::new(),
-            #[cfg(feature = "ares")]
-            active_sidebar_archives: Vec::new(),
-            ra2_dir: ra2_dir.to_path_buf(),
-        };
+        Self::open_startup_archives(ra2_dir, media_mode, StartupArchivePolicy::OptionalWarnings)
+    }
+
+    /// Inspect the ordinary startup stack while retaining readable archives for
+    /// resource diagnostics. Missing optional probes stay silent. The partial
+    /// manager is diagnostic only: ordinary startup still stops on required
+    /// failures, while unreadable optional archives are logged and skipped.
+    pub fn inspect_install(
+        ra2_dir: &Path,
+        media_mode: MediaArchiveMode,
+    ) -> Result<(Self, Vec<ArchiveIssue>), AssetError> {
+        let mut issues = Vec::new();
+        let manager = Self::open_startup_archives(
+            ra2_dir,
+            media_mode,
+            StartupArchivePolicy::Inspect(&mut issues),
+        )?;
+        Ok((manager, issues))
+    }
+
+    fn open_startup_archives(
+        ra2_dir: &Path,
+        media_mode: MediaArchiveMode,
+        mut policy: StartupArchivePolicy<'_>,
+    ) -> Result<Self, AssetError> {
+        let mut manager = Self::from_ini_probe_root(ra2_dir)?;
 
         // WinMain registers the YR language archive before the RA2 fallback.
-        manager.mount_named_archive("langmd.mix", false)?;
-        manager.mount_named_archive("language.mix", false)?;
+        manager.mount_startup_archive("langmd.mix", false, &mut policy)?;
+        manager.mount_startup_archive("language.mix", false, &mut policy)?;
 
         // Init_Base_Mix_Files probes all expansion slots in descending order.
         for index in (0..=99).rev() {
-            manager.mount_named_archive(&format!("expandmd{index:02}.mix"), false)?;
+            manager.mount_startup_archive(
+                &format!("expandmd{index:02}.mix"),
+                false,
+                &mut policy,
+            )?;
         }
 
         for name in MASTER_ARCHIVES {
-            manager.mount_named_archive(name, true)?;
+            manager.mount_startup_archive(name, true, &mut policy)?;
         }
 
         for name in ["cachemd.mix", "cache.mix", "localmd.mix", "local.mix"] {
-            manager.mount_named_archive(name, true)?;
+            manager.mount_startup_archive(name, true, &mut policy)?;
         }
 
         // AudioSystem__Init uses exactly one archive: the MD archive when
         // present, otherwise the base archive.
-        if !manager.mount_named_archive("audiomd.mix", false)? {
-            manager.mount_named_archive("audio.mix", false)?;
+        if !manager.mount_startup_archive("audiomd.mix", false, &mut policy)? {
+            manager.mount_startup_archive("audio.mix", false, &mut policy)?;
         }
 
         manager.select_audio_pair();
@@ -458,25 +541,25 @@ impl AssetManager {
         // Init_Mix_Files constructs only these named core archives. Optional
         // constructors are allowed to fail exactly where retail does not gate
         // startup on their result.
-        manager.mount_named_archive("conqmd.mix", true)?;
-        manager.mount_named_archive("genermd.mix", false)?;
-        manager.mount_named_archive("generic.mix", false)?;
-        manager.mount_named_archive("isogenmd.mix", false)?;
-        manager.mount_named_archive("isogen.mix", false)?;
-        manager.mount_named_archive("conquer.mix", true)?;
-        manager.mount_named_archive("cameomd.mix", true)?;
-        manager.mount_named_archive("cameo.mix", true)?;
+        manager.mount_startup_archive("conqmd.mix", true, &mut policy)?;
+        manager.mount_startup_archive("genermd.mix", false, &mut policy)?;
+        manager.mount_startup_archive("generic.mix", false, &mut policy)?;
+        manager.mount_startup_archive("isogenmd.mix", false, &mut policy)?;
+        manager.mount_startup_archive("isogen.mix", false, &mut policy)?;
+        manager.mount_startup_archive("conquer.mix", true, &mut policy)?;
+        manager.mount_startup_archive("cameomd.mix", true, &mut policy)?;
+        manager.mount_startup_archive("cameo.mix", true, &mut policy)?;
 
-        manager.mount_native_map_media(media_mode)?;
-        manager.mount_named_archive("multimd.mix", true)?;
-        manager.mount_named_archive("thememd.mix", false)?;
+        manager.mount_startup_map_media(media_mode, &mut policy)?;
+        manager.mount_startup_archive("multimd.mix", true, &mut policy)?;
+        manager.mount_startup_archive("thememd.mix", false, &mut policy)?;
         // VERA presentation extension: native YR mounts THEME.MIX only when
         // THEMEMD.MIX is absent. Keep MD first, then make original RA2 music
         // available to the shared Theme catalog without displacing YR files.
         // Preserve this user-requested parity exception during future parity
         // work unless the user explicitly asks to change the music catalog.
-        manager.mount_named_archive("theme.mix", false)?;
-        manager.mount_native_movie_media(media_mode)?;
+        manager.mount_startup_archive("theme.mix", false, &mut policy)?;
+        manager.mount_startup_movie_media(media_mode, &mut policy)?;
 
         // Loose YRO archives are deliberately absent here. Retail registers
         // each one during SessionClass scenario enumeration, immediately
@@ -684,22 +767,53 @@ impl AssetManager {
 
     /// Resolve one file through the normal first-match archive lookup.
     pub fn resolve_ref(&self, name: &str) -> Option<AssetResolutionRef<'_>> {
-        if let Some((loose, bytes)) = self.loose_bytes(name) {
-            return Some(AssetResolutionRef {
-                bytes,
-                source_archive: loose.source_name.as_str(),
-                entry_id: mix_hash(name),
-            });
+        self.resolve_ref_with_limit(name, None)
+            .expect("unbounded asset resolution cannot exceed a read limit")
+    }
+
+    /// Resolve the same VFS winner while bounding a first loose-file read.
+    /// An oversized winner is an error, never permission to select a smaller
+    /// archive fallback. Existing snapshots and mapped MIX entries stay borrowed.
+    pub fn resolve_ref_bounded(
+        &self,
+        name: &str,
+        maximum: usize,
+    ) -> Result<Option<AssetResolutionRef<'_>>, AssetError> {
+        self.resolve_ref_with_limit(name, Some(maximum))
+    }
+
+    fn resolve_ref_with_limit(
+        &self,
+        name: &str,
+        maximum: Option<usize>,
+    ) -> Result<Option<AssetResolutionRef<'_>>, AssetError> {
+        if let Some(loose) = self.loose_asset(name) {
+            let bytes = match maximum {
+                Some(maximum) => loose.bytes_bounded(maximum)?,
+                None => loose.bytes(),
+            };
+            if let Some(bytes) = bytes {
+                return Ok(Some(AssetResolutionRef {
+                    bytes,
+                    source_archive: loose.source_name.as_str(),
+                    entry_id: mix_hash(name),
+                }));
+            }
         }
-        let (named, entry_id) = self.lookup_asset_entry(name)?;
-        named
-            .archive
-            .get_by_id(entry_id)
-            .map(|bytes| AssetResolutionRef {
-                bytes,
-                source_archive: named.name.as_str(),
-                entry_id,
-            })
+        let Some((named, entry_id)) = self.lookup_asset_entry(name) else {
+            return Ok(None);
+        };
+        let Some(bytes) = named.archive.get_by_id(entry_id) else {
+            return Ok(None);
+        };
+        if let Some(maximum) = maximum {
+            check_asset_read_limit(bytes.len() as u64, maximum)?;
+        }
+        Ok(Some(AssetResolutionRef {
+            bytes,
+            source_archive: named.name.as_str(),
+            entry_id,
+        }))
     }
 
     /// Load through retail's `LoadFileFromMIX @ 0x005B40B0` boundary.
@@ -1123,36 +1237,60 @@ impl AssetManager {
         self.archives.push(named);
     }
 
+    #[cfg(test)]
     fn mount_native_map_media(&mut self, mode: MediaArchiveMode) -> Result<(), AssetError> {
+        self.mount_startup_map_media(mode, &mut StartupArchivePolicy::FailFast)
+    }
+
+    fn mount_startup_map_media(
+        &mut self,
+        mode: MediaArchiveMode,
+        policy: &mut StartupArchivePolicy<'_>,
+    ) -> Result<(), AssetError> {
         match mode {
             MediaArchiveMode::Numbered { media_index } => {
                 let number = media_index.wrapping_add(1);
-                self.mount_named_archive(&format!("mapsmd{number:02}.mix"), true)?;
-                self.mount_named_archive(&format!("maps{number:02}.mix"), false)?;
+                self.mount_startup_archive(&format!("mapsmd{number:02}.mix"), true, policy)?;
+                self.mount_startup_archive(&format!("maps{number:02}.mix"), false, policy)?;
             }
             MediaArchiveMode::CdWildcard => {
-                let md = self.mount_wildcard_archives(None, "mapsmd")?;
-                if !md.matched {
-                    // This is the native fallback branch, even though active
-                    // YR still fails the later required-MD global check.
-                    self.mount_wildcard_archives(None, "maps")?;
-                }
-                if !md.first_registered {
-                    return Err(AssetError::AssetNotFound {
-                        name: "MAPSMD*.MIX".to_string(),
-                    });
+                let result = (|| {
+                    let md = self.mount_wildcard_archives(None, "mapsmd")?;
+                    if !md.matched {
+                        // This is the native fallback branch, even though active
+                        // YR still fails the later required-MD global check.
+                        self.mount_wildcard_archives(None, "maps")?;
+                    }
+                    if !md.first_registered {
+                        return Err(AssetError::AssetNotFound {
+                            name: "MAPSMD*.MIX".to_string(),
+                        });
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    Self::record_archive_issue("MAPSMD*.MIX", true, error, policy)?;
                 }
             }
         }
         Ok(())
     }
 
+    #[cfg(test)]
     fn mount_native_movie_media(&mut self, mode: MediaArchiveMode) -> Result<(), AssetError> {
+        self.mount_startup_movie_media(mode, &mut StartupArchivePolicy::FailFast)
+    }
+
+    fn mount_startup_movie_media(
+        &mut self,
+        mode: MediaArchiveMode,
+        policy: &mut StartupArchivePolicy<'_>,
+    ) -> Result<(), AssetError> {
         match mode {
             MediaArchiveMode::Numbered { media_index } => {
                 let number = media_index.wrapping_add(1);
-                if !self.mount_named_archive(&format!("movmd{number:02}.mix"), false)? {
-                    self.mount_named_archive(&format!("movies{number:02}.mix"), true)?;
+                if !self.mount_startup_archive(&format!("movmd{number:02}.mix"), false, policy)? {
+                    self.mount_startup_archive(&format!("movies{number:02}.mix"), true, policy)?;
                 }
             }
             MediaArchiveMode::CdWildcard => {
@@ -1174,18 +1312,25 @@ impl AssetManager {
                     }
                 }
 
-                let mut mounted = self.mount_wildcard_archives(directory, family)?;
-                if !mounted.matched {
-                    mounted = self.mount_wildcard_archives(None, "movies")?;
-                }
-                if !mounted.first_registered {
-                    return Err(AssetError::AssetNotFound {
-                        name: if family == "movmd" {
-                            "MOVMD*.MIX".to_string()
-                        } else {
-                            "MOVIES*.MIX".to_string()
-                        },
-                    });
+                let name = if family == "movmd" {
+                    "MOVMD*.MIX"
+                } else {
+                    "MOVIES*.MIX"
+                };
+                let result = (|| {
+                    let mut mounted = self.mount_wildcard_archives(directory, family)?;
+                    if !mounted.matched {
+                        mounted = self.mount_wildcard_archives(None, "movies")?;
+                    }
+                    if !mounted.first_registered {
+                        return Err(AssetError::AssetNotFound {
+                            name: name.to_string(),
+                        });
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    Self::record_archive_issue(name, true, error, policy)?;
                 }
             }
         }
@@ -1258,6 +1403,46 @@ impl AssetManager {
 
     fn raw_relative_file_available(&self, relative: &str) -> bool {
         retail_enumerated_file(&self.ra2_dir.join(relative))
+    }
+
+    fn record_archive_issue(
+        name: &str,
+        required: bool,
+        error: AssetError,
+        policy: &mut StartupArchivePolicy<'_>,
+    ) -> Result<(), AssetError> {
+        match policy {
+            StartupArchivePolicy::Inspect(issues) => {
+                issues.push(ArchiveIssue {
+                    name: name.to_owned(),
+                    required,
+                    detail: error.to_string(),
+                });
+                Ok(())
+            }
+            StartupArchivePolicy::OptionalWarnings if !required => {
+                // Install warnings must remain optional when the game starts.
+                // This changes no required archive or standalone media gate.
+                log::warn!("Skipping unreadable optional archive {name}: {error}");
+                Ok(())
+            }
+            _ => Err(error),
+        }
+    }
+
+    fn mount_startup_archive(
+        &mut self,
+        name: &str,
+        required: bool,
+        policy: &mut StartupArchivePolicy<'_>,
+    ) -> Result<bool, AssetError> {
+        match self.mount_named_archive(name, required) {
+            Ok(mounted) => Ok(mounted),
+            Err(error) => {
+                Self::record_archive_issue(name, required, error, policy)?;
+                Ok(false)
+            }
+        }
     }
 
     fn mount_named_archive(&mut self, name: &str, required: bool) -> Result<bool, AssetError> {
@@ -1790,6 +1975,85 @@ mod tests {
         assert!(
             !manager.contains("taunts\\tauam01.wav"),
             "the startup loose catalog stays top-level"
+        );
+    }
+
+    #[test]
+    fn bounded_loose_resolution_refuses_sparse_winner_without_snapshot_or_mix_fallback() {
+        let dir = TestDirectory::new("bounded-sparse-loose");
+        let path = dir.path().join("child.ini");
+        let sparse = std::fs::File::create(&path).unwrap();
+        sparse.set_len(64 * 1024 * 1024).unwrap();
+        drop(sparse);
+        let mut manager = empty_manager(dir.path());
+        manager.archives.push(NamedArchive {
+            name: "fallback.mix".into(),
+            archive: make_new_format_mix("child.ini", b"small"),
+        });
+        manager.rebuild_indexes();
+        assert!(matches!(
+            manager.resolve_ref_bounded("CHILD.INI", 32 * 1024 * 1024),
+            Err(AssetError::ReadLimitExceeded {
+                actual: 67_108_864,
+                ..
+            })
+        ));
+        assert!(
+            manager
+                .loose_asset("child.ini")
+                .unwrap()
+                .bytes
+                .get()
+                .is_none()
+        );
+
+        std::fs::write(&path, b"loose").unwrap();
+        let selected = manager
+            .resolve_ref_bounded("child.ini", 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.bytes, b"loose");
+        assert!(selected.source_archive.starts_with("loose:"));
+        std::fs::write(&path, b"replacement").unwrap();
+        assert!(matches!(
+            manager.resolve_ref_bounded("child.ini", 4),
+            Err(AssetError::ReadLimitExceeded { actual: 5, .. })
+        ));
+        assert_eq!(manager.resolve_ref("child.ini").unwrap().bytes, b"loose");
+    }
+
+    #[test]
+    fn bounded_resolution_keeps_unreadable_loose_fallback_and_archive_borrows() {
+        let dir = TestDirectory::new("bounded-mix-winner");
+        let path = dir.path().join("child.ini");
+        std::fs::write(&path, b"loose").unwrap();
+        let mut manager = empty_manager(dir.path());
+        for (name, bytes) in [("first.mix", &b"archived"[..]), ("second.mix", &b"ok"[..])] {
+            manager.archives.push(NamedArchive {
+                name: name.into(),
+                archive: make_new_format_mix("child.ini", bytes),
+            });
+        }
+        manager.rebuild_indexes();
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(
+            manager.resolve_ref_bounded("child.ini", 2),
+            Err(AssetError::ReadLimitExceeded { actual: 8, .. })
+        ));
+        let bounded = manager
+            .resolve_ref_bounded("child.ini", 8)
+            .unwrap()
+            .unwrap();
+        let ordinary = manager.resolve_ref("child.ini").unwrap();
+        assert_eq!(bounded.bytes, b"archived");
+        assert!(std::ptr::eq(bounded.bytes, ordinary.bytes));
+        assert_eq!(bounded.source_archive, "first.mix");
+        assert_eq!(bounded.entry_id, ordinary.entry_id);
+        assert!(
+            manager
+                .resolve_ref_bounded("missing.ini", 0)
+                .unwrap()
+                .is_none()
         );
     }
 

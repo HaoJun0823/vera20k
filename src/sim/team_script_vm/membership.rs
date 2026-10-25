@@ -15,10 +15,6 @@
 //! gate) replay in `recruit_oracle_tests`.
 //!
 //! RESIDUALS (none has a retail producer or reader that changes a skirmish):
-//! - An object's team group (`+0x214`), which `Add_Member` writes
-//!   (`0x006F1870`) and `Recruit` filters and penalises by, is not
-//!   represented: every object reads -1, the constructor value, as every
-//!   retail TeamType and TaskForce leaves `Group=` at -1.
 //! - `Remove_Member` sets `+0x6B8` on every object it is called for; only a
 //!   `Weeder=` unit's Mission_Guard reads it (`0x00740A60`), and VERA's
 //!   Weeder takes its own guard arm.
@@ -51,10 +47,6 @@ use super::{TeamMember, TeamRules, member_type_identity, script_action_at};
 /// `Recruit`'s penalty on a candidate outside the team's group, added to
 /// the squared distance (`0x006EABFA`).
 const OTHER_GROUP_PENALTY: i32 = 0x3200;
-
-/// The group every object reads: `+0x214`'s constructor value (module
-/// residual).
-const OBJECT_GROUP: i32 = -1;
 
 /// Whether a TaskForce entry of `amount` with `recruited` members counted
 /// against it wants more (signed), as `TeamClass::AI`'s recruit loop
@@ -108,6 +100,67 @@ pub(super) fn recruit_pick(
 }
 
 impl Simulation {
+    /// gamemd.exe, `TeamTypeClass::Can_Recruit @ 0x006F1E20`, called by
+    /// HouseClass::Has_Factories_For_TeamType509610 before a Team exists.
+    /// Reads the existing membership, life, mission, radio and recruitment
+    /// owners. Unlike TeamClass::Can_Add, this has no TaskForce-slot test,
+    /// placement-scope, airport-contact or unloading exceptions, or entry,
+    /// bunker, drain and Magnetron gates. It performs no writes or RNG draws.
+    pub(crate) fn team_type_can_recruit(
+        &self,
+        team_type_id: crate::sim::intern::InternedId,
+        entity_id: u64,
+        owner: crate::sim::intern::InternedId,
+        rules: &RuleSet,
+    ) -> bool {
+        let vm = &self.team_script_vm;
+        let Some(team_type) = vm.team_type_definition(team_type_id) else {
+            return false;
+        };
+        let current_type = vm.member_team_type(entity_id);
+        if current_type.is_some_and(|current| current.id == team_type_id) {
+            return false;
+        }
+        let Some(entity) = self.substrate.entities.get(entity_id) else {
+            return false;
+        };
+        if entity.health.current() <= 0
+            || !entity.lifecycle.object_alive()
+            || entity.lifecycle.in_limbo()
+            || !entity.radio_contacts.is_empty()
+            || entity.owner() != owner
+            || !crate::sim::mission::control::mission_recruitable(rules, entity.mission.effective())
+        {
+            return false;
+        }
+        let autocreate = vm
+            .team_type_ini
+            .get(&team_type_id)
+            .is_some_and(|metadata| metadata.autocreate);
+        if (!entity.base_defense_response.recruitable_a() && !autocreate)
+            || (!entity.base_defense_response.recruitable_b() && autocreate)
+            || current_type.is_some_and(|current| current.priority >= team_type.priority)
+        {
+            return false;
+        }
+        if entity.category() == EntityCategory::Aircraft
+            && self
+                .object_type(entity.type_ref(), rules)
+                .is_some_and(|object| {
+                    crate::sim::combat::combat_weapon::weapon_for_index(
+                        object,
+                        entity.veterancy.rank(),
+                        0,
+                    )
+                    .is_some()
+                })
+            && entity.ammo().is_some_and(|ammo| ammo.current() == 0)
+        {
+            return false;
+        }
+        true
+    }
+
     /// `TeamClass::Can_Add @ 0x006EA610`: whether `entity_id` may join team
     /// `team_id`, and the TaskForce entry it counts against, the first of
     /// its type. A `constrained` add (mind control's `0x006EA4F0`) skips the
@@ -257,6 +310,12 @@ impl Simulation {
                 initiated,
             },
         );
+        // gamemd.exe Add_Member6EA500 stores Get_Group6F1870 at6EA57C,
+        // after linking and before Tag inheritance. Remove_Member retains it.
+        let group = vm.team_group(vm.teams.get(&team_id).unwrap());
+        if let Some(entity) = self.substrate.entities.get_mut(entity_id) {
+            entity.assign_object_group(group);
+        }
         //6EA58C..6EA5B0: B3=0 inherits a nonNULL Team Tag on every member;
         //B3=1 requires signed Type+5E0 Passengers>0. The Tag owner preserves
         //the Object attachment when Team+70 is NULL (6EA582..6EA587).
@@ -452,15 +511,18 @@ impl Simulation {
             .team_type_id
             .and_then(|id| vm.team_type_ini.get(&id))
             .map_or(-1, |metadata| metadata.waypoint);
-        let origin = if waypoint >= 0 {
-            self.session
-                .waypoint_cell(waypoint)
-                .map_or([0, 0], |(x, y)| {
-                    self.team_target_xy(super::TeamTarget::Cell { x, y })
-                })
-        } else {
-            team.zone.map_or([0, 0], |zone| self.team_target_xy(zone))
-        };
+        // Recruit6EAAAD first queries the retained zone. A nonempty packed
+        // waypoint then overrides it with literal XY/Z0 (6EAAFE..6EAB20),
+        // without Map lookup or terrain height; Empty keeps the zone.
+        let mut origin = team.zone.map_or([0, 0], |zone| self.team_target_xy(zone));
+        if let Some(cell) = (waypoint >= 0)
+            .then(|| self.session.waypoint_cell(waypoint))
+            .flatten()
+            && cell != (0, 0)
+        {
+            let center = crate::sim::cell_kernel::cell_center(cell.into(), 0);
+            origin = [center.x, center.y];
+        }
         let entries = vm.task_force_entries(team);
         let Some(&entry) = entries.get(slot) else {
             return false;
@@ -486,7 +548,9 @@ impl Simulation {
             .map(|(id, entity)| RecruitCandidate {
                 id,
                 xy: position_world_xy(&entity.position),
-                group: OBJECT_GROUP,
+                // gamemd.exe Recruit6EAA90 reads Techno+214, including
+                // authored campaign groups (6EAC7A for Infantry).
+                group: entity.object_group(),
                 // The unit search's own house and type test.
                 matches: class != EntityCategory::Unit
                     || (entity.owner() == owner

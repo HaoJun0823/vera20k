@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::rules::ini_parser::IniFile;
-use crate::sim::production::{ProductionCategory, construct_active_factory_fixture};
+use crate::sim::production::ProductionCategory;
 use serde_json::{Value, json};
 
 #[cfg(feature = "ares")]
@@ -232,8 +232,34 @@ fn sim_for(row: &Value, rules: &RuleSet) -> (Simulation, InternedId) {
                 .factories_mut()
                 .test_enqueue_kernel(holder, kind, object, 0, 0)
         );
-        construct_active_factory_fixture(&mut sim, rules, holder, kind, object)
-            .expect("the factory's object constructs");
+        // The native oracle supplies +58 independently of the House slot,
+        // including Infantry/Aircraft/Building held in the Ship factory.
+        // Construct that declared object without claiming StartProduction
+        // admits these synthetic cross-family holders.
+        let object_type = rules
+            .object(sim.interner.resolve(object))
+            .expect("the row's unique declared object type");
+        let owner_name = sim.interner.resolve(holder).to_owned();
+        let entity = sim
+            .construct_resolved_object_limbo_at_height(
+                object_type,
+                &owner_name,
+                0,
+                0,
+                0,
+                0,
+                rules,
+                crate::sim::world::FrameEffects::default(),
+            )
+            .expect("the supplied factory object constructs");
+        assert_eq!(
+            sim.production.factories_mut().link_active_entity(
+                crate::sim::production::factory::FactoryHolder::House(holder, kind),
+                entity,
+                0, // This supplied factory prior starts with zero debt.
+            ),
+            Some(entity)
+        );
         for queued in names(&factory["queued"]) {
             let queued = sim.interner.get(queued).unwrap();
             sim.production
@@ -423,6 +449,51 @@ fn can_build_matches_the_original() {
         };
         assert_eq!(answer, int(&row["answer"]), "{}", row["name"]);
     }
+}
+
+/// ReadOwners4750D0 clears DA0 before comma tokenization; CanBuild4F79E4
+/// rejects that zero mask. The limit-only and prerequisite-override arms
+/// precede this country gate in the original function.
+#[test]
+#[cfg(not(feature = "ares"))]
+fn comma_only_required_houses_refuses_ordinary_can_build_but_keeps_shortcuts() {
+    let make = |required: &str| {
+        RuleSet::from_ini(&IniFile::from_str(&format!(
+            "[Countries]\n0=C0\n1=C1\n[BuildingTypes]\n0=Q\n1=BYPASS\n\
+             [Q]\nStrength=100\nTechLevel=1\nOwner=C1\nPrerequisiteOverride=BYPASS\n\
+             RequiredHouses={required}\n[BYPASS]\nStrength=100\n"
+        )))
+        .unwrap()
+    };
+    let rules = make(",,,");
+    let product = rules.object("Q").unwrap();
+    let (mut sim, owner) = sim_for(&json!({}), &rules);
+    assert_eq!(
+        can_build(&sim, &rules, owner, product, false, true),
+        CanBuild::No
+    );
+    let (ai, ai_owner) = sim_for(&json!({"house":{"human":false}}), &rules);
+    assert_eq!(
+        can_build(&ai, &rules, ai_owner, product, false, true),
+        CanBuild::No
+    );
+    assert_eq!(
+        can_build(&sim, &rules, owner, product, true, true),
+        CanBuild::Yes
+    );
+
+    crate::sim::production::tests::spawn_structure(&mut sim, &rules, 1, "H0", "BYPASS", 10, 10);
+    assert_eq!(
+        can_build(&sim, &rules, owner, product, false, true),
+        CanBuild::Yes
+    );
+    let blank = make("");
+    let (sim, owner) = sim_for(&json!({}), &blank);
+    assert_eq!(
+        can_build(&sim, &blank, owner, blank.object("Q").unwrap(), false, true),
+        CanBuild::Yes,
+        "an empty ReadString keeps the unrestricted constructor default"
+    );
 }
 
 #[test]

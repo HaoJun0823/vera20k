@@ -326,7 +326,7 @@ pub fn available_start_choices(
     let claimed: Vec<_> = claimed.into_iter().collect();
     std::iter::once(SkirmishComboItem::Start(LaunchStartPosition::Auto))
         .chain(
-            (0..capacity.min(SKIRMISH_PLAYER_SLOT_COUNT))
+            (0..capacity.min(crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT))
                 .map(|index| LaunchStartPosition::Position(index as u8))
                 .filter(|start| selected == Some(*start) || !claimed.contains(start))
                 .map(SkirmishComboItem::Start),

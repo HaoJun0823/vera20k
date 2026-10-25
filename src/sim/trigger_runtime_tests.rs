@@ -3298,6 +3298,129 @@ fn typed_trigger_reference_force_uses_operand_instead_of_metadata() {
 }
 
 #[test]
+fn destroy_attached_refuses_stationary_immune_hut_without_blocking_other_receivers() {
+    let (mut sim, rules, overlays, houses) =
+        event_ingress_fixture_with_rules("[CABHUT]\nImmune=yes\n");
+    let owner = sim.resolve(houses[0]).to_owned();
+    let hut = sim
+        .spawn_object("CABHUT", &owner, 12, 12, 0, &rules)
+        .unwrap();
+    let unit = spawn_event_ingress_unit(&mut sim, &rules, houses[0], (16, 16));
+    install_event_ingress_map(
+        &mut sim,
+        &rules,
+        "[Triggers]\nDESTROY=Country0,<none>,Destroy,0,1,1,1,0\n\
+         [Events]\nDESTROY=1,41,0,0\n\
+         [Actions]\nDESTROY=2,32,0,0,0,0,0,0,A,28,0,7,0,0,0,0,A\n\
+         [Tags]\nDESTROYTAG=2,Destroy,DESTROY\n",
+    );
+    for id in [hut, unit] {
+        sim.attach_object_trigger_tag(id, Some("DESTROYTAG"));
+    }
+    event_ingress_damage(
+        &mut sim,
+        &rules,
+        &overlays,
+        unit,
+        crate::sim::combat::RAD_NO_ATTACKER,
+        1,
+        FrameEffects::default(),
+    );
+    assert!(
+        sim.global_variables()[7],
+        "the following action still executes"
+    );
+    assert_eq!(sim.entities().get(hut).unwrap().health.current(), 200);
+    assert!(sim.entities().get(hut).unwrap().is_object_alive());
+    assert!(!sim.entities().get(unit).unwrap().is_object_alive());
+    assert_eq!(sim.houses[&houses[0]].stats().units_lost(), 1);
+}
+
+#[test]
+fn forced_trigger_cycle_returns_to_normal_map_polling() {
+    let map = trigger_fixture_map(
+        "[Triggers]\nTRGA=Neutral,<none>,A,0,1,1,1,0\nTRGB=Neutral,<none>,B,0,1,1,1,0\n\
+         [Events]\nTRGA=1,13,0,0\nTRGB=1,13,0,0\n\
+         [Actions]\nTRGA=2,22,2,TRGB,0,0,0,0,A,28,0,7,0,0,0,0,A\n\
+         TRGB=2,22,2,TRGA,0,0,0,0,A,28,0,8,0,0,0,0,A\n\
+         [Tags]\nAT=2,A,TRGA\nBT=2,B,TRGB\n",
+    );
+    let mut sim = Simulation::new();
+    install_map_triggers(&mut sim, &map);
+    sim.classify_map_triggers(crate::rules::ruleset::RuleSet::empty_for_test());
+    ordinary_master_frame(&mut sim, None, None, true);
+    assert!(sim.global_variables()[7]);
+    assert!(sim.global_variables()[8]);
+    assert!(sim.trigger_runtime.action_trace.len() < 256);
+    sim.trigger_runtime.action_trace.clear();
+    ordinary_master_frame(&mut sim, None, None, true);
+    assert!(sim.trigger_runtime.action_trace.len() < 256);
+}
+
+fn force_chain_map(levels: usize, branch: bool) -> crate::map::map_file::MapFile {
+    let mut triggers = String::from("[Triggers]\n");
+    let mut actions = String::from("[Actions]\n");
+    let mut tags = String::from("[Tags]\n");
+    for level in 0..levels {
+        triggers.push_str(&format!(
+            "TR{level:02}=Neutral,<none>,TR{level:02},0,1,1,1,0\n"
+        ));
+        tags.push_str(&format!("G{level:02}=2,TR{level:02},TR{level:02}\n"));
+        if level + 1 == levels {
+            actions.push_str(&format!("TR{level:02}=1,28,0,9,0,0,0,0,A\n"));
+        } else {
+            let force = format!("22,2,TR{:02},0,0,0,0,A", level + 1);
+            actions.push_str(&if branch {
+                format!("TR{level:02}=2,{force},{force}\n")
+            } else {
+                format!("TR{level:02}=1,{force}\n")
+            });
+        }
+    }
+    trigger_fixture_map(&format!("{triggers}{actions}{tags}"))
+}
+
+fn spring_test_trigger(sim: &mut Simulation, name: &str) {
+    let live = live_trigger_of_type(sim, trigger_type_index(sim, name));
+    sim.spring_live_trigger(
+        live,
+        TagEventInput::default(),
+        &mut Vec::new(),
+        crate::rules::ruleset::RuleSet::empty_for_test(),
+        None,
+        FrameEffects::default(),
+    );
+}
+
+#[test]
+fn forced_trigger_deep_chain_is_refused_without_poisoning_later_dispatch() {
+    let mut sim = Simulation::new();
+    install_map_triggers(&mut sim, &force_chain_map(33, false));
+    for tag in 0..sim.trigger_runtime.definitions.tag_types.len() {
+        sim.construct_trigger_tag(tag);
+    }
+    spring_test_trigger(&mut sim, "TR00");
+    assert!(!sim.global_variables()[9]);
+    spring_test_trigger(&mut sim, "TR32");
+    assert!(sim.global_variables()[9]);
+}
+
+#[test]
+fn forced_trigger_branching_work_is_bounded_and_next_dispatch_gets_its_budget() {
+    let mut sim = Simulation::new();
+    install_map_triggers(&mut sim, &force_chain_map(14, true));
+    for tag in 0..sim.trigger_runtime.definitions.tag_types.len() {
+        sim.construct_trigger_tag(tag);
+    }
+    spring_test_trigger(&mut sim, "TR00");
+    assert!(sim.global_variables()[9]);
+    assert!(sim.trigger_runtime.action_trace.len() <= 4096);
+    sim.trigger_runtime.action_trace.clear();
+    spring_test_trigger(&mut sim, "TR13");
+    assert_eq!(sim.trigger_runtime.action_trace.len(), 1);
+}
+
+#[test]
 fn typed_trigger_reference_enable_and_disable_use_operand_instead_of_metadata() {
     // Enable53 starts from disabled Triggers, Disable54 from enabled ones;
     // only the operand Trigger flips, never the "2" metadata decoy.

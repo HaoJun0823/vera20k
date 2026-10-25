@@ -739,11 +739,7 @@ fn mission_guard(sim: &mut Simulation, id: u64, rules: &RuleSet, ctx: ObjectAiCt
         .unwrap_or(MissionType::Guard);
     // vt+0x2AC, `BuildingClass::Is_Armed 0x00458DB0`.
     if combat_weapon::is_armed(entity, obj) {
-        let empty_garrison = obj.can_be_occupied
-            && entity
-                .passenger_role
-                .cargo()
-                .is_none_or(|cargo| cargo.is_empty());
+        let empty_garrison = obj.can_be_occupied && entity.passenger_role.occupants().is_empty();
         let has_target = entity.attack_target.target().is_some();
         if let Some(entity) = sim.substrate.entities.get_mut(id) {
             // `0x00449701`.
@@ -1120,7 +1116,7 @@ fn advance_turret_anim(substrate: &mut ObjectSubstrate, id: u64) {
 
 /// BuildingClass::Update's Gattling block once the Techno AI has returned
 /// with the building alive (`0x0043FE5B`; a dead one returns from the Update),
-/// for a Gattling type only:
+/// with the generic zero-Ammo refill between its two Gattling arms:
 /// - a value above 0 advances `+0x148` (`0x0043FE69..0x0043FE88`);
 /// - unless the building's mission, else its queued one, is Attack
 ///   (`0x0043FEBE..0x0043FECB`): the idle decay
@@ -1143,7 +1139,6 @@ pub(super) fn gattling_idle(
         .entities
         .get(id)
         .and_then(|entity| interner.object_type(entity.type_ref(), rules))
-        .filter(|obj| obj.is_gattling)
     else {
         return;
     };
@@ -1151,8 +1146,20 @@ pub(super) fn gattling_idle(
     let Some(entity) = substrate.entities.get_mut(id) else {
         return;
     };
-    if entity.gattling.value() > 0 {
+    if obj.is_gattling && entity.gattling.value() > 0 {
         entity.turret_anim_frame.advance();
+    }
+    // Building Update43FE8E..43FEB8: after TechnoAI/mission and the first
+    // Gattling step, exactly zero refills from the live type. No timer or
+    // rearm mutation; Hospital/Armory retain their depleted count.
+    if !obj.hospital
+        && !obj.armory()
+        && let Some(ammo) = entity.ammo_mut()
+    {
+        ammo.refill_empty_from_type(obj.ammo);
+    }
+    if !obj.is_gattling {
+        return;
     }
     if entity.mission.effective() == MissionId::from_known(MissionType::Attack) {
         return;
@@ -1578,15 +1585,6 @@ impl Simulation {
     /// (vt+0x3AC), including its overlay line-of-fire checks. Other objects
     /// admit every target here.
     ///
-    /// RESIDUALS:
-    /// - The restore after a cell target expires
-    ///   (`combat::combat_aoe::expire_cell_target_references`) holds only the
-    ///   entity store and puts the suspended target back without this
-    ///   admission. Trigger: a building whose retaliation suspended its
-    ///   mission and whose later cell target expires. Effect: a Selling,
-    ///   unpowered or out-of-range building keeps that target until its next
-    ///   Mission_Attack or range drop. Frequency: rare. Later owner: that
-    ///   restore moving onto `Simulation`.
     pub(crate) fn building_admits_target(
         &self,
         id: u64,

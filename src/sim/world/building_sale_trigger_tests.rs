@@ -206,6 +206,9 @@ fn campaign_scene(map_name: &str, remove_home: bool) -> HeadlessScenario {
     sim.session.publish_started();
     sim.hash_state_every(std::num::NonZeroU64::new(10_000).unwrap());
     HeadlessScenario {
+        source: crate::map::source::LoadedMapSource::LegacyFallback {
+            label: map_name.to_owned(),
+        },
         runtime: crate::sim::runtime::SimRuntime {
             simulation: sim,
             resources: crate::sim::runtime::SimResources {

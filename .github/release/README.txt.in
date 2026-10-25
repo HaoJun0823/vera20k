@@ -36,8 +36,8 @@ REQUIREMENTS
     scroll down, click Open Anyway, enter your password and confirm. The
     button stays for about an hour after the block; if it is gone, open
     VERA20k again. Each new version asks once.
-  Linux: needs ALSA (libasound2) and a Vulkan driver. The AppImage mounts
-    itself with FUSE (fusermount, from the fuse3 or fuse package), which most
+  Linux: needs ALSA (libasound2), a Vulkan driver, and libxkbcommon-x11-0
+    for X11 keyboard support. The AppImage mounts itself with FUSE (fusermount, from the fuse3 or fuse package), which most
     desktops have; without it, start it with --appimage-extract-and-run.
 
 This is early software: expect missing features and differences from the

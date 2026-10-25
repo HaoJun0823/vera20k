@@ -427,8 +427,21 @@ pub(crate) fn paint_wol_verify(
         return paint;
     };
     let chrome = atlas.control_chrome();
-    for (node, name) in verify.names.iter().enumerate() {
-        let rect = layout.boxes[node];
+    if let Some(geometry) = verify.list_geometry(layout) {
+        super::list::paint_list(
+            &mut paint.controls,
+            atlas,
+            geometry,
+            verify.visible_nodes(layout).start,
+            None,
+            verify.pressed_scroll_part(),
+            false,
+            SCALE,
+        );
+    }
+    for node in verify.visible_nodes(layout) {
+        let name = &verify.names[node];
+        let rect = verify.node_rect(layout, node).expect("visible verify node");
         super::controls::paint_control(
             &mut paint.controls,
             &chrome,

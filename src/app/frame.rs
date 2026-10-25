@@ -100,6 +100,70 @@ impl App {
         event_loop: &ActiveEventLoop,
         simulation_allowed: bool,
     ) -> RuntimeServiceResult {
+        let started = Instant::now();
+        let mut result = RuntimeServiceResult::default();
+        let mut attempts = 0;
+        loop {
+            let before = state.match_state.sim_runtime.as_ref().map(|runtime| {
+                (
+                    runtime.simulation.session().tick(),
+                    runtime.simulation.session().binary_frame(),
+                )
+            });
+            let pass = Self::service_match_runtime_once(state, event_loop, simulation_allowed);
+            result.main_tick_admitted |= pass.main_tick_admitted;
+            result.screen_shake_offset = pass.screen_shake_offset;
+            result.quit_requested |= pass.quit_requested;
+            attempts += 1;
+            if result.quit_requested
+                || !simulation_allowed
+                || state.frontend.screen != GameScreen::InGame
+                || state.match_state.scenario_exit.is_some()
+                || state.match_state.scenario_outcome.is_some()
+                || Self::house_outcome_wait_pending(state)
+                || crate::app::match_runtime::network_failure::pending(state)
+                || !crate::app::match_runtime::frame_pacer::LocalFramePacer::permits_catch_up(
+                    attempts,
+                    started.elapsed(),
+                )
+            {
+                break;
+            }
+            let Some(runtime) = state.match_state.sim_runtime.as_ref() else {
+                break;
+            };
+            let session = runtime.simulation.session();
+            if before == Some((session.tick(), session.binary_frame())) {
+                break;
+            }
+            let Some(live) = state
+                .match_state
+                .live_network
+                .as_ref()
+                .filter(|live| live.uses_sequenced_lockstep())
+            else {
+                break;
+            };
+            if !live.has_terminal_network_error()
+                && !crate::app::match_runtime::frame_pacer::LocalFramePacer::admits_canonical_frame(
+                    session.binary_frame(),
+                    live.committed_frontier(),
+                )
+            {
+                break;
+            }
+        }
+        result
+    }
+
+    /// One retained production transaction. Catch-up repeats this owner,
+    /// including transport, output consumers and terminal routing; it never
+    /// repeats Logic inside a suspended frame or draws intermediate worlds.
+    fn service_match_runtime_once(
+        state: &mut AppState,
+        event_loop: &ActiveEventLoop,
+        simulation_allowed: bool,
+    ) -> RuntimeServiceResult {
         let mut main_tick_admitted = false;
         // GScreen Input reads the current native frame parity but does not
         // advance it. Hidden background service still owns Input while the
@@ -113,7 +177,7 @@ impl App {
         // Wait_For_Players still enters GScreen Input at 0x006485B7 and
         // 0x00649827; repeated services read the same binary-frame parity.
         let input_is_active = in_game
-            && (!state.platform.focus_freeze_active()
+            && (!state.focus_freeze_active()
                 || Self::house_outcome_wait_pending(state)
                 || network_wait_pending);
         let input_frame = input_is_active.then(|| {
@@ -143,6 +207,20 @@ impl App {
         // current outcome Vox before it raises the victory/defeat exit global.
         // Drive that gate before deciding whether another sim frame is legal.
         let scenario_now_ms = crate::app::match_runtime::frame_pacer::wall_clock_ms();
+        if state.match_state.match_diagnostics.is_replay_playback() {
+            // Playback never services lobby/relay or routes recorded EXIT and
+            // outcomes into live teardown. Keep the final battlefield visible.
+            crate::app::match_runtime::sim_tick::pump_audio_service(state, scenario_now_ms);
+            if in_game && simulation_allowed {
+                main_tick_admitted =
+                    sim_tick::advance_in_game_runtime(state, scenario_now_ms, false);
+            }
+            return RuntimeServiceResult {
+                main_tick_admitted,
+                screen_shake_offset,
+                ..Default::default()
+            };
+        }
         crate::app::lan_service::poll(state, scenario_now_ms);
         if crate::app::match_runtime::network_failure::pending(state) {
             // ExecuteDoList64CD0C blocks inside ShellMessageBox5D3490. Its
@@ -289,7 +367,7 @@ impl App {
         if matches!(state.frontend.screen, GameScreen::InGame)
             && (network_frame_pending
                 || (simulation_allowed
-                    && !state.platform.focus_freeze_active()
+                    && !state.focus_freeze_active()
                     && state.match_state.scenario_exit.is_none()
                     && state.match_state.scenario_outcome.is_none()))
         {
@@ -350,7 +428,7 @@ impl App {
     /// tactical capture never reaches the hidden service loop.
     pub(super) fn match_runs_while_hidden(state: &AppState) -> bool {
         state.frontend.screen == GameScreen::InGame
-            && (Self::house_outcome_wait_pending(state) || !state.platform.focus_freeze_active())
+            && (Self::house_outcome_wait_pending(state) || !state.focus_freeze_active())
     }
 
     /// The one owner of the window's own cursor after the startup splash, set
@@ -486,7 +564,7 @@ impl App {
         // Native polls timed pause before Logic, then Manage55DDA5 afterwards.
         // Retain that admission: Action110 can enter a new hold during Logic.
         // Exact-step diagnostics already advanced their admitted frame above.
-        let message_ms = if state.platform.focus_freeze_active() {
+        let message_ms = if state.focus_freeze_active() {
             None
         } else {
             crate::app::input::messages::update(
@@ -928,6 +1006,43 @@ impl App {
             &mut encoder,
             &output.texture,
         );
+        if state.frontend.screen == GameScreen::InGame {
+            let status = state
+                .match_state
+                .match_diagnostics
+                .playback_status()
+                .or_else(|| {
+                    let live = state.match_state.live_network.as_ref()?;
+                    let frame = state
+                        .match_state
+                        .sim_runtime
+                        .as_ref()?
+                        .simulation
+                        .session()
+                        .binary_frame();
+                    match live.recovery_status(
+                        crate::app::match_runtime::frame_pacer::wall_clock_ms() as u32,
+                        frame,
+                    )? {
+                        crate::net::live_commands::NetworkRecoveryStatus::Reconnecting => Some(
+                            "Reconnecting - waiting for connection; match remains active"
+                                .to_owned(),
+                        ),
+                        crate::net::live_commands::NetworkRecoveryStatus::CatchingUp { frames } => {
+                            Some(format!("Catching up - {frames} frames behind"))
+                        }
+                    }
+                });
+            if let Some(status) = status {
+                state.renderer.fps_overlay.encode_status(
+                    &state.renderer.gpu,
+                    &state.renderer.batch_renderer,
+                    &mut encoder,
+                    &output.texture,
+                    &status,
+                );
+            }
+        }
         if state.frontend.screen == GameScreen::InGame
             && let Some(offset_px) = runtime_pass.screen_shake_offset
         {
@@ -970,7 +1085,11 @@ impl App {
             shell_capture_current_frame |=
                 session.should_capture_after_render(state, presented_shell)?;
         }
-        let capture_current_frame = shell_capture_current_frame || tactical_capture_current_frame;
+        let replay_capture_current_frame = game_render_output.is_some()
+            && state.match_state.match_diagnostics.playback_capture_ready();
+        let capture_current_frame = shell_capture_current_frame
+            || tactical_capture_current_frame
+            || replay_capture_current_frame;
         let pending_capture = if capture_current_frame {
             Some(crate::render::frame_readback::PendingBgra8Readback::encode(
                 &state.renderer.gpu.device,
@@ -1001,7 +1120,9 @@ impl App {
                 screenshot_central_rect,
             )?;
         let capture_timeout = if capture_current_frame {
-            Some(if shell_capture_current_frame {
+            Some(if replay_capture_current_frame {
+                crate::render::screenshot::READBACK_TIMEOUT
+            } else if shell_capture_current_frame {
                 shell_capture
                     .as_deref()
                     .expect("shell capture session exists when readback is requested")
@@ -1099,7 +1220,23 @@ impl App {
                 capture_timeout.expect("capture timeout exists with pending readback"),
             )?;
             let surface_format = state.renderer.gpu.config.format;
-            let capture_terminal = if shell_capture_current_frame {
+            let capture_terminal = if replay_capture_current_frame {
+                let runtime = state
+                    .match_state
+                    .sim_runtime
+                    .as_ref()
+                    .expect("rendered replay runtime");
+                state
+                    .match_state
+                    .match_diagnostics
+                    .complete_playback_capture(
+                        runtime,
+                        state.renderer.gpu.config.width,
+                        state.renderer.gpu.config.height,
+                        &pixels,
+                    )?;
+                true
+            } else if shell_capture_current_frame {
                 let session = shell_capture
                     .as_deref_mut()
                     .expect("shell capture session exists when readback completes");
@@ -1134,7 +1271,12 @@ impl App {
             }
         }
 
-        crate::app::loading::pump::after_loading_frame_presented(state);
+        crate::app::loading::pump::after_loading_frame_presented(
+            state,
+            shell_capture
+                .as_deref()
+                .and_then(|capture| capture.loading_observer()),
+        )?;
         #[cfg(feature = "telemetry-dashboard")]
         crate::app::telemetry_capture::publish_if_due(state);
 

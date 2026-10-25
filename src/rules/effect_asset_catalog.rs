@@ -312,6 +312,22 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
     for name in &rules.general.metallic_debris {
         insert(name);
     }
+    // AreaDamage48A34D constructs the retained BarrelExplode; Voxel749F30
+    // constructs its ExpireAnim74A1AF and BounceAnim74A87F. Bind these
+    // producers explicitly rather than depending on another warhead's list.
+    if let Some(name) = rules.general.barrel_explode.as_deref() {
+        insert(name);
+    }
+    for kind in rules.voxel_anim_types_iter() {
+        for name in kind.expire_anim.iter().chain(&kind.bounce_anim) {
+            insert(name);
+        }
+    }
+    // BuildingDestructionEffects441AF3 uses find-only on literal FIRE3.
+    // An orphan ART section must not create a registered Type.
+    if rules.anim_type_names.contains("FIRE3") {
+        insert("FIRE3");
+    }
     // A chunk landing in water below the deck: `Wake=` and the first
     // `SplashList=` entry (`AnimClass::AI 0x00423D46..0x00423DDD`).
     insert(&rules.general.wake.name);
@@ -325,6 +341,13 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
     // `[General] Parachute=`: the canopy `ObjectClass::Paradrop` attaches to a
     // dropped object (`sim::movement::parachute_descent`).
     if let Some(name) = rules.general.parachute_shp.as_deref() {
+        insert(name);
+    }
+    // NPSE ObjectClass::Paradrop C2F939..C2F94D substitutes Rules+400
+    // for non-infantry. It needs the same physical bounds as Parachute.
+    if crate::rules::NPATCH_ENABLED
+        && let Some(name) = rules.general.vehicle_parachute.as_deref()
+    {
         insert(name);
     }
     // Techno70F1D0 attaches [General] Behind= to an obscured object. Its
@@ -362,6 +385,13 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
     // at once.
     insert(&rules.general.dominator_first_anim);
     insert(&rules.general.dominator_second_anim);
+    // TechnoClass::Install_Drain_Link70FD70 constructs Rules+31C's
+    // DrainAnimationType at70FDF5..70FE14 and attaches it to the drainer.
+    // Bind its physical frames before Fire_At6FDF8C can create the AnimClass;
+    // the same scheduler closure supplies the renderer's animation atlas.
+    if let Some(name) = rules.combat_damage.drain_animation_type.as_deref() {
+        insert(name);
+    }
     // `[CombatDamage] ControlledAnimationType=` and
     // `PermaControlledAnimationType=`: the rings a captured or Dominated
     // object wears (`sim::capture_manager`).
@@ -637,6 +667,60 @@ mod tests {
         assert_eq!(catalog.raw_frame_count("FX"), Some(6));
         assert_eq!(catalog.effect_frame_count("FX"), Some(3));
         assert_eq!(catalog.raw_frame_count("BROKEN"), None);
+    }
+
+    /// The NPSE `[General] VehicleParachute=` canopy is bound through the same
+    /// anim asset root the stock `Parachute=` uses, so a mod's own canopy
+    /// carries physical frame bounds before `AnimClass::effective_bounds`
+    /// reads them.
+    #[test]
+    fn vehicle_parachute_canopy_binds_through_the_production_load() {
+        let root = TestRoot::new();
+        std::fs::write(
+            root.path().join("VEHCHUTE.SHP"),
+            shp_with_undecodable_pixels(6),
+        )
+        .expect("write canopy SHP");
+        let assets = AssetManager::from_loose_root_for_test(root.path());
+        let art = IniFile::from_str("[PARACH]\nLoopCount=-1\n[VEHCHUTE]\nLoopCount=-1\n");
+        // `[Animations]` slot 1 also feeds the fifth infantry death anim, so
+        // the canopy takes slot 0 and the stock canopy slot 1 to keep this
+        // fixture from rooting the wrong name there.
+        let processed = crate::rules::native_processing::RulesLayerStack::new(IniFile::from_str(
+            "[Animations]\n0=VEHCHUTE\n1=PARACH\n\
+             [General]\nParachute=PARACH\nVehicleParachute=vehchute\n",
+        ))
+        .process_with_fixed_art(&art)
+        .expect("production retained Rules read");
+        let mut rules =
+            RuleSet::from_processed_rules(&processed).expect("project the processed rules");
+        rules.install_art_data(ArtRegistry::from_ini(&art));
+
+        let capability = crate::rules::NPATCH_ENABLED;
+        assert_eq!(
+            rules.general.vehicle_parachute.as_deref(),
+            capability.then_some("VEHCHUTE"),
+            "only the extension reader publishes the pointer"
+        );
+        let roots = anim_class_roots(&rules);
+        assert_eq!(
+            roots.iter().any(|root| root == "VEHCHUTE"),
+            capability,
+            "the canopy's art root follows the extension pointer"
+        );
+        rules.bind_anim_class_assets(&roots, &assets, "TEM", "TEMPERATE");
+        assert_eq!(
+            rules
+                .art()
+                .anim_runtime_config("VEHCHUTE")
+                .and_then(|config| config.raw_shp_frame_count),
+            capability.then_some(6),
+            "the bound canopy carries the SHP's physical frame bounds"
+        );
+        assert_eq!(
+            rules.art().scheduler_anim_types().contains("VEHCHUTE"),
+            capability
+        );
     }
 
     /// A root whose SHP is missing stays a real null-image Anim, and a bound root's
@@ -921,6 +1005,23 @@ mod anim_class_root_tests {
 
     /// `[Powerups]` anims reach the binder; a `<none>` token and an absent
     /// row (the default `0,NONE`) contribute no root.
+    #[test]
+    fn roots_cover_overlay_and_voxel_death_producers() {
+        let rules = RuleSet::from_ini(&IniFile::from_str(
+            "[General]\nBarrelExplode=MYBLAST\n[VoxelAnims]\n0=MYCHUNK\n\
+             [MYCHUNK]\nExpireAnim=MYEXPIRE\nBounceAnim=MYBOUNCE\n\
+             [Animations]\n999=FIRE3\n",
+        ))
+        .unwrap();
+        let roots = anim_class_roots(&rules);
+        for name in ["MYBLAST", "MYEXPIRE", "MYBOUNCE", "FIRE3"] {
+            assert!(
+                roots.iter().any(|root| root == name),
+                "{name} absent: {roots:?}"
+            );
+        }
+    }
+
     #[test]
     fn roots_cover_powerup_pickup_anims() {
         let rules = RuleSet::from_ini(&IniFile::from_str(

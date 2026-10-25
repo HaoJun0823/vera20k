@@ -117,8 +117,16 @@ fn apply_cameo_transitions(
 /// transitions, never from a view consumer.
 pub(crate) fn refresh_sidebar_projection(state: &mut AppState) {
     refresh_radar_animation_source(state);
+    let theme = current_sidebar_theme(state);
+    #[cfg(feature = "phobos")]
+    let gdi_positions = state.rules().map_or(
+        theme == crate::render::sidebar_chrome::SidebarTheme::Allied,
+        |rules| rules.side_gdi_positions(current_sidebar_side(state)),
+    );
+    #[cfg(not(feature = "phobos"))]
+    let gdi_positions = theme == crate::render::sidebar_chrome::SidebarTheme::Allied;
     let mut spec =
-        crate::ui::sidebar::SidebarChromeLayoutSpec::for_theme(current_sidebar_theme(state));
+        crate::ui::sidebar::SidebarChromeLayoutSpec::for_theme_and_positions(theme, gdi_positions);
     if let Some(atlas) = current_sidebar_chrome(state) {
         spec.side2_height = atlas.side2.pixel_size[1];
         spec.side3_height = atlas.side3.pixel_size[1];
@@ -837,6 +845,7 @@ pub(crate) fn begin_main_pass<'a>(
         }),
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     })
 }
 
@@ -868,6 +877,7 @@ pub(crate) fn begin_main_load_pass<'a>(
         }),
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     })
 }
 

@@ -13,6 +13,8 @@ use crate::rules::overlay_types::OverlayTypeRegistry;
 use crate::ui::game_screen::GameScreen;
 
 pub(crate) struct FrontendState {
+    /// Immutable process flag from Parse_Command_Line52F94B (0xA8EDDC).
+    pub(crate) campaign_speed_control: bool,
     /// External offline launch: returning from the session closes the process for its client.
     pub(crate) external_launch: bool,
     pub(crate) external_launch_error: Option<String>,
@@ -108,6 +110,8 @@ pub(crate) struct FrontendState {
     /// One Westwood Online visit (`WOL_Main` `0x0077B2A0`): welcome, login,
     /// waits, boxes and the lobby entry, from Internet until WOL is left.
     pub(crate) wol: Option<crate::app::shell_wol::WolVisit>,
+    /// Retains only the departing online visit's bounded HTTP cleanup owner.
+    pub(crate) online_cleanup: crate::app::shell_wol::OnlineCleanup,
     /// The login chain's process globals (nickname, password, Remember,
     /// changed byte); they outlive every WOL visit.
     pub(crate) wol_account: crate::ui::wol_login::WolAccountGlobals,

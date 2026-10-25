@@ -109,8 +109,8 @@ pub fn can_auto_deploy_here(sim: &Simulation, unit_id: u64, rules: &RuleSet) -> 
 /// Bunker install state 5 (459301..459337): reciprocal links, deselection,
 /// state 6, then Guard5/1. Unit virtual+150 is Object deselect5F44A0, not
 /// Limbo: preserve coordinates, track, radio contacts and Logic membership.
-/// Native +214=-1 also removes control-group membership; that owner currently
-/// lives only in app input and is an explicit missing integration here.
+/// gamemd.exe UpdateBunker458E50/459315 clears the one retained Techno+214
+/// Group before deselection; input derives membership from that same field.
 pub fn install_bunker_link(sim: &mut Simulation, building_id: u64, unit_id: u64, rules: &RuleSet) {
     if !sim
         .substrate
@@ -126,8 +126,9 @@ pub fn install_bunker_link(sim: &mut Simulation, building_id: u64, unit_id: u64,
     }
     if let Some(u) = sim.substrate.entities.get_mut(unit_id) {
         u.bunker.link = BunkerLink::Installed(building_id);
-        u.selection.deselect();
+        u.assign_object_group(-1);
     }
+    sim.object_deselect(unit_id);
     if let Some(rt) = sim
         .substrate
         .entities
@@ -777,6 +778,11 @@ mod tests {
             .unwrap()
             .selection
             .set_selected_for_test(true);
+        sim.substrate
+            .entities
+            .get_mut(1)
+            .unwrap()
+            .assign_object_group(4);
         install_bunker_link(&mut sim, 2, 1, &rules);
 
         let bunker = sim.substrate.entities.get(2).unwrap();
@@ -796,6 +802,23 @@ mod tests {
         assert!(!unit.lifecycle.in_limbo());
         assert!(unit.lifecycle.cell_marked());
         assert!(!unit.selection.is_selected());
+        assert_eq!(unit.object_group(), -1);
+        let follow: Vec<_> = sim
+            .take_lifecycle_outputs_for_test()
+            .into_iter()
+            .filter(|output| {
+                matches!(
+                    output,
+                    crate::sim::world::LifecycleOutput::FollowReleased { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            follow,
+            [crate::sim::world::LifecycleOutput::FollowReleased { stable_id: 1 }],
+            "UpdateBunker clears membership before Deselect releases Follow"
+        );
+        let unit = sim.substrate.entities.get(1).unwrap();
         assert_eq!(
             unit.mission.current(),
             MissionId::from_known(MissionType::Guard)

@@ -595,7 +595,6 @@ impl ThemeRuntime {
         assets: &AssetManager,
         gates: ThemeGates,
         physical: MusicOutputState,
-        wall_ms: u64,
     ) -> ThemeAction {
         self.initialize_catalog(assets);
         let selected = names
@@ -607,7 +606,7 @@ impl ThemeRuntime {
             selected
         };
         let mut prepare = |stem: &str| prepare_track(stem, assets);
-        self.play_song(selected, gates, physical, wall_ms, &mut prepare)
+        self.play_song(selected, gates, physical, &mut prepare)
     }
 
     /// `Main__PrepareSession @ 0x0052D9A0`: `Play(From_Name("INTRO"))`.
@@ -1043,6 +1042,38 @@ fn scan_catalog_availability(entries: &mut [ThemeEntry], assets: &AssetManager) 
             .and_then(|wav| wav.native_duration_seconds())
             .unwrap_or(0);
     }
+}
+
+/// Installer diagnostics use the playlist's own catalog and availability scan,
+/// without initializing an audio device or decoding whole songs.
+pub(crate) fn missing_install_music(assets: &AssetManager) -> Vec<String> {
+    let mut missing = Vec::new();
+    for name in [THEME_INI_NAME, RA2_THEME_INI_NAME] {
+        let selected = match crate::rules::retail_sources::select_ini(assets, name) {
+            Ok(selected) => selected,
+            Err(error) => {
+                if name == THEME_INI_NAME {
+                    missing.push(format!("{name}: {error}"));
+                }
+                continue;
+            }
+        };
+        let mut entries = catalog_from_ini(&selected.ini);
+        scan_catalog_availability(&mut entries, assets);
+        for entry in entries {
+            if entry.sound.is_empty() {
+                continue;
+            }
+            let wav = format!("{}.wav", entry.sound);
+            if !entry.available {
+                let issue = format!("{wav}: music track unavailable");
+                if !missing.contains(&issue) {
+                    missing.push(issue);
+                }
+            }
+        }
+    }
+    missing
 }
 
 /// Catalog load `0x00720590`: every non-empty `[Themes]` value in source

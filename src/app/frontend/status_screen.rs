@@ -630,6 +630,7 @@ pub(crate) fn render(
         }),
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     });
     if let Some((buffer, count)) = &glow_buffer {
         batch.draw_with_buffer_passthrough(&mut pass, glow, buffer, *count);

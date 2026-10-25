@@ -596,14 +596,24 @@ impl Simulation {
     }
 
     pub fn house_is_human_player(&self, owner: InternedId) -> bool {
+        Self::is_human_player(&self.session, &self.houses, owner)
+    }
+
+    /// `HouseClass::IsHumanPlayer @ 0x0050B6F0` over the two fields it reads,
+    /// for callers that hold the object store mutably.
+    pub(crate) fn is_human_player(
+        session: &crate::sim::scenario_session::ScenarioSession,
+        houses: &crate::sim::houses::Houses,
+        owner: InternedId,
+    ) -> bool {
         // House50B6F0: nonzero session mode compares exactly to LocalPlayer;
         // mode zero uses the two native human/control flags.
-        if self.session.game_mode_nonzero() {
+        if session.game_mode_nonzero() {
             //50B716 loads A83D4C, the persisted native current-house input.
             //Presentation viewer binding cannot change this receiver's result.
-            self.session.current_house() == Some(owner)
+            session.current_house() == Some(owner)
         } else {
-            self.houses
+            houses
                 .get(&owner)
                 .is_some_and(|h| h.is_controlled_by_human(false))
         }
@@ -622,6 +632,53 @@ impl Simulation {
                 .get(&owner)
                 .is_some_and(|house| house.player_control())
         }
+    }
+
+    /// gamemd.exe TeamAssign731060/TeamClear7310D0: owner admission precedes
+    /// both stores. Selected eligible objects take the requested raw group;
+    /// other eligible objects in that group return to -1. No life/limbo gate.
+    /// Shared by the committed command and its pending input projection.
+    pub(super) fn assigned_control_group(
+        &self,
+        entity: &crate::sim::game_entity::GameEntity,
+        current: i32,
+        group: i32,
+        selected: &std::collections::HashSet<u64>,
+    ) -> i32 {
+        if !(0..10).contains(&group) || !self.house_is_control_group_eligible(entity.owner()) {
+            current
+        } else if selected.contains(&entity.stable_id()) {
+            group
+        } else if current == group {
+            -1
+        } else {
+            current
+        }
+    }
+
+    pub(super) fn assign_control_group(&mut self, group: i32, selected: &[u64]) -> bool {
+        if !(0..10).contains(&group) {
+            return false;
+        }
+        let selected = selected.iter().copied().collect();
+        let changes: Vec<_> = self
+            .substrate
+            .entities
+            .iter_sorted()
+            .filter_map(|(id, entity)| {
+                let next =
+                    self.assigned_control_group(entity, entity.object_group(), group, &selected);
+                (next != entity.object_group()).then_some((id, next))
+            })
+            .collect();
+        for (id, group) in changes {
+            self.substrate
+                .entities
+                .get_mut(id)
+                .unwrap()
+                .assign_object_group(group);
+        }
+        true
     }
 
     /// Virtual+A0: Building44F5C0 or Unit/Infantry/Aircraft Techno700C40.
@@ -1233,8 +1290,24 @@ impl Simulation {
                 }
                 self.trigger_runtime
                     .transfer_engineer_tag_to_building(engineer_id, building_id);
-                self.announce_engineer_capture(building_id, owner, rules);
-                self.change_owner_with_rules(building_id, owner, rules, registry, frame_effects);
+                //519F71 loads the entrant's live owner after the second
+                //Entered callback and Tag transfer. Action36 can change it
+                //again without restarting this admitted PerCell continuation.
+                if let Some(capture_owner) = self
+                    .substrate
+                    .entities
+                    .get(engineer_id)
+                    .map(|engineer| engineer.owner())
+                {
+                    self.announce_engineer_capture(building_id, capture_owner, rules);
+                    self.change_owner_with_rules(
+                        building_id,
+                        capture_owner,
+                        rules,
+                        registry,
+                        frame_effects,
+                    );
+                }
                 if let Some(building) = self.substrate.entities.get_mut(building_id) {
                     // Techno+0x338 (`0x00519F94`).
                     building

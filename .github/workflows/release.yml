@@ -186,6 +186,26 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev pkg-config desktop-file-utils
+      - name: Install Inno Setup 7.1.0
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Pin the official compiler instead of using the runner's older copy.
+          $installer = Join-Path $env:RUNNER_TEMP 'innosetup-7.1.0-x64.exe'
+          $compilerDir = Join-Path $env:RUNNER_TEMP 'innosetup-7.1.0'
+          Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe' -OutFile $installer
+          $expectedSha256 = '0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f'
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $expectedSha256) {
+            throw 'Inno Setup download checksum mismatch'
+          }
+          $install = Start-Process $installer -Wait -PassThru -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', '/TASKS=',
+            "/DIR=`"$compilerDir`"")
+          if ($install.ExitCode -ne 0) { throw "Inno Setup installation failed: $($install.ExitCode)" }
+          $iscc = Join-Path $compilerDir 'ISCC.exe'
+          if (-not (Test-Path $iscc -PathType Leaf)) { throw 'Inno Setup compiler was not installed' }
+          "INNO_SETUP_ISCC=$iscc" >> $env:GITHUB_ENV
       - name: Build the game
         # Shipped binaries leave out the default `dev-overlays` (the Ctrl+Shift dev chord),
         # and use the whole-program `shipping` profile (Cargo.toml).
@@ -224,11 +244,8 @@ jobs:
           NAME: ${{ steps.package.outputs.name }}
         run: |
           $ErrorActionPreference = 'Stop'
-          # Inno Setup 6 comes with the runner image (actions/runner-images).
-          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
-          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
           $dist = (Resolve-Path dist).Path
-          & $iscc "/DAppVersion=$env:VERSION" "/DBuild=$env:STAMP" `
+          & $env:INNO_SETUP_ISCC "/DAppVersion=$env:VERSION" "/DBuild=$env:STAMP" `
             "/DPackageDir=$dist\$env:NAME" "/DOutputDir=$dist" `
             "/DOutputBaseFilename=$env:NAME-setup" .github\release\windows\vera20k.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
@@ -249,6 +266,45 @@ jobs:
           $app = Join-Path $root 'VERA20K'
           $log = Join-Path $root 'setup.log'
           New-Item -ItemType Directory -Force $root | Out-Null
+          # Exercise the real picker functions and controls in both UI
+          # languages. This test setup aborts before installing anything.
+          $definition = Get-Content '.github\release\windows\vera20k.iss' -Raw -Encoding utf8
+          $messagesStart = $definition.IndexOf('[Languages]')
+          $filesStart = $definition.IndexOf('[Files]')
+          $codeStart = $definition.IndexOf('[Code]')
+          $messages = $definition.Substring($messagesStart, $filesStart - $messagesStart)
+          $code = $definition.Substring($codeStart).Replace(
+            'procedure InitializeWizard();', 'procedure ProductionInitializeWizard();')
+          $testHeader = @'
+          [Setup]
+          AppId=VERA20K-Picker-Tests
+          AppName=VERA20K picker tests
+          AppVersion=1
+          DefaultDirName={tmp}\picker-tests
+          PrivilegesRequired=lowest
+          Uninstallable=no
+          CreateAppDir=no
+          WizardStyle=modern
+          DisableWelcomePage=no
+          '@
+          $testBody = Get-Content '.github\release\windows\picker-tests.iss' -Raw -Encoding utf8
+          $testScript = Join-Path $root 'picker-tests.iss'
+          [IO.File]::WriteAllText($testScript, "$testHeader`n$messages`n$code`n$testBody",
+            [Text.UTF8Encoding]::new($false))
+          & $env:INNO_SETUP_ISCC "/O$root" '/Fpicker-tests' $testScript
+          if ($LASTEXITCODE -ne 0) { throw 'picker test setup did not compile' }
+          foreach ($language in 'english', 'chinesesimplified') {
+            $result = Join-Path $root 'picker-test-result.txt'
+            Remove-Item $result -ErrorAction SilentlyContinue
+            $p = Start-Process (Join-Path $root 'picker-tests.exe') -Wait -PassThru -ArgumentList `
+              '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LANG=$language"
+            # The test deliberately calls Abort, so its success marker is
+            # authoritative; the setup process itself exits with code 1.
+            if (-not (Test-Path $result) -or (Get-Content $result -Raw) -ne 'passed') {
+              if (Test-Path $result) { Get-Content $result }
+              throw "picker tests failed in $language"
+            }
+          }
           # Without a game folder, setup takes the one from before or finds one.
           function Install([string]$Game) {
             $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$log`"",
@@ -257,11 +313,12 @@ jobs:
             $p = Start-Process $setup -Wait -PassThru -ArgumentList $arguments
             return $p.ExitCode
           }
-          # Only the two masters the installer checks; nothing here is game data.
+          # Tiny authored MIX/CSF fixtures exercise the bundled real reader.
+          # No retail data or validation bypass is used in the installer.
           function New-Game([string]$Dir) {
             if (-not [IO.Path]::IsPathRooted($Dir)) { $Dir = Join-Path $root $Dir }
             New-Item -ItemType Directory -Force $Dir | Out-Null
-            foreach ($f in 'ra2md.mix', 'ra2.mix') { Set-Content (Join-Path $Dir $f) '' }
+            Copy-Item '.github\release\windows\test-game\*' $Dir -Exclude README.md
             return $Dir
           }
           function Read-Config { Get-Content (Join-Path $app 'config.toml') -Raw -Encoding utf8 }
@@ -284,11 +341,28 @@ jobs:
           New-Item -ItemType Directory -Force $empty | Out-Null
           if ((Install $empty) -eq 0) { throw 'setup accepted a folder without Yuri''s Revenge' }
           if (Test-Path (Join-Path $app 'vera20k.exe')) { throw 'a refused setup installed files' }
+          $report = Get-Content $log -Raw -Encoding utf8
+          foreach ($f in 'ra2md.mix', 'ra2.mix', 'ra2md.csf', 'rulesmd.ini', 'artmd.ini', 'aimd.ini') {
+            if (-not $report.Contains($f)) { throw "setup did not report missing $f" }
+          }
+
+          # Having both masters is insufficient if another required archive
+          # is missing. A later choice retries with fresh results.
+          $partial = New-Game 'incomplete'
+          Remove-Item (Join-Path $partial 'cameomd.mix')
+          if ((Install $partial) -eq 0) { throw 'setup accepted missing required cameo data' }
+          if (-not (Get-Content $log -Raw -Encoding utf8).Contains('cameomd.mix')) {
+            throw 'setup did not name the missing required archive'
+          }
 
           # A fresh install writes config.toml from the example.
           $first = New-Game 'game one'
           $code = Install $first
           if ($code -ne 0) { Get-Content $log; throw "setup failed with exit code $code" }
+          $report = Get-Content $log -Raw -Encoding utf8
+          if (-not $report.Contains('test-song.wav') -or -not $report.Contains('Optional content')) {
+            throw 'setup did not warn about optional music'
+          }
           foreach ($f in 'vera20k.exe', 'config.toml', 'config.toml.example', 'README.txt',
                          'LICENSE-GPL', 'THIRD_PARTY_LICENSES.html') {
             if (-not (Test-Path (Join-Path $app $f))) { throw "setup did not install $f" }
@@ -342,6 +416,7 @@ jobs:
           # forward slashes, and lists its libraries in UTF-8 with doubled
           # backslashes.
           $eaGame = New-Game (Join-Path $env:ProgramFiles 'EA Games\Command and Conquer Red Alert II')
+          Copy-Item '.github\release\windows\test-language-german.csf' (Join-Path $eaGame 'ra2md.csf')
           $steam = Join-Path $root 'Steam'
           $library = Join-Path $root "library $yuri"
           $steamGame = New-Game "library $yuri\steamapps\common\Command & Conquer Red Alert II"
@@ -349,16 +424,40 @@ jobs:
           New-Item -Force 'HKCU:\Software\Valve\Steam' | Out-Null
           Set-ItemProperty 'HKCU:\Software\Valve\Steam' SteamPath ($steam -replace '\\', '/')
           $libraries = "`"libraryfolders`"`n{`n"
-          foreach ($i in 0, 1) {
-            $folder = @($steam, $library)[$i] -replace '\\', '\\'
+          # The same library appears twice with different case and a trailing
+          # separator. It must produce one installation in the picker.
+          foreach ($i in 0, 1, 2) {
+            $folder = @($steam, $library, ($library.ToUpperInvariant() + '\'))[$i] -replace '\\', '\\'
             $libraries += "`t`"$i`"`n`t{`n`t`t`"path`"`t`t`"$folder`"`n`t`t`"label`"`t`t`"`"`n`t}`n"
           }
           [IO.File]::WriteAllText((Join-Path $steam 'steamapps\libraryfolders.vdf'), "$libraries}`n",
             [Text.UTF8Encoding]::new($false))
+          # Steam appears first and has both masters, but lacks another
+          # required archive. Both installations must be listed, with the
+          # valid German EA copy recommended instead of the damaged one.
+          Remove-Item (Join-Path $steamGame 'cameomd.mix')
           $code = Install ''
-          if ($code -ne 0) { Get-Content $log; throw "setup failed to find the Steam game: exit code $code" }
+          if ($code -ne 0) { Get-Content $log; throw "setup failed to recommend the valid game: exit code $code" }
+          Assert-Found $eaGame
+          $report = Get-Content $log -Raw -Encoding utf8
+          foreach ($text in 'Detected game installations: 2',
+                            "Detected game installation: $steamGame", "Detected game installation: $eaGame",
+                            'Language: English (US)', 'Language: German', 'cameomd.mix',
+                            "Recommended game folder: $eaGame") {
+            if (-not $report.Contains($text)) { throw "picker report lacks $text" }
+          }
+          # Explicit automation must still fail for its chosen bad folder,
+          # even while another detected installation passes validation.
+          if ((Install $steamGame) -eq 0) { throw 'setup ignored the invalid explicit /GAMEDIR' }
+          Assert-Found $eaGame
+          # A damaged previous choice must not hide another valid install.
+          Copy-Item '.github\release\windows\test-game\cameomd.mix' $steamGame
+          Remove-Item (Join-Path $eaGame 'ra2.mix')
+          $code = Install ''
+          if ($code -ne 0) { Get-Content $log; throw "setup failed to recommend Steam: exit code $code" }
           Assert-Found $steamGame
-          # Without the game there, setup moves on to the EA app's folder.
+          Copy-Item '.github\release\windows\test-game\ra2.mix' $eaGame
+          # Without the game there, setup recommends the EA app's folder.
           Remove-Item (Join-Path $steamGame '*.mix')
           $code = Install ''
           if ($code -ne 0) { Get-Content $log; throw "setup failed to find the EA app game: exit code $code" }

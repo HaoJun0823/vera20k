@@ -6,6 +6,7 @@
 use crate::app::loading::init::MapMenuEntry;
 use crate::render::batch::SpriteInstance;
 use crate::render::bit_font::BitFont;
+use crate::render::shell_text::{self, ShellAlign, ShellTextDraw};
 use crate::render::skirmish_shell_chrome::{
     ControlChrome, SkirmishShellChromeAtlas, SkirmishShellChromeEntry,
 };
@@ -28,6 +29,7 @@ use super::chrome::{
     push_ownerdraw_two_pixel_bevel_frame, push_ownerdraw_two_pixel_bevel_frame_px, push_solid_rect,
     push_solid_rect_px, push_tinted_entry,
 };
+use super::text::rect_to_text_rect;
 use super::{
     OWNERDRAW_SELECTED_RGB_FROM_DAT_00AC4604_PACKED_000000FF, SHELL_CONTROL_DEPTH,
     SHELL_DROPDOWN_BG_RGB_PENDING_COMBODROPWIN_SOURCE_CAPTURE, SHELL_DROPDOWN_DEPTH,
@@ -143,6 +145,87 @@ pub(super) fn push_new_edit_instances(
             paint.caret_depth,
             scale,
         );
+    }
+}
+
+/// A NewEdit's frame, caret and text, as NewEdit__DrawTextAndCaret
+/// `0x00623880` paints them in BB, BC/BD, C2/C9 and `0x10F`: the text sits
+/// inside the frame from the first visible unit, and an open IME composition
+/// is spliced in at the caret in the composition colour (`app::input::ime`).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_new_edit(
+    controls: &mut Vec<SpriteInstance>,
+    texts: &mut Vec<ShellTextDraw>,
+    atlas: &SkirmishShellChromeAtlas,
+    font: &BitFont,
+    edit: &crate::ui::skirmish_shell::SavedSeedDescriptionEdit,
+    composition: Option<(&[u16], usize)>,
+    rect: RectPx,
+    caret_visible: bool,
+    text_depth: f32,
+    scale: ShellScale,
+) {
+    let composed = composition.map(|(units, cursor)| {
+        edit.with_composition(
+            units,
+            cursor,
+            (scale.base_rect(rect).w - 3).max(0) as u32,
+            |text| font.text_width(text),
+        )
+    });
+    let (view, composed_units) = match &composed {
+        Some((view, units)) => (view, units.clone()),
+        None => (edit, 0..0),
+    };
+    push_new_edit_instances(
+        controls,
+        atlas,
+        font,
+        view,
+        NewEditPaint {
+            frame: scale.derive_rect(rect, |rect| {
+                RectPx::new(rect.x - 2, rect.y - 2, rect.w + 5, rect.h + 5)
+            }),
+            text: scale.derive_rect(rect, |rect| {
+                RectPx::new(rect.x + 2, rect.y, rect.w - 1, rect.h + 1)
+            }),
+            background: None,
+            frame_depth: SHELL_EDIT_FRAME_DEPTH,
+            caret_depth: SHELL_EDIT_CARET_DEPTH,
+            caret_visible,
+        },
+        scale,
+    );
+    let first = view.first_visible_unit.min(view.units.len());
+    let (start, end) = (
+        composed_units.start.max(first),
+        composed_units.end.max(first),
+    );
+    let composition_rgb = crate::app::input::ime::COMPOSITION_RGB.map(|c| f32::from(c) / 255.0);
+    let mut x = 0;
+    for (units, rgb) in [
+        (first..start, SHELL_LABEL_TEXT_RGB),
+        (start..end, composition_rgb),
+        (end..view.units.len(), SHELL_LABEL_TEXT_RGB),
+    ] {
+        if units.is_empty() {
+            continue;
+        }
+        let text = view.painted_range(units.start, units.end);
+        let field = scale.derive_rect(rect, |rect| {
+            RectPx::new(rect.x + 2 + x, rect.y, rect.w - 1 - x, rect.h + 1)
+        });
+        texts.push(shell_text::draw_in_rect_scaled(
+            font,
+            &text,
+            rect_to_text_rect(field),
+            rgb,
+            ShellAlign::V_CENTER,
+            [0.0; 2],
+            text_depth,
+            scale.factor(),
+        ));
+        x += font.text_width(&text) as i32;
     }
 }
 

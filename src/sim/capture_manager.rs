@@ -68,9 +68,6 @@
 //!   `FSTP float` under the process chop control word (`0x00670504..
 //!   0x00670509`); VERA parses to the nearest `f32`. Equal for stock `.25`;
 //!   an authored mark can differ by one ulp.
-//! - A crushed controller frees its victims at the crush call (`0x007418E5`,
-//!   before Record_The_Kill); VERA frees them in the crushed object's UnInit
-//!   a moment later in the same frame.
 
 use crate::sim::world::FrameEffects;
 use serde::{Deserialize, Serialize};
@@ -153,6 +150,11 @@ impl CaptureManagerState {
     /// `GetControlledCount @ 0x004722D0`.
     pub fn count(&self) -> i32 {
         i32::try_from(self.nodes.len()).unwrap_or(i32::MAX)
+    }
+
+    /// `+0x3C MaxControlNodes`, the native display maximum.
+    pub fn max_control(&self) -> i32 {
+        self.max_control
     }
 
     /// `IsOverloading @ 0x004726C0`: no extra pip unless an infinite
@@ -402,6 +404,18 @@ impl MindControlLink {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn controlled_by_house_for_test(
+        controller: InternedId,
+        original: InternedId,
+    ) -> Self {
+        Self {
+            house_controller: Some(controller),
+            house_original_owner: Some(original),
+            ..Self::default()
+        }
+    }
+
     /// The Dominator's hold (`+0x2C4`) with no controller or ring.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn permanent_for_test() -> Self {
@@ -436,8 +450,13 @@ impl CaptureVictimFacts {
                 target.invulnerability.as_ref(),
                 frame,
             )
-            // CanCapture's gate 9 (`0x00471D1E..0x00471D2C`).
-            || target.constructing_or_selling();
+            // CanCapture471D1E..471D2C reads raw current +AC for every
+            // Techno. A queued Construction is still capturable until it
+            // commences; GetFireError repeats this gate at discharge.
+            || matches!(
+                target.mission.current().known(),
+                Some(MissionType::Construction | MissionType::Selling)
+            );
         Self {
             owner: target.owner(),
             capturable: !refused,

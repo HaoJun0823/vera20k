@@ -82,6 +82,12 @@ pub struct TerrainObjectType {
     snow_occupation_bits: i32,
     /// Art `Foundation=`. Defaults to 1x1 until art.ini merge patches it.
     pub foundation: String,
+    /// Phobos `TerrainTypeExt`'s five `SpawnsTiberium.*` fields. Absent without
+    /// the Phobos capability, which is also how a retail build behaves: the
+    /// stock spawner keeps its own-cell-neighbour spread and Riparius fallback.
+    #[cfg(feature = "phobos")]
+    #[serde(default = "PhobosSpawnsTiberium::ctor")]
+    pub spawns_tiberium_ext: PhobosSpawnsTiberium,
     /// TerrainType+2B8 is null after71DAF1, independently of index+298.
     /// ReadINI71DF96 and saved Load71E22D bind that index's static list.
     #[serde(default = "legacy_bound_terrain_field")]
@@ -173,6 +179,8 @@ impl TerrainObjectType {
                 .to_string(),
             occupy_list_bound: read_state.has_occupy_list(),
             shape_requested: image.theater() || !image.shp_loads().is_empty(),
+            #[cfg(feature = "phobos")]
+            spawns_tiberium_ext: PhobosSpawnsTiberium::ctor(),
         };
         read_state.project_into(&mut terrain, image);
         terrain
@@ -203,7 +211,31 @@ impl TerrainObjectType {
     }
 
     pub fn has_occupy_list(&self) -> bool {
-        self.occupy_list_bound && foundation::foundation_dimensions(&self.foundation) != (0, 0)
+        self.occupy_list_bound
+    }
+
+    /// TerrainTypeOccupyList71DE40 returns the cached Terrain list, not the
+    /// Building list selected by the same ReadFoundation474DA0 token. Original
+    /// initializer71D580 builds selectors0..6 as the named rectangles, but
+    /// selector7 atB0EED8 is4x2 despite the reader's `3x5` name. The remaining
+    /// source is zeroed/unterminated71DA51..75; refuse its execution rather than
+    /// inventing Building geometry. An unused retained Type is still valid.
+    pub fn occupied_cell_offsets(
+        &self,
+    ) -> Result<Vec<(i16, i16)>, crate::rules::error::RulesError> {
+        if !self.occupy_list_bound {
+            return Ok(Vec::new());
+        }
+        match foundation::foundation_id(&self.foundation) {
+            0..=6 => Ok(foundation::foundation_cell_offsets(&self.foundation)),
+            7 => Ok(foundation::foundation_cell_offsets("4x2")),
+            _ => Err(crate::rules::error::RulesError::InvalidValue {
+                section: self.name.clone(),
+                key: "Foundation".into(),
+                expected: "an initialized Terrain list (native selector0..7)".into(),
+                value: self.foundation.clone(),
+            }),
+        }
     }
 
     pub fn armor_id(&self) -> crate::rules::armor::ArmorId {
@@ -241,6 +273,71 @@ impl TerrainObjectType {
     }
 }
 
+/// Phobos `TerrainTypeExt`'s ore-spawner fields
+/// (`src/Ext/TerrainType/Body.{h,cpp}`). `TerrainTypeExt::LoadFromINI` runs at
+/// the `TerrainTypeClass_LoadFromINI @ 0x0071E0A6` hook — the end of every
+/// `TerrainTypeClass::ReadINI @ 0x0071DEA0` pass — and each `Valueable` read
+/// retains the current field when its key is absent or cannot be parsed.
+///
+/// Constructor defaults are `Body.h`'s initializer list: type 0, range 1, one
+/// growth stage 3, one cell per animation 1 and no particle (-1).
+#[cfg(feature = "phobos")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct PhobosSpawnsTiberium {
+    /// `SpawnsTiberium.Type=`: the `[Tiberiums]` index the spawner germinates.
+    pub tiberium_type: i32,
+    /// `SpawnsTiberium.Range=`: the CellSpread radius searched per attempt.
+    pub range: i32,
+    /// `SpawnsTiberium.GrowthStage=`: the density written, or its random range.
+    pub growth_stage: crate::rules::ini_value::PartialIntPair,
+    /// `SpawnsTiberium.CellsPerAnim=`: forced spreads one animation emits.
+    pub cells_per_anim: crate::rules::ini_value::PartialIntPair,
+    /// `SpawnsTiberium.Particle=`: the `[Particles]` type emitted at the
+    /// spawner's Location. `None` is Phobos' -1.
+    pub particle: Option<String>,
+}
+
+#[cfg(feature = "phobos")]
+impl PhobosSpawnsTiberium {
+    /// `TerrainTypeExt`'s member initializers.
+    pub const fn ctor() -> Self {
+        Self {
+            tiberium_type: 0,
+            range: 1,
+            growth_stage: crate::rules::ini_value::PartialIntPair::single(3),
+            cells_per_anim: crate::rules::ini_value::PartialIntPair::single(1),
+            particle: None,
+        }
+    }
+
+    /// The five reads in `TerrainTypeExt::LoadFromINI`'s order. `find_particle`
+    /// answers with the canonical section name when a token resolves in the
+    /// live `ParticleTypeClass` array: `ValueableIdx<ParticleTypeClass>::Read`
+    /// uses `FindIndex` without allocating, so an unknown name reports a parse
+    /// failure and retains the current reference.
+    pub fn read_pass(
+        &mut self,
+        section: &IniSection,
+        mut find_particle: impl FnMut(&str) -> Option<String>,
+    ) {
+        self.tiberium_type = section.read_ares_int("SpawnsTiberium.Type", self.tiberium_type);
+        self.range = section.read_ares_int("SpawnsTiberium.Range", self.range);
+        self.growth_stage =
+            section.read_ares_partial_int_pair("SpawnsTiberium.GrowthStage", self.growth_stage);
+        self.cells_per_anim =
+            section.read_ares_partial_int_pair("SpawnsTiberium.CellsPerAnim", self.cells_per_anim);
+        if let Some(name) = section.read_name("SpawnsTiberium.Particle", 2048) {
+            // Phobos TemplateDef.h ValueableIdx::Read updates only on a found
+            // index or an explicit blank sentinel; an unknown name retains.
+            if let Some(particle) = find_particle(name) {
+                self.particle = Some(particle);
+            } else if crate::rules::ini_parser::is_native_none_type_name(name) {
+                self.particle = None;
+            }
+        }
+    }
+}
+
 /// The two relevant native inputs in one admitted TerrainTypeClass::ReadINI
 /// pass. Image is the inherited ObjectTypeClass `+0x1F8` buffer; its asset
 /// color is deferred until the existing terrain asset binding phase.
@@ -267,6 +364,11 @@ pub(crate) struct TerrainTypeReadState {
     is_logic: bool,
     is_veinhole: bool,
     legal_target: bool,
+    /// Phobos reads its extension at the end of the same ReadINI pass, so the
+    /// per-pass retention belongs to this state, not the merged section.
+    #[cfg(feature = "phobos")]
+    #[serde(default = "PhobosSpawnsTiberium::ctor")]
+    spawns_tiberium_ext: PhobosSpawnsTiberium,
 }
 
 impl TerrainTypeReadState {
@@ -281,6 +383,8 @@ impl TerrainTypeReadState {
             is_logic: true,
             is_veinhole: false,
             legal_target: false,
+            #[cfg(feature = "phobos")]
+            spawns_tiberium_ext: PhobosSpawnsTiberium::ctor(),
         }
     }
 
@@ -356,6 +460,20 @@ impl TerrainTypeReadState {
         terrain.occupy_list_bound = self.has_occupy_list();
         terrain.shape_requested = image.theater() || !image.shp_loads().is_empty();
         terrain.radar_color_read_passes.clone_from(&self.reads);
+        #[cfg(feature = "phobos")]
+        terrain
+            .spawns_tiberium_ext
+            .clone_from(&self.spawns_tiberium_ext);
+    }
+
+    /// The `TerrainTypeExt::LoadFromINI @ 0x0071E0A6` half of this ReadINI pass.
+    #[cfg(feature = "phobos")]
+    pub(crate) fn read_phobos_pass(
+        &mut self,
+        section: &crate::rules::ini_parser::IniSection,
+        find_particle: impl FnMut(&str) -> Option<String>,
+    ) {
+        self.spawns_tiberium_ext.read_pass(section, find_particle);
     }
 
     fn has_occupy_list(&self) -> bool {
@@ -411,6 +529,113 @@ mod tests {
         assert_eq!(t.temperate_occupation_bits, 7);
         assert_eq!(t.snow_occupation_bits, 7);
         assert_eq!(t.foundation, "1x1");
+    }
+
+    /// Phobos' five `SpawnsTiberium.*` keys, read through the production
+    /// layered process owner: `TerrainTypeExt`'s constructor defaults, the
+    /// `PartialVector2D<int>` value count, and a later pass that retains every
+    /// key it does not name.
+    #[test]
+    #[cfg(feature = "phobos")]
+    fn spawns_tiberium_extension_defaults_counts_and_retains_across_passes() {
+        use crate::rules::native_processing::{RulesLayerKind, RulesLayerStack};
+        use crate::rules::ruleset::RuleSet;
+
+        let authored = |extra: &str| {
+            IniFile::from_str(&format!(
+                "[TerrainTypes]\n0=TIBTRE01\n[TIBTRE01]\nSpawnsTiberium=yes\n\
+                 IsAnimated=yes\n{extra}\
+                 [Particles]\n0=SPARKA\n[SPARKA]\n"
+            ))
+        };
+        let extension = |ini: IniFile| {
+            let rules = RuleSet::from_rules_layers(&RulesLayerStack::new(ini))
+                .expect("authored phobos terrain keys");
+            rules
+                .terrain_object_type_case_insensitive("TIBTRE01")
+                .expect("TIBTRE01")
+                .spawns_tiberium_ext
+                .clone()
+        };
+
+        let defaults = extension(authored(""));
+        assert_eq!((defaults.tiberium_type, defaults.range), (0, 1));
+        assert!(defaults.growth_stage.is_single());
+        assert_eq!(defaults.growth_stage.low, 3);
+        assert_eq!(defaults.cells_per_anim.low, 1);
+        assert_eq!(defaults.particle, None);
+
+        let mut layers = RulesLayerStack::new(authored(
+            "SpawnsTiberium.Type=1\nSpawnsTiberium.Range=2\n\
+             SpawnsTiberium.GrowthStage=4,8\nSpawnsTiberium.CellsPerAnim=1,3\n\
+             SpawnsTiberium.Particle=sparka\n",
+        ));
+        layers.push(
+            RulesLayerKind::GameMode,
+            IniFile::from_str(
+                "[TIBTRE01]\nSpawnsTiberium.Range=5\nSpawnsTiberium.Particle=UNKNOWN\n",
+            ),
+        );
+        let rules = RuleSet::from_rules_layers(&layers).expect("layered phobos terrain keys");
+        let extended = &rules
+            .terrain_object_type_case_insensitive("TIBTRE01")
+            .expect("TIBTRE01")
+            .spawns_tiberium_ext;
+        assert_eq!((extended.tiberium_type, extended.range), (1, 5));
+        assert_eq!(
+            (
+                extended.growth_stage.low,
+                extended.growth_stage.high,
+                extended.growth_stage.values
+            ),
+            (4, 8, 2),
+            "a two-value range keeps both slots and draws"
+        );
+        assert_eq!(extended.cells_per_anim.low, 1);
+        assert_eq!(extended.particle.as_deref(), Some("SPARKA"));
+        layers.push(
+            RulesLayerKind::Scenario,
+            IniFile::from_str("[TIBTRE01]\nSpawnsTiberium.Particle=<none>\n"),
+        );
+        let cleared = RuleSet::from_rules_layers(&layers).expect("explicit particle clear");
+        assert!(
+            cleared
+                .terrain_object_type_case_insensitive("TIBTRE01")
+                .unwrap()
+                .spawns_tiberium_ext
+                .particle
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "phobos")]
+    fn spawns_tiberium_retained_process_state_changes_compatibility_hash() {
+        use crate::rules::native_processing::RulesLayerStack;
+        use crate::rules::ruleset::RuleSet;
+        let current = RulesLayerStack::new(IniFile::from_str(
+            "[TerrainTypes]\n0=TIBTRE01\n[TIBTRE01]\nSpawnsTiberium=yes\n",
+        ));
+        let continued = |cells| {
+            let earlier = RulesLayerStack::new(IniFile::from_str(&format!(
+                "[TerrainTypes]\n0=TIBTRE01\n[TIBTRE01]\nSpawnsTiberium.CellsPerAnim={cells}\n",
+            )))
+            .process()
+            .unwrap();
+            let (_, trace) = earlier.into_ini_and_native_type_construction_trace();
+            let registry = trace.into_registry_state_discarding_events();
+            let next = current
+                .process_with_fixed_art_and_registry_state(&IniFile::empty(), registry)
+                .unwrap();
+            RuleSet::from_processed_rules(&next).unwrap()
+        };
+        let first = continued(1);
+        let second = continued(2);
+        assert_eq!(first.source_ini_hash(), second.source_ini_hash());
+        assert_ne!(
+            first.simulation_config_hash(),
+            second.simulation_config_hash()
+        );
     }
 
     #[test]

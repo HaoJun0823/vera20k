@@ -95,15 +95,6 @@ pub enum GameSoundEvent {
     /// FootLimbo405FD0 stops repetition even for counted loops, then detaches
     /// the owner's handle while the current audio finishes.
     AnimationDetached { anim_id: u64 },
-    /// A weapon fired — play the weapon's Report= sound.
-    WeaponFired {
-        /// sound.ini ID from the weapon's Report= field.
-        sound_id: String,
-        /// Screen position of the sound source (for spatial audio).
-        /// If None, plays at full volume (non-positional).
-        source: Option<SoundSource>,
-    },
-
     /// A unit was selected by the player — play VoiceSelect.
     ///
     /// `speaker_id` is the object that speaks: `TechnoClass::Queue_Voice @
@@ -354,8 +345,7 @@ impl GameSoundEvent {
     /// Get the sound ID for this event.
     pub fn sound_id(&self) -> &str {
         match self {
-            Self::WeaponFired { sound_id, .. }
-            | Self::AnimationStarted { sound_id, .. }
+            Self::AnimationStarted { sound_id, .. }
             | Self::UnitSelected { sound_id, .. }
             | Self::UnitMoveOrder { sound_id, .. }
             | Self::UnitAttackOrder { sound_id, .. }
@@ -397,8 +387,7 @@ impl GameSoundEvent {
     /// Get the positional source for spatial audio, if this event has one.
     pub fn source(&self) -> Option<SoundSource> {
         match self {
-            Self::WeaponFired { source, .. }
-            | Self::AnimationStarted { source, .. }
+            Self::AnimationStarted { source, .. }
             | Self::AnimationStopped { source, .. }
             | Self::EntityDestroyed { source, .. }
             | Self::EntityCrushed { source, .. }
@@ -460,8 +449,9 @@ impl GameSoundEvent {
 /// `VoiceDeploy=` slot, or the resource-Archive `VoiceHarvest=` override,
 /// before its positional DeploySound. Automatic relocation suppresses the
 /// ordinary line. Deploy/unload input acknowledgement for other categories
-/// remains separate, despite the bound Deploy/Undeploy slots; `VoiceFalling=`
-/// is still unparsed and taunts reach an empty match arm.
+/// remains separate, despite the bound Deploy/Undeploy slots; taunts reach an
+/// empty match arm. `VoiceFalling=` is a positional [`GameSoundEvent::VocAt`]
+/// from Foot AI's falling edge (4DAB3C).
 ///
 /// `VoiceSinking=`/`SinkingSound=` are resolved against fixed SOUNDMD by the
 /// Rules process owner. Foot's +3CD/+3CE edge (4DABC7) emits the positional

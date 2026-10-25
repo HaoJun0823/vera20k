@@ -31,7 +31,7 @@ use crate::ui::shell::menu_page::{MenuPageButtonRect, MenuPageLayout, MenuPageSp
 use crate::ui::shell::slide::PanelArt;
 use crate::ui::wol_shell::{
     BOX_NO, BOX_OK, BOX_YES, StaticAlign, WAIT_CHECK_STATUS, WAIT_DISCONNECT, WOL_LOBBY_TITLE_KEY,
-    WOL_WELCOME_PAGE, WolBoxButtons,
+    WolBoxButtons, WolTextCaption,
 };
 
 /// Icon and group-box children sit over the background, under the text.
@@ -196,8 +196,8 @@ impl Painted {
 
     fn title_key(&self) -> Option<&'static str> {
         match self {
-            Self::Welcome(_) => Some(WOL_WELCOME_PAGE.title_key),
-            Self::Login(_) => Some(crate::ui::wol_login::PAGE.title_key),
+            Self::Welcome(layout) => Some(layout.page_spec().title_key),
+            Self::Login(layout) => Some(layout.page_spec().title_key),
             Self::Lobby(_) => Some(WOL_LOBBY_TITLE_KEY),
             Self::Options(_) => Some(crate::ui::wol_options::PAGE.title_key),
             Self::SoundOptions(_) => Some(crate::ui::shell::sound::SHELL_SOUND_PAGE.title_key),
@@ -371,7 +371,7 @@ pub(crate) fn render_wol_page(
                     .as_ref()
                     .and_then(|visit| visit.login())
                     .and_then(|login| login.buttons.hovered)
-                    .and_then(crate::ui::wol_login::tooltip_key),
+                    .and_then(|control| layout.tooltip_key(control)),
                 layout.status_help,
             ),
             _ => (None, page.status_help),
@@ -456,8 +456,8 @@ pub(crate) fn render_wol_page(
     let mut icon_sprites = Vec::new();
     let mut labels = Vec::new();
     if let (true, Painted::Welcome(layout)) = (children, &painted) {
-        for window in layout.group_boxes {
-            push_group_box(&mut sprites, chrome, window, scale);
+        for window in &layout.group_boxes {
+            push_group_box(&mut sprites, chrome, *window, scale);
         }
         if let Some(art) = art {
             for (file, window) in &layout.icons {
@@ -473,7 +473,10 @@ pub(crate) fn render_wol_page(
         for (text, rect) in &layout.texts {
             let caption = match filled.iter().find(|(id, _)| Some(*id) == text.id) {
                 Some((_, value)) => value.as_str().into(),
-                None => resolve_csf(state, text.key),
+                None => match text.caption {
+                    WolTextCaption::Csf(key) => resolve_csf(state, key),
+                    WolTextCaption::Literal(value) => value.into(),
+                },
             };
             if caption.is_empty() {
                 continue;
@@ -656,8 +659,8 @@ pub(crate) fn render_wol_page(
         (_, Some(wave)) => Some(wave.button_draws()),
         (Painted::Backdrop, None) => Some(shell_paint::shuttered_column(page.right_panel)),
         (Painted::Welcome(layout), None) => {
-            spec = Some(&WOL_WELCOME_PAGE);
-            let active = controller.top_id() == Some(WOL_WELCOME_PAGE.dialog);
+            spec = Some(layout.page_spec());
+            let active = controller.top_id() == Some(layout.page_spec().dialog);
             let pressed = active.then(|| controller.pressed()).flatten();
             painted_buttons = layout
                 .painted_buttons(pressed)
@@ -667,7 +670,7 @@ pub(crate) fn render_wol_page(
             None
         }
         (Painted::Login(layout), None) => {
-            spec = Some(&crate::ui::wol_login::PAGE);
+            spec = Some(layout.page_spec());
             if let Some(login) = state.frontend.wol.as_ref().and_then(|visit| visit.login()) {
                 painted_buttons = layout
                     .page
@@ -806,6 +809,7 @@ pub(crate) fn render_wol_page(
         (Painted::Lobby(layout), None) => {
             spec = Some(&crate::ui::wol_lobby::PAGE);
             if let Some(lobby) = lobby {
+                spec = Some(lobby.ui.page_spec());
                 painted_buttons = layout
                     .page
                     .buttons
@@ -849,8 +853,9 @@ pub(crate) fn render_wol_page(
         let Some(spec) = spec.and_then(|spec| spec.button(button.id)) else {
             continue;
         };
+        let text = resolve_csf(state, spec.csf_key);
         labels.push(PaintLabel {
-            text: resolve_csf(state, spec.csf_key),
+            text,
             rect: owner_draw_button_label_rect(button.rect, *pressed),
             align: ShellAlign(ShellAlign::H_CENTER.0 | ShellAlign::V_CENTER.0),
             rgb: crate::app::frontend::skirmish_shell_render::wol_button_label_rgb(*enabled),

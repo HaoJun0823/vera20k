@@ -47,6 +47,7 @@ pub(crate) fn sync_in_game_options_speed_from_sim(state: &mut AppState) {
 
 pub(crate) fn fallback_map_load_result() -> init::MapLoadResult {
     init::MapLoadResult {
+        pending_atlases: None,
         scenario: init::ScenarioLoadInputs {
             campaign_names: None,
             startup: crate::app::match_bootstrap::LoadingStartup::Generic {
@@ -278,6 +279,38 @@ pub(crate) fn install_world_presentation(
         &state.renderer.batch_renderer,
         state.process_assets.manager(),
     ));
+    // Phobos DigitalDisplay `Shape=`/`Palette=` assets, retained once per match
+    // like `DigitalDisplayTypeClass`'s SHP pointers.
+    #[cfg(feature = "phobos")]
+    if let Some(assets) = state.process_assets.manager()
+        && let Some(rules) = state
+            .match_state
+            .sim_runtime
+            .as_ref()
+            .map(|runtime| &runtime.resources.rules)
+        && let Some(overlay) = state
+            .match_state
+            .match_presentation
+            .selection_overlay
+            .as_mut()
+    {
+        overlay.load_digital_display_shapes(
+            &state.renderer.gpu.device,
+            &state.renderer.gpu.queue,
+            &state.renderer.batch_renderer,
+            assets,
+            rules.digital_display_types().types(),
+        );
+    }
+    // Phobos placement preview strips embed the active theater's palette and
+    // the local house colour; a map load invalidates them.
+    #[cfg(feature = "phobos")]
+    state
+        .match_state
+        .match_presentation
+        .placement_preview_art
+        .borrow_mut()
+        .reset();
     // Full_Init 687BB2 -> Init_BeaconArt 4309D0; each row's ColorScheme is
     // its House's (+0x16054).
     state.match_state.match_presentation.beacon_art =
@@ -289,7 +322,6 @@ pub(crate) fn install_world_presentation(
                 .houses()
                 .order()
                 .iter()
-                .take(crate::app::match_runtime::beacons::BEACON_HOUSES)
                 .map(|house| {
                     let index = colors
                         .get(sim.interner().resolve(*house))
@@ -325,6 +357,7 @@ pub(crate) fn install_world_presentation(
             [cw, ch],
             crate::render::shroud_buffer::SHROUD_EDGE_LUT,
         );
+        buffer.set_translucent_fog(&state.renderer.gpu.queue, state.translucent_fog_enabled());
         // Cell47EFE0/47F250 use FOG.SHP's raw A bytes when Scenario0x1000
         // is set. It belongs to this same tactical source, not a sprite atlas.
         let fog = crate::assets::shp_file::ShpFile::from_bytes(assets.get_ref("fog.shp")?).ok()?;
@@ -340,6 +373,10 @@ pub(crate) fn install_world_presentation(
 /// owner suspends/resumes audio; the later Theme queue/Stop(true) belongs to
 /// apply_map_load_result (683E4D..683E66), after this movie returns.
 pub(crate) fn finish_fresh_scenario_read(state: &mut AppState, mut result: init::MapLoadResult) {
+    assert!(
+        result.pending_atlases.is_none(),
+        "install requires completed presentation"
+    );
     // Read_INI_Basic689FD6/689FF4 retains these two buffers across fresh
     // ClearScene reads. Saved restoration instead installs the saved values
     // directly through install_world_presentation; it must not inherit here.
@@ -430,7 +467,6 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
         simulation.install_fresh_process_main(&state.frontend.frontend_main_rng);
         simulation.publish_scenario_started();
         simulation.batch_path_searches();
-        simulation.batch_target_scans();
         crate::sim::runtime::SimRuntime {
             simulation,
             resources: crate::sim::runtime::SimResources {
@@ -547,9 +583,6 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
     state.match_state.input.cursor_y = tactical_height as f32 * 0.5;
     state.platform.frame_pacer.reset_for_immediate_frame();
     state.match_state.input.queued_order_mode = render::OrderMode::Move;
-    for group in &mut state.match_state.input.control_groups {
-        group.clear();
-    }
     state.match_state.local_owner_override = result.scenario.initial_local_owner;
     state.match_state.match_audio.reset_for_new_match();
     state.match_state.sandbox_full_visibility = result.scenario.sandbox_full_visibility;
@@ -618,6 +651,30 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
                     .restore_campaign_carry_over(record, &runtime.resources.rules);
             }
             crate::app::lan_service::install_gameplay(state).map_err(|error| error.to_string())
+        }
+        crate::app::match_bootstrap::LoadingStartup::Replay { .. } => {
+            state.match_state.startup.clear();
+            let playback = match (
+                state.match_state.sim_runtime.as_mut(),
+                state.match_state.loaded_map_source.as_ref(),
+                state.match_state.loaded_map_hash,
+            ) {
+                (Some(runtime), Some(source), Some(map_hash)) => state
+                    .match_state
+                    .match_diagnostics
+                    .install_playback(runtime, source, map_hash),
+                _ => Err(anyhow::anyhow!(
+                    "replay loader did not install an authored world"
+                )),
+            };
+            if let Err(error) = playback {
+                let message = format!("Replay startup failed: {error:#}");
+                log::error!("{message}");
+                state.frontend.external_launch_error = Some(message);
+            }
+            // A rejected replay is a frozen inspection view, never a fresh
+            // playable match. Its diagnostics owner blocks every tick/input.
+            Ok(())
         }
         crate::app::match_bootstrap::LoadingStartup::UnverifiedLegacy { .. }
         | crate::app::match_bootstrap::LoadingStartup::Generic { .. } => {
@@ -708,6 +765,7 @@ pub(crate) fn clear_screen(encoder: &mut wgpu::CommandEncoder, view: &wgpu::Text
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     });
 }
 

@@ -35,18 +35,27 @@ pub(crate) fn apply_action(state: &mut AppState, action: SetupAction) {
                 .as_ref()
                 .is_some_and(|protocol| !protocol.locked)
             {
-                // WOL C2 Back's leave (0x7900B8) goes to the lobby's
-                // service once C2 has closed (commit_back).
-                if !(dialog.wol() && dialog.host) {
-                    queue(state, NetworkSetupRequest::Leave);
-                }
-                // C9 Back (0x791E4A..5F) closes only when the leave call
-                // fails; otherwise the channel-left event closes it.
-                if !(dialog.wol() && !dialog.host) {
-                    App::leave_shell_dialog(
-                        state,
-                        shell_transition::ShellExitThen::NetworkSetupBack(dialog),
-                    );
+                if !dialog.wol() && state.match_state.lan_service.is_some() {
+                    //5E09CD..5E0AC6 services the direct Type10 drain before
+                    // leaving. The visit owner bounds VERA's larger FIFO;
+                    // its completion resumes this ordinary Back transition.
+                    if let Err(error) = crate::app::lan_service::request_setup_back(state) {
+                        log::error!("LAN setup departure failed: {error:#}");
+                    }
+                } else {
+                    // WOL C2 Back's leave (0x7900B8) goes to the lobby's
+                    // service once C2 has closed (commit_back).
+                    if !(dialog.wol() && dialog.host) {
+                        queue(state, NetworkSetupRequest::Leave);
+                    }
+                    // C9 Back (0x791E4A..5F) closes only when the leave call
+                    // fails; otherwise the channel-left event closes it.
+                    if !(dialog.wol() && !dialog.host) {
+                        App::leave_shell_dialog(
+                            state,
+                            shell_transition::ShellExitThen::NetworkSetupBack(dialog),
+                        );
+                    }
                 }
             }
             Ok(())
@@ -78,6 +87,15 @@ pub(crate) fn apply_action(state: &mut AppState, action: SetupAction) {
             Ok(())
         }
         // 0x00790C8D (C2) and 0x0079235F (C9): the modal page dialog 0xCF.
+        SetupAction::RosterPage { forward } => {
+            if let Some(view) = super::view(state)
+                && !view.locked
+                && let Some(ui) = state.frontend.multiplayer_setup.as_mut()
+            {
+                ui.page_rows(view.row_count, forward);
+            }
+            Ok(())
+        }
         SetupAction::Page => {
             crate::app::shell_wol::page::open_page_dialog(state);
             Ok(())
@@ -201,8 +219,9 @@ fn select(state: &mut AppState, control: u16, value: i32) -> anyhow::Result<()> 
         combo.choices.iter().any(|choice| choice.value == value),
         "selection no longer belongs to this popup"
     );
-    let (column, row) =
+    let (column, _) =
         SetupColumn::decode(control).ok_or_else(|| anyhow::anyhow!("unknown setup combo"))?;
+    let row = usize::from(combo.row);
     if column == SetupColumn::Player {
         if value == 0 {
             return Ok(());
@@ -346,7 +365,7 @@ pub(crate) fn commit_start(state: &mut AppState, agreed_seed: u32) {
         .session
         .network_setup()
         .and_then(|launch| launch.selected_map_file.clone());
-    let (accepted_random_map, guest_staging) = if state.match_state.session.host() {
+    let (accepted_random_map, mut guest_staging) = if state.match_state.session.host() {
         (
             state
                 .frontend
@@ -368,6 +387,24 @@ pub(crate) fn commit_start(state: &mut AppState, agreed_seed: u32) {
             }),
         )
     };
+    if accepted_random_map.is_none()
+        && guest_staging.is_none()
+        && matches!(
+            state.match_state.session_mode(),
+            SessionMode::Lan | SessionMode::Wol
+        )
+        && selected.as_deref().is_some_and(|file| {
+            file.eq_ignore_ascii_case(crate::map::skirmish_scenarios::RANDMAP_SED)
+        })
+    {
+        // A network rematch reuses the accepted W table after the first match
+        // consumed its presentation preview. Full_Init6873E6 copies these
+        // same Scenario+11C0 cells; it does not require regenerating a preview.
+        let staging = state.frontend.multiplayer_shell_runtime.start_staging();
+        guest_staging = Some(
+            crate::app::shell_random_map::AcceptedRmgStartStaging::from_scenario_staging(&staging),
+        );
+    }
     match state.match_state.session.freeze_network_start(agreed_seed) {
         Ok(startup) => {
             if state.match_state.session_mode()
@@ -457,8 +494,23 @@ pub(crate) fn commit_map_selection(
             .session
             .network_map_metadata()
             .is_none_or(|current| current.display_name != metadata.display_name);
+    // Use Map can reselect an already-uploaded source. Ask the same map
+    // identity owner as received HostSetup before replacing its selection;
+    // unchanged physical/effective bytes retain their image and marker bounds.
+    let mut selected = state
+        .match_state
+        .session
+        .network_setup()
+        .ok_or_else(|| anyhow::anyhow!("no admitted setup"))?
+        .clone();
+    selected.mode = crate::skirmish_launch::SkirmishLaunchMode::from_game_mode(mode);
+    selected.selected_map_file = Some(file.clone());
+    let map_changed = state
+        .match_state
+        .session
+        .network_map_requires_verification(&selected, &metadata)?;
     let removed = state.match_state.session.select_network_map(
-        crate::skirmish_launch::SkirmishLaunchMode::from_game_mode(mode),
+        selected.mode,
         file.clone(),
         map.player_capacity,
     )?;
@@ -475,6 +527,9 @@ pub(crate) fn commit_map_selection(
         .multiplayer_shell_runtime
         .set_preferred_game_mode(mode_id);
     state.frontend.skirmish_preview_texture = None;
+    if let Some(protocol) = state.frontend.network_setup_protocol.as_mut() {
+        protocol.invalidate_received_preview(map_changed);
+    }
     if super::dialog(state).wol() {
         // C2 ChooseMap 0x790F68: acceptance clears only for a new
         // filename or title; the advertisement always follows (78F000).

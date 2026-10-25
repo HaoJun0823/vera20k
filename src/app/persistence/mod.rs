@@ -8,7 +8,11 @@
 pub(crate) mod commands;
 pub(crate) mod options;
 pub(crate) mod options_profile;
+#[cfg(feature = "phobos")]
+pub(crate) mod phobos_settings;
+pub(crate) mod profile_file;
 mod resource_load;
+pub(crate) mod rules_profile;
 pub(crate) mod wol_profile;
 pub(crate) use resource_load::{PreparedSavedGame, SavedGamePreparationView};
 
@@ -255,12 +259,17 @@ impl PreparedLoad {
             current_simulation.terrain_speed_config().clone(),
             overlay_registry.ok_or(PreparedLoadError::MissingOverlayRegistry)?,
             None,
+            None,
         )
     }
 
     /// One world restore for production resource loads and headless fixtures.
     /// The caller supplies the incoming bound resources and only lends the
     /// current process RNG owners; no fresh scenario construction is replayed.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "bound resources and explicit user-file Cell values"
+    )]
     fn prepare_snapshot(
         snapshot: GameSnapshot,
         process: crate::sim::world::SnapshotProcessState<'_>,
@@ -271,6 +280,7 @@ impl PreparedLoad {
         prepare_terrain_assets: Option<
             &mut crate::sim::snapshot::SnapshotTerrainAssetPreparation<'_>,
         >,
+        saved_land: Option<crate::map::resolved_terrain::SavedCellLandValues>,
     ) -> Result<Self, PreparedLoadError> {
         let saved_sidebar_order = snapshot.sidebar_order().cloned();
         let tactical_view = snapshot.tactical_view().cloned();
@@ -289,11 +299,19 @@ impl PreparedLoad {
         crate::sim::production::validate_restored_factory_state(&simulation, rules)?;
         simulation.rebuild_caches_after_load(terrain_template, terrain_speed_config, rules);
 
-        let map_restore = simulation.restore_map_authority_after_snapshot_load(
-            rules,
-            overlay_registry,
-            prepare_terrain_assets,
-        )?;
+        let map_restore = match saved_land {
+            Some(saved_land) => simulation.restore_map_authority_after_user_load(
+                rules,
+                overlay_registry,
+                prepare_terrain_assets,
+                saved_land,
+            )?,
+            None => simulation.restore_map_authority_after_snapshot_load(
+                rules,
+                overlay_registry,
+                prepare_terrain_assets,
+            )?,
+        };
         // Older headless saves may omit types that had never spawned. Add
         // those canonical names without changing any saved ID, then build
         // the handle table; a missing name must never become sidebar ID zero.
@@ -598,6 +616,29 @@ impl SaveRepository {
             .any(|(entry, _)| entry.header.is_compatible())
     }
 
+    /// SaveInfo681840/559ED0 needs metadata, not the simulation body. Reuse
+    /// the one snapshot parser with a growing prefix: strings can exceed a
+    /// fixed page, but ordinary headers must not read a 200 MB saved world.
+    fn read_browser_metadata(
+        mut reader: impl std::io::Read,
+    ) -> std::io::Result<GameSnapshotHeader> {
+        use std::io::Read;
+        let mut prefix = Vec::new();
+        let mut next = 64;
+        loop {
+            let added = reader.by_ref().take(next).read_to_end(&mut prefix)?;
+            match GameSnapshot::read_metadata(&prefix) {
+                Ok(header) => return Ok(header),
+                Err(SnapshotError::DeserializeFailed(
+                    crate::util::save_codec::Error::UnexpectedEnd,
+                )) if added != 0 => next = prefix.len() as u64,
+                Err(error) => {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error));
+                }
+            }
+        }
+    }
+
     /// Saves whose header reads, with their file time, in directory order.
     fn readable_entries(&self) -> impl Iterator<Item = (SaveEntry, u64)> + '_ {
         std::fs::read_dir(&self.directory)
@@ -613,8 +654,7 @@ impl SaveRepository {
                 if !metadata.is_file() {
                     return None;
                 }
-                let bytes = self.read(&path).ok()?;
-                let header = GameSnapshot::read_metadata(&bytes).ok()?;
+                let header = Self::read_browser_metadata(std::fs::File::open(&path).ok()?).ok()?;
                 let ticks = crate::map::rmg::saved_seeds::system_time_to_file_time(
                     metadata.modified().ok()?,
                 );
@@ -827,8 +867,8 @@ mod tests {
                 }),
                 startup: self.startup.clone(),
                 screen: self.screen.clone(),
-                pacer_admits_same_bucket: self.frame_pacer.should_admit(32, 1, false),
-                pacer_admits_next_bucket: self.frame_pacer.should_admit(48, 1, false),
+                pacer_admits_same_bucket: self.frame_pacer.should_admit(32, 1, None, false),
+                pacer_admits_next_bucket: self.frame_pacer.should_admit(48, 1, None, false),
                 overlay_render_index: self
                     .overlay_render_index
                     .iter()

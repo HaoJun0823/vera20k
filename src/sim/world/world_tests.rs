@@ -49,6 +49,7 @@ fn make_test_entity(type_id: &str, category: EntityCategory) -> MapEntity {
         mission: None,
         recruitable_a: true,
         recruitable_b: true,
+        group: -1,
         structure_upgrades: [None, None, None],
         structure_ai_sellable: false,
         structure_ai_repairable: false,
@@ -1728,15 +1729,15 @@ fn gsi_04_07_wall_sell_ordered_cleanup_detach_navigation_and_zero_refund_rng() {
             .target()
             .is_none()
     );
-    assert!(
+    assert_eq!(
         sim.substrate
             .entities
             .get(20)
             .unwrap()
             .attack_target
-            .target()
-            .is_none(),
-        "cleanup removal expires the represented Cell target"
+            .target(),
+        Some(TargetKind::Cell(4, 3)),
+        "sale sweeps its source Cell; recursive cleanup does not sweep the neighbor"
     );
     assert!(sim.path_grid.as_deref().unwrap().is_walkable(4, 4));
     assert!(sim.path_grid.as_deref().unwrap().is_walkable(4, 3));
@@ -2282,17 +2283,23 @@ fn gsi_04_07_damage_fatal_transport_lifecycle_brackets_nested_death_weapon() {
     // takes `BuildingClass::ReceiveDamage` case 4, whose stock 8-frame timer
     // runs `ObjectClass::UnInit` (`0x005F6625` clears `IsAlive +0x90`) before
     // the `0x00442905` re-test, so `NotifyUnderAttack` never runs for it.
-    assert_eq!(result.consequences.effects().under_attack_events.len(), 1);
+    assert!(result.consequences.effects().under_attack_events.is_empty());
     assert_eq!(
-        (
-            result.consequences.effects().under_attack_events[0].rx,
-            result.consequences.effects().under_attack_events[0].ry
-        ),
-        (8, 5)
-    );
-    assert_eq!(
-        result.consequences.effects().under_attack_events[0].victim_type,
-        listener.type_ref()
+        fatal
+            .sound_events
+            .iter()
+            .filter_map(|event| match event {
+                SimSoundEvent::UnderAttack {
+                    owner,
+                    miner,
+                    rx,
+                    ry,
+                    ..
+                } => Some((*owner, *miner, *rx, *ry)),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [(listener.owner(), false, 8, 5)]
     );
     assert!(!fatal.substrate.occupancy.contains_entity(8, 5, 10));
     let attacker = fatal.substrate.entities.get(20).unwrap();
@@ -5855,6 +5862,7 @@ fn move_event_issuer_does_not_replace_actor_owner() {
             mission: None,
             recruitable_a: true,
             recruitable_b: true,
+            group: -1,
             structure_upgrades: [None, None, None],
             structure_ai_sellable: false,
             structure_ai_repairable: false,
@@ -6045,6 +6053,7 @@ fn attack_move_fight(rules: &RuleSet) -> Simulation {
                 mission: None,
                 recruitable_a: true,
                 recruitable_b: true,
+                group: -1,
                 structure_upgrades: [None, None, None],
                 structure_ai_sellable: false,
                 structure_ai_repairable: false,
@@ -6065,6 +6074,7 @@ fn attack_move_fight(rules: &RuleSet) -> Simulation {
                 mission: None,
                 recruitable_a: true,
                 recruitable_b: true,
+                group: -1,
                 structure_upgrades: [None, None, None],
                 structure_ai_sellable: false,
                 structure_ai_repairable: false,
@@ -6788,6 +6798,8 @@ fn sale_death_is_ignored_before_ordinary_tail_drain() {
     rules.set_buildup_control_for_test("GAPOWR", [0, 25, 2]);
 
     let mut sim = Simulation::new();
+    sim.session
+        .set_game_mode(crate::sim::scenario_session::ScenarioGameMode::Skirmish);
     sim.input_delay_ticks = 0;
     let grid = PathGrid::test_all_passable(64, 64);
 
@@ -9009,14 +9021,28 @@ fn gsi_05_14_death_debris_joins_the_live_order_the_hash_and_the_snapshot() {
     // order once its AI reaches Delete.
     let first = first_id;
     let before = sim.substrate.voxel_anims.get(first).unwrap().world_coord();
-    sim.visit_voxel_anim(first, &rules);
+    sim.visit_voxel_anim(first, &rules, crate::sim::world::FrameEffects::default());
+    sim.process_pending_delete_with(
+        &rules,
+        Some(rules.overlay_registry()),
+        crate::sim::world::FrameEffects::default(),
+        1,
+        sim.session().started(),
+    );
     let after = sim.substrate.voxel_anims.get(first).unwrap().world_coord();
     assert_ne!(before, after, "one AI visit moves the body");
     for _ in 0..200 {
         if !sim.substrate.voxel_anims.contains_key(first) {
             break;
         }
-        sim.visit_voxel_anim(first, &rules);
+        sim.visit_voxel_anim(first, &rules, crate::sim::world::FrameEffects::default());
+        sim.process_pending_delete_with(
+            &rules,
+            Some(rules.overlay_registry()),
+            crate::sim::world::FrameEffects::default(),
+            1,
+            sim.session().started(),
+        );
     }
     assert!(
         !sim.substrate.voxel_anims.contains_key(first),

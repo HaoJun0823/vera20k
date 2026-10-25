@@ -206,6 +206,11 @@ impl TemporalState {
         self.link.is_some()
     }
 
+    /// `TemporalClass+0x48 WarpRemaining` on this object's own link.
+    pub fn warp_remaining(&self) -> Option<i32> {
+        self.link.as_ref().map(|link| link.warp_remaining)
+    }
+
     /// Every object id this state names, for the snapshot reference check.
     pub(crate) fn references(&self) -> impl Iterator<Item = u64> + '_ {
         self.head.into_iter().chain(
@@ -550,18 +555,13 @@ impl Simulation {
             owner: entity.owner(),
             victim_type: entity.type_ref(),
         };
-        Self::dispatch_under_attack_events(
-            &self.interner,
-            &self.session,
-            &self.house_alliances,
-            &mut self.sound_events,
-            &self.houses,
-            &[event],
-            rules,
-        );
         if notify_house {
-            self.raise_house_attacked_tags(event.owner, rules, registry, effects);
+            self.notify_house_under_attack(event, rules, registry, effects);
+            return;
         }
+        // Temporal71B04C/71B05F's harvester branch calls radar/EVA directly, with
+        // no House Tags, and also completes before returning to the warp.
+        self.submit_under_attack_warning(event, rules, effects);
     }
 
     /// `TemporalClass::CanWarpTarget @ 0x0071AE50`: a `Warpable=` type, not
@@ -731,9 +731,30 @@ impl Simulation {
             return;
         };
         if category == EntityCategory::Structure {
+            // Temporal71A9A0..71A9A7: only positive true Occupants count
+            // calls KillOccupants(NULL), ahead of Cargo disposal/bunker release.
+            if self
+                .substrate
+                .entities
+                .get(target)
+                .is_some_and(|entity| entity.passenger_role.occupants().count() > 0)
+            {
+                crate::sim::passenger::garrison_eject::kill_building_occupants(
+                    self,
+                    target,
+                    UninitContext::new(rules, registry).with_effects(effects),
+                );
+            }
+            // TemporalClass::Update (0x0071A9AC..0x0071A9DC) scalar-deletes Cargo
+            // before the parent's kill/UnInit. This private erase runs inside
+            // the admitted live object pass, whose active GameState is 1.
+            self.scalar_delete_building_cargo(
+                target,
+                UninitContext::new(rules, registry).with_effects(effects),
+                1,
+            );
             // 0x0071A9EE..0x0071AA15: a Tank Bunker releases its occupant
-            // (`0x004593A0`). Garrison occupants and absorbed passengers go
-            // in the UnInit below (module residual).
+            // (`0x004593A0`) after the synchronous Cargo destructors.
             crate::sim::docking::bunker_link::release_sell_destroy(self, target, rules, effects);
         }
         // 0x0071AA90: the erased object's own bunker link (`+0x2E4`) names a
@@ -1004,15 +1025,9 @@ impl Simulation {
             return;
         };
         if let Some(target) = target {
+            //71AD40 clears only +270/+278 here. Unlike ClearWarp71ACD0,
+            //it never calls ForceOnline452210 or dirties the target House.
             self.substrate.set_temporal_head(target, None);
-            self.substrate
-                .set_building_online_for_temporal(target, true); //ClearWarp71AD0B
-            if let Some(owner) = self.substrate.entities.get(target).and_then(|entity| {
-                (entity.category() == EntityCategory::Structure).then_some(entity.owner())
-            }) {
-                Self::invalidate_house_power(&self.houses, &mut self.power_states, owner, false); //ClearWarp71AD04
-                self.houses.request_house_tech_tree_recheck(owner); //71AD17
-            }
             if let Some(stored) = self.substrate.temporal_link_mut(attacker) {
                 stored.target = None;
             }
@@ -1426,3 +1441,7 @@ fn location_coord(entity: &GameEntity) -> AnimWorldCoord {
 #[cfg(test)]
 #[path = "temporal_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "temporal_cargo_disposal_tests.rs"]
+mod cargo_disposal_tests;

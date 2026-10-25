@@ -313,6 +313,8 @@ pub enum SnapshotRestoreError {
     },
     #[error("invalid retained foundation for object {object_id}")]
     InvalidFoundation { object_id: u64 },
+    #[error("invalid saved live Cell Land: {0}")]
+    InvalidSavedCellLand(String),
     #[error("invalid UnitDelivery snapshot state: {0}")]
     InvalidUnitDelivery(&'static str),
     #[error("invalid paid two-stage selection: {0}")]
@@ -325,6 +327,10 @@ pub enum SnapshotRestoreError {
         object_id: u64,
         reason: &'static str,
     },
+    #[error("invalid saved VoxelAnimType damage identity")]
+    InvalidVoxelTypeDamage,
+    #[error("invalid saved VoxelAnim {object_id} type identity")]
+    InvalidVoxelAnimType { object_id: u64 },
     #[error("invalid saved TechnoType TechLevel state: {reason}")]
     InvalidTypeTechLevels { reason: String },
     #[error("invalid scalable Bullet runtime: {0}")]
@@ -703,10 +709,11 @@ impl GameSnapshot {
         )
     }
 
-    /// Deserialize a current-layout snapshot without content validation.
+    /// Deserialize an internal current-layout checkpoint without content validation.
     ///
     /// This exists for internal tests and diagnostics. Production restoration
     /// uses [`Self::load_with_resources`] and validates the incoming resources.
+    /// Keep planning state here; the admitted player-load path alone discards it.
     /// Like retail's post-read Scenario
     /// reinitializer, full deserialization resets the embedded Scenario RNG to
     /// `Random__Seed(0)` even though its saved bytes remain in the wire layout.
@@ -784,7 +791,7 @@ impl GameSnapshot {
     }
 
     fn deserialize_admitted(bytes: &[u8]) -> Result<GameSnapshot, SnapshotError> {
-        let snapshot: GameSnapshot = save_codec::deserialize(bytes)?;
+        let mut snapshot: GameSnapshot = save_codec::deserialize(bytes)?;
         if snapshot.tick != snapshot.sim.session.tick() {
             return Err(SnapshotError::TickMetadataMismatch {
                 header_tick: snapshot.tick,
@@ -797,6 +804,10 @@ impl GameSnapshot {
                 simulation_map_name: snapshot.sim.session.map_name().to_owned(),
             });
         }
+        // Native content Load clears PlanMgr, then TechnoLoad zeros +514.
+        // Retain the wire layout for internal checkpoints, but player loads
+        // cannot restore future paths. Current missions and events survive.
+        snapshot.sim.reset_planning_after_player_load();
         Ok(snapshot)
     }
 
@@ -1211,6 +1222,19 @@ fn restore_object_references(
                     passenger_id,
                 )?;
             }
+        }
+
+        // BuildingClass's saved vector+684 contains independent Infantry
+        // references; Cargo+114 is validated above, never reclassified by flags.
+        for &occupant_id in entity.passenger_role.occupants().ids() {
+            require_resolved_reference(
+                entity_ids.contains(&occupant_id),
+                "EntityStore",
+                entity_id,
+                "passenger_role.occupants.ids",
+                "EntityStore",
+                occupant_id,
+            )?;
         }
 
         // SpawnManagerClass__Load @ 0x006B7F10 queues every non-null
@@ -1963,6 +1987,9 @@ impl Simulation {
             .occupancy
             .restore_memberships(&self.substrate.entities)
             .map_err(|reason| SnapshotRestoreError::InvalidCellMembership { reason })?;
+        // VERA-only compatibility: the retired frame-start scan setting keeps
+        // its serialized slot, but every restored object scans live.
+        self.scan_batch = None;
         Ok(())
     }
 
@@ -1982,10 +2009,58 @@ impl Simulation {
         overlay_registry: &crate::rules::overlay_types::OverlayTypeRegistry,
         prepare_terrain_assets: Option<&mut SnapshotTerrainAssetPreparation<'_>>,
     ) -> Result<SnapshotMapRestoreOutput, SnapshotRestoreError> {
+        self.restore_map_authority_after_load(rules, overlay_registry, prepare_terrain_assets, None)
+    }
+
+    /// The app's user-file boundary only. Generic simulation continuations must
+    /// not run CellLoad4839F0 / Map no-init565190's crate resets.
+    pub fn restore_map_authority_after_user_load(
+        &mut self,
+        rules: &crate::rules::ruleset::RuleSet,
+        overlay_registry: &crate::rules::overlay_types::OverlayTypeRegistry,
+        prepare_terrain_assets: Option<&mut SnapshotTerrainAssetPreparation<'_>>,
+        saved_land: crate::map::resolved_terrain::SavedCellLandValues,
+    ) -> Result<SnapshotMapRestoreOutput, SnapshotRestoreError> {
+        self.restore_map_authority_after_load(
+            rules,
+            overlay_registry,
+            prepare_terrain_assets,
+            Some(saved_land),
+        )
+    }
+
+    fn restore_map_authority_after_load(
+        &mut self,
+        rules: &crate::rules::ruleset::RuleSet,
+        overlay_registry: &crate::rules::overlay_types::OverlayTypeRegistry,
+        prepare_terrain_assets: Option<&mut SnapshotTerrainAssetPreparation<'_>>,
+        saved_land: Option<crate::map::resolved_terrain::SavedCellLandValues>,
+    ) -> Result<SnapshotMapRestoreOutput, SnapshotRestoreError> {
         self.validate_type_tech_levels(rules)?;
+        for (id, name, _) in self.voxel_type_damage_identity_entries() {
+            if rules.voxel_anim_type_id_by_name(name) != Some(id)
+                || rules.voxel_anim_type(id).name != name
+            {
+                return Err(SnapshotRestoreError::InvalidVoxelTypeDamage);
+            }
+        }
+        for (&object_id, debris) in self.substrate.voxel_anims.iter() {
+            if debris.type_id().0 as usize >= rules.voxel_anim_type_count() {
+                return Err(SnapshotRestoreError::InvalidVoxelAnimType { object_id });
+            }
+        }
         // TerrainLoad71CDA0 preserves the separately saved Display/Logic
         // vectors. Only ObjectUnlimbo5F4FEF..5F5040's eligible spawners need
         // Logic; validate with restored type state without rebuilding order.
+        if let Some(grid) = self.resolved_terrain.as_ref() {
+            for &(x, y) in self.terrain_objects.cell_index().keys() {
+                if grid.native_fixed_cell_index(x as i16, y as i16).is_none() {
+                    return Err(SnapshotRestoreError::InvalidCellMembership {
+                        reason: format!("Terrain Cell ({x}, {y}) has no native allocation"),
+                    });
+                }
+            }
+        }
         for terrain in self.terrain_objects.objects().values() {
             if !terrain.is_live() {
                 continue;
@@ -1997,6 +2072,14 @@ impl Simulation {
                     object_id: terrain.stable_id(),
                     type_name: type_name.to_owned(),
                 })?;
+            // TypeLoad71E22D rebinds its retained selector, but only actual
+            // live instance admission needs an executable terminated list.
+            // Preserve saved Cell heads; never infer them from this check.
+            terrain_type.occupied_cell_offsets().map_err(|error| {
+                SnapshotRestoreError::InvalidCellMembership {
+                    reason: error.to_string(),
+                }
+            })?;
             if !terrain.in_logic_vector()
                 && terrain.joins_logic_on_unlimbo(terrain_type, self.session.game_mode())
             {
@@ -2071,6 +2154,25 @@ impl Simulation {
             });
         }
 
+        if let Some(saved_land) = saved_land.as_ref() {
+            // MouseLoad restores Map+68/raw rows before LoadContent67E8CD's
+            // hierarchy pass. A user file cannot invent that saved topology
+            // from the Cell+4C values which CellLoad has just reset to zero.
+            let zones = self.zone_grid.as_ref().ok_or(
+                SnapshotRestoreError::MissingMapAuthorityComponent {
+                    component: "ZoneGrid",
+                },
+            )?;
+            if !zones.is_native_load_pending() {
+                return Err(SnapshotRestoreError::NavigationAuthorityPublicationFailed);
+            }
+            self.crate_authority.reset_coordinates_after_user_load();
+            self.overlay_grid
+                .as_mut()
+                .expect("validated overlay cache")
+                .reset_crate_fields_after_user_load(saved_land.allocated_cells());
+        }
+
         // Reproject runtime isometric replacements onto the pristine
         // app-supplied map before overlay, bridge, and zone reconstruction.
         self.dynamic_terrain_cells
@@ -2143,6 +2245,14 @@ impl Simulation {
                     );
                 }
             }
+        }
+
+        if let Some(saved_land) = saved_land {
+            self.resolved_terrain
+                .as_mut()
+                .expect("validated terrain cache")
+                .restore_user_loaded_land(&saved_land)
+                .map_err(|error| SnapshotRestoreError::InvalidSavedCellLand(error.to_string()))?;
         }
 
         if !self.rebuild_dynamic_navigation(rules) {
@@ -2330,6 +2440,7 @@ mod tests {
             rules,
             Some(&registry),
             crate::sim::combat::TerrainDamageEvent {
+                damage_writeback: None,
                 stable_id: tree,
                 rx: 3,
                 ry: 4,
@@ -2338,6 +2449,7 @@ mod tests {
                 warhead_ref,
                 near_center_ic_isolation_eligible: false,
             },
+            true,
             crate::sim::world::FrameEffects::default(),
         );
         assert_eq!(
@@ -3352,6 +3464,7 @@ mod tests {
             !crate::rules::ARES_ENABLED,
             !crate::rules::PHOBOS_ENABLED,
             !crate::rules::NPATCH_ENABLED,
+            !crate::rules::VERAX_ENABLED,
         );
         // A complete header with no body proves capability admission runs before
         // Simulation deserialization, even without bound scenario resources.
@@ -5032,7 +5145,7 @@ mod tests {
         use crate::sim::game_entity::GameEntity;
         use crate::sim::movement::ShipLocomotionRuntime;
         use crate::sim::movement::locomotor::LocomotorState;
-        use crate::util::fixed_math::{SIM_HALF, SIM_ONE};
+        use crate::util::fixed_math::SIM_ONE;
 
         let mut sim = Simulation::new();
         let owner = sim.interner.intern("Soviet");
@@ -5071,9 +5184,29 @@ mod tests {
             .set_for_test(7);
         assert_ne!(sim.state_hash(), populated_counter_hash);
 
+        sim.substrate
+            .entities
+            .get_mut(1)
+            .unwrap()
+            .foot_speed
+            .set_speed_fraction_native_bits(0x3fc9_9999_9999_999a);
+        let fraction_hash = sim.state_hash();
+        sim.substrate
+            .entities
+            .get_mut(1)
+            .unwrap()
+            .foot_speed
+            .set_speed_fraction_native_bits(0x3fc9_9999_9999_999b);
+        assert_ne!(
+            sim.state_hash(),
+            fraction_hash,
+            "adjacent doubles with the same fixed projection must hash differently"
+        );
         let ship_head = DriveCoord::cell(6, 5, 0);
         let entity = sim.substrate.entities.get_mut(1).expect("SHP unit");
-        entity.foot_speed.set_speed_fraction(SIM_HALF);
+        entity
+            .foot_speed
+            .set_speed_fraction_native_bits(0x3fc9_9999_9999_999a);
         // This serialization fixture supplies a Ship instance explicitly.
         entity.locomotor = Some(LocomotorState::for_test_kind(LocomotorKind::Ship));
         entity
@@ -5086,6 +5219,14 @@ mod tests {
                     .with_head_to_for_test(Some(ship_head))
                     .with_target_speed_fraction_for_test(SIM_ONE),
             ));
+        entity
+            .locomotor
+            .as_mut()
+            .unwrap()
+            .store_track_target_fraction_native(
+                crate::sim::movement::track_process::TrackFamily::Ship,
+                crate::util::native_x87::NativeF64Bits::from_bits(0x3ff3_3333_3333_3334),
+            );
         let populated_shp_state_hash = sim.state_hash();
         assert_ne!(populated_shp_state_hash, populated_counter_hash);
 
@@ -5124,9 +5265,26 @@ mod tests {
             .expect("restored Ship runtime");
         assert_eq!(restored_ship.destination(), Some(ship_head));
         assert_eq!(restored_ship.head_to(), Some(ship_head));
-        assert_eq!(restored_ship.target_speed_fraction(), SIM_ONE);
+        assert_eq!(
+            restored
+                .entities()
+                .get(1)
+                .unwrap()
+                .locomotor
+                .as_ref()
+                .unwrap()
+                .track_target_fraction_native(
+                    crate::sim::movement::track_process::TrackFamily::Ship
+                )
+                .unwrap()
+                .bits(),
+            0x3ff3_3333_3333_3334
+        );
         let restored_owner_speed = &restored.substrate.entities.get(1).unwrap().foot_speed;
-        assert_eq!(restored_owner_speed.applied_fraction(), SIM_HALF);
+        assert_eq!(
+            restored_owner_speed.native_applied_fraction().bits(),
+            0x3fc9_9999_9999_999a
+        );
         assert_eq!(restored.state_hash(), populated_shp_state_hash);
     }
 
@@ -8464,11 +8622,10 @@ mod tests {
             terrain
         };
         for terrain in [&damaged, &destroyed, &spawner] {
-            sim.terrain_objects.insert_constructed(
-                terrain.clone(),
-                terrain.stable_id() == spawner_id,
-                true,
-            );
+            sim.terrain_objects
+                .insert_constructed(terrain.clone(), terrain.stable_id() == spawner_id);
+            sim.terrain_objects
+                .add_to_cell(terrain.stable_id(), terrain.cell());
             assert!(sim.register_terrain_object(terrain.stable_id(), &rules));
             mark_terrain_raw_occupation(
                 &mut sim.substrate.raw_cell_occupation,

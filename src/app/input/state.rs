@@ -8,7 +8,7 @@
 use crate::render::upscale_pass::ZoomGeometry;
 use crate::sim::intern::InternedId;
 use crate::sim::snapshot::saved_local_view::{
-    CONTROL_GROUP_SLOTS, SavedCursorModes, SavedLocalView, SavedLocalViewError, SavedTargeting,
+    SavedCursorModes, SavedLocalView, SavedLocalViewError, SavedTargeting,
 };
 use std::collections::HashSet;
 use winit::keyboard::{KeyCode, ModifiersState};
@@ -91,14 +91,6 @@ impl PreparedSavedLocalView {
                 }
             }
         }
-        for &object_id in saved.control_groups().iter().flatten() {
-            if simulation.entities().get(object_id).is_none() {
-                return Err(SavedLocalViewError::MissingEntityReference {
-                    field: "control group",
-                    object_id,
-                });
-            }
-        }
         let (order, pending) = crate::app::input::dispatch::selection_order_for_world(
             simulation,
             Some(rules),
@@ -153,8 +145,8 @@ impl PreparedSavedLocalView {
         Ok(Self { saved, targeting })
     }
 
-    /// Restore exactly the saved owners after navigation's world-replacement
-    /// invalidation. The Tactical view has its own owner,
+    /// Restore persistent owners after navigation's world-replacement
+    /// invalidation. Active YR PlanMgr is reset, not restored. The Tactical view has its own owner,
     /// camera::restore_tactical_view, applied once new geometry is installed.
     pub(crate) fn commit_into(
         self,
@@ -165,7 +157,10 @@ impl PreparedSavedLocalView {
             .view_bookmarks
             .restore_saved_cells(self.saved.view_bookmarks());
         let modes = self.saved.modes();
-        input.planning.restore_active(modes.planning);
+        // ClearScene6370B0 clears active YR Q at AC4CF4. Mouse raw load can
+        // restore legacy Display+11B3, a different byte. Do not use the saved
+        // VERA bit to reactivate the producer or emit a new PLANCOMMIT.
+        input.planning.reset();
         sidebar.repair_mode_on = modes.repair;
         sidebar.sell_mode_on = modes.sell;
         input.targeting_mode = self.targeting;
@@ -174,10 +169,9 @@ impl PreparedSavedLocalView {
         // raw but MouseLoad never swizzles it, so no retry survives a load.
         input.building_placement_preview = None;
         input.saved_building_placement = None;
-        let (order, pending, groups, follow) = self.saved.into_local_input();
+        let (order, pending, follow) = self.saved.into_local_input();
         input.selection_order = order;
         input.selection_order_pending = pending;
-        input.control_groups = groups.into();
         input.follow_target = follow;
         // ClearScene685640 and PostLoad6851D2 call734210, which resets the
         // last team slot to -1 and rewinds both click clocks. None has the
@@ -238,6 +232,15 @@ pub(crate) struct MatchInputState {
     pub(crate) retail_screenshot_requested: bool,
     /// True while left-dragging on minimap (camera pan mode).
     pub(crate) minimap_dragging: bool,
+    /// Touch gestures translated into mouse input (Windows touchscreens). Its
+    /// sticky gesture lives here, beside the other pointer bytes, so the match
+    /// teardown ladder resets it with them.
+    pub(crate) touch_mapper: crate::app::input::touch::TouchMouseMapper,
+    /// The cursor position came from a touch, not a hardware pointer. VERA
+    /// internal: edge auto-scroll needs a pointer that can leave the band, and
+    /// a lifted finger leaves the synthetic cursor parked. The next real
+    /// `CursorMoved` clears it.
+    pub(crate) cursor_from_touch: bool,
     /// Selection drag state — tracks mouse drag for box-select.
     pub(crate) selection_state: crate::sim::selection::SelectionState,
     /// Player-side `g_CurrentObjects` order. Selection commands update this
@@ -250,8 +253,6 @@ pub(crate) struct MatchInputState {
     pub(crate) selection_voice_enabled: bool,
     /// Pending order mode for the next right-click command.
     pub(crate) queued_order_mode: crate::app::types::OrderMode,
-    /// Control group slots (0-9) storing stable entity ids.
-    pub(crate) control_groups: Vec<Vec<u64>>,
     /// Slot and wall-clock instant of the last plain control-group recall, for
     /// the 800 ms double-tap that centres the camera. Wall clock, never sim
     /// state: the original stamps `timeGetTime()` here and only a recall writes
@@ -395,12 +396,13 @@ impl MatchInputState {
         Self {
             cursor_visibility: Default::default(),
             minimap_dragging: false,
+            touch_mapper: crate::app::input::touch::TouchMouseMapper::new(),
+            cursor_from_touch: false,
             selection_state: crate::sim::selection::SelectionState::new(),
             selection_order: Vec::new(),
             selection_order_pending: false,
             selection_voice_enabled: true,
             queued_order_mode: crate::app::types::OrderMode::Move,
-            control_groups: vec![Vec::new(); CONTROL_GROUP_SLOTS],
             last_control_group_press: None,
             follow_target: None,
             targeting_mode: None,
@@ -597,7 +599,7 @@ impl MatchInputState {
 
     /// Consume the ordered native lifecycle facts through this input owner.
     /// Returning true requests an actual-cursor preview refresh after retry.
-    pub(crate) fn apply_building_placement_output(
+    pub(crate) fn apply_lifecycle_output(
         &mut self,
         output: &crate::sim::world::LifecycleOutput,
         local_house: Option<InternedId>,
@@ -659,6 +661,10 @@ impl MatchInputState {
         self.minimap_dragging = false;
         self.selection_state.cancel_drag();
         self.tactical_mouse.cancel_mouse_drag();
+        // The touch gesture is the mapper's; without this a finger still down
+        // when the drag is torn down would deliver its release into the screen
+        // that replaced it.
+        self.touch_mapper.reset();
     }
 
     /// TAction46 clears the active display modes before Lock684240 cancels
@@ -697,17 +703,6 @@ impl MatchInputState {
             self.selection_order_pending,
             &[],
         );
-        assert_eq!(self.control_groups.len(), CONTROL_GROUP_SLOTS);
-        // Native membership lives on each serialized Techno, not in a list
-        // retaining already-deleted objects. Project the existing app lists
-        // onto the same entity store being saved, preserving member order.
-        let groups = std::array::from_fn(|slot| {
-            self.control_groups[slot]
-                .iter()
-                .copied()
-                .filter(|id| simulation.entities().get(*id).is_some())
-                .collect()
-        });
         let alive = |id: &u64| simulation.entities().get(*id).is_some();
         let targeting = self.targeting_mode.as_ref().map(|mode| match mode {
             crate::app::types::TargetingMode::BuildingPlacement(target) => {
@@ -725,12 +720,12 @@ impl MatchInputState {
             self.view_bookmarks.saved_cells(),
             order,
             pending,
-            groups,
             self.follow_target.filter(alive),
             SavedCursorModes {
                 repair: sidebar.repair_mode_on,
                 sell: sidebar.sell_mode_on,
-                planning: self.planning.active(),
+                // Active YR PlanMgr is outside Mouse's saved Display body.
+                planning: false,
                 targeting,
             },
         )

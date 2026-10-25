@@ -29,6 +29,11 @@ const _: () = assert!(
     cfg!(feature = "npatch") == rules::NPATCH_ENABLED,
     "enable NPatch through the vera20k package's npatch feature"
 );
+// The same boundary for VERA20K's own VeraX extension capability.
+const _: () = assert!(
+    cfg!(feature = "verax") == rules::VERAX_ENABLED,
+    "enable VeraX through the vera20k package's verax feature"
+);
 
 // Opaque process-RNG cursor receipt shared by map generation and simulation.
 use vera20k_core::rng_continuation;

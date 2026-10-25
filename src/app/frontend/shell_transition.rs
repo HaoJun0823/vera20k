@@ -19,6 +19,7 @@ use anyhow::{Result, bail};
 
 use crate::app::AppState;
 use crate::ui::shell::descriptor::DialogId;
+use crate::ui::shell::menu_page::MenuPageSpec;
 
 // Re-export the render-agnostic schedule types from the shared substrate so the
 // shell renderers (and the `AppState` field) keep their existing import paths.
@@ -99,11 +100,23 @@ pub(crate) enum ShellSlideKind {
     Score,
     /// Dialog 0x103 — campaign victory StandaloneScore.
     CampaignScore,
+    /// Dialog 0xBC7 — the LAN Cooperative campaign end.
+    CampaignEnd,
     /// Dialog 0x105 — Choose Map's random-map dialog.
     RandomMap,
 }
 
 impl ShellSlideKind {
+    /// The shell of a campaign score page's dialog.
+    pub(crate) fn campaign_score(
+        dialog: crate::ui::campaign_score_shell::CampaignScoreDialog,
+    ) -> Self {
+        match dialog {
+            crate::ui::campaign_score_shell::CampaignScoreDialog::Victory => Self::CampaignScore,
+            crate::ui::campaign_score_shell::CampaignScoreDialog::CampaignEnd => Self::CampaignEnd,
+        }
+    }
+
     /// The Win32 dialog resource id this shell maps to. The slide's eligibility
     /// and column are looked up from this id in the data-driven `slide` table
     /// (no hardcoded per-kind counts here).
@@ -135,6 +148,7 @@ impl ShellSlideKind {
             ShellSlideKind::ChooseMap => 0x006B,
             ShellSlideKind::Score => 0x0108,
             ShellSlideKind::CampaignScore => 0x0103,
+            ShellSlideKind::CampaignEnd => 0x0BC7,
             ShellSlideKind::RandomMap => 0x0105,
         })
     }
@@ -144,14 +158,20 @@ impl ShellSlideKind {
     /// error. Options' two pages adjust `0xD5`'s retail column to VERA's
     /// buttons: the main page slides Vera Options under Network too, and
     /// VERA's page has only Back, as on the Keyboard page `0xA3`.
-    pub(crate) fn column(self, rows: u32) -> SlideColumn {
+    pub(crate) fn column(self, rows: u32, page: Option<&MenuPageSpec>) -> SlideColumn {
         let spec = crate::ui::shell::slide::slide_spec_for(self.dialog_id())
             .expect("rendered shell dialog must have a slide column");
-        let top_buttons = match self {
-            ShellSlideKind::Options => spec.top_buttons + 1,
-            ShellSlideKind::VeraOptions => 0,
-            _ => spec.top_buttons,
-        };
+        // WOL's simplified pages must slide only their visible buttons too.
+        let top_buttons = page
+            .filter(|page| page.dialog == self.dialog_id())
+            .map_or_else(
+                || match self {
+                    ShellSlideKind::Options => spec.top_buttons + 1,
+                    ShellSlideKind::VeraOptions => 0,
+                    _ => spec.top_buttons,
+                },
+                |page| page.stacked.len() as u32,
+            );
         crate::ui::shell::slide::SlideDialogSpec {
             top_buttons,
             ..spec
@@ -165,6 +185,19 @@ impl ShellSlideKind {
             crate::ui::main_menu_dialogs::options::OptionsPage::Main => ShellSlideKind::Options,
             crate::ui::main_menu_dialogs::options::OptionsPage::Vera => ShellSlideKind::VeraOptions,
         }
+    }
+}
+
+fn column_page_spec(
+    visit: Option<&crate::app::shell_wol::WolVisit>,
+    kind: Option<ShellSlideKind>,
+) -> Option<&'static MenuPageSpec> {
+    let visit = visit?;
+    match kind? {
+        ShellSlideKind::WolWelcome => Some(visit.welcome_page_spec()),
+        ShellSlideKind::WolLogin => Some(visit.login()?.policy.page_spec()),
+        ShellSlideKind::WolLobby => Some(visit.lobby()?.ui.page_spec()),
+        _ => None,
     }
 }
 
@@ -258,6 +291,9 @@ pub(crate) enum ShellExitThen {
     /// Campaign victory Continue (`0x423`, result 1): `0x103` slides out
     /// before GameExit::Victory continues the campaign.
     CampaignScoreContinue,
+    /// Campaign-end Continue (`0x6D1`, result 1): `0xBC7` slides out and
+    /// Main_Game returns to the mode's shell.
+    CampaignEndContinue,
     /// A Westwood Online mode button: `0x10E` closes with the mode written
     /// and `WOL_Main` runs that mode's flow.
     WolAction(crate::ui::wol_shell::WolMode),
@@ -345,6 +381,7 @@ impl ShellExitThen {
             Self::WolAddBuddyClose { .. } => ShellSlideKind::WolAddBuddyQuery,
             Self::ScoreContinue => ShellSlideKind::Score,
             Self::CampaignScoreContinue => ShellSlideKind::CampaignScore,
+            Self::CampaignEndContinue => ShellSlideKind::CampaignEnd,
         }
     }
 }
@@ -413,7 +450,10 @@ pub(crate) fn begin_shell_exit(state: &mut AppState, then: ShellExitThen) -> She
         kind,
     ) {
         ExitStartRule::Slide => {
-            let column = kind.column(panel_rows(state));
+            let column = kind.column(
+                panel_rows(state),
+                column_page_spec(state.frontend.wol.as_ref(), Some(kind)),
+            );
             state.frontend.shell_exit = Some(ShellExit {
                 wave: ShellFrameWave::new_slide_out(column, Instant::now()),
                 then,
@@ -523,6 +563,7 @@ enum ShellWaveCompletion {
 struct ShellLifecycleReducer<'a> {
     /// Right-panel tile rows for a new wave's column.
     panel_rows: u32,
+    page_spec: Option<&'static MenuPageSpec>,
     active_shell: &'a mut Option<ShellSlideKind>,
     first_paint_slide: &'a mut Option<ShellFrameWave>,
     slide_generation: &'a mut u64,
@@ -536,6 +577,10 @@ impl<'a> ShellLifecycleReducer<'a> {
     fn from_state(state: &'a mut AppState) -> Self {
         Self {
             panel_rows: panel_rows(state),
+            page_spec: column_page_spec(
+                state.frontend.wol.as_ref(),
+                current_shell_slide_target(state),
+            ),
             active_shell: &mut state.frontend.shell_slide_active_shell,
             first_paint_slide: &mut state.frontend.shell_first_paint_slide,
             slide_generation: &mut state.frontend.shell_slide_generation,
@@ -576,10 +621,13 @@ impl<'a> ShellLifecycleReducer<'a> {
                     }
                     ShellFrameWave::new_presented_main_menu(
                         *self.slide_generation,
-                        kind.column(self.panel_rows),
+                        kind.column(self.panel_rows, self.page_spec),
                     )
                 } else {
-                    ShellFrameWave::new_first_paint_slide(kind.column(self.panel_rows), now)
+                    ShellFrameWave::new_first_paint_slide(
+                        kind.column(self.panel_rows, self.page_spec),
+                        now,
+                    )
                 });
                 ShellEntryEffect::Started(kind)
             }
@@ -633,7 +681,9 @@ impl<'a> ShellLifecycleReducer<'a> {
             ShellSlideKind::ChooseMap => ShellWaveCompletion::ChooseMap,
             ShellSlideKind::RandomMap => ShellWaveCompletion::RandomMap,
             ShellSlideKind::Score => ShellWaveCompletion::Score,
-            ShellSlideKind::CampaignScore => ShellWaveCompletion::CampaignScore,
+            ShellSlideKind::CampaignScore | ShellSlideKind::CampaignEnd => {
+                ShellWaveCompletion::CampaignScore
+            }
         })
     }
 
@@ -780,10 +830,14 @@ pub(crate) fn current_shell_slide_target(state: &AppState) -> Option<ShellSlideK
                 .then_some(ShellSlideKind::Score);
         }
         if crate::app::App::campaign_score_shell_active(state) {
-            return crate::ui::shell::slide::is_slide_eligible(
-                ShellSlideKind::CampaignScore.dialog_id(),
-            )
-            .then_some(ShellSlideKind::CampaignScore);
+            let kind = ShellSlideKind::campaign_score(
+                state
+                    .frontend
+                    .campaign_score_page
+                    .as_ref()
+                    .map_or_else(Default::default, |page| page.dialog),
+            );
+            return crate::ui::shell::slide::is_slide_eligible(kind.dialog_id()).then_some(kind);
         }
         return None;
     }
@@ -1125,7 +1179,7 @@ pub(crate) fn render_shell_first_paint_slide(
             encoder,
             destination,
         )?,
-        ShellSlideKind::CampaignScore => {
+        ShellSlideKind::CampaignScore | ShellSlideKind::CampaignEnd => {
             crate::app::frontend::campaign_score_shell_render::render_campaign_score_page(
                 state,
                 encoder,
@@ -1222,6 +1276,7 @@ pub(crate) fn render_shell_first_paint_slide(
         }
         // 0x103's SHOW completion (`0x4EC` on the dialog) starts every kind-1
         // static and, after playing ScoreAnimSound, the 0x72B kind-4 timer.
+        // 0xBC7's (`0x00470D30`) plays no sound.
         Some(ShellWaveCompletion::CampaignScore) => {
             let now = Instant::now();
             let frames = state
@@ -1230,8 +1285,16 @@ pub(crate) fn render_shell_first_paint_slide(
                 .as_ref()
                 .and_then(|art| art.scra.as_ref())
                 .map_or(0, |strip| strip.frames.len());
+            let victory = state
+                .frontend
+                .campaign_score_page
+                .as_ref()
+                .is_some_and(|page| {
+                    page.dialog == crate::ui::campaign_score_shell::CampaignScoreDialog::Victory
+                });
             let sound = state
                 .rules()
+                .filter(|_| victory)
                 .and_then(|rules| rules.general.score_anim_sound())
                 .map(str::to_owned);
             if let Some(page) = state.frontend.campaign_score_page.as_mut() {
@@ -1386,7 +1449,7 @@ mod tests {
 
     /// Last presented tick of a `0xE2` entry at 800x600 (9 tile rows).
     fn main_menu_terminal_tick() -> u8 {
-        ShellSlideKind::MainMenu.column(9).total_ticks() as u8 - 1
+        ShellSlideKind::MainMenu.column(9, None).total_ticks() as u8 - 1
     }
 
     #[test]
@@ -1394,7 +1457,7 @@ mod tests {
         // Movie list 0x129 at 800x600: 9 tile rows, 9 + 9 = 18 ticks of 30 ms.
         let t0 = Instant::now();
         let mut exit = ShellExit {
-            wave: ShellFrameWave::new_slide_out(ShellSlideKind::MovieList.column(9), t0),
+            wave: ShellFrameWave::new_slide_out(ShellSlideKind::MovieList.column(9, None), t0),
             then: ShellExitThen::MovieListBack,
             completed_at: None,
         };
@@ -1420,7 +1483,7 @@ mod tests {
     #[test]
     fn shell_kinds_resolve_their_slide_columns() {
         let top_and_bottom = |kind: ShellSlideKind| {
-            let column = kind.column(9);
+            let column = kind.column(9, None);
             (column.top_buttons, column.bottom_button, column.map_button)
         };
         assert_eq!(top_and_bottom(ShellSlideKind::MainMenu), (5, true, false));
@@ -1447,6 +1510,18 @@ mod tests {
             top_and_bottom(ShellSlideKind::VeraOptions),
             (0, true, false)
         );
+    }
+
+    #[test]
+    fn modern_wol_slides_only_animate_the_visible_button_faces() {
+        let welcome = ShellSlideKind::WolWelcome
+            .column(9, Some(&crate::ui::wol_shell::WOL_ONLINE_WELCOME_PAGE));
+        assert_eq!((welcome.top_buttons, welcome.bottom_button), (1, true));
+        let lobby = crate::ui::wol_lobby::WolLobbyState::new(false, true);
+        let column = ShellSlideKind::WolLobby.column(9, Some(lobby.page_spec()));
+        assert_eq!((column.top_buttons, column.bottom_button), (3, true));
+        assert_eq!(ShellSlideKind::WolWelcome.column(9, None).top_buttons, 6);
+        assert_eq!(ShellSlideKind::WolLobby.column(9, None).top_buttons, 8);
     }
 
     #[test]
@@ -1505,6 +1580,7 @@ mod tests {
         // Open 0x100: 0xE2 is destroyed, but no 0x100 frame is allowed to run.
         ShellLifecycleReducer {
             panel_rows: 9,
+            page_spec: None,
             active_shell: &mut active_shell,
             first_paint_slide: &mut first_paint_slide,
             slide_generation: &mut slide_generation,
@@ -1522,6 +1598,7 @@ mod tests {
         // Queued Back destroys 0x100 and recreates 0xE2 before the frame driver.
         ShellLifecycleReducer {
             panel_rows: 9,
+            page_spec: None,
             active_shell: &mut active_shell,
             first_paint_slide: &mut first_paint_slide,
             slide_generation: &mut slide_generation,
@@ -1538,6 +1615,7 @@ mod tests {
         // wave or sound ever existed; exactly one fresh 0xE2 entry edge does.
         let effect = ShellLifecycleReducer {
             panel_rows: 9,
+            page_spec: None,
             active_shell: &mut active_shell,
             first_paint_slide: &mut first_paint_slide,
             slide_generation: &mut slide_generation,
@@ -1599,6 +1677,7 @@ mod tests {
         assert!(
             ShellLifecycleReducer {
                 panel_rows: 9,
+                page_spec: None,
                 active_shell: &mut active_shell,
                 first_paint_slide: &mut first_paint_slide,
                 slide_generation: &mut slide_generation,
@@ -1655,6 +1734,7 @@ mod tests {
         let later = t0 + Duration::from_secs(1);
         let effect = ShellLifecycleReducer {
             panel_rows: 9,
+            page_spec: None,
             active_shell: &mut active_shell,
             first_paint_slide: &mut first_paint_slide,
             slide_generation: &mut slide_generation,
@@ -1679,7 +1759,7 @@ mod tests {
         let mut active_shell = Some(ShellSlideKind::MainMenu);
         let mut first_paint_slide = Some(ShellFrameWave::new_presented_main_menu(
             52,
-            ShellSlideKind::MainMenu.column(9),
+            ShellSlideKind::MainMenu.column(9, None),
         ));
         let mut slide_generation = 52;
         let mut title_reveal = Kind1StaticReveal::default();
@@ -1711,6 +1791,7 @@ mod tests {
         assert!(
             !ShellLifecycleReducer {
                 panel_rows: 9,
+                page_spec: None,
                 active_shell: &mut active_shell,
                 first_paint_slide: &mut first_paint_slide,
                 slide_generation: &mut slide_generation,

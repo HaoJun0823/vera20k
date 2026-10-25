@@ -610,7 +610,7 @@ impl Simulation {
                     entity.drop_credit.manipulated_by = Some(firer);
                     entity.drop_credit.warped_by_house = Some(firer_house);
                 }
-                self.techno_death_stun(
+                self.stun(
                     held,
                     UninitContext::new(rules, registry).with_effects(effects),
                 );
@@ -923,6 +923,7 @@ impl Simulation {
                     return false;
                 };
                 AreaDamageReceiver::Terrain(TerrainDamageEvent {
+                    damage_writeback: None,
                     stable_id: tree.stable_id(),
                     rx: tree.cell().0,
                     ry: tree.cell().1,

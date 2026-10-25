@@ -403,3 +403,13 @@ fn save_to_pipe_matches_the_native_streams() {
         );
     }
 }
+
+#[test]
+fn multiplayer_digest_ignores_comments_but_keeps_duplicate_value_order() {
+    let base = IniFile::from_str("[General]\nBuildSpeed=.7\nBuildSpeed=.9\n");
+    let padded =
+        IniFile::from_str("; comment\n[General]\nBuildSpeed = .7 ; comment\nBuildSpeed=.9\n");
+    let reordered = IniFile::from_str("[General]\nBuildSpeed=.9\nBuildSpeed=.7\n");
+    assert_eq!(base.multiplayer_digest(), padded.multiplayer_digest());
+    assert_ne!(base.multiplayer_digest(), reordered.multiplayer_digest());
+}

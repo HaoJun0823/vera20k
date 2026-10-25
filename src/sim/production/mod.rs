@@ -48,15 +48,15 @@ pub use self::production_placement::{
     is_within_build_area, placement_preview_for_owner_with_overlays,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use self::production_queue::{
-    dispatch_production_changes_for_tests, publish_production_changes_for_tests,
-};
-#[cfg(any(test, feature = "test-support"))]
 pub(in crate::sim) use self::production_queue::house_for_test;
 pub use self::production_queue::{
     build_options_for_owner, credits_for_owner, has_build_option_for_owner,
     power_balance_for_owner, publish_production_changes, queue_view_for_owner,
     ready_buildings_for_owner,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use self::production_queue::{
+    dispatch_production_changes_for_tests, publish_production_changes_for_tests,
 };
 pub(crate) use self::production_refinery::spawn_building_free_unit;
 pub use self::production_repair::can_repair_building;
@@ -68,10 +68,10 @@ pub(crate) use self::production_sell::sell_back;
 #[cfg(any(test, feature = "test-support"))]
 pub use self::production_sell::sell_building_now_for_test;
 pub use self::production_sell::sell_stage_zero;
-pub use self::production_sell::{SellOrder, can_sell_building};
+pub use self::production_sell::{SellOrder, can_sell_building, techno_refund};
 pub(crate) use self::production_sell::{
-    archive_less_sale, sell_after_owner_change, sell_complete, sell_stage_one, techno_refund,
-    type_refund, undeploy_target,
+    archive_less_sale, sell_after_owner_change, sell_complete, sell_stage_one,
+    sell_useless_repair_contact, type_refund, undeploy_target,
 };
 pub use self::production_spawn::mark_war_factory_spawn_contact;
 pub use self::production_tech::{
@@ -117,6 +117,12 @@ mod tests;
 mod industrial_plant_retail_tests;
 
 #[cfg(test)]
+mod free_unit_harvest_retail_tests;
+
+#[cfg(test)]
+mod production_start_price_tests;
+
+#[cfg(test)]
 #[path = "production_queue_tests.rs"]
 mod queue_tests;
 
@@ -133,7 +139,13 @@ mod replay_tests;
 mod lifecycle_tests;
 
 #[cfg(test)]
+pub(crate) use lifecycle_tests::prerequisite_loss_cancellation_fixture;
+
+#[cfg(test)]
 mod manual_primary_tests;
 
 #[cfg(test)]
 mod native_event_tests;
+
+#[cfg(test)]
+mod typed_identity_tests;

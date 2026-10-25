@@ -1351,7 +1351,10 @@ mod tests {
             MmpbRegionRect::new(998, 758, 432, 332)
         );
         let row = layout_loading_progress_row(
-            LoadingProgressRowPlacement::StandardSkirmish([1600, 1200]),
+            LoadingProgressRowPlacement::StandardSkirmish {
+                render_size: [1600, 1200],
+                participants: 8,
+            },
             [80, 5],
             Some([47, 23]),
             [0, 12],

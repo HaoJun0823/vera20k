@@ -33,13 +33,34 @@ use persistence::{
     SkirmishPersistedSlot, read_setup_snapshot,
 };
 
-const RA2MD_INI: &str = "RA2MD.INI";
+use crate::app::persistence::profile_file;
 const CONCRETE_ITEM_DATA: i32 = -1;
 const RANDOM_ITEM_DATA: i32 = -2;
 const MULTIPLAYER_HANDLE_UNITS: usize = 0x14;
 const MULTIPLAYER_HANDLE_LIMIT_BYTES: usize = 19;
 const DEFAULT_MULTIPLAYER_HANDLE: &[u8] = b"[New Player]";
 const DEFAULT_MULTIPLAYER_GAME_MODE: i32 = 1;
+
+/// VERA HTTPS account names also become persona INI section names. Keep their
+/// admission shared by the HTTP response, login continuation and handle owner.
+pub(crate) fn validate_online_handle(name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !name.is_empty()
+            && name.len() <= 24
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)),
+        "online service returned an invalid player name"
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum HandleSource {
+    #[default]
+    Native,
+    AuthenticatedOnline,
+}
 
 /// Direct launch adapters bypass PrepareSession52E11E/123. Share its Country
 /// allocation/body #1 without cached shell settings or the PortPool RNG draw.
@@ -58,6 +79,9 @@ pub(crate) fn prepare_external_skirmish_countries(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LocalMultiplayerPreferences {
     handle_bytes: Vec<u8>,
+    /// The bytes above have one authority. Native Handle reads cannot replace
+    /// an authenticated online name while that account's visit is alive.
+    handle_source: HandleSource,
     side: i32,
     side_ex: i32,
     color_index: i32,
@@ -98,6 +122,7 @@ impl Default for LocalMultiplayerPreferences {
     fn default() -> Self {
         Self {
             handle_bytes: DEFAULT_MULTIPLAYER_HANDLE.to_vec(),
+            handle_source: HandleSource::Native,
             side: 0,
             side_ex: 0,
             color_index: 0,
@@ -112,9 +137,13 @@ impl LocalMultiplayerPreferences {
     /// Apply the six fields written by `SessionClass__WriteMultiPlayerSettings`
     /// at 0x006990A0. The reader at 0x006980C0 first establishes a complete
     /// Session cache from constructor/string-table defaults, so pump/dialog
-    /// exits still write all six fields when keys were absent from RA2MD.INI.
+    /// exits still write all six fields when keys were absent from VERA.INI.
     fn update_ini_bytes(&self, content: &[u8], side_name: &str) -> Vec<u8> {
-        let handle = encode_multiplayer_handle(&self.handle_bytes);
+        // RA2MD.INI remains the native local-name preference, never the account
+        // database. Online identity stays in this owner's full in-memory bytes.
+        let handle = encode_multiplayer_handle(
+            &self.handle_bytes[..self.handle_bytes.len().min(MULTIPLAYER_HANDLE_LIMIT_BYTES)],
+        );
         let color = self.color_index.to_string();
         let color_ex = self.color_ex.to_string();
         let side_ex = self.side_ex.to_string();
@@ -156,7 +185,7 @@ pub(crate) struct MultiplayerShellRuntime {
     lan_snapshot: MultiplayerSetupSnapshot,
     wol_snapshot: MultiplayerSetupSnapshot,
     // These preferences mirror the process INI8870C0. Native6980C0 does not
-    // reopen RA2MD.INI on a child-dialog visit; keep accepted in-memory values
+    // reopen VERA.INI on a child-dialog visit; keep accepted in-memory values
     // rather than replacing them with an unsolicited disk refresh.
     local_preferences: LocalMultiplayerPreferences,
     /// Physical process INI8870C0 input. Accepted writers update this buffer
@@ -308,7 +337,7 @@ impl MultiplayerShellRuntime {
     /// `0x00699450`, called by Main_Game (`0x0048CF79`) after a scenario
     /// returns in GameMode 1..4 with replay bit 2 of `0x00A8D5F8` clear
     /// (VERA has no replay playback, so the bit is always clear):
-    /// WriteBool the four toggles, then save RA2MD.INI.
+    /// WriteBool the four toggles, then save VERA.INI.
     pub(crate) fn persist_session_toggles(&mut self) {
         self.persist_preferences(|runtime, existing| {
             let toggles = runtime.local_preferences.toggles;
@@ -359,10 +388,12 @@ impl MultiplayerShellRuntime {
 
     /// Restore Session+208's LAN or Session+284's WOL profile (5ED5A0 with
     /// the profile in EDX). Slot01..07 describe visible rows1..7; row0 is the
-    /// new local host. 697F10 uses defaults2/2 for both.
+    /// new local host. 697F10 uses defaults2/2 for both. The same process
+    /// profile retains VERA network rows8..29 without adding disk keys.
     pub(crate) fn new_network_setup(
         &mut self,
         profile: SetupProfile,
+        prefer_computer_mode: bool,
         catalog: &crate::app::scenario_catalog::ScenarioCatalog,
         modes: &[SkirmishGameMode],
         mut options: crate::skirmish_launch::SkirmishLaunchOptions,
@@ -371,7 +402,8 @@ impl MultiplayerShellRuntime {
         room: crate::app::match_runtime::session::NetworkRoom,
     ) -> anyhow::Result<(
         SkirmishLaunchSession,
-        [crate::app::match_runtime::session::NetworkVacancy; 8],
+        [crate::app::match_runtime::session::NetworkVacancy;
+            crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT],
     )> {
         use crate::app::match_runtime::session::NetworkVacancy;
         use crate::skirmish_launch::{
@@ -382,6 +414,17 @@ impl MultiplayerShellRuntime {
         let mut mode = mode_by_id(modes, snapshot.game_mode)
             .or_else(|| modes.first())
             .ok_or_else(|| anyhow::anyhow!("network setup has no game mode"))?;
+        // Modern online setup starts on a computer-capable mode. Select on
+        // this working launch only; the retained native profile stays intact.
+        if prefer_computer_mode && !mode.class.lists_in_skirmish() {
+            mode = modes
+                .iter()
+                .find(|mode| mode.class == crate::skirmish_modes::MpModeClass::Battle)
+                .or_else(|| modes.iter().find(|mode| mode.class.lists_in_skirmish()))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("network setup has no computer-capable game mode")
+                })?;
+        }
         // 0x5ED5E7..0x5ED628: a WOL tournament or clan room refuses a mode
         // whose vtable+4 holds (Cooperative) for the default mode 5D5E10.
         let room_only = room.tournament_or_clan();
@@ -440,7 +483,8 @@ impl MultiplayerShellRuntime {
         } else {
             LaunchTeam::None
         };
-        let mut vacancies = [NetworkVacancy::Open; 8];
+        let mut vacancies =
+            [NetworkVacancy::Open; crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT];
         let mut opponents = Vec::new();
         for (index, persisted) in snapshot.slots.iter().enumerate() {
             let row = (index + 1) as u8;
@@ -452,6 +496,14 @@ impl MultiplayerShellRuntime {
                 6 => Some(AiDifficulty::Hard),
                 _ => None,
             };
+            // A fallback smaller map cannot admit an extended saved AI. This
+            // read leaves the retained profile intact; map/mode admission below
+            // remains owned by MatchSession::select_network_map. Native rows
+            // keep their existing restore-then-capacity ordering.
+            if row >= 8 && i32::from(row) >= selected.player_capacity && difficulty.is_some() {
+                vacancies[usize::from(row)] = NetworkVacancy::Closed;
+                continue;
+            }
             if let Some(difficulty) = difficulty.filter(|_| !observe && !self.lan_observer()) {
                 opponents.push(SkirmishAiSlot {
                     raw_slot_index: row,
@@ -499,8 +551,10 @@ impl MultiplayerShellRuntime {
         &mut self,
         profile: SetupProfile,
         launch: &SkirmishLaunchSession,
-        vacancies: [Option<crate::app::match_runtime::session::NetworkVacancy>; 8],
-        row_choices: [Option<crate::skirmish_launch::SkirmishLocalSlot>; 8],
+        vacancies: [Option<crate::app::match_runtime::session::NetworkVacancy>;
+            crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT],
+        row_choices: [Option<crate::skirmish_launch::SkirmishLocalSlot>;
+            crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT],
         catalog: &crate::app::scenario_catalog::ScenarioCatalog,
     ) {
         use crate::app::match_runtime::session::NetworkVacancy;
@@ -620,7 +674,24 @@ impl MultiplayerShellRuntime {
     /// Session handle `[0xA8B380]`: BB's name edit, and the WOL nickname
     /// after a successful login (`0x007864C0`).
     pub(crate) fn set_handle(&mut self, name: &str) {
+        self.local_preferences.handle_source = HandleSource::Native;
         self.local_preferences.handle_bytes = crate::util::native_string::acp_encode(name);
+        self.local_preferences
+            .handle_bytes
+            .truncate(MULTIPLAYER_HANDLE_LIMIT_BYTES);
+    }
+
+    /// VERA online account identity is independent of native WOL/Handle byte
+    /// limits. Keep one full name for every subsequent setup and rematch reader.
+    pub(crate) fn accept_online_handle(&mut self, name: &str) -> anyhow::Result<()> {
+        validate_online_handle(name)?;
+        self.local_preferences.handle_bytes = name.as_bytes().to_vec();
+        self.local_preferences.handle_source = HandleSource::AuthenticatedOnline;
+        Ok(())
+    }
+
+    pub(crate) fn release_online_handle(&mut self) {
+        self.local_preferences.handle_source = HandleSource::Native;
         self.local_preferences
             .handle_bytes
             .truncate(MULTIPLAYER_HANDLE_LIMIT_BYTES);
@@ -657,7 +728,7 @@ impl MultiplayerShellRuntime {
         self.lan_observer_mode = i32::from(observer);
     }
 
-    /// `0x5EE190`: `[MultiPlayer] ObserverMode` from the process RA2MD.INI
+    /// `0x5EE190`: `[MultiPlayer] ObserverMode` from the process VERA.INI
     /// object (ReadInt, default 0), as `WOL_Main`'s settings reader ends
     /// (`0x0077DED0`). An unsaved lobby toggle reverts here.
     pub(crate) fn reload_observer_mode(&mut self) {
@@ -720,11 +791,18 @@ impl MultiplayerShellRuntime {
         player: &crate::skirmish_launch::SkirmishHumanSlot,
         mode: i32,
     ) {
-        let mut handle_bytes = crate::util::native_string::acp_encode(&player.name);
-        handle_bytes.truncate(MULTIPLAYER_HANDLE_LIMIT_BYTES);
+        let handle_source = self.local_preferences.handle_source;
+        let handle_bytes = if handle_source == HandleSource::AuthenticatedOnline {
+            self.local_preferences.handle_bytes.clone()
+        } else {
+            let mut bytes = crate::util::native_string::acp_encode(&player.name);
+            bytes.truncate(MULTIPLAYER_HANDLE_LIMIT_BYTES);
+            bytes
+        };
         self.local_preferences = LocalMultiplayerPreferences {
             toggles: self.local_preferences.toggles,
             handle_bytes,
+            handle_source,
             side: if player.is_observer() {
                 -3
             } else if player.slot.country_random {
@@ -801,7 +879,7 @@ impl MultiplayerShellRuntime {
         let cooperative_country_roster = startup_rules
             .map(cooperative_country_roster_from_rules)
             .unwrap_or_default();
-        let ini_path = ra2_dir.map(|root| root.join(RA2MD_INI));
+        let ini_path = ra2_dir.map(profile_file::path);
         let (
             snapshot,
             [lan_snapshot, wol_snapshot],
@@ -830,7 +908,7 @@ impl MultiplayerShellRuntime {
             scenario_start_staging: Default::default(),
             gameplay_scenario_return_pending: false,
         };
-        // The retained RA2MD.INI bytes are the process INI, so the cache has to
+        // The retained VERA.INI bytes are the process INI, so the cache has to
         // carry the whole `ReadMultiPlayer6980C0` read from the start: native
         // runs it (`52E11E`/`55FD31`) before any dialog reads `Side` back out of
         // the Session, and `Side` only resolves through `Countries6722F0`/`475540`.
@@ -982,6 +1060,7 @@ impl MultiplayerShellRuntime {
         self.local_preferences = LocalMultiplayerPreferences {
             toggles: self.local_preferences.toggles,
             handle_bytes,
+            handle_source: HandleSource::Native,
             side: menu_country_item_data(resolved.local_slot().country),
             side_ex: if state.player_country_random {
                 RANDOM_ITEM_DATA
@@ -1016,6 +1095,7 @@ impl MultiplayerShellRuntime {
         let mut handle_bytes = crate::util::native_string::acp_encode(&state.player_name_edit.text);
         handle_bytes.truncate(MULTIPLAYER_HANDLE_LIMIT_BYTES);
         self.local_preferences.handle_bytes = handle_bytes;
+        self.local_preferences.handle_source = HandleSource::Native;
         self.local_preferences.game_mode = self.snapshot.game_mode;
         if state.player_country_random {
             self.local_preferences.side_ex = RANDOM_ITEM_DATA;
@@ -1255,15 +1335,26 @@ impl MultiplayerShellRuntime {
         }
     }
 
-    /// CCINIClass reads coopsave.ini (a read failure leaves it empty),
-    /// clears the section, puts the keys and saves the whole file.
-    fn write_coop_save(&self, section: &str, values: &[(String, String)]) {
-        let Some(path) = self
-            .ini_path
+    /// coopsave.ini beside the profile, where `0x0049C5A0` writes it.
+    fn coop_save_path(&self) -> Option<std::path::PathBuf> {
+        self.ini_path
             .as_deref()
             .and_then(Path::parent)
             .map(|dir| dir.join(cooperative::COOP_SAVE_INI))
-        else {
+    }
+
+    /// The saved-campaign readers' file (`0x0049D120`, `0x0049D390`,
+    /// `0x0049C0D0`): `None` when it cannot be read, as `ReadCCFile`
+    /// failing makes each of them return false.
+    pub(crate) fn cooperative_save(&self) -> Option<IniFile> {
+        let bytes = std::fs::read(self.coop_save_path()?).ok()?;
+        Some(IniFile::from_bytes(&bytes).unwrap_or_else(|_| IniFile::from_str("")))
+    }
+
+    /// CCINIClass reads coopsave.ini (a read failure leaves it empty),
+    /// clears the section, puts the keys and saves the whole file.
+    fn write_coop_save(&self, section: &str, values: &[(String, String)]) {
+        let Some(path) = self.coop_save_path() else {
             return;
         };
         let existing = std::fs::read(&path).unwrap_or_default();
@@ -1283,6 +1374,23 @@ impl MultiplayerShellRuntime {
         Some(self.cooperative_progress.active()?.can_continue())
     }
 
+    /// Cooperative `+0xA4` (`0x005C44E0`): after a won mission with the
+    /// active record past its last stage, the campaign type and
+    /// `0x0049BCE0`'s tallies and time for the campaign-end dialog `0xBC7`.
+    /// `first_house_name` is the first human House's narrowed UI name.
+    pub(crate) fn cooperative_campaign_end(
+        &self,
+        first_house_name: &[u8],
+    ) -> Option<(i32, Option<([[i32; 4]; 2], i32)>)> {
+        let record = self.cooperative_progress.active()?;
+        (!record.can_continue()).then(|| {
+            (
+                record.campaign_type,
+                record.campaign_end_tallies(first_house_name),
+            )
+        })
+    }
+
     /// `0x0049D070` on the active record: the next stage's map token.
     pub(crate) fn cooperative_next_scenario_token(&self) -> Option<&str> {
         self.cooperative_progress.active()?.next_scenario_token()
@@ -1295,25 +1403,11 @@ impl MultiplayerShellRuntime {
         let Some(path) = self.ini_path.as_deref() else {
             return;
         };
-        let existing = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Vec::new(),
-            Err(err) => {
-                log::warn!(
-                    "Could not read {} before multiplayer persistence: {err}",
-                    path.display()
-                );
-                return;
-            }
+        let Some(directory) = path.parent() else {
+            return;
         };
-        // Other existing profile writers own their sections. Merge those disk
-        // bytes while retaining this owner's process inputs independently.
-        let updated = update(self, &existing);
-        if let Err(err) = std::fs::write(path, updated) {
-            log::warn!(
-                "Could not persist multiplayer settings to {}: {err}",
-                path.display()
-            );
+        if let Err(err) = profile_file::update(directory, |existing| update(self, existing)) {
+            log::warn!("Could not write {}: {err}", path.display());
         }
     }
 
@@ -1580,7 +1674,7 @@ fn read_local_preference_fields(ini: &IniFile, preferences: &mut LocalMultiplaye
         .take_while(|byte| *byte != 0)
         .take(MULTIPLAYER_HANDLE_LIMIT_BYTES)
         .collect();
-    if !handle_bytes.is_empty() {
+    if preferences.handle_source == HandleSource::Native && !handle_bytes.is_empty() {
         preferences.handle_bytes = handle_bytes;
     }
     //6982E2 supplies the retained raw field as ReadInt default;6982FD stores
@@ -1838,6 +1932,69 @@ mod tests {
     }
 
     #[test]
+    fn modern_online_setup_prefers_battle_without_rewriting_the_native_profile() {
+        use crate::map::skirmish_scenarios::{SkirmishScenarioRecord, SkirmishScenarioSource};
+        use crate::skirmish_modes::MpModeClass;
+        let Some(ini) = crate::rules::retail_ini_fixture::retail_ini("mpmodesmd.ini") else {
+            return;
+        };
+        let modes = crate::skirmish_modes::parse_mpmodes_ini(&ini);
+        assert_eq!(mode_by_id(&modes, 6).unwrap().class, MpModeClass::ManBattle);
+        let concrete = |file, filter| {
+            SkirmishScenarioRecord::concrete_from_ini(
+                0,
+                SkirmishScenarioSource::Synthetic,
+                file,
+                &IniFile::from_str(&format!("[Basic]\nGameMode={filter}\n")),
+            )
+        };
+        let catalog = crate::app::scenario_catalog::ScenarioCatalog::from_records(vec![
+            concrete("duel.mmx", "duel"),
+            concrete("standard.mmx", "standard"),
+        ]);
+        let mut owner = runtime(
+            MultiplayerSetupSnapshot::from_global_defaults(defaults(), SetupProfile::Skirmish),
+            1,
+        );
+        owner.wol_snapshot.game_mode = 6;
+        owner.wol_snapshot.scenario_index = 0;
+        let retained = owner.wol_snapshot.clone();
+        let restore = |owner: &mut MultiplayerShellRuntime, prefer| {
+            owner
+                .new_network_setup(
+                    SetupProfile::Wol,
+                    prefer,
+                    &catalog,
+                    &modes,
+                    SkirmishLaunchOptions::default(),
+                    Default::default(),
+                    false,
+                    Default::default(),
+                )
+                .unwrap()
+                .0
+        };
+        let modern = restore(&mut owner, true);
+        assert_eq!(modern.mode.class, MpModeClass::Battle);
+        assert_eq!(modern.selected_map_file.as_deref(), Some("standard.mmx"));
+        assert_eq!(owner.wol_snapshot, retained);
+        let native = restore(&mut owner, false);
+        assert_eq!(native.mode.id, 6);
+        assert_eq!(native.selected_map_file.as_deref(), Some("duel.mmx"));
+        assert_eq!(owner.wol_snapshot, retained);
+        let ffa = modes
+            .iter()
+            .find(|mode| mode.class == MpModeClass::FreeForAll)
+            .unwrap();
+        owner.wol_snapshot.game_mode = ffa.id;
+        let retained = owner.wol_snapshot.clone();
+        let modern = restore(&mut owner, true);
+        assert_eq!(modern.mode.id, ffa.id);
+        assert_eq!(modern.selected_map_file.as_deref(), Some("standard.mmx"));
+        assert_eq!(owner.wol_snapshot, retained);
+    }
+
+    #[test]
     fn wol_room_restore_refuses_cooperative_and_unofficial_maps() {
         use crate::app::match_runtime::session::NetworkRoom;
         use crate::map::skirmish_scenarios::{SkirmishScenarioRecord, SkirmishScenarioSource};
@@ -1873,6 +2030,7 @@ mod tests {
             owner
                 .new_network_setup(
                     SetupProfile::Wol,
+                    false,
                     &catalog,
                     &modes,
                     SkirmishLaunchOptions::default(),
@@ -1920,6 +2078,7 @@ mod tests {
         let (launch, vacancies) = owner
             .new_network_setup(
                 SetupProfile::Lan,
+                false,
                 &catalog,
                 &modes,
                 crate::skirmish_launch::SkirmishLaunchOptions::default(),
@@ -1957,6 +2116,7 @@ mod tests {
         let (wol, wol_vacancies) = owner
             .new_network_setup(
                 SetupProfile::Wol,
+                false,
                 &catalog,
                 &modes,
                 crate::skirmish_launch::SkirmishLaunchOptions::default(),
@@ -1966,11 +2126,15 @@ mod tests {
             )
             .unwrap();
         assert!(wol.opponents.is_empty());
-        assert_eq!(wol_vacancies, [NetworkVacancy::Open; 8]);
+        assert_eq!(
+            wol_vacancies,
+            [NetworkVacancy::Open; crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT]
+        );
         owner.set_lan_observer(true);
         let (observer, _) = owner
             .new_network_setup(
                 SetupProfile::Lan,
+                false,
                 &catalog,
                 &modes,
                 crate::skirmish_launch::SkirmishLaunchOptions::default(),
@@ -1984,6 +2148,176 @@ mod tests {
     }
 
     #[test]
+    fn network_profiles_retain_extended_rows_without_extending_the_ini_format() {
+        use crate::app::match_runtime::session::NetworkVacancy;
+        use crate::map::skirmish_scenarios::{SkirmishScenarioRecord, SkirmishScenarioSource};
+        use crate::skirmish_launch::{
+            AiDifficulty, LaunchStartPosition, LaunchTeam, SkirmishAiSlot,
+        };
+        let mut map_ini = "[Basic]\nGameMode=standard\nMaxPlayers=30\n[Waypoints]\n".to_owned();
+        for row in 0..30 {
+            map_ini.push_str(&format!("{row}={}\n", 10010 + row));
+        }
+        let catalog = crate::app::scenario_catalog::ScenarioCatalog::from_records(vec![
+            SkirmishScenarioRecord::concrete_from_ini(
+                0,
+                SkirmishScenarioSource::Synthetic,
+                "large.mmx",
+                &IniFile::from_str(&map_ini),
+            ),
+        ]);
+        let small_catalog = crate::app::scenario_catalog::ScenarioCatalog::from_records(vec![
+            SkirmishScenarioRecord::concrete_from_ini(
+                0,
+                SkirmishScenarioSource::Synthetic,
+                "small.mmx",
+                &IniFile::from_str("[Basic]\nGameMode=standard\n"),
+            ),
+        ]);
+        let mut owner = runtime(
+            MultiplayerSetupSnapshot::from_global_defaults(defaults(), SetupProfile::Skirmish),
+            1,
+        );
+        let offline_before = owner.snapshot.clone();
+        let modes = [mode()];
+        for profile in [SetupProfile::Lan, SetupProfile::Wol] {
+            let other = if profile == SetupProfile::Lan {
+                SetupProfile::Wol
+            } else {
+                SetupProfile::Lan
+            };
+            let other_before = owner.network_snapshot(other).clone();
+            let (mut launch, mut vacancies) = owner
+                .new_network_setup(
+                    profile,
+                    false,
+                    &catalog,
+                    &modes,
+                    Default::default(),
+                    Default::default(),
+                    false,
+                    Default::default(),
+                )
+                .unwrap();
+            let ai = SkirmishAiSlot {
+                raw_slot_index: 1,
+                country: LaunchCountry::from_country_index(8),
+                country_random: false,
+                color_index: 7,
+                color_random: false,
+                start_position: LaunchStartPosition::Auto,
+                team: LaunchTeam::Team(3),
+                difficulty: AiDifficulty::Hard,
+            };
+            launch.opponents = vec![
+                ai.clone(),
+                SkirmishAiSlot {
+                    raw_slot_index: 24,
+                    ..ai
+                },
+            ];
+            launch.ai_player_count = 2;
+            launch.rebuild_house_roster();
+            vacancies[2] = NetworkVacancy::Closed;
+            *vacancies.get_mut(29).expect("extended profile row29") = NetworkVacancy::Closed;
+            owner.remember_network_setup(
+                profile,
+                &launch,
+                vacancies.map(Some),
+                std::array::from_fn(|_| None),
+                &catalog,
+            );
+            let retained = owner.network_snapshot(profile).clone();
+            // A temporarily unavailable large map must not discard the held AI
+            // choice or manufacture an AI outside the fallback map's capacity.
+            let (fallback, _) = owner
+                .new_network_setup(
+                    profile,
+                    false,
+                    &small_catalog,
+                    &modes,
+                    Default::default(),
+                    Default::default(),
+                    false,
+                    Default::default(),
+                )
+                .unwrap();
+            assert_eq!(fallback.opponents.as_slice(), &launch.opponents[..1]);
+            assert_eq!(owner.network_snapshot(profile), &retained);
+            let (restored, restored_vacancies) = owner
+                .new_network_setup(
+                    profile,
+                    false,
+                    &catalog,
+                    &modes,
+                    Default::default(),
+                    Default::default(),
+                    false,
+                    Default::default(),
+                )
+                .unwrap();
+            assert_eq!(restored.opponents, launch.opponents);
+            assert_eq!(&restored_vacancies[..8], &vacancies[..8]);
+            assert_eq!(restored_vacancies.get(29), Some(&NetworkVacancy::Closed));
+            assert_eq!(owner.network_snapshot(other), &other_before);
+            assert_eq!(owner.snapshot, offline_before);
+            let disk_keys = retained.ini_updates();
+            assert!(disk_keys.iter().any(|(key, _)| key == "Slot07"));
+            assert!(
+                !disk_keys
+                    .iter()
+                    .any(|(key, _)| key == "Slot08" || key == "Slot29")
+            );
+        }
+    }
+
+    #[test]
+    fn authenticated_online_name_survives_setup_save_reload_and_rematch() {
+        use crate::map::skirmish_scenarios::{SkirmishScenarioRecord, SkirmishScenarioSource};
+        let mut owner = runtime(
+            MultiplayerSetupSnapshot::from_global_defaults(defaults(), SetupProfile::Skirmish),
+            1,
+        );
+        let name = "ABCDEFGHIJKLMNOPQRSTUVWX";
+        owner.accept_online_handle(name).unwrap();
+        let catalog = crate::app::scenario_catalog::ScenarioCatalog::from_records(vec![
+            SkirmishScenarioRecord::concrete_from_ini(
+                0,
+                SkirmishScenarioSource::Synthetic,
+                "test.mmx",
+                &IniFile::from_str("[Basic]\nGameMode=standard\n"),
+            ),
+        ]);
+        let new_setup = |owner: &mut MultiplayerShellRuntime| {
+            owner
+                .new_network_setup(
+                    SetupProfile::Wol,
+                    false,
+                    &catalog,
+                    &[mode()],
+                    SkirmishLaunchOptions::default(),
+                    crate::ui::skirmish_shell::SkirmishTrackbarBounds::default(),
+                    false,
+                    Default::default(),
+                )
+                .unwrap()
+                .0
+        };
+        let first = new_setup(&mut owner);
+        assert_eq!(first.local_player().name, name);
+        let mut stale = first.local_player().clone();
+        stale.name = "stale local preference".into();
+        owner.update_local_preferences(&stale, first.mode.id);
+        owner.persist_network_setup(SetupProfile::Wol);
+        owner.read_multiplayer_settings(&mut empty_process_assets());
+        assert_eq!(new_setup(&mut owner).local_player().name, name);
+        assert!(owner.accept_online_handle("invalid name").is_err());
+        assert_eq!(owner.local_participant().name, name);
+        owner.release_online_handle();
+        assert_eq!(owner.local_participant().name, &name[..19]);
+    }
+
+    #[test]
     fn profile_and_seed_writers_work_with_process_asset_manager_alive() {
         use crate::app::persistence::options_profile::RetailOptionsProfile;
         use crate::map::rmg::{RmgOptions, saved_seeds};
@@ -1994,7 +2328,7 @@ mod tests {
             std::thread::current().id()
         ));
         std::fs::create_dir_all(&directory).expect("fixture directory");
-        let path = directory.join(RA2MD_INI);
+        let path = directory.join(profile_file::FILENAME);
         let initial =
             b"; keep this comment\r\n[Unrelated]\r\nKey=kept\r\n[Skirmish]\r\nCredits=10000\r\n";
         std::fs::write(&path, initial).expect("existing nonempty profile");
@@ -2002,7 +2336,9 @@ mod tests {
         let mut seed = RmgOptions::default();
         saved_seeds::write_browser_seed(&directory, &seed_name, &seed).expect("existing seed");
         let assets = AssetManager::from_loose_root_for_test(&directory);
-        let borrowed_profile = assets.get_ref(RA2MD_INI).expect("profile snapshot");
+        let borrowed_profile = assets
+            .get_ref(profile_file::FILENAME)
+            .expect("profile snapshot");
         let borrowed_seed = assets.get_ref("SAVE0001.SED").expect("seed snapshot");
         let mut runtime = MultiplayerShellRuntime::initialize(
             42,
@@ -2019,7 +2355,7 @@ mod tests {
             runtime.persist_snapshot();
             profile.scroll_rate = scroll_rate;
             profile
-                .commit_ra2md(&directory)
+                .commit_settings(&directory)
                 .expect("Options write with manager alive");
             runtime.persist_snapshot();
             let bytes = std::fs::read(&path).expect("persisted profile");
@@ -2054,7 +2390,10 @@ mod tests {
         assert_eq!(reread.description, seed.description);
         assert_eq!(borrowed_profile, initial);
         assert_ne!(borrowed_seed, seed.to_sed_bytes());
-        assert_eq!(assets.get_ref(RA2MD_INI), Some(borrowed_profile));
+        assert_eq!(
+            assets.get_ref(profile_file::FILENAME),
+            Some(borrowed_profile)
+        );
         drop(assets);
         std::fs::remove_dir_all(directory).expect("remove owned fixture");
     }
@@ -2253,7 +2592,7 @@ WOLTaunts=junk
         );
         directory.write("artmd.ini", b"[Fixture]\n");
         directory.write(
-            RA2MD_INI,
+            profile_file::FILENAME,
             b"[MultiPlayer]\nSide=ABCDEFGHIJKLMNOPQRSTUVWXY\nColor=99\n",
         );
         let assets = AssetManager::from_loose_root_for_test(directory.path());
@@ -2284,7 +2623,10 @@ WOLTaunts=junk
             runtime.local_preferences.side, 3,
             "475540 rereads the original long token; constructor IDs truncate at24bytes"
         );
-        directory.write(RA2MD_INI, b"[MultiPlayer]\nSide=Americans\nColor=0\n");
+        directory.write(
+            profile_file::FILENAME,
+            b"[MultiPlayer]\nSide=Americans\nColor=0\n",
+        );
         runtime.read_multiplayer_settings(&mut process);
         assert_eq!(runtime.local_preferences.side, 4);
         assert_eq!(runtime.local_preferences.color_index, 99);
@@ -2328,7 +2670,10 @@ WOLTaunts=junk
               [Sides]\nAllied=Americans,British\n",
         );
         directory.write("artmd.ini", b"[Fixture]\n");
-        directory.write(RA2MD_INI, b"[MultiPlayer]\nSide=British\nColor=3\n");
+        directory.write(
+            profile_file::FILENAME,
+            b"[MultiPlayer]\nSide=British\nColor=3\n",
+        );
         let assets = AssetManager::from_loose_root_for_test(directory.path());
         let mut process = crate::app::process_assets::ProcessAssets::new(
             crate::assets::asset_manager::MediaArchiveMode::STOCK_DIGITAL,
@@ -2406,6 +2751,7 @@ WOLTaunts=junk
             LocalMultiplayerPreferences {
                 toggles: SessionToggles::default(),
                 handle_bytes: b"[New Player]".to_vec(),
+                handle_source: HandleSource::Native,
                 side: menu_country_item_data(LaunchCountry::America),
                 side_ex: CONCRETE_ITEM_DATA,
                 color_index: 2,
@@ -2576,6 +2922,7 @@ WOLTaunts=junk
         runtime.local_preferences = LocalMultiplayerPreferences {
             toggles: SessionToggles::default(),
             handle_bytes: vec![0x4a, 0x6f, 0x73, 0xe9],
+            handle_source: HandleSource::Native,
             side: menu_country_item_data(LaunchCountry::Yuri),
             side_ex: CONCRETE_ITEM_DATA,
             color_index: 7,
@@ -2685,6 +3032,7 @@ WOLTaunts=junk
         runtime.local_preferences = LocalMultiplayerPreferences {
             toggles: SessionToggles::default(),
             handle_bytes: b"Cached".to_vec(),
+            handle_source: HandleSource::Native,
             side: menu_country_item_data(LaunchCountry::Russia),
             side_ex: CONCRETE_ITEM_DATA,
             color_index: 3,
@@ -2793,7 +3141,7 @@ WOLTaunts=junk
             opponent.enabled = false;
         }
 
-        let result = crate::ui::skirmish_shell::launch_session(&shell, &[map()], &[mode()]);
+        let result = crate::ui::skirmish_shell::launch_session(&shell, &[map()], &[mode()], false);
 
         assert_eq!(
             result,

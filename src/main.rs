@@ -16,6 +16,16 @@ use anyhow::Result;
 use winit::event_loop::EventLoop;
 
 fn main() -> Result<()> {
+    if let Some(result) =
+        vera20k::app::frontend::launch::try_replay_verify(std::env::args_os().skip(1))
+    {
+        std::process::exit(result?);
+    }
+    if let Some(result) =
+        vera20k::app::frontend::launch::try_game_data_check(std::env::args_os().skip(1))
+    {
+        std::process::exit(result?);
+    }
     // A launch from the macOS app bundle or the Linux AppImage works in the
     // app's data folder. Enter it before the logger opens logs/ there.
     let app_bundle = vera20k::app::app_bundle::enter_data_folder();
@@ -45,8 +55,12 @@ fn main() -> Result<()> {
         vera20k::rules::PHOBOS_ENABLED
     );
     log::info!(
-        "NPatch support compiled in: {} (placeholder)",
+        "NPatch support compiled in: {}",
         vera20k::rules::NPATCH_ENABLED
+    );
+    log::info!(
+        "VeraX support compiled in: {}",
+        vera20k::rules::VERAX_ENABLED
     );
     if let Some(path) = &log_path {
         log::info!("Log file: {}", path.display());
@@ -76,21 +90,23 @@ fn run(app_bundle: bool) -> Result<()> {
 
     // Native claims its single-instance gate before it creates a window: a
     // second copy raises and restores the running one and exits, so the two
-    // never both write RA2MD.INI on quit. Capture modes are automation-only and
+    // never both write VERA.INI on quit. Capture modes are automation-only and
     // are deliberately left ungated so parallel captures still run —
     // VERA-internal exemption, native has no capture mode.
     let _instance_guard = match &launch_mode {
         vera20k::app::frontend::launch::AppLaunchMode::Interactive(_)
-        | vera20k::app::frontend::launch::AppLaunchMode::Spawn(_) => {
+        | vera20k::app::frontend::launch::AppLaunchMode::Spawn(_)
+        | vera20k::app::frontend::launch::AppLaunchMode::Replay(_) => {
             match vera20k::util::single_instance::acquire(vera20k::app::WINDOW_TITLE) {
                 vera20k::util::single_instance::SingleInstance::Acquired(guard) => Some(guard),
                 vera20k::util::single_instance::SingleInstance::AlreadyRunning => {
                     if matches!(
                         &launch_mode,
                         vera20k::app::frontend::launch::AppLaunchMode::Spawn(_)
+                            | vera20k::app::frontend::launch::AppLaunchMode::Replay(_)
                     ) {
                         anyhow::bail!(
-                            "cannot start the CnCNet session while another VERA20k instance is running"
+                            "cannot start an external session or replay while another VERA20k instance is running"
                         );
                     }
                     // Recorded gap: native also exits with a success status
@@ -127,6 +143,9 @@ fn run(app_bundle: bool) -> Result<()> {
         }
         vera20k::app::frontend::launch::AppLaunchMode::Spawn(options) => {
             vera20k::app::App::new_spawn(options)?
+        }
+        vera20k::app::frontend::launch::AppLaunchMode::Replay(request) => {
+            vera20k::app::App::new_replay(request)
         }
         vera20k::app::frontend::launch::AppLaunchMode::ShellCapture(request) => {
             request.validate_runtime_environment()?;

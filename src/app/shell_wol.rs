@@ -8,14 +8,13 @@
 //!
 //! The WOLAPI COM object, its servers and its credential store are outside
 //! the shell: they meet it only through [`WolServiceRequest`] /
-//! [`WolServiceEvent`]. Production has no WOLAPI ([`WolProvider::Unavailable`]):
-//! every WOL action shows `TXT_APIMISSING` in `0xD0` and returns to a new
-//! `0xE2` (`0x0052E28E`), as on a retail install without the online
-//! components, unless the Options page's developer box picks VERA's offline
-//! stand-in ([`WolProvider::TestService`]).
+//! [`WolServiceEvent`]. Production uses VERA's authenticated HTTPS lobby and
+//! UDP relay through [`WolProvider::Online`]. The unavailable and controlled
+//! providers preserve the original missing-component path and test boundaries.
 
 pub(crate) mod buddies;
 pub(crate) mod buddy;
+mod live_service;
 pub(crate) mod lobby;
 mod login;
 pub(crate) mod my_info;
@@ -25,11 +24,17 @@ pub(crate) mod persona;
 pub(crate) mod quick_match;
 mod service;
 mod test_service;
+pub(crate) mod translation;
 
+pub(crate) use live_service::OnlineCleanup;
+pub(crate) use live_service::{
+    local_choices_agreed, online_cleanup_pending, online_exit_ready, online_match_id,
+};
 pub(crate) use login::{combo_popup, login_layout, open_login_art};
 pub(crate) use service::{
     NET_STATUS_LOST, WolApiStatus, WolHighScoreRecord, WolLadderRecord, WolLoginAccepted,
-    WolProvider, WolServer, WolServerList, WolServiceEvent, WolServiceRequest, service_event,
+    WolProvider, WolServer, WolServerList, WolServiceEvent, WolServiceRequest, request,
+    service_event,
 };
 pub(crate) use test_service::{
     WolTestGuest, default_buddies as test_service_buddies,
@@ -48,6 +53,7 @@ pub(crate) fn poll(state: &mut AppState) -> Option<std::time::Instant> {
         page::poll_scroll_repeat(state),
         lobby::poll(state),
         quick_match::poll(state),
+        live_service::poll(state),
         test_service::poll(state),
     ]
     .into_iter()
@@ -56,8 +62,8 @@ pub(crate) fn poll(state: &mut AppState) -> Option<std::time::Instant> {
 }
 
 /// `0x0077DED0`, called only at `WOL_Main` entry (`0x0077B307`): the
-/// nine `[WOnline]` values from RA2MD.INI, then `[MultiPlayer] ObserverMode`
-/// (`0x005EE190`). The profile holds what RA2MD.INI says, so the chat
+/// nine `[WOnline]` values from VERA.INI, then `[MultiPlayer] ObserverMode`
+/// (`0x005EE190`). The profile holds what VERA.INI says, so the chat
 /// filter toggles of the last visit revert here.
 pub(crate) fn read_wol_settings(state: &mut AppState) {
     state.frontend.wol_preferences = state.persistence.options_profile.wol_preferences;
@@ -188,6 +194,9 @@ pub(crate) struct WolVisit {
     /// empty without a nickname.
     pub(crate) welcome_texts: Vec<(u16, String)>,
     provider: WolProvider,
+    /// Full retail controls belong to explicit native UI captures only.
+    legacy_ui: bool,
+    live_service: Option<live_service::LiveService>,
     requests: Vec<WolServiceRequest>,
     /// The WOLAPI credential store as the service last reported it.
     credentials: Vec<WolCredential>,
@@ -255,6 +264,8 @@ impl WolVisit {
             flow: None,
             welcome_texts: Vec::new(),
             provider: WolProvider::Unavailable,
+            legacy_ui: false,
+            live_service: None,
             requests: Vec::new(),
             credentials: Vec::new(),
             last_error: None,
@@ -278,15 +289,37 @@ impl WolVisit {
         }
     }
 
-    /// Diagnostics and tests only: a controlled service will drain the
-    /// requests and inject events. Production keeps `Unavailable` unless
-    /// the Options page chose the test service.
+    /// Diagnostics and tests can select a backend without changing presentation.
     pub(crate) fn set_provider(&mut self, provider: WolProvider) {
         self.provider = provider;
     }
 
+    pub(crate) fn welcome_page_spec(&self) -> &'static crate::ui::shell::menu_page::MenuPageSpec {
+        if self.legacy_ui {
+            &crate::ui::wol_shell::WOL_WELCOME_PAGE
+        } else {
+            &crate::ui::wol_shell::WOL_ONLINE_WELCOME_PAGE
+        }
+    }
+
+    pub(crate) fn modern_ui(&self) -> bool {
+        !self.legacy_ui
+    }
+
+    /// Diagnostics select their presentation independently of the service.
+    pub(crate) fn set_legacy_ui(&mut self, legacy: bool) -> bool {
+        let changed = self.legacy_ui != legacy;
+        self.legacy_ui = legacy;
+        changed
+    }
+
     pub(crate) fn take_service_requests(&mut self) -> Vec<WolServiceRequest> {
         std::mem::take(&mut self.requests)
+    }
+
+    /// Pending shell requests only; diagnostics never inspect credentials or payloads.
+    pub(crate) fn pending_service_request_count(&self) -> usize {
+        self.requests.len()
     }
 
     pub(crate) fn mode(&self) -> Option<WolMode> {
@@ -448,6 +481,7 @@ pub(crate) fn open_lobby(state: &mut AppState, postmatch: bool) {
 /// mode-loop apply (`0x0077B402`) and the lobby runner with postmatch set
 /// (`0x0077B44B`) follow.
 pub(crate) fn reenter_after_match(state: &mut AppState) {
+    live_service::match_returned(state);
     persona::enter_wol_main(state);
     read_wol_settings(state);
     let now_ms = crate::app::match_runtime::frame_pacer::wall_clock_ms();
@@ -461,6 +495,19 @@ pub(crate) fn reenter_after_match(state: &mut AppState) {
     open_lobby(state, true);
 }
 
+fn provider_for_visit(
+    test_service: bool,
+    capture_size: Option<winit::dpi::PhysicalSize<u32>>,
+) -> WolProvider {
+    // Stand-in games and players are diagnostic fixtures. A saved test
+    // preference must never replace the real service in ordinary play.
+    if capture_size.is_some() && test_service {
+        WolProvider::TestService
+    } else {
+        WolProvider::Online
+    }
+}
+
 impl App {
     /// State 2 (`0x0052DD57`) then `WOL_Main`: the lobby music takes over
     /// (`0x0077B2D7..0x0077B31D`) and `0x10E` is created after the empty
@@ -472,16 +519,19 @@ impl App {
         // The message boxes paint from the skirmish chrome atlas.
         let _ = Self::ensure_skirmish_shell_chrome(state);
         Self::ensure_wol_welcome_art(state);
-        persona::enter_wol_main(state);
         read_wol_settings(state);
         let now_ms = crate::app::match_runtime::frame_pacer::wall_clock_ms();
         let lobby_music = state.frontend.wol_preferences.lobby_music != 0;
         let saved_shuffle = state.audio.enter_wol_lobby_music(lobby_music, now_ms);
         let mut visit = WolVisit::open(saved_shuffle);
-        if state.persistence.options_profile.wol_test_service {
-            visit.provider = WolProvider::TestService;
-        }
+        visit.provider = provider_for_visit(
+            state.persistence.options_profile.wol_test_service,
+            state.platform.capture_client_size,
+        );
         state.frontend.wol = Some(visit);
+        // Persona I/O is selected by the new visit's provider, never a
+        // previous visit (or the absence of one).
+        persona::enter_wol_main(state);
         persona::fill_welcome(state);
         // The first mode-loop pass (0x0077B402) applies again.
         apply_wol_preferences(state);
@@ -874,6 +924,14 @@ impl App {
     /// restored, and PrepareSession plays INTRO and builds a new `0xE2`
     /// (`0x0052E28E`).
     pub(super) fn return_from_wol(state: &mut AppState) {
+        // The UI visit ends here. Its same HTTPS cleanup owner moves into the
+        // process frontend until logout acknowledgement/deadline + worker stop;
+        // old callbacks never enter a later WOL visit.
+        live_service::leave_visit(state);
+        state
+            .frontend
+            .multiplayer_shell_runtime
+            .release_online_handle();
         if let Some(visit) = state.frontend.wol.take() {
             state.audio.leave_wol_lobby_music(visit.saved_shuffle);
         }

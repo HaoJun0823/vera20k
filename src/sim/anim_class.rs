@@ -1806,7 +1806,15 @@ impl Simulation {
         if config.hide_if_no_ore
             && let Some(overlay_registry) = overlay_registry
         {
-            let hidden = self.anim_cell_tiberium_value(location, rules, overlay_registry) == 0;
+            let value = self.anim_cell_tiberium_value(location, rules, overlay_registry);
+            // Phobos' `AnimClass_AI_Early @ 0x423B95` replacement keeps the same
+            // gate and compares instead: `GetContainedTiberiumValue() <=
+            // abs(HideIfNoOre.Threshold)`. `wrapping_abs` keeps the native
+            // two's-complement result for INT_MIN, where C++'s `abs` overflows.
+            #[cfg(feature = "phobos")]
+            let hidden = value <= config.hide_if_no_ore_threshold.wrapping_abs();
+            #[cfg(not(feature = "phobos"))]
+            let hidden = value == 0;
             if let Some(anim) = self.substrate.anims.get_mut(id) {
                 anim.draw_runtime.hidden = hidden;
             }
@@ -2058,6 +2066,17 @@ impl Simulation {
         let terrain_owner = anim
             .owner_entity
             .is_some_and(|owner| self.terrain_objects.get(owner).is_some());
+        // Ares AnimClass_Update_DamageDelay1000B1AF..1000B1E7 passes the
+        // animation's House, falling back to an attached Techno's owner.
+        // Neither owner is an attacking object; keep RAD_NO_ATTACKER below.
+        #[cfg(feature = "ares")]
+        let source_house = anim.owner_house.or_else(|| {
+            anim.owner_entity
+                .and_then(|owner| self.substrate.entities.get(owner))
+                .map(|owner| owner.owner())
+        });
+        #[cfg(not(feature = "ares"))]
+        let source_house = None;
         let increment = if terrain_owner { damage * 5.0 } else { damage };
         let accumulated = f64::from_bits(anim.damage_accumulator.bits()) + increment;
         // Rust does not specify arithmetic NaN payloads across platforms.
@@ -2084,6 +2103,11 @@ impl Simulation {
         } else {
             rules.combat_damage.flame_damage2()
         };
+        // Ares1000B179 first reads AnimType+330 (the existing art Warhead
+        // reader); only a null pointer uses the stock INVISO/FlameDamage2
+        // fallback. Weapon= and Damage.Delay= are separate pending extensions.
+        #[cfg(feature = "ares")]
+        let warhead_name = config.warhead.as_deref().or(warhead_name);
         let Some((name, warhead)) =
             warhead_name.and_then(|name| rules.warhead(name).map(|warhead| (name, warhead)))
         else {
@@ -2100,7 +2124,11 @@ impl Simulation {
             crate::sim::projectile::ProjectileCoord::new(coord.x, coord.y, coord.z),
             whole,
             warhead,
-            (crate::sim::combat::RAD_NO_ATTACKER, None, warhead_ref),
+            (
+                crate::sim::combat::RAD_NO_ATTACKER,
+                source_house,
+                warhead_ref,
+            ),
             effects,
         )
     }
@@ -2189,8 +2217,15 @@ impl Simulation {
         };
         let owner_name = self.interner.resolve(owner).to_string();
         let (rx, ry, _, _, _) = location.to_cell_sub_z();
-        let Some(infantry) = self.construct_object_limbo_at_height(
-            kind,
+        // Rules6707DC/67BB10 retains an InfantryType pointer; AnimAI4249F9
+        // calls that type's creator, independent of other name registries.
+        let Some(object) =
+            rules.object_in_category(crate::rules::object_type::ObjectCategory::Infantry, kind)
+        else {
+            return true;
+        };
+        let Some(infantry) = self.construct_resolved_object_limbo_at_height(
+            object,
             &owner_name,
             rx,
             ry,
@@ -2904,7 +2939,7 @@ impl Simulation {
         id: AnimId,
         config: &AnimTypeRuntimeConfig,
         rules: &RuleSet,
-        overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
+        _overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
         position: glam::IVec3,
         frame_effects: FrameEffects<'_>,
     ) -> bool {
@@ -2913,11 +2948,7 @@ impl Simulation {
         {
             self.spawn_named_anim(rules, bounce_anim, coord, 0, BOUNCE_CONTACT_DRAW_FLAGS, 0);
         }
-        // Map[coord] (`0x004239E5`); VERA keeps no objects on the dummy cell.
-        let (Some(warhead_name), Some((rx, ry))) = (
-            config.warhead.as_deref(),
-            Self::map_coord_cell(&self.resolved_terrain, position.x, position.y),
-        ) else {
+        let Some(warhead_name) = config.warhead.as_deref() else {
             return false;
         };
         let damage = match X87Chop53::load_f64(config.damage).and_then(X87Chop53::ftol_i64) {
@@ -2925,80 +2956,14 @@ impl Simulation {
             Err(_) => return false,
         };
         let warhead_ref = self.interner.intern(warhead_name);
-        use crate::sim::combat::combat_aoe::AreaDamageReceiver;
-        use crate::sim::occupancy::CellObjectMember;
-        let ground = MovementLayer::Ground;
-        let mut current = self.cell_objects((rx, ry), ground).next();
-        let mut bridge_state_changed = false;
-        while let Some(target) = current {
-            let center = match target {
-                CellObjectMember::Entity(id) => self.substrate.entities.get(id).map(|entity| {
-                    let [x, y] = crate::sim::movement::ground_pose::object_center_xy(entity);
-                    (x, y)
-                }),
-                // Loaded Terrain objects retain their map-cell center. This
-                // contact gate uses XY only (GetCoords5F65A0); it does not
-                // substitute ground/deck height for the object's location.
-                CellObjectMember::Terrain(id) => {
-                    self.terrain_objects.objects().get(&id).map(|tree| {
-                        let coord = tree.world_coord();
-                        (coord.x, coord.y)
-                    })
-                }
-            };
-            if let Some((x, y)) = center {
-                let distance = position
-                    .x
-                    .wrapping_sub(x)
-                    .wrapping_abs()
-                    .wrapping_add(position.y.wrapping_sub(y).wrapping_abs());
-                if distance <= config.damage_radius {
-                    let distance_leptons = crate::util::native_x87::adjust_for_z_standard(distance);
-                    let receiver = match target {
-                        CellObjectMember::Entity(id) => AreaDamageReceiver::Entity(
-                            crate::sim::combat::EntityDamageEvent::direct_receiver(
-                                id,
-                                damage,
-                                distance_leptons,
-                                crate::sim::combat::RAD_NO_ATTACKER,
-                                None,
-                                warhead_ref,
-                                crate::sim::combat::ReceiverCallFlags {
-                                    ignore_defenses: false,
-                                    arg6: false,
-                                },
-                            ),
-                        ),
-                        CellObjectMember::Terrain(id) => {
-                            let tree = &self.terrain_objects.objects()[&id];
-                            AreaDamageReceiver::Terrain(crate::sim::combat::TerrainDamageEvent {
-                                stable_id: id,
-                                rx: tree.cell().0,
-                                ry: tree.cell().1,
-                                damage,
-                                distance_leptons,
-                                warhead_ref,
-                                near_center_ic_isolation_eligible: false,
-                            })
-                        }
-                    };
-                    bridge_state_changed |= self
-                        .commit_noncombat_aoe_receivers(
-                            rules,
-                            overlay_registry,
-                            &[receiver],
-                            frame_effects,
-                        )
-                        .bridge_state_changed;
-                }
-            }
-            // 423A83 reads Object+30 AFTER ReceiveDamage. The native Terrain
-            // lethal tail unlinks synchronously and clears that successor;
-            // collecting a vector up front would incorrectly hit later objects.
-            // Evidence: tools/spatial_oracle/terrain_debris_receiver.json.
-            current = self.next_cell_object(target);
-        }
-        bridge_state_changed
+        self.apply_bounce_contact_damage(
+            position,
+            config.damage_radius,
+            crate::sim::world::BounceContactDamage::Anim(damage),
+            warhead_ref,
+            rules,
+            frame_effects,
+        )
     }
 
     /// The landing arm proper (`0x00423C4A..0x00423EF8`); see
@@ -3846,6 +3811,69 @@ mod tests {
     use crate::rules::ini_parser::IniFile;
     use crate::sim::combat::Health;
     use crate::sim::game_entity::GameEntity;
+
+    /// Phobos' `AnimClass_AI_Early @ 0x423B95` replacement of the stock
+    /// `HideIfNoOre` test: the anim's cell `Get_Tiberium_Value @ 0x00485020`
+    /// hides it at or below `abs(HideIfNoOre.Threshold=)`, not only at zero.
+    #[test]
+    #[cfg(feature = "phobos")]
+    fn hide_if_no_ore_threshold_moves_the_value_cut_off() {
+        use crate::sim::overlay_grid::OverlayGrid;
+        use crate::sim::world::Simulation;
+
+        let ini = IniFile::from_str(
+            "[InfantryTypes]\n[VehicleTypes]\n[AircraftTypes]\n[BuildingTypes]\n\
+             [Tiberiums]\n0=Riparius\n[Riparius]\nImage=1\nValue=25\n\
+             [OverlayTypes]\n0=TIBCELL\n[TIBCELL]\nTiberium=yes\n",
+        );
+        let mut rules = RuleSet::from_ini(&ini).expect("twinkle rules");
+        let mut art = ArtRegistry::from_ini(&IniFile::from_str(
+            "[TWNK1]\nLoopCount=-1\nDetailLevel=2\nHideIfNoOre=true\n\
+             HideIfNoOre.Threshold=-60\nRate=450\n",
+        ));
+        art.bind_anim_frame_count_for_test("TWNK1", 8);
+        rules.replace_art_registry_for_test(art);
+        let overlays = crate::rules::overlay_types::OverlayTypeRegistry::from_ini(&ini, None);
+
+        let hidden_over = |density: u8| {
+            let mut sim = Simulation::new();
+            sim.session.set_map_width_for_test(16);
+            sim.session.set_map_height_for_test(16);
+            let mut grid = OverlayGrid::new(16, 16);
+            grid.place_overlay(8, 8, 0, density);
+            sim.install_overlay_grid_for_load(grid);
+            let type_id = sim.interner.intern("TWNK1");
+            let id = sim
+                .spawn_anim_at_world(
+                    &rules,
+                    AnimClassSpawnDescriptor {
+                        loop_count: -1,
+                        ..runtime_descriptor(type_id, 0)
+                    },
+                    AnimWorldCoord {
+                        x: 8 * 256 + 128,
+                        y: 8 * 256 + 128,
+                        z: 0,
+                    },
+                )
+                .expect("the twinkle constructs");
+            sim.visit_anim(
+                id,
+                &rules,
+                Some(&overlays),
+                crate::sim::world::FrameEffects::default(),
+            );
+            sim.anim(id)
+                .expect("the looping twinkle survives its visit")
+                .draw_runtime
+                .hidden
+        };
+
+        // `TiberiumClass::Value` times `OverlayData + 1`, so 50 against the
+        // threshold's 60 and 125 over it.
+        assert!(hidden_over(1), "50 <= abs(-60) hides the twinkle");
+        assert!(!hidden_over(4), "125 > 60 leaves it drawing");
+    }
 
     #[test]
     fn damage_fire_references_follow_original_owner_then_anim_expiry() {

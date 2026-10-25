@@ -184,7 +184,6 @@ pub fn visit_starting_mtnk_concrete_attack(
     )
     .unwrap();
     scene.runtime.simulation.batch_path_searches();
-    scene.runtime.simulation.batch_target_scans();
     // Periodic frame hashes feed replay and sync checks, which nothing here
     // reads; an interval no tick reaches skips them (11-12% of each frame in
     // this unoptimized test build).
@@ -359,6 +358,30 @@ pub(super) fn load_anytown_concrete() -> HeadlessScenario {
     let retail = std::path::PathBuf::from(std::env::var_os("RA2_DIR").unwrap());
     let map = std::env::var("VERA20K_ANYTOWN_MAP").unwrap_or_else(|_| "XMP03T4.MAP".to_owned());
     crate::headless_scenario::load(&retail, &map, 0).unwrap()
+}
+
+pub(super) fn load_anytown_concrete_from_path(path: &std::path::Path) -> HeadlessScenario {
+    let retail = std::path::PathBuf::from(std::env::var_os("RA2_DIR").unwrap());
+    let map = path.to_string_lossy();
+    crate::headless_scenario::load(&retail, &map, 0).unwrap()
+}
+
+pub(super) fn retail_anytown_map_bytes() -> Vec<u8> {
+    use crate::assets::asset_manager::{AssetManager, MediaArchiveMode};
+
+    let retail = std::path::PathBuf::from(std::env::var_os("RA2_DIR").unwrap());
+    let assets = AssetManager::new(&retail, MediaArchiveMode::STOCK_DIGITAL).unwrap();
+    let loaded =
+        crate::map::source::load_map_by_name_or_path_with_assets(&retail, "XMP03T4.MAP", &assets)
+            .unwrap();
+    let (length, digest) = loaded
+        .source
+        .physical_identity()
+        .expect("retail Anytown has physical map bytes");
+    crate::map::source::prepare_transfer_map_source(&loaded.source, &assets)
+        .unwrap()
+        .read(digest, length)
+        .unwrap()
 }
 
 pub(super) fn load_shrapnel() -> HeadlessScenario {

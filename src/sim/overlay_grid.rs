@@ -712,6 +712,24 @@ impl OverlayGrid {
         true
     }
 
+    /// CellLoad483BE0 clears literal179/242, independently of Rules crate-image
+    /// pointers or lobby options. Loading emits no runtime dirty/recalc receipt.
+    pub(crate) fn reset_crate_fields_after_user_load(
+        &mut self,
+        cells: impl Iterator<Item = (u16, u16)>,
+    ) {
+        for (rx, ry) in cells {
+            let Some(index) = index_of(self.width, self.height, rx, ry) else {
+                continue;
+            };
+            let cell = &mut self.cells[index];
+            if matches!(cell.overlay_id, Some(179 | 242)) {
+                cell.overlay_id = None;
+                cell.overlay_data = 0;
+            }
+        }
+    }
+
     /// Drain the coordinates whose overlay identity was erased without a
     /// recalc. The frame finalizer forwards these to presentation so the
     /// removed sprite stops drawing.
@@ -750,10 +768,10 @@ impl OverlayGrid {
         true
     }
 
-    /// Literal576BA0 +44=-1 after the separately published +11E store. Keep
+    /// Literal576BA0 / AreaDamage48A2F0 +44=-1. Keep
     /// the state, wall owner and retained attributes; only presentation drops
     /// the removed identity. This must not enqueue a frame-tail Recalc.
-    pub(crate) fn clear_literal_bridge_identity(&mut self, rx: u16, ry: u16) -> bool {
+    pub(crate) fn clear_literal_overlay_identity(&mut self, rx: u16, ry: u16) -> bool {
         self.bump_mutation_epoch();
         let Some(idx) = index_of(self.width, self.height, rx, ry) else {
             return false;
@@ -2162,7 +2180,7 @@ mod tests {
         grid.cells[0].overlay_id = Some(24);
         grid.cells[0].wall_owner = Some(crate::sim::intern::test_intern("RetainedOwner"));
         let owner = grid.cells[0].wall_owner;
-        assert!(grid.clear_literal_bridge_identity(0, 0));
+        assert!(grid.clear_literal_overlay_identity(0, 0));
         assert_eq!(grid.cell(0, 0).overlay_id, None);
         assert_eq!(
             grid.cell(0, 0).overlay_data,

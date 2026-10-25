@@ -50,6 +50,8 @@ use crate::util::read_helpers::{read_i32_le, read_u16_le, read_u32_le};
 
 /// MIX flags bit: file index is Blowfish-encrypted (with RSA key block).
 const FLAG_ENCRYPTED: u16 = 0x0002;
+const FLAG_CHECKSUM: u16 = 0x0001;
+const CHECKSUM_SIZE: usize = 20;
 
 /// Size of the new-format header: 2-byte marker (0x0000) + 2-byte flags.
 /// The RSA key block or file index starts after this.
@@ -86,6 +88,8 @@ pub struct MixArchive {
     entries: Vec<MixEntry>,
     /// Byte offset where the body section starts in the raw data.
     body_offset: usize,
+    body_size: usize,
+    flags: u16,
     /// The raw archive bytes. Top-level archives can stay memory-mapped;
     /// nested archives can share a sub-view into parent archive storage.
     data: MixData,
@@ -262,9 +266,12 @@ impl MixArchive {
         // New format (RA2/TS): offset 0 is always 0x0000 as a format marker.
         // Old-header layout: offset 0 is file_count (always non-zero).
         let first_word: u16 = read_u16_le(bytes, 0);
-        let (mut entries, body_offset) = if first_word == 0 {
-            // New format: actual flags are at offset 2.
-            let flags: u16 = read_u16_le(bytes, 2);
+        let flags = if first_word == 0 {
+            read_u16_le(bytes, 2)
+        } else {
+            0
+        };
+        let (mut entries, body_offset, body_size) = if first_word == 0 {
             let is_encrypted: bool = (flags & FLAG_ENCRYPTED) != 0;
 
             if is_encrypted {
@@ -281,6 +288,8 @@ impl MixArchive {
         Ok(Self {
             entries,
             body_offset,
+            body_size,
+            flags,
             data,
         })
     }
@@ -308,8 +317,8 @@ impl MixArchive {
         let entry: &MixEntry = &self.entries[index];
         let data = self.data.as_slice();
 
-        let start: usize = self.body_offset + entry.offset as usize;
-        let end: usize = start + entry.size as usize;
+        let start = self.body_offset.checked_add(entry.offset as usize)?;
+        let end = start.checked_add(entry.size as usize)?;
 
         // Bounds check to prevent panics on corrupt data.
         if end > data.len() {
@@ -352,11 +361,81 @@ impl MixArchive {
         self.data.len()
     }
 
+    /// Validate a completely accounted-for container for an untrusted consumer.
+    /// Ordinary retail asset loading keeps its permissive index lookup. A
+    /// network map additionally forbids aliases, overlapping entries and
+    /// hidden body/trailer data. The caller owns allowed padding byte types.
+    pub(crate) fn validate_complete_layout(
+        &self,
+        padding_byte_allowed: impl Fn(u8) -> bool,
+    ) -> Result<(), AssetError> {
+        let invalid = |reason: &str| AssetError::InvalidMixHeader {
+            reason: reason.to_owned(),
+        };
+        if self.flags & !(FLAG_CHECKSUM | FLAG_ENCRYPTED) != 0 {
+            return Err(invalid("Unsupported transfer MIX flags"));
+        }
+        let data = self.data.as_slice();
+        let body_end = self
+            .body_offset
+            .checked_add(self.body_size)
+            .filter(|&end| end <= data.len())
+            .ok_or_else(|| invalid("Invalid transfer MIX body length"))?;
+        let checksum_size = if self.flags & FLAG_CHECKSUM != 0 {
+            CHECKSUM_SIZE
+        } else {
+            0
+        };
+        if data.len().checked_sub(body_end) != Some(checksum_size) {
+            return Err(invalid("Unreferenced transfer MIX trailer"));
+        }
+        let body = &data[self.body_offset..body_end];
+        // The flagged retail trailer is SHA-1 of the complete physical body,
+        // including alignment bytes (Hills.mmx, Dustbowl.mmx, RiverRam.yro).
+        if checksum_size != 0 && crate::util::sha1::sha1_bytes(body).as_slice() != &data[body_end..]
+        {
+            return Err(invalid("Transfer MIX checksum mismatch"));
+        }
+        if self.entries.windows(2).any(|pair| pair[0].id == pair[1].id) {
+            return Err(invalid("Duplicate transfer MIX file IDs"));
+        }
+        let mut ranges: Vec<_> = self.entries.iter().collect();
+        ranges.sort_by_key(|entry| entry.offset);
+        let padding_is_valid = |start: usize, end: usize| {
+            // Named retail map wrappers align entries and body end to 16
+            // bytes. Their <16-byte padding contains old plaintext residues,
+            // not just zeroes; arbitrary gaps remain forbidden.
+            start == end
+                || (start.checked_next_multiple_of(16) == Some(end)
+                    && body[start..end]
+                        .iter()
+                        .all(|&byte| padding_byte_allowed(byte)))
+        };
+        let mut cursor = 0usize;
+        for entry in ranges {
+            let start = entry.offset as usize;
+            let end = start
+                .checked_add(entry.size as usize)
+                .filter(|&end| end <= body.len())
+                .ok_or_else(|| invalid("Transfer MIX entry exceeds its body"))?;
+            if entry.size == 0 || start < cursor || !padding_is_valid(cursor, start) {
+                return Err(invalid("Overlapping or unreferenced transfer MIX data"));
+            }
+            cursor = end;
+        }
+        if !padding_is_valid(cursor, body.len()) {
+            return Err(invalid("Unreferenced transfer MIX body tail"));
+        }
+        Ok(())
+    }
+
     /// Parse a new-format encrypted MIX file (RA2 typical: flags & 0x0002).
     ///
     /// Layout: [marker:2][flags:2][RSA block:80][encrypted index...][body...]
     /// The RSA block starts at offset 4 (after the 2-byte marker + 2-byte flags).
-    fn parse_encrypted_new_format(data: &[u8]) -> Result<(Vec<MixEntry>, usize), AssetError> {
+    fn parse_encrypted_new_format(
+        data: &[u8],
+    ) -> Result<(Vec<MixEntry>, usize, usize), AssetError> {
         // RSA key block starts after the 4-byte new-format header.
         let rsa_start: usize = NEW_FORMAT_HEADER_SIZE;
         let rsa_end: usize = rsa_start + mix_crypto::RSA_KEY_BLOCK_SIZE;
@@ -391,7 +470,7 @@ impl MixArchive {
         mix_crypto::blowfish_decrypt_ecb(&blowfish_key, &mut first_block)?;
 
         let file_count: u16 = read_u16_le(&first_block, 0);
-        let _body_size: u32 = read_u32_le(&first_block, 2);
+        let body_size = read_u32_le(&first_block, 2) as usize;
 
         // Calculate total encrypted index size and decrypt everything.
         let total_index_bytes: usize = INDEX_HEADER_SIZE + file_count as usize * INDEX_ENTRY_SIZE;
@@ -421,14 +500,16 @@ impl MixArchive {
         // Body data starts right after the encrypted index.
         let body_offset: usize = encrypted_start + encrypted_size;
 
-        Ok((entries, body_offset))
+        Ok((entries, body_offset, body_size))
     }
 
     /// Parse a new-format unencrypted MIX file (flags has no encryption bit).
     ///
     /// Layout: [marker:2][flags:2][file_count:2][body_size:4][entries...][body...]
     /// The index header starts at offset 4.
-    fn parse_unencrypted_new_format(data: &[u8]) -> Result<(Vec<MixEntry>, usize), AssetError> {
+    fn parse_unencrypted_new_format(
+        data: &[u8],
+    ) -> Result<(Vec<MixEntry>, usize, usize), AssetError> {
         if data.len() < NEW_FORMAT_HEADER_SIZE + INDEX_HEADER_SIZE {
             return Err(AssetError::InvalidMixHeader {
                 reason: "File too small for new-format unencrypted header".to_string(),
@@ -436,7 +517,7 @@ impl MixArchive {
         }
 
         let file_count: u16 = read_u16_le(data, NEW_FORMAT_HEADER_SIZE);
-        let _body_size: u32 = read_u32_le(data, NEW_FORMAT_HEADER_SIZE + 2);
+        let body_size = read_u32_le(data, NEW_FORMAT_HEADER_SIZE + 2) as usize;
 
         let index_start: usize = NEW_FORMAT_HEADER_SIZE + INDEX_HEADER_SIZE;
         let index_end: usize = index_start + file_count as usize * INDEX_ENTRY_SIZE;
@@ -453,7 +534,7 @@ impl MixArchive {
         let entries: Vec<MixEntry> = Self::parse_entries(data, index_start, file_count)?;
         let body_offset: usize = index_end;
 
-        Ok((entries, body_offset))
+        Ok((entries, body_offset, body_size))
     }
 
     /// Parse an old-header MIX file (no format marker).
@@ -463,7 +544,7 @@ impl MixArchive {
     fn parse_old_format(
         data: &[u8],
         file_count: u16,
-    ) -> Result<(Vec<MixEntry>, usize), AssetError> {
+    ) -> Result<(Vec<MixEntry>, usize, usize), AssetError> {
         if data.len() < INDEX_HEADER_SIZE {
             return Err(AssetError::InvalidMixHeader {
                 reason: "File too small for old-header MIX header".to_string(),
@@ -471,7 +552,7 @@ impl MixArchive {
         }
 
         // body_size at offset 2 (skip file_count which is the first 2 bytes).
-        let _body_size: u32 = read_u32_le(data, 2);
+        let body_size = read_u32_le(data, 2) as usize;
 
         let index_start: usize = INDEX_HEADER_SIZE;
         let index_end: usize = index_start + file_count as usize * INDEX_ENTRY_SIZE;
@@ -488,7 +569,7 @@ impl MixArchive {
         let entries: Vec<MixEntry> = Self::parse_entries(data, index_start, file_count)?;
         let body_offset: usize = index_end;
 
-        Ok((entries, body_offset))
+        Ok((entries, body_offset, body_size))
     }
 
     /// Parse file index entries from a buffer starting at the given offset.
@@ -531,8 +612,8 @@ impl MixArchive {
     }
 
     fn entry_view(&self, entry: &MixEntry) -> Option<MixData> {
-        let start: usize = self.body_offset + entry.offset as usize;
-        let end: usize = start + entry.size as usize;
+        let start = self.body_offset.checked_add(entry.offset as usize)?;
+        let end = start.checked_add(entry.size as usize)?;
         if end > self.data.len() {
             return None;
         }

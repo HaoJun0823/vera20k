@@ -13,7 +13,7 @@ use crate::rules::ruleset::RuleSet;
 use crate::sim::selection::SelectionState;
 use crate::sim::world::{
     LocalPlanningBoundary, NetworkCommandBoundary, NetworkCommandError, OutcomeWaitBoundary,
-    SimSoundEvent, Simulation, SoundBoundary,
+    SimSoundEvent, Simulation, SoundBoundary, TacticalRadarBoundary,
 };
 
 #[cfg(test)]
@@ -31,6 +31,8 @@ mod outcome_wait_tests;
 /// Source: `tools/input_oracle/gattling_loop.json` and its native harness.
 type RadarAdmission<'a> =
     dyn FnMut(crate::sim::radar::RadarEventRequest, u64, &RuleSet) -> bool + 'a;
+type TacticalRadarSetter<'a> =
+    dyn FnMut(bool) -> Option<crate::render::radar::anim::RadarAvailabilityCue> + 'a;
 
 struct ScenarioPauseOwners<'a> {
     clock: &'a mut super::scenario_pause::ScenarioPauseClock,
@@ -45,9 +47,11 @@ pub(crate) struct FrameClientBoundary<'a> {
     local_owner: Option<&'a str>,
     output: RefCell<&'a mut SoundEventQueue>,
     admit_radar: RefCell<&'a mut RadarAdmission<'a>>,
+    tactical_radar: Option<RefCell<&'a mut TacticalRadarSetter<'a>>>,
     planning: Option<RefCell<(&'a mut PlanningInputState, &'a mut SelectionState)>>,
     network: Option<RefCell<&'a mut super::session::MatchSession>>,
     live_network: Option<RefCell<&'a mut crate::net::live_commands::LiveCommandSession>>,
+    logic_frame_rate: u32,
     outcome_wait: Option<RefCell<&'a mut Option<super::scenario_exit::ScenarioOutcomeVoiceWait>>>,
     scenario_pause: Option<RefCell<ScenarioPauseOwners<'a>>>,
 }
@@ -65,11 +69,25 @@ impl<'a> FrameClientBoundary<'a> {
             local_owner,
             output: RefCell::new(output),
             admit_radar: RefCell::new(admit_radar),
+            tactical_radar: None,
             planning: None,
             network: None,
             live_network: None,
+            logic_frame_rate: 0,
             outcome_wait: None,
             scenario_pause: None,
+        }
+    }
+
+    pub(crate) fn with_tactical_radar(mut self, setter: &'a mut TacticalRadarSetter<'a>) -> Self {
+        self.tactical_radar = Some(RefCell::new(setter));
+        self
+    }
+
+    fn consume_queued_audio(&self, sim: &Simulation) {
+        let events = self.output.borrow_mut().drain();
+        if let Some((sfx, inputs)) = self.playback.borrow_mut().as_mut() {
+            inputs.consume(sfx, &events, Some(sim), self.local_owner);
         }
     }
 
@@ -95,6 +113,11 @@ impl<'a> FrameClientBoundary<'a> {
         live: Option<&'a mut crate::net::live_commands::LiveCommandSession>,
     ) -> Self {
         self.live_network = live.map(RefCell::new);
+        self
+    }
+
+    pub(crate) fn with_logic_frame_rate(mut self, frame_rate: u32) -> Self {
+        self.logic_frame_rate = frame_rate;
         self
     }
 
@@ -228,23 +251,47 @@ impl NetworkCommandBoundary for FrameClientBoundary<'_> {
         })?;
         let now_ms = super::frame_pacer::wall_clock_ms();
         let now = super::frame_pacer::frame_bucket(now_ms);
-        live.borrow_mut()
-            .poll(queues, context, max_ahead, now, now_ms as u32)
-            .map(Some)
-            .map_err(|error| {
-                log::error!("live network command exchange: {error}");
-                match error {
-                    LiveCommandError::Exchange(CommandExchangeError::InitialChecksum {
-                        ..
-                    }) => NetworkInterruption::ScenariosDiffer.into(),
-                    LiveCommandError::Exchange(CommandExchangeError::Decode(error))
-                        if error.kind == DecodeFailureKind::AdmissionFull =>
-                    {
-                        NetworkInterruption::QueueFull.into()
-                    }
-                    error => NetworkCommandError::Unavailable(error.to_string()),
+        let latency_fudge = self
+            .network
+            .as_ref()
+            .map_or(0, |session| session.borrow().latency_fudge());
+        let mut live = live.borrow_mut();
+        live.finish_processing(now_ms as u32);
+        live.poll(
+            queues,
+            context,
+            max_ahead,
+            now,
+            now_ms as u32,
+            latency_fudge,
+            self.logic_frame_rate,
+        )
+        .map(Some)
+        .map_err(|error| {
+            log::error!("live network command exchange: {error}");
+            match error {
+                LiveCommandError::Sequenced(
+                    crate::net::live_commands::SequencedError::Desync { .. },
+                ) => NetworkInterruption::ScenariosDiffer.into(),
+                LiveCommandError::Sequenced(
+                    crate::net::live_commands::SequencedError::QueueFull,
+                ) => NetworkInterruption::QueueFull.into(),
+                LiveCommandError::Sequenced(_) => NetworkInterruption::ConnectionFailed.into(),
+                LiveCommandError::Startup(crate::net::live_commands::StartupError::Aborted) => {
+                    NetworkInterruption::ConnectionFailed.into()
                 }
-            })
+                LiveCommandError::Startup(_)
+                | LiveCommandError::Exchange(CommandExchangeError::InitialChecksum { .. }) => {
+                    NetworkInterruption::ScenariosDiffer.into()
+                }
+                LiveCommandError::Exchange(CommandExchangeError::Decode(error))
+                    if error.kind == DecodeFailureKind::AdmissionFull =>
+                {
+                    NetworkInterruption::QueueFull.into()
+                }
+                error => NetworkCommandError::Unavailable(error.to_string()),
+            }
+        })
     }
 
     fn record_frame_checksum(&self, frame: u32, checksum: u32) {
@@ -320,15 +367,117 @@ impl SoundBoundary for FrameClientBoundary<'_> {
                 &mut output,
             );
         }
-        let events = output.drain();
-        if let Some((sfx, inputs)) = self.playback.borrow_mut().as_mut() {
-            inputs.consume(sfx, &events, Some(sim), self.local_owner);
-        }
+        drop(output);
+        self.consume_queued_audio(sim);
         self.delivered.set(delivered + pending.len());
     }
 
     fn delivered(&self) -> usize {
         self.delivered.get()
+    }
+
+    fn update_looping_sound(
+        &self,
+        sim: &Simulation,
+        owner: u64,
+        world: crate::sim::anim_class::AnimWorldCoord,
+    ) {
+        if let Some((sfx, inputs)) = self.playback.borrow_mut().as_mut() {
+            inputs.update_looping_sound(sfx, sim, self.local_owner, owner, world);
+        }
+    }
+}
+
+impl TacticalRadarBoundary for FrameClientBoundary<'_> {
+    fn set_available(&self, sim: &Simulation, rules: &RuleSet, available: bool) {
+        // House508F4F/4FC21B -> Radar656DF0 ->656BE0 is synchronous.
+        // Earlier death sounds and637A10's queued EndPlanningModeSound
+        // must reach the existing SFX owner before the availability cue.
+        self.consume(sim, rules, sim.sound_events());
+        self.consume_queued_audio(sim);
+        let Some(setter) = &self.tactical_radar else {
+            return;
+        };
+        let Some(cue) = (*setter.borrow_mut())(available) else {
+            return;
+        };
+        if let Some((sfx, inputs)) = self.playback.borrow_mut().as_mut() {
+            crate::app::radar_movie::end_radar_sound_loop_with(sfx);
+            if let Some(sound) =
+                crate::app::presentation::building_anim::radar_availability_sound(rules, cue)
+            {
+                inputs.consume(sfx, &[sound], Some(sim), self.local_owner);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tactical_radar_tests {
+    use super::*;
+    use crate::sim::world::FrameEffects;
+
+    #[test]
+    fn tactical_radar_delivers_sound_prefix_and_queued_planning_exit() {
+        let Some(retail) =
+            crate::rules::retail_ini_fixture::retail_battle_rules_for_map("XMP03T4.MAP")
+        else {
+            return;
+        };
+        let rules = retail.rules;
+        let mut sim = Simulation::new();
+        let map = crate::map::map_file::MapFile::from_bytes(
+            b"[Map]\nTheater=TEMPERATE\nSize=0,0,2,1\nLocalSize=0,0,2,1\n\
+              [IsoMapPack5]\n1=DwALABwBAAIA/////wAAABEAAA==\n\
+              [Basic]\nNewINIFormat=4\n[Waypoints]\n0=1001\n\
+              [Triggers]\nT=Americans,<none>,Radar,0,1,1,1,0\n\
+              [Events]\nT=1,13,0,0\n\
+              [Actions]\nT=1,55,0,1,0,0,0,0,A\n\
+              [Tags]\nTAG=0,Radar,T\n",
+        )
+        .unwrap();
+        sim.install_waypoints(&map.waypoints);
+        sim.initialize_trigger_definitions(&map, &Default::default(), None, None);
+        sim.classify_map_triggers(&rules);
+        sim.advance_triggers(&rules, None, FrameEffects::empty());
+        assert!(matches!(
+            sim.sound_events(),
+            [SimSoundEvent::RadarEvent { .. }]
+        ));
+        let observed = RefCell::new(Vec::new());
+        let mut admit = |_, _, _: &RuleSet| {
+            observed.borrow_mut().push("prefix");
+            true
+        };
+        let mut setter = |_| {
+            observed.borrow_mut().push("setter");
+            None
+        };
+        let mut planning = PlanningInputState::default();
+        let mut selection = SelectionState::new();
+        let mut sounds = SoundEventQueue::new();
+        planning.set_active(true, Some(&sim), Some(&rules), &mut selection, &mut sounds);
+        let _ = sounds.drain();
+        let boundary = FrameClientBoundary::new(None, None, &mut sounds, &mut admit)
+            .with_tactical_radar(&mut setter)
+            .with_planning(&mut planning, &mut selection);
+        boundary.set_available(&sim, &rules, false);
+        assert_eq!(*observed.borrow(), ["prefix", "setter"]);
+        assert_eq!(boundary.delivered(), 1);
+
+        //637A10 queues UI audio without a new SimSound fact. A second
+        //consume of the same prefix alone would return without draining it.
+        boundary.leave_planning(&sim, &rules);
+        let expected = rules.general.end_planning_mode_sound.as_ref().unwrap();
+        assert!(matches!(
+            boundary.output.borrow().iter().collect::<Vec<_>>().as_slice(),
+            [crate::audio::events::GameSoundEvent::UiSound { sound_id }] if sound_id == expected
+        ));
+        boundary.set_available(&sim, &rules, true);
+        assert!(boundary.output.borrow().is_empty());
+        assert_eq!(boundary.delivered(), 1);
+        assert_eq!(*observed.borrow(), ["prefix", "setter", "setter"]);
+        // Real dispatch/queue consumption, without SFX/device playback.
     }
 }
 
@@ -398,6 +547,8 @@ mod network_command_tests {
             .register(HouseState::new(owner, 0, None, true, 0, 10));
         sim.session_mut_for_test()
             .set_game_mode(crate::sim::scenario_session::ScenarioGameMode::Wol);
+        // WOL admission includes MaxAhead before the frame-256 House gate.
+        sim.install_network_timing(10);
         sim.session_mut_for_test().set_tick_for_test(256);
         sim.session_mut_for_test().set_binary_frame_for_test(256);
         SimRuntime::from_simulation(sim)

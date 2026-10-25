@@ -65,6 +65,7 @@ pub(super) fn apply(
             CellObjectMember::Terrain(stable_id) => {
                 if let Some(terrain) = sim.terrain_objects.objects().get(&stable_id) {
                     let event = TerrainDamageEvent {
+                        damage_writeback: None,
                         stable_id,
                         rx,
                         ry,
@@ -77,6 +78,7 @@ pub(super) fn apply(
                         rules,
                         registry,
                         event,
+                        true,
                         frame_effects,
                     );
                 }
@@ -209,7 +211,10 @@ mod tests {
             .iter()
             .filter(|event| {
                 matches!(event,
-                    SimSoundEvent::EntityDied { die_sound_id, .. } if die_sound_id == "GIDie"
+                    SimSoundEvent::VocAt { sound_id, .. }
+                    | SimSoundEvent::VocAtCoord { sound_id, .. }
+                    | SimSoundEvent::EntityDied { die_sound_id: sound_id, .. }
+                        if sound_id == "GIDie"
                 )
             })
             .count();
@@ -294,11 +299,12 @@ mod tests {
             4,
             crate::sim::world::FrameEffects::default(),
         );
-        assert!(
-            !sim.sound_events
-                .iter()
-                .any(|event| matches!(event, SimSoundEvent::EntityDied { .. }))
-        );
+        assert!(!sim.sound_events.iter().any(|event| matches!(
+            event,
+            SimSoundEvent::VocAt { .. }
+                | SimSoundEvent::VocAtCoord { .. }
+                | SimSoundEvent::EntityDied { .. }
+        )));
         assert!(
             sim.substrate
                 .entities

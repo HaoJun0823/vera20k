@@ -314,6 +314,20 @@ pub(super) fn water_terrain(width: u16, height: u16) -> ResolvedTerrainGrid {
     ResolvedTerrainGrid::from_cells(width, height, cells)
 }
 
+fn water_terrain_with_yard_exit(width: u16, height: u16) -> ResolvedTerrainGrid {
+    let mut terrain = water_terrain(width, height);
+    // The 4x4 yard at (20,20) occupies its GetCoords centre (22,22).
+    // Exit443C60 -> FNPC56DC20 rejects that raw occupation. Leave exactly
+    // one Float candidate in the first ring outside its south/east edges.
+    for (x, y) in (20..=24).flat_map(|n| [(24, n), (n, 24)]) {
+        let cell = terrain.cell_mut_for_test(x, y).unwrap();
+        let cost = if (x, y) == (22, 24) { 100 } else { 0 };
+        cell.speed_costs.float = Some(cost);
+        cell.base_speed_costs.float = Some(cost);
+    }
+    terrain
+}
+
 pub(super) fn placement_radius_rules() -> RuleSet {
     let ini = IniFile::from_str(
         "[Countries]\n0=Americans\n1=Alliance\n2=Russians\n3=Soviet\n[InfantryTypes]\n\
@@ -561,6 +575,7 @@ pub(super) fn spawn_structure(
         rules,
     );
     sim.substrate.entities.insert(ge);
+    stamp_type_foundation(sim, rules, sid);
     // Use the lifecycle boundary so the fixture is a placed (not factory-held)
     // structure and raw-store consumers see the same Mark state as gameplay.
     let _ = sim.mark_entity_put(sid, crate::sim::world::UninitContext::with_rules(rules));
@@ -587,7 +602,8 @@ pub(super) fn spawn_structure(
 
 /// Give a [`spawn_structure`] fixture the foundation construction copies from
 /// its type's `Foundation=` (`stamp_building_cell_profile`), which its
-/// GetCoords reads. Its occupancy stays on the north-west cell.
+/// GetCoords and first Mark read. Changing an already-marked fixture's footprint
+/// also requires the normal Remove/Put boundary to refresh its occupied cells.
 pub(super) fn stamp_type_foundation(sim: &mut Simulation, rules: &RuleSet, sid: u64) {
     let entity = sim
         .substrate
@@ -740,7 +756,7 @@ fn naval_factory_spawn_uses_water_exit_and_defers_unload_only_without_contacts()
     // suppress the request; a free slot alone does not admit Unload.
     for occupied_slots in [&[0usize][..], &[1][..], &[0, 1][..], &[][..]] {
         let mut sim = Simulation::new();
-        let terrain = water_terrain(32, 32);
+        let terrain = water_terrain_with_yard_exit(32, 32);
         let grid = PathGrid::from_resolved_terrain(&terrain);
         sim.install_fixture_path_grid(Some(&grid));
         sim.resolved_terrain = Some(terrain);
@@ -814,8 +830,8 @@ fn naval_factory_spawn_uses_water_exit_and_defers_unload_only_without_contacts()
         let produced = sim.substrate.entities.get(produced).unwrap();
         assert_eq!(
             (produced.position.rx(), produced.position.ry()),
-            (22, 22),
-            "4x4 yard fallback starts at BuildingClass::GetCoords foundation centre"
+            (22, 24),
+            "FNPC from the 4x4 yard's centre finds its sole unoccupied exit"
         );
         let yard = sim.substrate.entities.get(1).unwrap();
         assert_eq!(yard.radio_contacts, contacts_before);
@@ -867,7 +883,7 @@ fn mixed_land_and_naval_factories_bind_independent_vehicle_and_ship_slots() {
     ), &IniFile::from_str("[GAYARD]\nFoundation=4x4\n"))
     .expect("mixed stock-shaped Vehicle/Ship rules");
     let mut sim = Simulation::new();
-    let mut terrain = water_terrain(40, 40);
+    let mut terrain = water_terrain_with_yard_exit(40, 40);
     let land_exit = terrain.cell_mut_for_test(6, 5).unwrap();
     land_exit.land_type = crate::rules::terrain_rules::LandType::Clear.as_index();
     let grid = PathGrid::test_all_passable(40, 40);
@@ -1019,7 +1035,7 @@ fn mixed_land_and_naval_factories_bind_independent_vehicle_and_ship_slots() {
                     .eq_ignore_ascii_case("DEST")
         })
         .expect("GAYARD delivered DEST through naval FNPC/Unlimbo");
-    assert_eq!((destroyer.position.rx(), destroyer.position.ry()), (22, 22));
+    assert_eq!((destroyer.position.rx(), destroyer.position.ry()), (22, 24));
     assert!(destroyer.lifecycle.cell_marked() && !destroyer.lifecycle.in_limbo());
     assert_eq!(
         sim.production
@@ -1055,7 +1071,7 @@ fn naval_delivery_nonzero_canenter_refunds_without_trying_second_producer() {
         cell.speed_costs.float = Some(0);
         cell.base_speed_costs.float = Some(0);
     }
-    for candidate in [(12, 12), (22, 22)] {
+    for candidate in [(12, 14), (22, 24)] {
         let cell = terrain.cell_mut_for_test(candidate.0, candidate.1).unwrap();
         cell.speed_costs.float = Some(100);
         cell.base_speed_costs.float = Some(100);
@@ -1089,18 +1105,27 @@ fn naval_delivery_nonzero_canenter_refunds_without_trying_second_producer() {
     let selected_mission = sim.substrate.entities.get(1).unwrap().mission;
     let other_mission = sim.substrate.entities.get(2).unwrap().mission;
     let mut blocker =
-        crate::sim::game_entity::GameEntity::test_default(50, "DEST", "Soviet", 12, 12);
+        crate::sim::game_entity::GameEntity::test_default(50, "DEST", "Soviet", 12, 14);
     blocker.set_category_for_test(crate::map::entities::EntityCategory::Unit);
     blocker.set_owner_for_test(sim.interner.intern("Soviet"));
     blocker.set_type_ref_for_test(sim.interner.intern("DEST"));
     sim.substrate.entities.insert(blocker);
     sim.substrate.occupancy.add(
         12,
-        12,
+        14,
         50,
         crate::sim::movement::locomotor::MovementLayer::Ground,
         None,
         CellListInsertion::PrependNonBuilding,
+    );
+    assert_eq!(
+        super::production_spawn::naval_exit_cell(
+            &sim,
+            1,
+            crate::rules::locomotor_type::SpeedType::Float,
+        ),
+        Some((12, 14)),
+        "FNPC reaches the supplied blocker outside the yard before CanEnter refuses it"
     );
 
     arm_build_via(

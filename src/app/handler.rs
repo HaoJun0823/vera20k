@@ -18,6 +18,19 @@ fn launcher_options_consumes_escape<T>(dialog: &Option<T>, is_escape: bool) -> b
 }
 
 impl App {
+    /// An event can interrupt WaitUntil before a capture's render cadence.
+    /// Keep that render deadline while still waking for independently due
+    /// lobby/network services. Offscreen frames have no swapchain pacing.
+    fn capture_render_wait_until(
+        &self,
+        now: Instant,
+        service_wake: Option<Instant>,
+    ) -> Option<Instant> {
+        self.capture_render_not_before
+            .filter(|deadline| now < *deadline)
+            .map(|deadline| service_wake.map_or(deadline, |service| deadline.min(service)))
+    }
+
     /// Route the physical keyboard edge before any underlying shell input.
     /// This owns main-menu modal admission; the existing message-box owner
     /// owns its result and teardown.
@@ -82,6 +95,11 @@ impl App {
         state.match_state.input.tactical_mouse.reset_on_focus_loss();
         state.match_state.input.selection_state.cancel_drag();
         state.match_state.input.minimap_dragging = false;
+        // A touch stream can end without an `Ended` when the window loses
+        // focus with fingers down, and the live gesture owns the edge-scroll
+        // inhibit, so it dies on the same edge as the rest of the pointer
+        // state.
+        state.match_state.input.touch_mapper.reset();
         state
             .match_state
             .match_presentation
@@ -308,38 +326,35 @@ fn show_menu_bar_and_dock_after_full_screen() {
     }
 }
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
-            return;
-        }
-        // Asked once AppKit has launched and activated the app; macOS keeps a
-        // chooser from any other process behind the app the player was using.
-        if std::mem::take(&mut self.ask_for_game_folder) && !super::app_bundle::ensure_game_folder()
-        {
-            log::info!("No game folder chosen; exiting");
-            event_loop.exit();
-            return;
-        }
-        log::info!("Application resumed — creating window and GPU context");
-        let capture_dimensions = match (self.shell_capture.as_ref(), self.tactical_capture.as_ref())
-        {
-            (Some(session), None) => Some((session.request().width(), session.request().height())),
-            (None, Some(session)) => Some((session.request().width(), session.request().height())),
-            (None, None) => None,
-            (Some(_), Some(_)) => {
-                log::error!("Shell and tactical capture modes are mutually exclusive");
-                event_loop.exit();
-                return;
+impl App {
+    fn accept_initialization_step(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        result: anyhow::Result<super::initialize::InitializationStep>,
+    ) {
+        match result {
+            Ok(super::initialize::InitializationStep::Pending(job)) => {
+                self.pending_initialization = Some(job);
+                event_loop.set_control_flow(ControlFlow::Poll);
             }
-        };
-        match Self::initialize(
-            event_loop,
-            capture_dimensions,
-            self.startup_options,
-            self.spawn_request.is_some(),
-        ) {
-            Ok(mut state) => {
+            Ok(super::initialize::InitializationStep::Ready(state, events)) => {
+                let mut state = *state;
+                // Resizes may have arrived while startup owned the renderer.
+                Self::follow_window_size(&mut state);
+                if let Some(request) = self.replay_request.take() {
+                    let loading = crate::app::loading::pump::LoadingRequest::replay(
+                        request
+                            .replay
+                            .standalone_startup()
+                            .expect("validated replay request"),
+                    );
+                    state.match_state.match_diagnostics.begin_playback(
+                        request.replay,
+                        request.capture_output,
+                        request.replay_sha256,
+                    );
+                    crate::app::loading::pump::begin_loading(&mut state, loading);
+                }
                 if let Some(request) = self.spawn_request.take()
                     && let Err(error) = Self::start_spawn_session(&mut state, request)
                 {
@@ -362,13 +377,19 @@ impl ApplicationHandler for App {
                 }
                 // Clip the cursor to the window on first launch (
                 // default). A focus regain re-applies it if the OS dropped it.
-                crate::app::input::cursor::apply_cursor_confinement(&state);
+                let window_id = state.platform.window.id();
                 self.state = Some(state);
+                for event in events {
+                    self.window_event(event_loop, window_id, event);
+                }
+                if let Some(state) = self.state.as_ref() {
+                    crate::app::input::cursor::apply_cursor_confinement(state);
+                }
                 log::info!("Initialization complete");
             }
             Err(err) => {
                 log::error!("Failed to initialize: {:#}", err);
-                if self.spawn_request.is_some() {
+                if self.spawn_request.is_some() || self.replay_request.is_some() {
                     self.startup_failure = Some(format!("CnCNet initialization failed: {err:#}"));
                 }
                 if let Some(session) = self.shell_capture.as_mut() {
@@ -381,12 +402,186 @@ impl ApplicationHandler for App {
             }
         }
     }
+}
+
+impl ApplicationHandler for App {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
+        if let Some(job) = self.pending_initialization.as_mut() {
+            job.admit_event_loop_turn();
+        }
+    }
+
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.state.is_some() || self.pending_initialization.is_some() {
+            return;
+        }
+        // Asked once AppKit has launched and activated the app; macOS keeps a
+        // chooser from any other process behind the app the player was using.
+        if std::mem::take(&mut self.ask_for_game_folder) && !super::app_bundle::ensure_game_folder()
+        {
+            log::info!("No game folder chosen; exiting");
+            event_loop.exit();
+            return;
+        }
+        log::info!("Application resumed — creating window and GPU context");
+        let capture_dimensions = match (self.shell_capture.as_ref(), self.tactical_capture.as_ref())
+        {
+            (Some(session), None) => Some((session.request().width(), session.request().height())),
+            (None, Some(session)) => Some((session.request().width(), session.request().height())),
+            (None, None) => None,
+            (Some(_), Some(_)) => {
+                log::error!("Shell and tactical capture modes are mutually exclusive");
+                event_loop.exit();
+                return;
+            }
+        };
+        let result = Self::initialize(
+            event_loop,
+            capture_dimensions,
+            self.startup_options,
+            self.spawn_request.is_some() || self.replay_request.is_some(),
+            self.replay_request
+                .as_ref()
+                .map(|request| request.retail_dir.as_path()),
+        );
+        let result = if capture_dimensions.is_some() {
+            result.and_then(super::initialize::InitializationStep::finish_synchronously)
+        } else {
+            result
+        };
+        self.accept_initialization_step(event_loop, result);
+    }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if let Some(job) = &mut self.pending_initialization {
+            if job.window_id() == _id {
+                if matches!(event, WindowEvent::CloseRequested) {
+                    self.pending_initialization = None;
+                    event_loop.exit();
+                } else if matches!(
+                    &event,
+                    WindowEvent::Focused(_)
+                        | WindowEvent::Occluded(_)
+                        | WindowEvent::Resized(_)
+                        | WindowEvent::CursorEntered { .. }
+                        | WindowEvent::CursorLeft { .. }
+                        | WindowEvent::CursorMoved { .. }
+                ) {
+                    // The normal platform/input owners receive these edges
+                    // once the state exists. No startup-only focus authority.
+                    job.defer_window_event(event);
+                }
+            }
+            return;
+        }
         let shell_capture_active = self.shell_capture.is_some();
         let tactical_capture_active = self.tactical_capture.is_some();
+        // Set while this call re-dispatches a touch's mouse events: those carry
+        // the parked touch cursor, not the hardware pointer.
+        let from_touch = self.dispatching_touch;
+
+        // Touchscreens have no OS cursor, so each contact is re-issued as the
+        // mouse events its gesture means; `input::touch` owns that mapping and
+        // carries the per-platform gate. Capture sessions stay input-sealed:
+        // a raw touch falls through and counts as a violation below.
+        #[cfg(not(target_os = "linux"))]
+        {
+            if !shell_capture_active
+                && !tactical_capture_active
+                && let WindowEvent::Touch(touch) = &event
+            {
+                let Some(state) = self.state.as_mut() else {
+                    return;
+                };
+                let in_game = state.frontend.screen == GameScreen::InGame;
+                let scale = state.platform.window.scale_factor();
+                let output = state.match_state.input.touch_mapper.translate(
+                    touch,
+                    Instant::now(),
+                    in_game,
+                    scale,
+                );
+                // The pointer is the finger's until a real mouse moves again.
+                state.match_state.input.cursor_from_touch = true;
+                if let Some((dx, dy)) = output.pan
+                    && in_game
+                {
+                    // Screen pixels to world pixels; the camera moves against
+                    // the fingers so the map follows them. The per-frame camera
+                    // clamp keeps an overshoot from leaving the playable area.
+                    let zoom = state.match_state.input.zoom_level.max(0.01);
+                    let (x, y) = (
+                        state.match_state.input.camera_x,
+                        state.match_state.input.camera_y,
+                    );
+                    crate::app::input::camera::set_camera_position(
+                        &mut state.match_state.input,
+                        (x + dx / zoom, y + dy / zoom),
+                    );
+                }
+                self.dispatching_touch = true;
+                for event in output.events.into_iter().flatten() {
+                    self.window_event(event_loop, _id, event);
+                }
+                self.dispatching_touch = false;
+                return;
+            }
+        }
+
         let Some(state) = &mut self.state else { return };
         state.sync_cursor_space();
+        // Playback has presentation-only input. Exit is local and never
+        // schedules EventClass EXIT or changes the recorded simulation.
+        if state.match_state.match_diagnostics.is_replay_playback() {
+            match &event {
+                WindowEvent::CloseRequested => {
+                    event_loop.exit();
+                    return;
+                }
+                WindowEvent::KeyboardInput { event, .. } => {
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        if code == KeyCode::Escape && event.state.is_pressed() {
+                            event_loop.exit();
+                        } else if matches!(
+                            code,
+                            KeyCode::ArrowLeft
+                                | KeyCode::ArrowRight
+                                | KeyCode::ArrowUp
+                                | KeyCode::ArrowDown
+                        ) {
+                            if event.state.is_pressed() {
+                                state.match_state.input.keys_held.insert(code);
+                            } else {
+                                state.match_state.input.keys_held.remove(&code);
+                            }
+                        }
+                    }
+                    return;
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    state.set_cursor_from_window(position.x as f32, position.y as f32);
+                    return;
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => *y,
+                        MouseScrollDelta::PixelDelta(position) => {
+                            (position.y as f32 / 30.0).clamp(-3.0, 3.0)
+                        }
+                    };
+                    crate::app::input::camera::apply_zoom(state, lines);
+                    return;
+                }
+                WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Focused(_)
+                | WindowEvent::Occluded(_)
+                | WindowEvent::RedrawRequested
+                | WindowEvent::CursorEntered { .. }
+                | WindowEvent::CursorLeft { .. } => {}
+                _ => return,
+            }
+        }
 
         // winit 0.30.12's X11 Ime::create_context(window, false) sends an
         // Ime::Disabled lifecycle notification even for an unmapped window.
@@ -629,6 +824,9 @@ impl ApplicationHandler for App {
                     crate::app::input::cursor::apply_cursor_confinement(state);
                 }
                 if !active {
+                    // `release_in_game_pointer_state` also drops a touch stream
+                    // that ended without an `Ended`, so no phantom finger turns
+                    // the next tap into a two-finger pan.
                     crate::app::input::cursor::release_cursor_confinement(state);
                     Self::release_in_game_pointer_state(state);
                     if let Some(browser) = state
@@ -714,6 +912,10 @@ impl ApplicationHandler for App {
                 // recorded before screen-specific dispatch own this state.
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // An open composition owns the keys (`app::input::ime`).
+                if event.state.is_pressed() && state.platform.ime.composing() {
+                    return;
+                }
                 if Self::house_outcome_wait_pending(state) {
                     if !event.state.is_pressed()
                         && let PhysicalKey::Code(code) = event.physical_key
@@ -1092,6 +1294,12 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                // The hardware pointer is back: edge auto-scroll may read the
+                // band again. A touch's synthetic move carries the parked
+                // cursor instead and keeps the inhibit up.
+                if !from_touch {
+                    state.match_state.input.cursor_from_touch = false;
+                }
                 state.set_cursor_from_window(position.x as f32, position.y as f32);
                 if Self::house_outcome_wait_pending(state) {
                     return;
@@ -1368,7 +1576,7 @@ impl ApplicationHandler for App {
                         if btn_state.is_pressed() {
                             Self::handle_main_menu_shell_mouse_down(state);
                         } else {
-                            Self::handle_main_menu_shell_mouse_up(state, event_loop);
+                            Self::handle_main_menu_shell_mouse_up(state);
                         }
                     }
                 } else if state.frontend.screen == GameScreen::InGame {
@@ -1408,17 +1616,38 @@ impl ApplicationHandler for App {
                 if state.frontend.screen == GameScreen::InGame
                     && !state.match_state.paused()
                     && !state.match_state.network_wait.dialog_open()
+                    && !crate::app::input::campaign_input::is_locked(state)
                 {
+                    // Optional player setting: over the battlefield the wheel changes the view
+                    // distance tier, anchored on the tactical centre. Over the
+                    // sidebar and the bottom strip it keeps gamemd's native
+                    // SidebarUp/SidebarDown routing.
+                    if state.persistence.options_profile.mouse_wheel_zoom
+                        && crate::app::input::camera::cursor_over_battlefield(state)
+                    {
+                        crate::app::input::camera::cycle_view_distance(state, lines);
+                        state.platform.window.request_redraw();
+                        return;
+                    }
                     // Every wheel notch scrolls the active build strip by one
-                    // row, wherever the cursor is. gamemd routes the wheel
-                    // message straight to the SidebarUp / SidebarDown commands
-                    // and has no world zoom for it to reach.
+                    // row. gamemd routes the wheel message straight to the
+                    // SidebarUp / SidebarDown commands and has no world zoom.
                     dispatch::sidebar_wheel_scroll(state, lines);
                 }
             }
+            WindowEvent::Ime(ime) => crate::app::input::ime::event(state, ime),
             WindowEvent::RedrawRequested => {
                 if let Err(err) = Self::render_frame(state, event_loop, None, None) {
                     log::error!("Render: {:#}", err);
+                    if state
+                        .match_state
+                        .match_diagnostics
+                        .playback_capture_requested()
+                    {
+                        state.frontend.external_launch_error =
+                            Some(format!("Replay capture failed: {err:#}"));
+                        event_loop.exit();
+                    }
                 }
             }
             _ => {}
@@ -1426,12 +1655,33 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // `resumed` and `about_to_wait` may share the first event-loop turn.
+        // A newly created continuation must wait for new_events, otherwise
+        // its work is joined to the preceding slice without servicing input.
+        if self
+            .pending_initialization
+            .as_ref()
+            .is_some_and(|job| !job.may_resume())
+        {
+            event_loop.set_control_flow(ControlFlow::Poll);
+            return;
+        }
+        if let Some(job) = self.pending_initialization.take() {
+            self.accept_initialization_step(event_loop, job.advance());
+            // One completed startup slice per event-loop pass, including the
+            // final admission. Ordinary input starts only with the full state.
+            return;
+        }
         let shell_scroll_wake = if let Some(state) = self.state.as_mut() {
             Self::follow_window_full_screen(state);
             // cursor lock: the OS drops the clip on focus loss /
             // Windows key, so re-assert the player's choice every frame while
             // the window is focused. Presentation-only, never part of the sim.
             crate::app::input::cursor::reassert_cursor_confinement(state);
+            // Captures keep their sealed input; they never ask for an IME.
+            if self.shell_capture.is_none() && self.tactical_capture.is_none() {
+                crate::app::input::ime::sync(state);
+            }
             Self::update_saved_seed_browser_scroll(state, false);
             Self::update_load_saved_game_scroll(state, false);
             [
@@ -1456,6 +1706,28 @@ impl ApplicationHandler for App {
         } else {
             None
         };
+        if self.shell_capture.is_some() || self.tactical_capture.is_some() {
+            // A callback already queued by the platform can arrive after the
+            // completed one-shot capture requested exit. Never render it again.
+            if self
+                .shell_capture
+                .as_ref()
+                .is_some_and(|session| session.is_finished())
+                || self
+                    .tactical_capture
+                    .as_ref()
+                    .is_some_and(|session| session.is_finished())
+            {
+                event_loop.exit();
+                return;
+            }
+            if let Some(deadline) =
+                self.capture_render_wait_until(Instant::now(), shell_scroll_wake)
+            {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                return;
+            }
+        }
         if let (Some(state), Some(session)) = (self.state.as_mut(), self.tactical_capture.as_mut())
         {
             if let Err(err) = Self::render_frame(state, event_loop, None, Some(&mut *session)) {
@@ -1465,17 +1737,15 @@ impl ApplicationHandler for App {
                 return;
             }
             if !session.is_finished() {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(session.next_wake_deadline()));
+                let deadline = session.next_wake_deadline();
+                self.capture_render_not_before = Some(deadline);
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    shell_scroll_wake.map_or(deadline, |service| deadline.min(service)),
+                ));
             }
         } else if let (Some(state), Some(session)) =
             (self.state.as_mut(), self.shell_capture.as_mut())
         {
-            // Windows may deliver another wait callback after exit was requested.
-            // The completed one-shot bundle must not enter rendering again.
-            if session.is_finished() {
-                event_loop.exit();
-                return;
-            }
             if let Err(err) = Self::render_frame(state, event_loop, Some(&mut *session), None) {
                 log::error!("Shell capture render: {err:#}");
                 session.fail(format!("shell capture render failed: {err:#}"));
@@ -1484,6 +1754,7 @@ impl ApplicationHandler for App {
             }
             if !session.is_finished() {
                 let mut deadline = session.next_wake_deadline();
+                self.capture_render_not_before = Some(deadline);
                 if let Some(wave_deadline) =
                     crate::app::frontend::shell_transition::main_menu_presented_wake_deadline(state)
                 {
@@ -1491,6 +1762,9 @@ impl ApplicationHandler for App {
                 }
                 if let Some(animation_deadline) = Self::campaign_score_animation_deadline(state) {
                     deadline = deadline.min(animation_deadline);
+                }
+                if let Some(service) = shell_scroll_wake {
+                    deadline = deadline.min(service);
                 }
                 event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
             }
@@ -1549,6 +1823,30 @@ impl ApplicationHandler for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_render_deadline_survives_early_service_wakes_and_admits_when_due() {
+        use std::time::Duration;
+
+        let mut app = App::default();
+        let rendered_at = Instant::now();
+        assert_eq!(app.capture_render_wait_until(rendered_at, None), None);
+
+        let deadline = rendered_at + Duration::from_millis(8);
+        app.capture_render_not_before = Some(deadline);
+        let service = rendered_at + Duration::from_millis(1);
+        assert_eq!(
+            app.capture_render_wait_until(rendered_at, Some(service)),
+            Some(service)
+        );
+        assert_eq!(app.capture_render_wait_until(service, None), Some(deadline));
+        assert_eq!(app.capture_render_not_before, Some(deadline));
+        assert_eq!(app.capture_render_wait_until(deadline, None), None);
+        assert_eq!(
+            app.capture_render_wait_until(deadline + Duration::from_secs(1), None),
+            None
+        );
+    }
 
     #[test]
     fn launcher_options_escape_is_consumed_without_replacing_the_parent() {

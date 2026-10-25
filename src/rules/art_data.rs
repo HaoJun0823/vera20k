@@ -400,6 +400,11 @@ pub struct AnimTypeRuntimeConfig {
     pub tiberium_chain_reaction: bool,
     pub is_tiberium: bool,
     pub hide_if_no_ore: bool,
+    /// Phobos `AnimTypeExt::HideIfNoOre_Threshold` (`src/Ext/AnimType/Body.h`,
+    /// read as a `Valueable<int>` with constructor default 0): the smallest
+    /// contained tiberium value at which a `HideIfNoOre=` anim still draws.
+    #[cfg(feature = "phobos")]
+    pub hide_if_no_ore_threshold: i32,
     pub is_animated_tiberium: bool,
     pub tiberium_spread_radius: i32,
     /// The Type references (`TiberiumSpawnType=`, `Spawns=`, `Warhead=`,
@@ -432,9 +437,10 @@ pub struct AnimTypeRuntimeConfig {
     /// point. `Simulation::visit_anim` consumes it after a due frame advance.
     pub damage: NativeF64Bits,
     /// art.ini `Warhead=`, `AnimTypeClass+0x330`, resolved by
-    /// `WarheadTypeClass::FindOrAllocate`. Bouncer-landing only — the per-frame
-    /// damage arm hard-selects `[CombatDamage] C4Warhead`/`FlameDamage2`
-    /// instead.
+    /// `WarheadTypeClass::FindOrAllocate`. Stock per-frame damage selects
+    /// `[CombatDamage] C4Warhead`/`FlameDamage2`, leaving this to Bouncer
+    /// landings. Ares AnimClass_Update_DamageDelay1000B179 also uses it for
+    /// ordinary damage, before falling back to the stock selection.
     pub warhead: Option<String>,
     /// art.ini `DamageRadius=`, `AnimTypeClass+0x334`. Bouncer-landing only.
     pub damage_radius: i32,
@@ -811,6 +817,8 @@ fn parse_anim_runtime_config(section: &IniSection) -> AnimTypeRuntimeConfig {
         tiberium_chain_reaction: section.read_bool("TiberiumChainReaction", false),
         is_tiberium: section.read_bool("IsTiberium", false),
         hide_if_no_ore: section.read_bool("HideIfNoOre", false),
+        #[cfg(feature = "phobos")]
+        hide_if_no_ore_threshold: section.read_ares_int("HideIfNoOre.Threshold", 0),
         is_animated_tiberium: section.read_bool("IsAnimatedTiberium", false),
         tiberium_spread_radius: section.read_int("TiberiumSpreadRadius", 0),
         // The Type references (`TiberiumSpawnType=`, `Spawns=`, `Warhead=`,

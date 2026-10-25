@@ -1143,10 +1143,12 @@ pub(crate) fn snapshot_get_rof(
     let firer = substrate.entities.get(snap.stable_id);
     super::rof::get_rof(
         &super::rof::RofQuery {
-            // RESIDUAL: a building's own Ammo (`+0x2FC`) is not kept. The
-            // retail buildings with `Ammo=` (CAAIRP, CAPOWR: 5) are unarmed,
-            // so none reaches GetROF.
-            building_ammo: None,
+            // GetROF6FCFA9: a Building with more than one round returns1
+            // before weapon queries and the ordinary ROF variation draw.
+            building_ammo: firer
+                .filter(|entity| entity.category() == EntityCategory::Structure)
+                .and_then(|entity| entity.ammo())
+                .map(|ammo| ammo.current()),
             weapon: rof_weapon,
             live,
             burst_index,
@@ -1156,13 +1158,19 @@ pub(crate) fn snapshot_get_rof(
                 .map_or(crate::util::native_x87::NativeF64Bits::ONE, |house| {
                     house.rof_bias()
                 }),
+            #[cfg(feature = "ares")]
+            attached_rof: Some(
+                firer.map_or(crate::util::native_x87::NativeF64Bits::ONE, |entity| {
+                    entity.attached_rof_multiplier()
+                }),
+            ),
             rof_ability: self::veterancy::has_weapon_ability(
                 self::veterancy::rank_from_u16(snap.veterancy),
                 obj,
                 crate::rules::object_type::Ability::Rof,
             ),
             veteran_rof: rules.general.veteran_rof,
-            occupants: snap.garrison.as_ref().map(|gs| gs.occupant_count as i32),
+            occupants: snap.garrison.as_ref().map(|gs| gs.occupant_count),
             bunkered: snap.category != EntityCategory::Structure
                 && firer.is_some_and(|firer| {
                     matches!(
@@ -1804,14 +1812,8 @@ pub(super) fn emit_admitted_fire(
     // occupant's ROF and Burst) and the shot's own kill credit, since its
     // Inviso bullet detonates later in its own AI (possibly this frame's
     // Logic tail, once its impact/fuse admits it).
-    if is_garrison
-        && let Some(cargo) = world
-            .substrate
-            .entities
-            .get_mut(snap.stable_id)
-            .and_then(|building| building.passenger_role.cargo_mut())
-    {
-        cargo.advance_garrison_fire_index();
+    if is_garrison && let Some(building) = world.substrate.entities.get_mut(snap.stable_id) {
+        building.passenger_role.occupants_mut().advance_fire_index();
     }
     // Techno6FF0B7..6FF15B: only a successfully launched shot arms recoil.
     // Stock recoil buildings have their own Turret=yes. Building4527D0's
@@ -1901,6 +1903,22 @@ pub(super) fn emit_admitted_fire(
         entity.weapon_burst.complete_shot(weapon.burst.max(1));
         entity.last_fire_frame.record(binary_frame);
     }
+    // TechnoClass::FireAt6FF38F calls VocClass::PlayAt7509E0 before the
+    // muzzle constructor6FF3C2. Admit through the shared sound owner here:
+    // later Bullet AI can submit a death cue competing for the same pool.
+    if let Some(report_id) = report_sound_id
+        && sound_enabled(world)
+    {
+        world.sound_events.emit(SimSoundEvent::voc_at_world_coord(
+            world.interner.resolve(report_id).to_owned(),
+            crate::sim::anim_class::AnimWorldCoord {
+                x: launch_source.coord.x,
+                y: launch_source.coord.y,
+                z: launch_source.coord.z,
+            },
+        ));
+        effects.flush_sound(world, rules);
+    }
     // `0x006FF394..0x006FF43F`, after GetROF: the muzzle anim, appended to the
     // Logic vector behind this shot's bullet.
     if let Some(event) = out.fire_events.last().cloned() {
@@ -1932,8 +1950,14 @@ pub(super) fn emit_admitted_fire(
     {
         world.commit_fired_wave(rules, &event, 3);
     }
-    // `0x006FF656`: DecreaseAmmo (vt+0x390). Only an aircraft holds Ammo here,
-    // and `AircraftClass`'s slot is a bare RET (`0x0041B900`).
+    // FireAt6FF65A: shared DecreaseAmmo70D670 (+390) debits only signed>0.
+    // Aircraft's override is RET41B900; release/dock retain their own writes.
+    if let Some(entity) = world.substrate.entities.get_mut(snap.stable_id)
+        && entity.category() != EntityCategory::Aircraft
+        && let Some(ammo) = entity.ammo_mut()
+    {
+        ammo.decrease();
+    }
     // `0x006FF66C`, after DecreaseAmmo (`0x006FF656`): RevealOnFire.
     reveal_on_fire(
         world,
@@ -1960,6 +1984,19 @@ pub(super) fn emit_admitted_fire(
     // UnitTarget and direct mission calls; constructors/shrapnel/other
     // classes never pass this Unit-only postprocessing boundary.
     if snap.category == EntityCategory::Unit {
+        // UnitFireAt7413D3..741401: only a nonnull base Bullet return
+        // restarts a finite, non-full automatic magazine. Re-read the live
+        // type after the common tail, before the firing counter/scalable.
+        if let Some(entity) = world.substrate.entities.get_mut(snap.stable_id)
+            && let Some(live_type) = world.interner.object_type(entity.type_ref(), rules)
+            && live_type.ammo > 0
+            && entity
+                .ammo()
+                .is_some_and(|ammo| ammo.current() < live_type.ammo)
+            && !live_type.manual_reload
+        {
+            entity.start_reloading_ammo(live_type, binary_frame as i32);
+        }
         let frames = rules
             .unit_shp_read_state(world.interner.resolve(snap.type_id))
             .map_or(0, |layout| layout.firing_frames());
@@ -1988,7 +2025,6 @@ pub(super) fn emit_admitted_fire(
             .and_then(|entity| entity.disguise.as_mut())
     {
         disguise.start_fire_blink(binary_frame, weapon.disguise_fake_blink_time);
-        world.note_disguise_blink_started();
     }
     Some(bullet_id)
 }
@@ -2404,10 +2440,9 @@ pub(crate) fn visit_fire(
                     .interner
                     .object_type(actor.type_ref(), rules)
                     .filter(|obj| combat_weapon::is_occupied(actor, obj))
-                    .and_then(|_| actor.passenger_role.cargo())
-                    .map(|cargo| GarrisonSnapshot {
-                        fire_index: cargo.garrison_fire_index(),
-                        occupant_count: cargo.count() as u8,
+                    .map(|_| GarrisonSnapshot {
+                        fire_index: actor.passenger_role.occupants().fire_index(),
+                        occupant_count: actor.passenger_role.occupants().count(),
                     });
                 AttackerSnapshot {
                     building_shot: Some(shot),

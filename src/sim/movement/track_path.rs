@@ -113,7 +113,7 @@ fn jumpjet_unit(entity: &GameEntity) -> bool {
 fn teleporter_unit(sim: &Simulation, entity: &GameEntity, rules: &RuleSet) -> bool {
     entity.category() == EntityCategory::Unit
         && sim
-            .object_type(entity.type_ref(), rules)
+            .entity_object_type(entity, rules)
             .is_some_and(|object| object.teleporter)
 }
 
@@ -658,24 +658,9 @@ impl Simulation {
     /// call sees is the override's (Override_Mission saved NavCom at
     /// `0x004D8F5B` and set its own at `0x004D8F6D`), not the saved one.
     ///
-    /// Residual: native Restore runs this setter inside the restore; VERA runs
-    /// it at the object's next Process entry, without the override's NavCom.
-    /// Trigger: an AoE cell target expiring under a suspended mission
-    /// (`restore_entity_after_target_expiry`, whose broadcast holds only the
-    /// entity store). Effects:
-    /// - the setter's timers, NavQueue clear, Move_To and admission effects
-    ///   (the deployment refusal's NavCom clear, the UnitRepair radio arm, the
-    ///   Teleporter arm's locomotor swap) land up to one frame late, inside the
-    ///   Process host chosen before the call;
-    /// - an override NavCom equal to the saved one takes the whole setter,
-    ///   where native's unchanged-NavCom return (`0x00741A80`) writes nothing;
-    /// - a setter that refuses before the Foot tail leaves NavCom and
-    ///   NavComAux empty, where native keeps the override's.
-    ///
-    /// Frequency: rare. Risk: timing, plus the rare same-NavCom and refusal
-    /// cases. The Teleporter swap needs a `Teleporter=` Unit holding a cell
-    /// target; a text search of retail `rulesmd.ini` finds only the unarmed
-    /// CMIN among Units.
+    /// Compatibility path for retained state or fixture-only restores without
+    /// a represented class setter. Production AreaDamage calls the full world
+    /// Restore synchronously before capturing the current spread cell.
     pub(crate) fn complete_pending_order(
         &mut self,
         id: u64,
@@ -823,7 +808,12 @@ impl Simulation {
         {
             return false;
         }
-        if actor.navigation.nav_com() == Some(requested) && !actor.setter_force_reassign.raised {
+        if actor
+            .navigation
+            .nav_com()
+            .is_some_and(|held| held.same_pointer(requested, self.resolved_terrain.as_ref()))
+            && !actor.setter_force_reassign.raised
+        {
             return true;
         }
         let actor = self
@@ -842,7 +832,7 @@ impl Simulation {
             .substrate
             .entities
             .get(id)
-            .and_then(|actor| self.object_type(actor.type_ref(), rules))
+            .and_then(|actor| self.entity_object_type(actor, rules))
             .is_some_and(|object| object.harvester);
         let requested_techno = match requested {
             NavTargetRef::Object { id } => crate::sim::radio::as_techno(self, id),
@@ -856,7 +846,7 @@ impl Simulation {
             && let Some(contact) = unit.radio_contacts.slot(0)
             && !unit.radio_contacts.contains(target)
             && self
-                .object_type(unit.type_ref(), rules)
+                .entity_object_type(unit, rules)
                 .is_some_and(|object| object.passengers > 0)
             && self
                 .substrate
@@ -913,8 +903,7 @@ impl Simulation {
             .filter(|(_, category)| *category == EntityCategory::Structure)
             .map(|(id, _)| id);
         let enter_building = original_building.and_then(|building| {
-            let object =
-                self.object_type(self.substrate.entities.get(building)?.type_ref(), rules)?;
+            let object = self.entity_object_type(self.substrate.entities.get(building)?, rules)?;
             (object.unit_repair || object.dock_unload || object.bunker).then_some((
                 building,
                 object.unit_repair,
@@ -937,7 +926,7 @@ impl Simulation {
             self.substrate
                 .entities
                 .get(building)
-                .and_then(|building| self.object_type(building.type_ref(), rules))
+                .and_then(|building| self.entity_object_type(building, rules))
                 .is_some_and(|object| object.unit_absorb)
         });
         if let Some(target) = mobile_target.or(absorber)
@@ -984,7 +973,7 @@ impl Simulation {
                             .entities
                             .get(id)
                             .and_then(|unit| {
-                                self.object_type(unit.type_ref(), rules)
+                                self.entity_object_type(unit, rules)
                                     .map(|object| !unit.health.is_full(object.strength))
                             })
                             .unwrap_or(false);
@@ -1149,7 +1138,8 @@ impl Simulation {
             if teleporter {
                 let _ = self.unit_teleporter_arm(id, None, rules);
             }
-            if self.unit_factory_exit_arm(id, None, rules, None, frame_effects) {
+            if !dock_fast_return && self.unit_factory_exit_arm(id, None, rules, None, frame_effects)
+            {
                 return true;
             }
             self.unit_destination_power_on(id, rules);
@@ -1163,7 +1153,15 @@ impl Simulation {
             _ => None,
         };
         let skip_move_to = teleporter && self.unit_teleporter_arm(id, requested_cell, rules);
-        if self.unit_factory_exit_arm(id, Some(requested), rules, None, frame_effects) {
+        // UnitClass::Set_Destination 0x00741970: successful UnitRepair/Bunker
+        // docking jumps from 0x00742C8E/0x00742D08 to Foot's setter at
+        // 0x00742D09 and returns before the WeaponsFactory arm (0x00742D46).
+        // Retail naval yards have both flags; running that arm here queues
+        // the repair destination as a factory-exit order while Enter is pending.
+        // Source: gamemd.exe instructions 0x00742C14..0x00742E47.
+        if !dock_fast_return
+            && self.unit_factory_exit_arm(id, Some(requested), rules, None, frame_effects)
+        {
             return true;
         }
         let requested = match original_building.filter(|_| !dock_fast_return) {
@@ -1305,7 +1303,7 @@ impl Simulation {
         let Some(building) = self.substrate.entities.get(dock) else {
             return UnitDockArm::Keep;
         };
-        let Some(object) = self.object_type(actor.type_ref(), rules) else {
+        let Some(object) = self.entity_object_type(actor, rules) else {
             return UnitDockArm::Keep;
         };
         if actor.category() != EntityCategory::Unit
@@ -1433,7 +1431,7 @@ impl Simulation {
                         .is_some_and(|building| {
                             building.category() == EntityCategory::Structure
                                 && self
-                                    .object_type(building.type_ref(), rules)
+                                    .entity_object_type(building, rules)
                                     .is_some_and(|object| object.unit_repair || object.bunker)
                         })
             });
@@ -1509,7 +1507,7 @@ impl Simulation {
             .slot(0)
             .and_then(|contact| self.substrate.entities.get(contact))
             .filter(|contact| contact.category() == EntityCategory::Structure)
-            .and_then(|contact| self.object_type(contact.type_ref(), rules))
+            .and_then(|contact| self.entity_object_type(contact, rules))
             .is_some_and(|object| object.dock_unload);
         // 0x007424D7: CellClass::Get_Unit(0) on the ground object list.
         let pad = dock_contact
@@ -1729,7 +1727,7 @@ impl Simulation {
             return false;
         };
         if !self
-            .object_type(actor.type_ref(), rules)
+            .entity_object_type(actor, rules)
             .is_some_and(|object| object.balloon_hover)
         {
             return false;

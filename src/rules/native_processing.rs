@@ -13,11 +13,13 @@ use crate::rules::armor::armor_index;
 use crate::rules::color_add::{ColorAddSelectors, ColorAddTable};
 use crate::rules::compatibility::RulesCompatibility;
 use crate::rules::crate_rules::CrateRules;
+use crate::rules::digital_display::DigitalDisplayTypeCatalog;
 use crate::rules::error::RulesError;
 use crate::rules::gunner_turrets::GunnerTurrets;
 use crate::rules::ini_parser::{IniFile, IniSection, is_native_none_type_name};
 use crate::rules::locomotor_type::SpeedType;
 use crate::rules::phobos_radiation::RadiationTypeCatalog;
+use crate::rules::phobos_shields::ShieldTypeCatalog;
 use crate::rules::sound_ini::EvaRegistry;
 
 use crate::rules::missile_spawn::{MissileFamily, MissileSpawnRules};
@@ -600,6 +602,26 @@ impl ProcessedRulesLayers {
             .as_ref()
     }
 
+    /// Phobos `[ShieldTypes]` catalog with the same retained process lifetime
+    /// as Types.
+    #[cfg(feature = "phobos")]
+    pub(crate) fn shield_types(&self) -> Option<&ShieldTypeCatalog> {
+        self.native_type_construction_trace
+            .registry_state
+            .phobos_shield_types
+            .as_ref()
+    }
+
+    /// Phobos `[DigitalDisplayTypes]` catalog with the same retained process
+    /// lifetime as Types.
+    #[cfg(feature = "phobos")]
+    pub(crate) fn digital_display_types(&self) -> Option<&DigitalDisplayTypeCatalog> {
+        self.native_type_construction_trace
+            .registry_state
+            .phobos_digital_display_types
+            .as_ref()
+    }
+
     /// Read-only projection of the retained registry's build capability.
     pub(crate) fn compatibility(&self) -> RulesCompatibility {
         self.native_type_construction_trace
@@ -750,7 +772,7 @@ impl ProcessedRulesLayers {
     /// fields and resource requests; registry construction performs no reads.
     pub(crate) fn overlay_type_states(
         &self,
-    ) -> impl Iterator<Item = (&str, i32, Option<&str>, &ObjectImageState)> {
+    ) -> impl Iterator<Item = (&str, i32, bool, Option<&str>, &ObjectImageState)> {
         self.native_type_construction_trace
             .registry_state()
             .families
@@ -761,6 +783,7 @@ impl ProcessedRulesLayers {
                 (
                     member.native_stored_id.as_str(),
                     member.overlay_damage_levels,
+                    member.overlay_explodes,
                     member.overlay_cell_anim.as_deref(),
                     &member.object_image,
                 )
@@ -933,6 +956,9 @@ impl ProcessedRulesLayers {
         registry.validate_techno_type_order()?;
         registry.validate_prerequisites()?;
         registry.validate_radiation_types()?;
+        registry.validate_shield_types()?;
+        #[cfg(feature = "phobos")]
+        registry.validate_digital_display_types()?;
         let families = &registry.families;
         let projectile_count = families
             .get(&RulesTypeFamily::Projectile)
@@ -1573,6 +1599,14 @@ impl ProcessedRulesLayers {
         })
     }
 
+    /// Phobos `UnitTypeExt`'s `OreGathering.*` vectors, one per VehicleType.
+    #[cfg(feature = "phobos")]
+    pub(crate) fn ore_gathering_states(
+        &self,
+    ) -> impl Iterator<Item = (&str, &crate::rules::object_type::PhobosOreGathering)> {
+        self.member_states(RulesTypeFamily::Vehicle, |member| &member.ore_gathering)
+    }
+
     /// Ares GenericWarhead references, resolved by the same ordered type
     /// allocator as native references. Kept separate from the retail fields.
     pub(crate) fn generic_super_weapon_warhead_states(
@@ -1601,10 +1635,20 @@ impl ProcessedRulesLayers {
     /// Each VoxelAnimType's references after every reached pass.
     pub(crate) fn voxel_anim_reference_states(
         &self,
-    ) -> impl Iterator<Item = (&str, &VoxelAnimTypeReferences)> {
-        self.member_states(RulesTypeFamily::VoxelAnimation, |member| {
-            &member.voxel_anim_references
-        })
+    ) -> impl Iterator<Item = (&str, &VoxelAnimTypeReferences, i32)> {
+        self.native_type_construction_trace
+            .registry_state()
+            .families
+            .get(&RulesTypeFamily::VoxelAnimation)
+            .into_iter()
+            .flatten()
+            .map(|member| {
+                (
+                    member.native_stored_id.as_str(),
+                    &member.voxel_anim_references,
+                    member.voxel_anim_damage,
+                )
+            })
     }
 
     /// Each AnimType's fixed-ART references, in AnimType registry order; a
@@ -1642,6 +1686,12 @@ impl ProcessedRulesLayers {
     }
 
     /// `[CombatDamage] DeathWeapon=` (Rules+FDC) after the last pass.
+    pub(crate) fn ammo_crate_damage(&self) -> i32 {
+        self.native_type_construction_trace
+            .registry_state()
+            .rules_ammo_crate_damage
+    }
+
     pub(crate) fn combat_damage_death_weapon(&self) -> Option<&str> {
         self.native_type_construction_trace
             .registry_state()
@@ -1716,13 +1766,15 @@ impl ProcessedRulesLayers {
             })
     }
 
-    pub(crate) fn emp_type_states(
+    pub(crate) fn ares_techno_states(
         &self,
     ) -> impl Iterator<
         Item = (
             ObjectCategory,
             &str,
             Option<&crate::rules::ares_emp::EmpTypeRules>,
+            Option<&crate::rules::ares_warhead::AttachEffectRules>,
+            bool,
         ),
     > {
         self.native_type_construction_trace
@@ -1738,6 +1790,8 @@ impl ProcessedRulesLayers {
                         category,
                         member.native_stored_id.as_str(),
                         member.emp_type.as_ref(),
+                        member.self_attach_effect.as_ref(),
+                        member.cloak_allowed,
                     )
                 })
             })
@@ -1808,6 +1862,13 @@ impl ProcessedRulesLayers {
             f64::from_bits(state.rules_unit_repair_rate.bits()),
             f64::from_bits(state.rules_infantry_repair_rate.bits()),
         )
+    }
+
+    /// Rules6660AE/ReadGeneral671858: retained scalar, surviving Type resets.
+    pub(crate) fn charge_to_drain_ratio(&self) -> NativeF64Bits {
+        self.native_type_construction_trace
+            .registry_state()
+            .rules_charge_to_drain_ratio
     }
 
     pub(crate) fn gravity(&self) -> i32 {
@@ -2510,6 +2571,10 @@ pub(crate) struct NativeRulesRegistryState {
     ares_armors: Option<ArmorCatalog>,
     /// Phobos `[RadiationTypes]` catalog; Process retains it per pass.
     phobos_radiation_types: Option<RadiationTypeCatalog>,
+    /// Phobos `[ShieldTypes]` catalog; Process retains it per pass.
+    phobos_shield_types: Option<ShieldTypeCatalog>,
+    /// Phobos `[DigitalDisplayTypes]` catalog; Process retains it per pass.
+    phobos_digital_display_types: Option<DigitalDisplayTypeCatalog>,
     #[cfg(feature = "ares")]
     ares_global_controls: AresGlobalControls,
     families: HashMap<RulesTypeFamily, Vec<ProcessedType>>,
@@ -2544,11 +2609,13 @@ pub(crate) struct NativeRulesRegistryState {
     rules_no_parachute_max_fall_rate: i32,
     rules_survivor_divisors: [i32; 3],
     rules_infantry_repair_step: i32,
+    rules_charge_to_drain_ratio: NativeF64Bits,
     rules_unit_repair_rate: NativeF64Bits,
     rules_infantry_repair_rate: NativeF64Bits,
     rules_maximum_cheer_rate: i32,
     rules_talk_bubble_time: i32,
     rules_spotlight: crate::rules::ruleset::SpotlightRules,
+    rules_ammo_crate_damage: i32,
     rules_ion_cannon_damage: i32,
     rules_ion_blast_anim: String,
     rules_ion_beam_anim: String,
@@ -2594,6 +2661,9 @@ impl Default for NativeRulesRegistryState {
             ares_armors: crate::rules::ARES_ENABLED.then(ArmorCatalog::default),
             phobos_radiation_types: crate::rules::PHOBOS_ENABLED
                 .then(RadiationTypeCatalog::with_default),
+            phobos_shield_types: crate::rules::PHOBOS_ENABLED.then(ShieldTypeCatalog::default),
+            phobos_digital_display_types: crate::rules::PHOBOS_ENABLED
+                .then(DigitalDisplayTypeCatalog::default),
             #[cfg(feature = "ares")]
             ares_global_controls: AresGlobalControls::default(),
             families: HashMap::new(),
@@ -2618,6 +2688,7 @@ impl Default for NativeRulesRegistryState {
             rules_no_parachute_max_fall_rate: general.no_parachute_max_fall_rate,
             rules_survivor_divisors: crate::rules::ruleset::DEFAULT_SURVIVOR_DIVISORS,
             rules_infantry_repair_step: general.infantry_repair_step,
+            rules_charge_to_drain_ratio: general.charge_to_drain_ratio,
             rules_unit_repair_rate: NativeF64Bits::from_bits(general.unit_repair_rate.to_bits()),
             rules_infantry_repair_rate: NativeF64Bits::from_bits(
                 general.infantry_repair_rate.to_bits(),
@@ -2626,6 +2697,7 @@ impl Default for NativeRulesRegistryState {
             rules_talk_bubble_time: general.talk_bubble_time,
             rules_spotlight: general.spotlight,
             // Rules665CD4=700; pointer fields665A18/665A24/666BD5 start null.
+            rules_ammo_crate_damage: 100,
             rules_ion_cannon_damage: 700,
             rules_ion_blast_anim: String::new(),
             rules_ion_beam_anim: String::new(),
@@ -2749,6 +2821,25 @@ impl NativeRulesRegistryState {
         Ok(())
     }
 
+    fn validate_shield_types(&self) -> Result<(), RulesError> {
+        if self.phobos_shield_types.is_some() != crate::rules::PHOBOS_ENABLED {
+            return Err(RulesError::InvalidSavedState(
+                "saved shield type catalog does not match the compiled capability",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "phobos")]
+    fn validate_digital_display_types(&self) -> Result<(), RulesError> {
+        if self.phobos_digital_display_types.is_some() != crate::rules::PHOBOS_ENABLED {
+            return Err(RulesError::InvalidSavedState(
+                "saved digital display type catalog does not match the compiled capability",
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_prerequisites(&self) -> Result<(), RulesError> {
         if self.ares_prerequisites.is_some() != crate::rules::ARES_ENABLED {
             return Err(RulesError::InvalidSavedState(
@@ -2860,6 +2951,7 @@ impl NativeRulesRegistryState {
         &mut self,
         tech_levels: impl IntoIterator<Item = (ObjectCategory, String, i32)>,
         upgrade_art_names: impl IntoIterator<Item = (String, u8, String)>,
+        voxel_damage: impl IntoIterator<Item = (String, i32)>,
     ) -> Result<(), RulesError> {
         let mut resolved = Vec::new();
         for (id, slot, name) in upgrade_art_names {
@@ -2871,6 +2963,15 @@ impl NativeRulesRegistryState {
                 ))?;
             resolved.push((index, slot, name));
         }
+        let mut resolved_voxels = Vec::new();
+        for (id, damage) in voxel_damage {
+            let index = self
+                .exact_type_index(RulesTypeFamily::VoxelAnimation, &id)
+                .ok_or(RulesError::InvalidSavedState(
+                    "outgoing VoxelAnim Damage does not identify one exact live VoxelAnimType",
+                ))?;
+            resolved_voxels.push((index, damage));
+        }
         self.consume_outgoing_type_tech_levels(tech_levels)?;
         for (index, slot, name) in resolved {
             self.families
@@ -2878,6 +2979,12 @@ impl NativeRulesRegistryState {
                 .expect("validated BuildingType family")[index]
                 .building_upgrade
                 .set_normal_art_name(slot, name);
+        }
+        for (index, damage) in resolved_voxels {
+            self.families
+                .get_mut(&RulesTypeFamily::VoxelAnimation)
+                .expect("validated VoxelAnimType family")[index]
+                .voxel_anim_damage = damage;
         }
         Ok(())
     }
@@ -2986,11 +3093,13 @@ impl NativeRulesRegistryState {
             rules_no_parachute_max_fall_rate: self.rules_no_parachute_max_fall_rate,
             rules_survivor_divisors: self.rules_survivor_divisors,
             rules_infantry_repair_step: self.rules_infantry_repair_step,
+            rules_charge_to_drain_ratio: self.rules_charge_to_drain_ratio,
             rules_unit_repair_rate: self.rules_unit_repair_rate,
             rules_infantry_repair_rate: self.rules_infantry_repair_rate,
             rules_maximum_cheer_rate: self.rules_maximum_cheer_rate,
             rules_talk_bubble_time: self.rules_talk_bubble_time,
             rules_spotlight: self.rules_spotlight,
+            rules_ammo_crate_damage: self.rules_ammo_crate_damage,
             rules_ion_cannon_damage: self.rules_ion_cannon_damage,
             rules_mind_control_attack_line_frames: self.rules_mind_control_attack_line_frames,
             rules_line_trail_override: self.rules_line_trail_override,
@@ -3255,6 +3364,8 @@ struct ProcessedType {
     /// OverlayCtor5FE265 starts at1; OverlayRead5FE8A6..5FE8C3 retains
     /// the full signed dword through each fixed-ART Image-section read.
     overlay_damage_levels: i32,
+    /// OverlayCtor5FE2C0 false; ReadINI5FE839..5FE853 current-default bool.
+    overlay_explodes: bool,
     /// OverlayTypeClass ctor5FE290 starts null; ReadINI5FE867..5FE8A0
     /// retains empty reads and stores AnimTypeFindOrAllocate428B80's result.
     overlay_cell_anim: Option<String>,
@@ -3366,6 +3477,9 @@ struct ProcessedType {
     ares_verses: Option<AresWarheadVerses>,
     ares_warhead: Option<crate::rules::ares_warhead::AresWarheadRules>,
     emp_type: Option<crate::rules::ares_emp::EmpTypeRules>,
+    self_attach_effect: Option<crate::rules::ares_warhead::AttachEffectRules>,
+    /// TechnoTypeExt+1FA: ctor1003C9D7 defaults true; read1003EBEF.
+    cloak_allowed: bool,
     /// ObjectType4753F0 -> Ares10006E10 binds at each reached body read.
     armor_id: ArmorId,
     /// ParticleSystemType+294, the bound ParticleType's index: constructor -1
@@ -3390,6 +3504,10 @@ struct ProcessedType {
     super_weapon_phobos_availability: PhobosSuperWeaponAvailability,
     #[cfg(feature = "ares")]
     additional_super_weapons: Vec<String>,
+    /// Phobos `UnitTypeExt`'s three `OreGathering.*` vectors.
+    #[cfg(feature = "phobos")]
+    #[serde(default)]
+    ore_gathering: crate::rules::object_type::PhobosOreGathering,
     /// Ares `SW.Warhead=`, read only for Type=GenericWarhead.
     generic_super_weapon_warhead: Option<String>,
     unit_delivery: Option<UnitDeliveryRules>,
@@ -3397,6 +3515,8 @@ struct ProcessedType {
     /// then WarheadType's factory (`0x0075E3B0`); an empty read keeps it.
     particle_warhead: Option<String>,
     voxel_anim_references: VoxelAnimTypeReferences,
+    /// Type+2F0 is mutable through Voxel contact74A923 and retained on reread.
+    voxel_anim_damage: i32,
     anim_references: AnimTypeReferences,
     /// BulletType+2B4 `ShrapnelWeapon=`, read the same way by BulletType
     /// ReadINI (`0x0046C2E1..0x0046C31F`) over the constructor's null
@@ -3741,6 +3861,7 @@ impl ProcessedType {
             body: IniSection::new(native_stored_id.clone()),
             object_image: ObjectImageState::new(&native_stored_id),
             overlay_damage_levels: 1,
+            overlay_explodes: false,
             overlay_cell_anim: None,
             voxel_shadow_index: 0,
             tech_level: crate::rules::object_type::DEFAULT_TECH_LEVEL,
@@ -3790,6 +3911,8 @@ impl ProcessedType {
             ares_verses: None,
             ares_warhead: None,
             emp_type: None,
+            self_attach_effect: None,
+            cloak_allowed: true,
             armor_id: ArmorId::NONE,
             holds_what: None,
             super_weapon_weapon: None,
@@ -3802,9 +3925,12 @@ impl ProcessedType {
             super_weapon_phobos_availability: PhobosSuperWeaponAvailability::default(),
             #[cfg(feature = "ares")]
             additional_super_weapons: Vec::new(),
+            #[cfg(feature = "phobos")]
+            ore_gathering: crate::rules::object_type::PhobosOreGathering::default(),
             generic_super_weapon_warhead: None,
             particle_warhead: None,
             voxel_anim_references: VoxelAnimTypeReferences::default(),
+            voxel_anim_damage: 0,
             anim_references: AnimTypeReferences::default(),
             shrapnel_weapon: None,
             airburst_weapon: None,
@@ -3867,6 +3993,7 @@ fn find_or_construct_type(
         #[cfg(feature = "ares")]
         {
             members[index].emp_type = Some(Default::default());
+            members[index].self_attach_effect = Some(Default::default());
         }
         #[cfg(feature = "ares")]
         {
@@ -3894,6 +4021,10 @@ struct RulesPassProcessor {
     ares_armors: Option<ArmorCatalog>,
     /// Phobos `[RadiationTypes]` catalog; Process retains it per pass.
     phobos_radiation_types: Option<RadiationTypeCatalog>,
+    /// Phobos `[ShieldTypes]` catalog; Process retains it per pass.
+    phobos_shield_types: Option<ShieldTypeCatalog>,
+    /// Phobos `[DigitalDisplayTypes]` catalog; Process retains it per pass.
+    phobos_digital_display_types: Option<DigitalDisplayTypeCatalog>,
     #[cfg(feature = "ares")]
     ares_global_controls: AresGlobalControls,
     ordinary: Option<IniFile>,
@@ -3924,11 +4055,13 @@ struct RulesPassProcessor {
     rules_no_parachute_max_fall_rate: i32,
     rules_survivor_divisors: [i32; 3],
     rules_infantry_repair_step: i32,
+    rules_charge_to_drain_ratio: NativeF64Bits,
     rules_unit_repair_rate: NativeF64Bits,
     rules_infantry_repair_rate: NativeF64Bits,
     rules_maximum_cheer_rate: i32,
     rules_talk_bubble_time: i32,
     rules_spotlight: crate::rules::ruleset::SpotlightRules,
+    rules_ammo_crate_damage: i32,
     rules_ion_cannon_damage: i32,
     rules_ion_blast_anim: String,
     rules_ion_beam_anim: String,
@@ -3967,6 +4100,8 @@ impl RulesPassProcessor {
             ares_prerequisites: registry_state.ares_prerequisites,
             ares_armors: registry_state.ares_armors,
             phobos_radiation_types: registry_state.phobos_radiation_types,
+            phobos_shield_types: registry_state.phobos_shield_types,
+            phobos_digital_display_types: registry_state.phobos_digital_display_types,
             #[cfg(feature = "ares")]
             ares_global_controls: registry_state.ares_global_controls,
             families: registry_state.families,
@@ -3991,11 +4126,13 @@ impl RulesPassProcessor {
             rules_no_parachute_max_fall_rate: registry_state.rules_no_parachute_max_fall_rate,
             rules_survivor_divisors: registry_state.rules_survivor_divisors,
             rules_infantry_repair_step: registry_state.rules_infantry_repair_step,
+            rules_charge_to_drain_ratio: registry_state.rules_charge_to_drain_ratio,
             rules_unit_repair_rate: registry_state.rules_unit_repair_rate,
             rules_infantry_repair_rate: registry_state.rules_infantry_repair_rate,
             rules_maximum_cheer_rate: registry_state.rules_maximum_cheer_rate,
             rules_talk_bubble_time: registry_state.rules_talk_bubble_time,
             rules_spotlight: registry_state.rules_spotlight,
+            rules_ammo_crate_damage: registry_state.rules_ammo_crate_damage,
             rules_ion_cannon_damage: registry_state.rules_ion_cannon_damage,
             rules_ion_blast_anim: registry_state.rules_ion_blast_anim,
             rules_ion_beam_anim: registry_state.rules_ion_beam_anim,
@@ -4093,6 +4230,10 @@ impl RulesPassProcessor {
         self.allocate_radiation_references(pass);
         #[cfg(feature = "phobos")]
         self.allocate_radiation_types(pass);
+        #[cfg(feature = "phobos")]
+        self.allocate_shield_types(pass);
+        #[cfg(feature = "phobos")]
+        self.allocate_digital_display_types(pass);
         // Elevation and Wall contain no Type factories.
         self.allocate_audio_visual_references(pass);
         self.process_special_weapons(pass);
@@ -4310,9 +4451,10 @@ impl RulesPassProcessor {
     /// Resolve each native pointer once, in constructor order. None means the
     /// reader retained its previous vector; Some(empty) is a real replacement
     /// (for example `,,,` or only exact `none` sentinels).
-    /// Ares pointer vectors look up existing types at this exact read point.
-    /// ReadString/strtok retain the native 2048-byte, comma-only list policy.
-    #[cfg(feature = "ares")]
+    /// Ares and Phobos pointer vectors look up existing types at this exact
+    /// read point. ReadString/strtok retain the native 2048-byte, comma-only
+    /// list policy.
+    #[cfg(any(feature = "ares", feature = "phobos"))]
     fn resolve_existing_list_from(
         &self,
         section: &IniSection,
@@ -4389,10 +4531,11 @@ impl RulesPassProcessor {
         Some(Some(members[index].native_stored_id.clone()))
     }
 
-    /// Shared Ares pointer-vector reader: Building specialization10010850 uses
-    /// Find10007E50 after none rejection10003950. Resolve once at the current
-    /// pass; callers project the retained ordinal as their existing field needs.
-    #[cfg(feature = "ares")]
+    /// Shared Ares/Phobos pointer-vector reader: Building specialization
+    /// 10010850 uses Find10007E50 after none rejection10003950. Resolve once at
+    /// the current pass; callers project the retained ordinal as their existing
+    /// field needs.
+    #[cfg(any(feature = "ares", feature = "phobos"))]
     fn resolve_existing_list_indices_from(
         &self,
         section: &IniSection,
@@ -4575,6 +4718,12 @@ impl RulesPassProcessor {
             ("CMislType", RulesTypeFamily::Aircraft, false),
             ("VeinholeTypeClass", RulesTypeFamily::Terrain, false),
             ("DefaultMirageDisguises", RulesTypeFamily::Terrain, true),
+            // NPSE extension read (`0xC30FF8..0xC3101F`): the canopy an
+            // airdropped non-infantry object takes. The extension's General
+            // reader runs after the stock reads, so its FindOrAllocate lands
+            // after every vanilla General pointer; an ordinary build skips it
+            // entirely (below) and neither allocates nor retains the type.
+            ("VehicleParachute", RulesTypeFamily::Animation, false),
         ];
 
         let Some(section) = pass.section("General") else {
@@ -4622,6 +4771,10 @@ impl RulesPassProcessor {
             section.read_double_bits("URepairRate", self.rules_unit_repair_rate);
         self.rules_infantry_repair_rate =
             section.read_double_bits("IRepairRate", self.rules_infantry_repair_rate);
+        // ReadGeneral67183C..67185D, Rules+760. Shared binary32 scanner,
+        // optional percent scaling, then retained binary64; no type reset.
+        self.rules_charge_to_drain_ratio =
+            section.read_double_bits("ChargeToDrainRatio", self.rules_charge_to_drain_ratio);
         // ReadGeneral's Prism block (`0x0067114F..0x006711B8`), current values
         // as defaults; RulesClass keeps them across Full_Init's reset.
         self.rules_prism_support = self.rules_prism_support.read_pass(section);
@@ -4634,6 +4787,11 @@ impl RulesPassProcessor {
         self.rules_talk_bubble_time = section.read_talk_bubble_time(self.rules_talk_bubble_time);
 
         for &(key, family, is_list) in SITES {
+            // An ordinary build never reads the NPSE extension, so it neither
+            // allocates the canopy's AnimType nor keeps the pointer.
+            if key == "VehicleParachute" && !crate::rules::NPATCH_ENABLED {
+                continue;
+            }
             if matches!(
                 key,
                 "MetallicDebris" | "BridgeExplosions" | "WeatherConClouds" | "WeatherConBolts"
@@ -5484,6 +5642,17 @@ impl RulesPassProcessor {
                         .as_mut()
                         .expect("TechnoType EMP extension")
                         .read_pass(&raw, sparkle);
+                    // TechnoTypeExt::LoadFromINI1003DEC0 calls the shared
+                    // descriptor reader10058A50 at1003E8D4, before subclasses.
+                    let animation = self.resolve_existing_anim_from(&raw, "AttachEffect.Animation");
+                    let member = &mut self.family_mut(family)[index];
+                    member
+                        .self_attach_effect
+                        .as_mut()
+                        .expect("TechnoType attachment descriptor")
+                        .read_pass(&raw, animation);
+                    member.cloak_allowed =
+                        raw.read_ares_bool("Cloakable.Allowed", member.cloak_allowed);
                 }
                 match family {
                     RulesTypeFamily::Building => {
@@ -5611,6 +5780,35 @@ impl RulesPassProcessor {
                         self.families.get_mut(&family).unwrap()[index]
                             .unit_shp
                             .read_pass(fixed_art.section_or_empty(&image), has_turret);
+                        #[cfg(feature = "phobos")]
+                        {
+                            // `UnitTypeExt::LoadFromINI` reads the three
+                            // `OreGathering.*` vectors in this order at the end
+                            // of the UnitType body. An absent key retains the
+                            // whole list; a present one replaces it, dropping
+                            // any `Anims=` token the AnimType array lacks.
+                            let mut gathering =
+                                self.family_mut(family)[index].ore_gathering.clone();
+                            if let Some(anims) = self.resolve_existing_list_from(
+                                &raw,
+                                "OreGathering.Anims",
+                                RulesTypeFamily::Animation,
+                                0x800,
+                            ) {
+                                gathering.anims = anims;
+                            }
+                            if let Some(tiberiums) =
+                                raw.read_ares_int_list("OreGathering.Tiberiums")
+                            {
+                                gathering.tiberiums = tiberiums;
+                            }
+                            if let Some(frames) =
+                                raw.read_ares_int_list("OreGathering.FramesPerDir")
+                            {
+                                gathering.frames_per_dir = frames;
+                            }
+                            self.family_mut(family)[index].ore_gathering = gathering;
+                        }
                     }
                     RulesTypeFamily::Infantry => {
                         if let Some(weapon) = self.resolve_scalar_from(
@@ -6205,6 +6403,29 @@ impl RulesPassProcessor {
                             theater,
                             tree_strength,
                         );
+                        #[cfg(feature = "phobos")]
+                        {
+                            // `TerrainTypeExt::LoadFromINI` is hooked at
+                            // 0x0071E0A6, the end of this same ReadINI body, so
+                            // its `ValueableIdx<ParticleTypeClass>` resolves
+                            // against the registry as it stands at this point.
+                            // Move the state out to read it through the
+                            // registry's immutable lookups.
+                            let mut state = self.family_mut(family)[index]
+                                .terrain_type_read_state
+                                .take()
+                                .expect("the Terrain read pass above retained its state");
+                            state.read_phobos_pass(&raw, |name| {
+                                self.find_existing(RulesTypeFamily::Particle, name).map(
+                                    |particle| {
+                                        self.families[&RulesTypeFamily::Particle][particle]
+                                            .native_stored_id
+                                            .clone()
+                                    },
+                                )
+                            });
+                            self.family_mut(family)[index].terrain_type_read_state = Some(state);
+                        }
                     }
                     RulesTypeFamily::Overlay => {
                         // OverlayRead5FE78B first calls ObjectRead. Its fixed
@@ -6216,6 +6437,9 @@ impl RulesPassProcessor {
                             ObjectImageKind::Ordinary,
                             theater,
                         );
+                        let member = &mut self.family_mut(family)[index];
+                        member.overlay_explodes =
+                            raw.read_bool("Explodes", member.overlay_explodes);
                         // OverlayTypeClass::ReadINI5FE88A/5FE897 resolves
                         // this Rules reference after ObjectRead. Empty keeps
                         // the pointer; nonempty uses the sole Anim factory.
@@ -6333,6 +6557,15 @@ impl RulesPassProcessor {
                         &mut references.attached_system,
                     ),
                 ] {
+                    if key == "Warhead" {
+                        //74B3D8..74B3F2 reads Damage after TrailerAnim and
+                        //before DamageRadius/Warhead, with its current value.
+                        let member = &mut self.family_mut(RulesTypeFamily::VoxelAnimation)[index];
+                        member.voxel_anim_damage = crate::rules::voxel_anim_type::read_damage(
+                            &raw,
+                            member.voxel_anim_damage,
+                        );
+                    }
                     if let Some(resolved) = self.resolve_scalar_from(&raw, key, family, 0x80) {
                         *field = resolved;
                     }
@@ -6348,6 +6581,9 @@ impl RulesPassProcessor {
         let Some(section) = pass.section("CombatDamage") else {
             return;
         };
+        // RulesCtor665675=100; CombatDamage66BBDE..66BBF5 precedes IonCannonDamage.
+        self.rules_ammo_crate_damage =
+            section.read_int("AmmoCrateDamage", self.rules_ammo_crate_damage);
         // CombatDamage66BBF8..66BC12: exact-case signed ReadInt5276D0,
         // current Rules+490 default, constructor665CD4=700, no clamp.
         self.rules_ion_cannon_damage =
@@ -6432,6 +6668,23 @@ impl RulesPassProcessor {
     #[cfg(feature = "phobos")]
     fn allocate_radiation_types(&mut self, pass: &IniFile) {
         if let Some(catalog) = self.phobos_radiation_types.as_mut() {
+            catalog.apply_pass(pass);
+        }
+    }
+
+    /// Phobos `ShieldTypeClass::LoadFromINIList` + each type's `LoadFromINI`.
+    #[cfg(feature = "phobos")]
+    fn allocate_shield_types(&mut self, pass: &IniFile) {
+        if let Some(catalog) = self.phobos_shield_types.as_mut() {
+            catalog.apply_pass(pass);
+        }
+    }
+
+    /// Phobos `DigitalDisplayTypeClass::LoadFromINIList` + each type's
+    /// `LoadFromINI`, reached on every Rules pass.
+    #[cfg(feature = "phobos")]
+    fn allocate_digital_display_types(&mut self, pass: &IniFile) {
+        if let Some(catalog) = self.phobos_digital_display_types.as_mut() {
             catalog.apply_pass(pass);
         }
     }
@@ -6614,6 +6867,8 @@ impl RulesPassProcessor {
                     ares_prerequisites: self.ares_prerequisites,
                     ares_armors: self.ares_armors,
                     phobos_radiation_types: self.phobos_radiation_types,
+                    phobos_shield_types: self.phobos_shield_types,
+                    phobos_digital_display_types: self.phobos_digital_display_types,
                     #[cfg(feature = "ares")]
                     ares_global_controls: self.ares_global_controls,
                     families: self.families,
@@ -6638,11 +6893,13 @@ impl RulesPassProcessor {
                     rules_no_parachute_max_fall_rate: self.rules_no_parachute_max_fall_rate,
                     rules_survivor_divisors: self.rules_survivor_divisors,
                     rules_infantry_repair_step: self.rules_infantry_repair_step,
+                    rules_charge_to_drain_ratio: self.rules_charge_to_drain_ratio,
                     rules_unit_repair_rate: self.rules_unit_repair_rate,
                     rules_infantry_repair_rate: self.rules_infantry_repair_rate,
                     rules_maximum_cheer_rate: self.rules_maximum_cheer_rate,
                     rules_talk_bubble_time: self.rules_talk_bubble_time,
                     rules_spotlight: self.rules_spotlight,
+                    rules_ammo_crate_damage: self.rules_ammo_crate_damage,
                     rules_ion_cannon_damage: self.rules_ion_cannon_damage,
                     rules_ion_blast_anim: self.rules_ion_blast_anim,
                     rules_ion_beam_anim: self.rules_ion_beam_anim,

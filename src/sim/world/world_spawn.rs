@@ -548,6 +548,8 @@ impl Simulation {
                 }
                 ge.base_defense_response
                     .author_recruitable(map_ent.recruitable_a, map_ent.recruitable_b);
+                // gamemd.exe Unit7434CA/Aircraft41B33D/Infantry51FD89, before Unlimbo.
+                ge.assign_object_group(map_ent.group);
 
                 Self::install_techno_components(&mut sim.interner, &sim.session, &sim.houses,
                     &mut ge,
@@ -732,7 +734,7 @@ impl Simulation {
         let entity = self.substrate.entities.get(temporary)?;
         if entity.category() != EntityCategory::Structure
             || self
-                .object_type(entity.type_ref(), rules)?
+                .entity_object_type(entity, rules)?
                 .building_upgrade()
                 .host()
                 .is_none()
@@ -1124,8 +1126,39 @@ impl Simulation {
         init: TechnoConstructorInit,
         frame_effects: FrameEffects<'_>,
     ) -> Result<Option<u64>, GeneratedTechnoInitError> {
-        let Some(ge) =
-            self.construct_runtime_techno(type_id, owner, rx, ry, facing, z, rules, init)?
+        let Some(obj) = rules.object(type_id) else {
+            return Ok(None);
+        };
+        self.spawn_resolved_object_limbo_at_height_with_init(
+            obj,
+            type_id,
+            owner,
+            rx,
+            ry,
+            facing,
+            z,
+            rules,
+            init,
+            frame_effects,
+        )
+    }
+
+    fn spawn_resolved_object_limbo_at_height_with_init(
+        &mut self,
+        obj: &ObjectType,
+        type_id: &str,
+        owner: &str,
+        rx: u16,
+        ry: u16,
+        facing: u8,
+        z: u8,
+        rules: &RuleSet,
+        init: TechnoConstructorInit,
+        frame_effects: FrameEffects<'_>,
+    ) -> Result<Option<u64>, GeneratedTechnoInitError> {
+        let Some(ge) = self.construct_resolved_runtime_techno(
+            obj, type_id, owner, rx, ry, facing, z, rules, init,
+        )?
         else {
             return Ok(None);
         };
@@ -1193,6 +1226,34 @@ impl Simulation {
             rules,
             TechnoConstructorInit::FreshScenario,
             frame_effects,
+        )
+        .expect("fresh Techno constructor initialization cannot fail")
+    }
+
+    /// Retain the already selected Type::CreateInstance pointer through the
+    /// same constructor/store/children/tracking transaction (Factory4C9C70).
+    pub(crate) fn construct_resolved_object_limbo_at_height(
+        &mut self,
+        obj: &ObjectType,
+        owner: &str,
+        rx: u16,
+        ry: u16,
+        facing: u8,
+        z: u8,
+        rules: &RuleSet,
+        effects: FrameEffects<'_>,
+    ) -> Option<u64> {
+        self.spawn_resolved_object_limbo_at_height_with_init(
+            obj,
+            &obj.id,
+            owner,
+            rx,
+            ry,
+            facing,
+            z,
+            rules,
+            TechnoConstructorInit::FreshScenario,
+            effects,
         )
         .expect("fresh Techno constructor initialization cannot fail")
     }
@@ -2258,6 +2319,9 @@ impl Simulation {
         rules: &RuleSet,
         frame_effects: FrameEffects<'_>,
     ) {
+        // InitManagers6F3F83 registers the typed parent before constructing
+        // its Spawn/Slave manager children. Load/NoInit bypasses this owner.
+        self.initialize_planning_token(parent_id);
         crate::sim::spawn_manager::commit_spawn_manager_pool(self, parent_id, rules, frame_effects);
         self.create_slave_manager(parent_id, rules, frame_effects);
         Self::initialize_airstrike(&self.interner, &mut self.substrate, parent_id, rules);
@@ -2273,13 +2337,14 @@ impl Simulation {
         stable_id: u64,
         rules: &RuleSet,
     ) {
-        let Some((category, veterancy, in_playfield, type_ref)) =
+        let Some((category, veterancy, in_playfield, type_ref, stealth_ability)) =
             substrate.entities.get(stable_id).map(|entity| {
                 (
                     entity.category(),
                     entity.veterancy.rank(),
                     entity.in_playfield(),
                     entity.type_ref(),
+                    entity.stealth_ability,
                 )
             })
         else {
@@ -2288,17 +2353,19 @@ impl Simulation {
         if !matches!(category, EntityCategory::Unit | EntityCategory::Infantry) {
             return;
         }
-        let Some(object) = interner.object_type(type_ref, rules) else {
+        let Some(object) = interner.object_type_in_category(type_ref, category.into(), rules)
+        else {
             return;
         };
         let rank_cloak = has_weapon_ability(rank_from_u16(veterancy), object, Ability::Cloak);
-        if !object.cloakable && !rank_cloak {
+        let intrinsic_cloak = stealth_ability.active(object.cloakable);
+        if !intrinsic_cloak && !rank_cloak {
             return;
         }
         let frame = session.binary_frame() as i32;
         // Only UnitClass owns the direct Unlimbo state write, and it tests the
         // copied runtime Cloakable byte rather than rank-granted CLOAK.
-        let fully_cloaked = category == EntityCategory::Unit && object.cloakable && !in_playfield;
+        let fully_cloaked = category == EntityCategory::Unit && intrinsic_cloak && !in_playfield;
         if let Some(entity) = substrate.entities.get_mut(stable_id) {
             crate::sim::cloak_disguise::CloakRuntime::install(
                 &mut entity.cloak,
@@ -2405,6 +2472,7 @@ impl Simulation {
                 (
                     entity.selection.is_selected(),
                     entity.veterancy.clone(),
+                    entity.object_group(),
                     entity.attack_target.target(),
                 ),
                 // Native rounds FacingClass::Current, including wrap at 0xff80.
@@ -2436,7 +2504,7 @@ impl Simulation {
             z,
             yard_type,
             deploy_facing,
-            (was_selected, veterancy, source_target),
+            (was_selected, veterancy, source_group, source_target),
             source_facing,
             is_construction_yard,
             deploy_cue,
@@ -2693,6 +2761,10 @@ impl Simulation {
             let _ =
                 self.assign_target_represented(targeter, target, rules, registry, frame_effects);
         }
+        // gamemd.exe UnitClass::Deploy7393C0 copies Techno+214 at7397CC.
+        if let Some(building) = self.substrate.entities.get_mut(new_sid) {
+            building.assign_object_group(source_group);
+        }
         // 0x007397D2..0x007397DE: the unit's veterancy (`+0x150`); the rank
         // cache (`+0x13C`) stays the building's own.
         if let Some(building) = self.substrate.entities.get_mut(new_sid) {
@@ -2768,7 +2840,15 @@ impl Simulation {
                 .anchor_first_node(pack_base_plan_cell(i32::from(rx), i32::from(ry)));
             house.anchor_base_plan((rx, ry));
             house.enable_ai_deploy_latches();
-            self.move_ground_forces_to_base(owner_id, rules, registry, frame_effects);
+            // Phobos `[General] GatherWhenMCVDeploy=` skips the native
+            // regroup (hook at `0x739920`) while keeping every earlier write.
+            #[cfg(feature = "phobos")]
+            let gather = rules.general.gather_when_mcv_deploy;
+            #[cfg(not(feature = "phobos"))]
+            let gather = true;
+            if gather {
+                self.move_ground_forces_to_base(owner_id, rules, registry, frame_effects);
+            }
         }
 
         // 0x00739956: a Slave Miner's manager moves to its refinery (the
@@ -2875,7 +2955,7 @@ impl Simulation {
         // Building449E66/70 captures current health/type ratio at actual
         // conversion, not when the reverse animation was requested. A missing
         // live type cannot supply a conversion ratio.
-        let Some((converted_health, archive, veterancy)) =
+        let Some((converted_health, archive, veterancy, source_group)) =
             self.substrate.entities.get(sid).and_then(|building| {
                 let health = crate::sim::conversion_health::ConversionHealth::capture(
                     building,
@@ -2887,6 +2967,7 @@ impl Simulation {
                     health,
                     building.archive_target(),
                     building.veterancy.clone(),
+                    building.object_group(),
                 ))
             })
         else {
@@ -2983,6 +3064,8 @@ impl Simulation {
             if was_selected {
                 unit.selection.select();
             }
+            // gamemd.exe BuildingClass::Mission_Selling copies +214 at44A052.
+            unit.assign_object_group(source_group);
             // The VeterancyClass (`+0x150`); the rank cache (`+0x13C`) stays
             // the unit's own.
             unit.veterancy.inherit(&veterancy);

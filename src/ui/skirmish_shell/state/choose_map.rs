@@ -344,6 +344,30 @@ impl ChooseMapModalState {
         }
     }
 
+    /// `LB_ADDSTRING` then `LB_SETITEMDATA` on the map list: a row at the
+    /// end, the selection unchanged.
+    pub fn push_row(&mut self, record: usize, label: String) {
+        self.filtered_record_indices.push(record);
+        if let Some(labels) = self.row_labels.as_mut() {
+            labels.push(label);
+        }
+    }
+
+    /// The last row's `LB_DELETESTRING`; a selection on it first moves to
+    /// the row before (`LB_SETCURSEL(count - 2)`, none for a single row).
+    pub fn pop_row(&mut self) {
+        let Some(last) = self.filtered_record_indices.len().checked_sub(1) else {
+            return;
+        };
+        if self.highlighted_filtered_index == Some(last) {
+            self.highlighted_filtered_index = last.checked_sub(1);
+        }
+        self.filtered_record_indices.pop();
+        if let Some(labels) = self.row_labels.as_mut() {
+            labels.pop();
+        }
+    }
+
     /// Whether a press is the second click of a double-click on one list's
     /// rows. Windows then sends `WM_LBUTTONDBLCLK`, which the list subclass
     /// only forwards as `LBN_DBLCLK` (`0x0061A904..0x0061A945`; `0x6B`

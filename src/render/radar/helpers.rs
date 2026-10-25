@@ -69,6 +69,49 @@ pub(super) struct TerrainPixel {
     pub color: [u8; 4],
 }
 
+/// Immutable projection pixels and their derived cell lookup. Replacing a
+/// playfield projection replaces both together; dirty radar updates never
+/// mutate these source pixels. The index retains the first pixel for duplicate
+/// coordinates, matching the former forward scan without scanning the whole
+/// map for every dirty cell in a large movement batch.
+pub(super) struct TerrainPixels {
+    pixels: Vec<TerrainPixel>,
+    by_cell: Vec<(u32, usize)>,
+}
+
+impl TerrainPixels {
+    pub fn new(pixels: Vec<TerrainPixel>) -> Self {
+        let mut by_cell: Vec<_> = pixels
+            .iter()
+            .enumerate()
+            .map(|(index, pixel)| (Self::key(pixel.rx, pixel.ry), index))
+            .collect();
+        by_cell.sort_unstable();
+        by_cell.dedup_by_key(|entry| entry.0);
+        Self { pixels, by_cell }
+    }
+
+    fn key(rx: u16, ry: u16) -> u32 {
+        (u32::from(rx) << 16) | u32::from(ry)
+    }
+
+    pub fn len(&self) -> usize {
+        self.pixels.len()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, TerrainPixel> {
+        self.pixels.iter()
+    }
+
+    pub fn cell(&self, rx: u16, ry: u16) -> Option<&TerrainPixel> {
+        let entry = self
+            .by_cell
+            .binary_search_by_key(&Self::key(rx, ry), |entry| entry.0)
+            .ok()?;
+        Some(&self.pixels[self.by_cell[entry].1])
+    }
+}
+
 pub(crate) fn minimap_overlay_datum(
     rx: u16,
     ry: u16,
@@ -431,6 +474,40 @@ pub(super) fn surface_visibility_color(
     }
     fog.is_cell_revealed(local_owner, pixel.rx, pixel.ry)
         .then_some(pixel.color)
+}
+
+#[cfg(test)]
+mod terrain_pixel_tests {
+    use super::*;
+
+    #[test]
+    fn cell_lookup_preserves_first_source_pixel_and_projection_replacement() {
+        let pixel = |rx, ry, red| TerrainPixel {
+            rx,
+            ry,
+            px: 0,
+            py: 0,
+            color: [red, 0, 0, 255],
+        };
+        let projection = TerrainPixels::new(vec![
+            pixel(u16::MAX, 2, 11),
+            pixel(2, u16::MAX, 22),
+            pixel(u16::MAX, 2, 33),
+        ]);
+        assert_eq!(projection.cell(u16::MAX, 2).unwrap().color[0], 11);
+        assert_eq!(projection.cell(2, u16::MAX).unwrap().color[0], 22);
+        assert!(projection.cell(2, 2).is_none());
+        assert_eq!(
+            projection
+                .iter()
+                .map(|pixel| pixel.color[0])
+                .collect::<Vec<_>>(),
+            [11, 22, 33],
+        );
+        let projection = TerrainPixels::new(vec![pixel(2, 2, 44)]);
+        assert!(projection.cell(u16::MAX, 2).is_none());
+        assert_eq!(projection.cell(2, 2).unwrap().color[0], 44);
+    }
 }
 
 #[cfg(test)]

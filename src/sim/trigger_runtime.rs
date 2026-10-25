@@ -32,6 +32,11 @@ const ACTION_ENABLE_TRIGGER: i32 = 53;
 const ACTION_DISABLE_TRIGGER: i32 = 54;
 const ACTION_SET_LOCAL: i32 = 56;
 const ACTION_CLEAR_LOCAL: i32 = 57;
+// VERA untrusted-map admission, not native Spring7265C0 semantics. Force22
+// bypasses Tag's dispatch guard. Bound acyclic nesting and repeated branching
+// too, so an authored graph cannot overflow the stack or expand exponentially.
+const MAX_TRIGGER_SPRING_DEPTH: usize = 32;
+const MAX_TRIGGER_SPRING_ACTIONS: usize = 4096;
 const ACTION_DAMAGE_AT_WAYPOINT: i32 = 63;
 const ACTION_ANNOUNCE_WIN: i32 = 67;
 const ACTION_ANNOUNCE_LOSE: i32 = 68;
@@ -643,6 +648,12 @@ pub struct TriggerRuntime {
     map_cursor: i32,
     definitions_prepared: bool,
     classified: bool,
+    /// Scratch for one synchronous Spring call tree. Empty between dispatches;
+    /// save/restore and checksums keep only the authoritative trigger state.
+    #[serde(skip)]
+    spring_depth: usize,
+    #[serde(skip)]
+    spring_actions_left: usize,
     #[cfg(any(test, feature = "test-support"))]
     fixture_difficulty: Option<i32>,
     #[cfg(any(test, feature = "test-support"))]
@@ -2570,12 +2581,23 @@ impl Simulation {
         if !trigger.enabled || trigger.pending {
             return false;
         }
+        if self.trigger_runtime.spring_depth >= MAX_TRIGGER_SPRING_DEPTH {
+            return false;
+        }
         let type_index = trigger.type_index;
         let count = self.trigger_runtime.definitions.trigger_types[type_index]
             .actions
             .len();
+        if self.trigger_runtime.spring_depth == 0 {
+            self.trigger_runtime.spring_actions_left = MAX_TRIGGER_SPRING_ACTIONS;
+        }
+        self.trigger_runtime.spring_depth += 1;
         let mut result = false;
         for ordinal in 0..count {
+            if self.trigger_runtime.spring_actions_left == 0 {
+                break;
+            }
+            self.trigger_runtime.spring_actions_left -= 1;
             //7265E7..726602 repeats the authored Country lookup for every
             //action and preserves Spring's incoming actor and packed Cell.
             let context = self.trigger_action_context(type_index, Some(index), input, rules);
@@ -2590,6 +2612,7 @@ impl Simulation {
                 frame_effects,
             );
         }
+        self.trigger_runtime.spring_depth -= 1;
         result
     }
 
@@ -3120,6 +3143,57 @@ impl Simulation {
         self.trigger_runtime
             .action_trace
             .push((action.entry.kind, action.value.unwrap_or(0)));
+        // Force22 must stay outside Execute's large nonrecursive action frame.
+        // Even a finite authored chain otherwise multiplies that frame until a
+        // client with a smaller thread stack aborts before the depth guard.
+        // Execute6DF0E7..6DF134 (original instructions) iterates the live registry in order and ignores Spring's
+        // result. Re-read its live length after every synchronous callback.
+        if action.entry.kind == ACTION_FORCE_TRIGGER {
+            if let Some(DefinitionReference::Trigger(target)) = action.reference {
+                let mut ordinal = 0;
+                while ordinal < self.trigger_runtime.trigger_order.len() {
+                    let live = self.trigger_runtime.trigger_order[ordinal];
+                    if self
+                        .trigger_runtime
+                        .trigger(live)
+                        .is_some_and(|trigger| trigger.type_index == target)
+                    {
+                        self.spring_live_trigger(
+                            live,
+                            context.input,
+                            effects,
+                            rules,
+                            overlay_registry,
+                            frame_effects,
+                        );
+                    }
+                    ordinal += 1;
+                }
+            }
+            return true;
+        }
+        self.execute_live_trigger_action(
+            action,
+            context,
+            effects,
+            rules,
+            overlay_registry,
+            frame_effects,
+        )
+    }
+
+    // Keep this frame out of the Force22 recursion path, also in optimized
+    // builds. The common dispatcher above owns tracing and forced dispatch.
+    #[inline(never)]
+    fn execute_live_trigger_action(
+        &mut self,
+        action: &RuntimeAction,
+        context: TriggerActionContext,
+        effects: &mut Vec<TriggerEffect>,
+        rules: &crate::rules::ruleset::RuleSet,
+        overlay_registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
+        frame_effects: FrameEffects<'_>,
+    ) -> bool {
         let reference = action.reference;
         let value = action.value;
         let sound = action.sound.as_deref();
@@ -3542,11 +3616,22 @@ impl Simulation {
                 };
                 let c4 = self.interner.intern(c4_name);
                 let mut matched = false;
+                // VERA untrusted-map security deviation from DestroyAttached
+                // 6E2050 (original instructions): a refused C4 receiver must
+                // not spin at6E20DF or the outer6E20EA rescan forever. In
+                // particular, Building442230 preserves Immune repair huts.
+                // Retain that immunity; skip only this call's nonprogressing
+                // receivers. Ordinary damage/cleanup order remains unchanged.
+                let mut refused = BTreeSet::new();
                 loop {
                     let mut visited_match = false;
                     let mut ordinal = 0;
                     while ordinal < self.substrate.entities.techno_registry_len() {
                         let id = self.substrate.entities.techno_registry_at(ordinal).unwrap();
+                        if refused.contains(&id) {
+                            ordinal += 1;
+                            continue;
+                        }
                         let health = self.substrate.entities.get(id).and_then(|entity| {
                             (entity.health.current() > 0
                                 && entity.lifecycle.object_alive()
@@ -3578,6 +3663,14 @@ impl Simulation {
                             event,
                             frame_effects,
                         );
+                        if self
+                            .substrate
+                            .entities
+                            .get(id)
+                            .is_some_and(|entity| entity.health.current() >= health)
+                        {
+                            refused.insert(id);
+                        }
                         matched = true;
                         visited_match = true;
                         //6E20DF decrements the slot before the loop increment:
@@ -4301,7 +4394,7 @@ impl Simulation {
                 };
                 effects.push(TriggerEffect::InputLockChanged { locked, was_locked });
             }
-            ACTION_FORCE_TRIGGER | ACTION_ENABLE_TRIGGER | ACTION_DISABLE_TRIGGER => {
+            ACTION_ENABLE_TRIGGER | ACTION_DISABLE_TRIGGER => {
                 if let Some(DefinitionReference::Trigger(target)) = reference {
                     let difficulty = self.trigger_difficulty();
                     let mut ordinal = 0;
@@ -4313,16 +4406,6 @@ impl Simulation {
                             .is_some_and(|t| t.type_index == target)
                         {
                             match action.kind {
-                                ACTION_FORCE_TRIGGER => {
-                                    self.spring_live_trigger(
-                                        live,
-                                        context.input,
-                                        effects,
-                                        rules,
-                                        overlay_registry,
-                                        frame_effects,
-                                    );
-                                }
                                 ACTION_ENABLE_TRIGGER => {
                                     if self.trigger_runtime.definitions.trigger_types[target]
                                         .admits_difficulty(difficulty)
@@ -4746,12 +4829,25 @@ impl Simulation {
                 //6DDCB1/6DDD23 and6DF399..6DF3CE use PlayerPtr, not the
                 //incoming Trigger House. The shared House result/timer
                 //owner drives normal frame termination and ScenarioExit.
-                return self.trigger_house_outcome(
-                    action.kind,
-                    value.unwrap_or(0),
-                    rules,
-                    frame_effects,
-                );
+                use crate::sim::house_state::HouseOutcomeKind;
+                use crate::sim::world::PlayerOutcomeRequest;
+                let request = match action.kind {
+                    1 | 2 => PlayerOutcomeRequest::Country {
+                        country_index: value.unwrap_or(0),
+                        win_on_match: action.kind == 1,
+                    },
+                    ACTION_ANNOUNCE_WIN | ACTION_ANNOUNCE_LOSE => PlayerOutcomeRequest::Flag {
+                        kind: if action.kind == ACTION_ANNOUNCE_WIN {
+                            HouseOutcomeKind::Victory
+                        } else {
+                            HouseOutcomeKind::Defeat
+                        },
+                        skip_timer: true,
+                    },
+                    ACTION_END_SCENARIO => PlayerOutcomeRequest::EndScenario,
+                    _ => unreachable!("matched native outcome action"),
+                };
+                return self.request_player_outcome(request, rules, frame_effects);
             }
             _ => return false,
         }
@@ -4959,6 +5055,10 @@ fn count_techtype(sim: &Simulation, type_id: &str) -> usize {
 #[cfg(test)]
 #[path = "trigger_runtime_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "trigger_runtime_factory_owner_tests.rs"]
+mod factory_owner_tests;
 
 #[cfg(test)]
 #[path = "trigger_runtime_duplicate_ini_tests.rs"]
@@ -5203,3 +5303,7 @@ mod building_sale_trigger_tests;
 #[cfg(test)]
 #[path = "trigger_runtime_building_sale_tests.rs"]
 mod building_sale_native_tests;
+
+#[cfg(test)]
+#[path = "trigger_runtime_skirmish_map_tests.rs"]
+mod skirmish_map_tests;

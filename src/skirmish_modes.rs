@@ -251,7 +251,7 @@ where
     modes
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn parse_mpmodes_ini(ini: &IniFile) -> Vec<SkirmishGameMode> {
     parse_mpmodes_ini_with_overrides(ini, |_| None)
 }

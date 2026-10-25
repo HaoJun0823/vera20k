@@ -44,7 +44,7 @@ use crate::rules::tiberium_type::TiberiumTypeRegistry;
 use crate::rules::voxel_anim_type::{VoxelAnimType, VoxelAnimTypeId};
 use crate::rules::warhead_type::WarheadType;
 use crate::rules::weapon_type::WeaponType;
-use crate::util::fixed_math::{SIM_ONE, SimFixed};
+use crate::util::fixed_math::SimFixed;
 use crate::util::lookup_hash::LookupMap;
 use crate::util::native_random::unit_draw_threshold;
 use crate::util::native_x87::{NativeF32Bits, NativeF64Bits};
@@ -522,6 +522,25 @@ pub struct GeneralRules {
     /// that fired or missed goes back to state 1 and picks a new firing spot.
     /// Retail: yes.
     pub curley_shuffle: bool,
+    /// `[General] EnableAIBuildLimitation=` — the older extension build's
+    /// switch (NPExt ext173, manual `AI克隆生产`'s predecessor): with yes, the
+    /// computer's production attempt checks the type's own `BuildLimit=`
+    /// (`Type+0x3B8`) like a production event does, and a plan at its limit
+    /// clears its choice and skips. Read by that build's `ReadGeneral` hook
+    /// `0xC2D132..0xC2D151` into `Rules+0x641`, default the current field, so
+    /// the constructor clears that byte through the +640 DWORD store
+    /// (`0x665F09`), so absent means no. NPSE #359 dropped this key and
+    /// reads per-type AIBuildLimit (`0xC27249..0xC2725A`) instead. Both
+    /// generations use factory_ai's shared tracked/produced comparison.
+    pub enable_ai_build_limitation: bool,
+    /// `[General] DisableParallelAIQueues=` — an NPSE 2.0 extension switch
+    /// read into `Rules+0x2D` by `ReadGeneral` C30303..C3031A through
+    /// ReadBooleanByte5295F0 with the current byte as default. The Rules
+    /// constructor's DWORD store at 66569B clears +2D, so absent means no.
+    /// With yes, Factory_AI C2F07C reserves by produced class, splitting
+    /// vehicles alone on Naval. HouseAiProduction owns the reservation and
+    /// its class-specific exit/abandon release phases. Default no keeps cloning.
+    pub disable_parallel_ai_queues: bool,
     /// `[General] RepairRate=` in minutes — `RulesClass+0x16E0`.
     ///
     /// The self-heal pulse (`FUN_0070BE80`) divides the frame counter by
@@ -758,6 +777,17 @@ pub struct GeneralRules {
     /// "PARACH"), `None` if unset or empty: the canopy the simulation attaches
     /// to a dropped object. Its timing is the AnimType's own art.
     pub parachute_shp: Option<String>,
+    /// Parsed `[General] VehicleParachute=` value (uppercased AnimType name),
+    /// read only with the explicit NPatch capability.
+    /// `None` if unset or empty: the NPSE canopy an airdropped non-infantry
+    /// object takes instead of `Parachute=` (`ObjectClass::Paradrop`'s
+    /// `0x5F5ADD` hook, cave `0xC2B0E4`..`0xC2FA8A`: infantry keeps
+    /// `Parachute=`, anything else takes this when the Rules+0x400 pointer
+    /// is set — the NPSE reader stores it there, `0xC31005..0xC31017` — and
+    /// `Parachute=` otherwise). Read in the General reader with the 0x80
+    /// string capacity; an empty read retains the previous pointer, while
+    /// `none` clears it through AnimTypeClass::FindOrAllocate @ 0x428B80.
+    pub vehicle_parachute: Option<String>,
     /// `[General] AmerParaDropInf=`/`AmerParaDropNum=` (`+0xC04`/`+0xC20`):
     /// the American Paradrop's planes.
     pub amer_paradrop: ParadropList,
@@ -1526,6 +1556,12 @@ pub struct GeneralRules {
     /// Holds the unresolved section name; ID resolution against the
     /// particle-system registry is deferred (matches A2/A3/A4/A5a pattern).
     pub barrel_particle: Option<String>,
+    /// Rules+54, ctor6656D1 null; General66D6A8..66D6D5 retains the
+    /// Anim factory result on missing/empty reads. AreaDamage48A34D.
+    pub barrel_explode: Option<String>,
+    /// Rules+58, ctor6656C0 empty; General66D6E2..66D7B1 preserves
+    /// ordered Voxel factory results. AreaDamage stops at its first passing trial.
+    pub barrel_debris: Vec<String>,
 
     // -- Harvester scan radii and economy --
     /// `Rules+0x1778`, `[General] TiberiumShortScan=` in leptons: the ring
@@ -1588,6 +1624,31 @@ pub struct GeneralRules {
     /// 0x005276D0` at `0x00671DA7`; the constructor writes 5 (`0x006656EE` →
     /// `0x006657CD`).
     pub maximum_queued_objects: i32,
+    /// Phobos `[General] BuildingProductionQueue=` (default false): a
+    /// BuildingType PRODUCE queues behind a running or completed building
+    /// instead of being dropped or abandoning the held product. The next
+    /// building starts only after the held one is placed.
+    #[cfg(feature = "phobos")]
+    pub building_production_queue: bool,
+    /// Phobos `[General] AIFireSale=` (default true): whether a computer
+    /// house on its last legs (`0x004FD879..0x004FD904`, no live
+    /// `Factory=` building) sells every building.
+    #[cfg(feature = "phobos")]
+    pub ai_fire_sale: bool,
+    /// Phobos `[General] AIFireSaleDelay=` in frames (default 0): the first
+    /// last-legs tick starts this timer instead of selling; the sale waits
+    /// until it completes. Non-positive sells at once.
+    #[cfg(feature = "phobos")]
+    pub ai_fire_sale_delay: i32,
+    /// Phobos `[General] AIAllToHunt=` (default true): whether the same
+    /// last-legs block sends every techno to hunt.
+    #[cfg(feature = "phobos")]
+    pub ai_all_to_hunt: bool,
+    /// Phobos `[General] GatherWhenMCVDeploy=` (default true): whether a
+    /// computer house's yard deploy runs
+    /// `HouseClass::MoveGroundForcesToBase @ 0x0050C920` (`0x00739926`).
+    #[cfg(feature = "phobos")]
+    pub gather_when_mcv_deploy: bool,
     /// `Rules+0xD78`, `[General] HarvesterTooFarDistance=` in cells: a
     /// refinery farther than this is approached before the dock is reserved.
     /// `RulesClass::ReadGeneral` reads it through `CCINIClass::ReadInt
@@ -1706,13 +1767,13 @@ pub struct GeneralRules {
     // (0x6660BE..0x6660ED). Read by the Drive/Ship fresh speed publish
     // (0x4B3D4C..0x4B3DA6) and the per-cell speed chain.
     /// Tracked vehicle uphill coefficient (`TrackedUphill=`).
-    pub tracked_uphill: SimFixed,
+    pub tracked_uphill: NativeF64Bits,
     /// Tracked vehicle downhill coefficient (`TrackedDownhill=`).
-    pub tracked_downhill: SimFixed,
+    pub tracked_downhill: NativeF64Bits,
     /// Non-tracked (wheeled and other) vehicle uphill coefficient (`WheeledUphill=`).
-    pub wheeled_uphill: SimFixed,
+    pub wheeled_uphill: NativeF64Bits,
     /// Non-tracked vehicle downhill coefficient (`WheeledDownhill=`).
-    pub wheeled_downhill: SimFixed,
+    pub wheeled_downhill: NativeF64Bits,
 
     // -- Per-object draw-light offsets --
     /// Signed `[AudioVisual] ExtraUnitLight=` body-light offset (`1000 == 1.0`).
@@ -1757,6 +1818,9 @@ pub struct GeneralRules {
     /// progress against this retained value times900, without truncating it
     /// to a timer first (`0x0044BD32`, `0x0044BD44`).
     pub unit_repair_rate: f64,
+    /// Rules+760; ctor6660AE stores3.0. ReadGeneral671858 uses the
+    /// current double as ReadDouble5283D0 default, without scaling/clamping.
+    pub charge_to_drain_ratio: NativeF64Bits,
     /// Hospital repair: Rules+16D8/16F0, ReadGeneral670DE9/670E57.
     pub infantry_repair_step: i32,
     pub infantry_repair_rate: f64,
@@ -2304,6 +2368,8 @@ impl Default for GeneralRules {
             game_speed_bias: 1.0,
             veteran_armor: 1.0,
             curley_shuffle: false,
+            enable_ai_build_limitation: false,
+            disable_parallel_ai_queues: false,
             repair_rate_minutes: 0.016,
             // Rules665696..6656B0 initializes the current-default fields
             // before ReadGeneral66E6E2..66E74B. Retail overrides are separate.
@@ -2367,6 +2433,7 @@ impl Default for GeneralRules {
             no_parachute_max_fall_rate: -100,
             paradrop_radius: 1024,
             parachute_shp: None,
+            vehicle_parachute: None,
             amer_paradrop: ParadropList::default(),
             ally_paradrop: ParadropList::default(),
             sov_paradrop: ParadropList::default(),
@@ -2570,6 +2637,8 @@ impl Default for GeneralRules {
             spy_money_steal_percent: NativeF32Bits::from_bits(0x3F00_0000),
             damage_fire_types: vec![],
             barrel_particle: None,
+            barrel_explode: None,
+            barrel_debris: Vec::new(),
             tiberium_short_scan: 0x600,
             tiberium_long_scan: 0x2000,
             buildup_time: f64::from_bits(0x3FA9_9999_9999_999A),
@@ -2581,6 +2650,16 @@ impl Default for GeneralRules {
             slave_miner_scan_correction: 0x300,
             slave_miner_kick_frame_delay: 0x7FFF_FFFF,
             maximum_queued_objects: 5,
+            #[cfg(feature = "phobos")]
+            building_production_queue: false,
+            #[cfg(feature = "phobos")]
+            ai_fire_sale: true,
+            #[cfg(feature = "phobos")]
+            ai_fire_sale_delay: 0,
+            #[cfg(feature = "phobos")]
+            ai_all_to_hunt: true,
+            #[cfg(feature = "phobos")]
+            gather_when_mcv_deploy: true,
             harvester_too_far_distance: 5,
             approach_target_reset_multiplier: 1,
             chrono_harv_too_far_distance: 50,
@@ -2610,10 +2689,10 @@ impl Default for GeneralRules {
             ),
             ship_sinking_weight: SimFixed::lit("3.0"),
             // RulesClass constructor 0x6660BE..0x6660ED.
-            tracked_uphill: SIM_ONE,
-            tracked_downhill: SIM_ONE,
-            wheeled_uphill: SIM_ONE,
-            wheeled_downhill: SIM_ONE,
+            tracked_uphill: NativeF64Bits::ONE,
+            tracked_downhill: NativeF64Bits::ONE,
+            wheeled_uphill: NativeF64Bits::ONE,
+            wheeled_downhill: NativeF64Bits::ONE,
             extra_unit_light: 0,
             extra_infantry_light: 0,
             extra_aircraft_light: 0,
@@ -2624,6 +2703,7 @@ impl Default for GeneralRules {
             guard_mode_stray: 0,
             // Rules constructor667530/53A retains the double, not frame ticks.
             unit_repair_rate: U_REPAIR_RATE_MINUTES,
+            charge_to_drain_ratio: NativeF64Bits::from_bits(0x4008_0000_0000_0000),
             // Constructor66751A and667540: 1 and double0.016.
             infantry_repair_step: 1,
             infantry_repair_rate: 0.016,
@@ -3445,6 +3525,20 @@ impl GeneralRules {
             game_speed_bias: general.read_double("GameSpeedBias", defaults.game_speed_bias),
             veteran_armor: general.read_double("VeteranArmor", 1.0),
             curley_shuffle: general.read_bool("CurleyShuffle", defaults.curley_shuffle),
+            // ext173 reads it with the current byte as default into
+            // `Rules+0x641` (`0xC2D132..0xC2D151`, `ReadBooleanByte 0x5295F0`).
+            enable_ai_build_limitation: crate::rules::NPATCH_ENABLED
+                && general.read_bool(
+                    "EnableAIBuildLimitation",
+                    defaults.enable_ai_build_limitation,
+                ),
+            // NPSE reads it with the current field as default into Rules+0x2D
+            // (C30303..C3031A); the constructor's 66569B store leaves 0.
+            disable_parallel_ai_queues: crate::rules::NPATCH_ENABLED
+                && general.read_bool(
+                    "DisableParallelAIQueues",
+                    defaults.disable_parallel_ai_queues,
+                ),
             repair_rate_minutes: general.read_double("RepairRate", defaults.repair_rate_minutes),
             // `RulesClass+0x30/+0x34/+0x38/+0x3C`, read by the General reader at
             // `0x0066D530`. ReadInt66E6F3/70D/727/740 retains each current
@@ -3549,6 +3643,9 @@ impl GeneralRules {
             hover_dampen: general.read_double_bits("HoverDampen", defaults.hover_dampen),
             paradrop_radius: general.read_int("ParadropRadius", 1024),
             parachute_shp: defaults.parachute_shp.clone(),
+            // The ordered RulesTypeReferences owner publishes the retained
+            // NPSE ReadGeneral pointer (C31005..C31017), like Parachute.
+            vehicle_parachute: defaults.vehicle_parachute.clone(),
             amer_paradrop: ParadropList::read_counts(general, "AmerParaDropNum"),
             ally_paradrop: ParadropList::read_counts(general, "AllyParaDropNum"),
             sov_paradrop: ParadropList::read_counts(general, "SovParaDropNum"),
@@ -3819,6 +3916,8 @@ impl GeneralRules {
                 .read_double_to_float("SpyMoneyStealPercent", defaults.spy_money_steal_percent),
             damage_fire_types: defaults.damage_fire_types.clone(),
             barrel_particle: defaults.barrel_particle.clone(),
+            barrel_explode: defaults.barrel_explode.clone(),
+            barrel_debris: defaults.barrel_debris.clone(),
             tiberium_short_scan: general.read_range("TiberiumShortScan", 0x600),
             tiberium_long_scan: general.read_range("TiberiumLongScan", 0x2000),
             buildup_time: general.read_double("BuildupTime", f64::from_bits(0x3FA9_9999_9999_999A)),
@@ -3830,6 +3929,16 @@ impl GeneralRules {
             slave_miner_scan_correction: general.read_range("SlaveMinerScanCorrection", 0x300),
             slave_miner_kick_frame_delay: general.read_int("SlaveMinerKickFrameDelay", 0x7FFF_FFFF),
             maximum_queued_objects: general.read_int("MaximumQueuedObjects", 5),
+            #[cfg(feature = "phobos")]
+            building_production_queue: general.read_bool("BuildingProductionQueue", false),
+            #[cfg(feature = "phobos")]
+            ai_fire_sale: general.read_bool("AIFireSale", true),
+            #[cfg(feature = "phobos")]
+            ai_fire_sale_delay: general.read_int("AIFireSaleDelay", 0),
+            #[cfg(feature = "phobos")]
+            ai_all_to_hunt: general.read_bool("AIAllToHunt", true),
+            #[cfg(feature = "phobos")]
+            gather_when_mcv_deploy: general.read_bool("GatherWhenMCVDeploy", true),
             harvester_too_far_distance: general.read_int("HarvesterTooFarDistance", 5),
             approach_target_reset_multiplier: general.read_int("ApproachTargetResetMultiplier", 1),
             chrono_harv_too_far_distance: general.read_int("ChronoHarvTooFarDistance", 50),
@@ -3882,18 +3991,12 @@ impl GeneralRules {
                 general.read_double("ShipSinkingWeight", defaults.ship_sinking_weight.to_num())
                     as f32,
             ),
-            tracked_uphill: SimFixed::from_num(
-                general.read_double("TrackedUphill", defaults.tracked_uphill.to_num::<f64>()),
-            ),
-            tracked_downhill: SimFixed::from_num(
-                general.read_double("TrackedDownhill", defaults.tracked_downhill.to_num::<f64>()),
-            ),
-            wheeled_uphill: SimFixed::from_num(
-                general.read_double("WheeledUphill", defaults.wheeled_uphill.to_num::<f64>()),
-            ),
-            wheeled_downhill: SimFixed::from_num(
-                general.read_double("WheeledDownhill", defaults.wheeled_downhill.to_num::<f64>()),
-            ),
+            tracked_uphill: general.read_double_bits("TrackedUphill", defaults.tracked_uphill),
+            tracked_downhill: general
+                .read_double_bits("TrackedDownhill", defaults.tracked_downhill),
+            wheeled_uphill: general.read_double_bits("WheeledUphill", defaults.wheeled_uphill),
+            wheeled_downhill: general
+                .read_double_bits("WheeledDownhill", defaults.wheeled_downhill),
             extra_unit_light,
             extra_infantry_light,
             extra_aircraft_light,
@@ -3906,6 +4009,7 @@ impl GeneralRules {
             repair_percent: general.read_double("RepairPercent", defaults.repair_percent),
             repair_step: general.read_int("RepairStep", defaults.repair_step),
             unit_repair_rate: defaults.unit_repair_rate,
+            charge_to_drain_ratio: defaults.charge_to_drain_ratio,
             infantry_repair_step: defaults.infantry_repair_step,
             infantry_repair_rate: defaults.infantry_repair_rate,
             reload_rate: general.read_double("ReloadRate", defaults.reload_rate),
@@ -4121,6 +4225,11 @@ pub struct RuleSet {
     side_extensions: Vec<(i32, bool, i32)>,
     /// Uppercase side identity -> source-order index.
     side_indices: HashMap<String, SideIdx>,
+    /// Phobos `[SOMESIDE] Sidebar.GDIPositions=`, in `[Sides]` order.
+    /// The first side defaults to GDI positions; all others default to the
+    /// NOD table. Unlike SideExt+88 this is read without the Ares feature.
+    #[cfg(feature = "phobos")]
+    side_gdi_positions: Vec<bool>,
     /// Effective side for each country after `[Sides]` membership and the
     /// per-country `Side=` override have both run.
     country_sides: Vec<Option<SideIdx>>,
@@ -4178,6 +4287,11 @@ pub struct RuleSet {
     /// leaves it empty, `0x0066641B..0x00666430`): the computer's wall types
     /// (`sim::ai_base_building`).
     pub concrete_wall_types: Vec<String>,
+    /// Original RulesClass::ReadAI672AE0, NSGates673830..673870 and
+    /// EWGates673875..6738A7: ordered BuildingType lists. Constructor
+    ///666437..666468 leaves both empty; omitted/empty reads retain them.
+    pub ns_gate_types: Vec<String>,
+    pub ew_gate_types: Vec<String>,
     /// Source-ordered resolved `[General] HarvesterUnit=` UnitType identities.
     pub harvester_unit_types: Vec<String>,
     /// Signed Hard/Normal/Easy vectors consumed directly by BasePlan Recalc.
@@ -4268,6 +4382,26 @@ pub struct RuleSet {
     pub elevation_model: ElevationModel,
     /// Per-cell radiation-field constants from [Radiation].
     pub radiation: RadiationRules,
+    /// Phobos `[ShieldTypes]` catalog, read per Rules pass by the ordered
+    /// Process owner. Empty in builds without the capability.
+    #[cfg(feature = "phobos")]
+    pub(crate) shield_types: crate::rules::phobos_shields::ShieldTypeCatalog,
+    /// Phobos shield globals: `[CombatDamage] ShieldApplyArmorMult` and
+    /// `[AudioVisual] Shield.ConditionYellow/ConditionRed`.
+    #[cfg(feature = "phobos")]
+    pub(crate) shield_globals: crate::rules::phobos_shields::ShieldGlobals,
+    /// Phobos `[DigitalDisplayTypes]` catalog, read per Rules pass by the
+    /// ordered Process owner. Empty in builds without the capability.
+    #[cfg(feature = "phobos")]
+    pub(crate) digital_display_types: crate::rules::digital_display::DigitalDisplayTypeCatalog,
+    /// Phobos DigitalDisplay globals: the four `[AudioVisual]` category
+    /// default lists and `DigitalDisplay.Health.FakeAtDisguise`.
+    #[cfg(feature = "phobos")]
+    pub(crate) digital_display_globals: crate::rules::digital_display::DigitalDisplayGlobals,
+    /// Phobos placement preview globals (`[AudioVisual] PlacementPreview*`).
+    #[cfg(feature = "phobos")]
+    pub(crate) placement_preview_globals:
+        crate::rules::phobos_placement_preview::PlacementPreviewGlobals,
     /// Radar event visual parameters (ping rectangles on minimap).
     pub radar_event_config: RadarEventConfig,
     /// All superweapon types indexed by ID (e.g., "LightningStormSpecial" → SuperWeaponType).
@@ -4527,6 +4661,7 @@ impl RuleSet {
         rules.general.weather_con_bolt_explosion = weather_anim.to_owned();
         rules.general.weapon_nullify_anim = nullify_anim.to_owned();
         rules.combat_damage.splash_list = splash.to_vec();
+        rules.combat_damage.ammo_crate_damage = processed.ammo_crate_damage();
         rules.combat_damage.death_weapon =
             processed.combat_damage_death_weapon().map(str::to_owned);
         for (name, conventional, em_effect, anim_list, debris_types, verses, ares_verses) in
@@ -4554,13 +4689,13 @@ impl RuleSet {
                 warhead.particle_system = particle_system.map(str::to_owned);
             }
         }
-        for (category, name, emp) in processed.emp_type_states() {
+        for (category, name, emp, attachment, cloak_allowed) in processed.ares_techno_states() {
             if let Some(object) = rules
                 .object_list
                 .iter_mut()
                 .find(|object| object.category == category && object.id == name)
             {
-                object.bind_emp_rules(emp);
+                object.bind_ares_techno_rules(emp, attachment, cloak_allowed);
             }
         }
         for (name, ares) in processed.ares_warhead_states() {
@@ -4610,6 +4745,7 @@ impl RuleSet {
             rules.general.unit_repair_rate,
             rules.general.infantry_repair_rate,
         ) = processed.repair_service_inputs();
+        rules.general.charge_to_drain_ratio = processed.charge_to_drain_ratio();
         let mut weapon_name_counts = HashMap::<String, usize>::new();
         for weapon in processed.weapon_states() {
             *weapon_name_counts
@@ -4907,6 +5043,14 @@ impl RuleSet {
                     .phobos_super_weapon_metadata
                     .insert(name.to_ascii_uppercase(), availability);
             }
+            for (name, gathering) in processed.ore_gathering_states() {
+                if let Some(unit) = rules.object_list.iter_mut().find(|object| {
+                    object.category == ObjectCategory::Vehicle
+                        && object.id.eq_ignore_ascii_case(name)
+                }) {
+                    unit.project_ore_gathering(gathering);
+                }
+            }
         }
         #[cfg(feature = "ares")]
         {
@@ -4955,13 +5099,14 @@ impl RuleSet {
                 particle.warhead = warhead.map(str::to_owned);
             }
         }
-        for (name, references) in processed.voxel_anim_reference_states() {
+        for (name, references, damage) in processed.voxel_anim_reference_states() {
             if let Some(voxel_anim) = rules
                 .voxel_anim_types
                 .iter_mut()
                 .find(|voxel_anim| voxel_anim.name.eq_ignore_ascii_case(name))
             {
                 references.apply_to(voxel_anim);
+                voxel_anim.damage = damage;
             }
         }
         processed.rules_type_references().apply_to(&mut rules);
@@ -5221,6 +5366,16 @@ impl RuleSet {
                 section.and_then(|section| sounds.read_rules_reference(section, "SinkingSound"));
             object.voice_sinking =
                 section.and_then(|section| sounds.read_rules_reference(section, "VoiceSinking"));
+            // TechnoType712FEC reads VoiceFalling (+0x54C) the same way.
+            object.voice_falling =
+                section.and_then(|section| sounds.read_rules_reference(section, "VoiceFalling"));
+            // InfantryType524193 reads VoiceComment (+0xE88) through
+            // ReadSoundList525430; no other type class reads the key.
+            if object.category == crate::rules::object_type::ObjectCategory::Infantry {
+                object.voice_comment = section.map_or_else(Vec::new, |section| {
+                    sounds.read_rules_sound_list(section, "VoiceComment")
+                });
+            }
             // TechnoType7133BA reads TurretRotateSound (+0x560) through
             // ReadString128 and Voc7514D0 for every techno type; the key is not
             // category-gated even though only buildings consume it.
@@ -5396,6 +5551,36 @@ impl RuleSet {
         let elevation_model = ElevationModel::from_ini(ini);
         let radiation: RadiationRules = RadiationRules::from_ini(ini);
         #[cfg(feature = "phobos")]
+        let (shield_types, shield_globals) = {
+            let shield_types = processed.shield_types().cloned().unwrap_or_default();
+            log::info!(
+                "Phobos shield types: [{}]",
+                shield_types.names().collect::<Vec<_>>().join(", ")
+            );
+            (
+                shield_types,
+                crate::rules::phobos_shields::ShieldGlobals::from_ini(ini),
+            )
+        };
+        #[cfg(feature = "phobos")]
+        let (digital_display_types, digital_display_globals) = {
+            let digital_display_types = processed
+                .digital_display_types()
+                .cloned()
+                .unwrap_or_default();
+            log::info!(
+                "Phobos digital display types: [{}]",
+                digital_display_types.names().collect::<Vec<_>>().join(", ")
+            );
+            (
+                digital_display_types,
+                crate::rules::digital_display::DigitalDisplayGlobals::from_ini(ini),
+            )
+        };
+        #[cfg(feature = "phobos")]
+        let placement_preview_globals =
+            crate::rules::phobos_placement_preview::PlacementPreviewGlobals::from_ini(ini);
+        #[cfg(feature = "phobos")]
         let radiation = {
             let mut radiation = radiation;
             radiation.radiation_types = processed.radiation_types().cloned().unwrap_or_default();
@@ -5414,6 +5599,17 @@ impl RuleSet {
         };
         let radar_event_config: RadarEventConfig = RadarEventConfig::from_ini(ini);
         let countries = country_side_registry.rules;
+        #[cfg(feature = "phobos")]
+        let side_gdi_positions: Vec<bool> = country_side_registry
+            .side_ids
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                ini.section(name).map_or(index == 0, |section| {
+                    section.read_bool("Sidebar.GDIPositions", index == 0)
+                })
+            })
+            .collect();
         let color_schemes = crate::rules::color_scheme::parse_color_schemes(ini);
         let house_color_ramps =
             crate::rules::house_colors::HouseColorRamps::from_schemes(&color_schemes);
@@ -5576,11 +5772,8 @@ impl RuleSet {
         let super_weapon_order: Vec<String> = sw_ids.clone();
         for sw_id in &sw_ids {
             if let Some(section) = ini.section(sw_id) {
-                if let Some(sw) = SuperWeaponType::from_ini_section(sw_id, section) {
-                    super_weapons.insert(sw_id.clone(), sw);
-                } else {
-                    log::warn!("SuperWeapon '{}' has unknown Type=, skipping", sw_id);
-                }
+                let sw = SuperWeaponType::from_ini_section(sw_id, section);
+                super_weapons.insert(sw_id.clone(), sw);
             } else {
                 log::trace!(
                     "SuperWeapon '{}' listed in [SuperWeaponTypes] but has no section",
@@ -5697,6 +5890,8 @@ impl RuleSet {
             country_ids: country_side_registry.country_ids,
             country_indices: country_side_registry.country_indices,
             side_ids: country_side_registry.side_ids,
+            #[cfg(feature = "phobos")]
+            side_gdi_positions,
             #[cfg(feature = "ares")]
             side_extensions: country_side_registry.side_extensions,
             side_indices: country_side_registry.side_indices,
@@ -5725,6 +5920,8 @@ impl RuleSet {
             soviet_base_defense_types: Vec::new(),
             third_base_defense_types: Vec::new(),
             concrete_wall_types: Vec::new(),
+            ns_gate_types: Vec::new(),
+            ew_gate_types: Vec::new(),
             harvester_unit_types: Vec::new(),
             ai_slave_miner_number,
             ai_extra_refineries,
@@ -5761,6 +5958,16 @@ impl RuleSet {
             allied_wall_transparency,
             elevation_model,
             radiation,
+            #[cfg(feature = "phobos")]
+            shield_types,
+            #[cfg(feature = "phobos")]
+            shield_globals,
+            #[cfg(feature = "phobos")]
+            digital_display_types,
+            #[cfg(feature = "phobos")]
+            digital_display_globals,
+            #[cfg(feature = "phobos")]
+            placement_preview_globals,
             radar_event_config,
             super_weapons,
             super_weapon_order,
@@ -6156,6 +6363,74 @@ impl RuleSet {
         Self::lookup_ci(&self.warheads, id)
     }
 
+    /// Phobos `[ShieldTypes]` entry by name (case-insensitive, first spelling
+    /// retained). No entry in a build without the capability.
+    #[cfg(feature = "phobos")]
+    pub fn shield_type(&self, name: &str) -> Option<&crate::rules::phobos_shields::ShieldType> {
+        self.shield_types.entry(name)
+    }
+
+    /// Phobos shield globals (`[CombatDamage]`/`[AudioVisual]`).
+    #[cfg(feature = "phobos")]
+    pub fn shield_globals(&self) -> &crate::rules::phobos_shields::ShieldGlobals {
+        &self.shield_globals
+    }
+
+    /// Phobos `[DigitalDisplayTypes]` catalog.
+    #[cfg(feature = "phobos")]
+    pub fn digital_display_types(
+        &self,
+    ) -> &crate::rules::digital_display::DigitalDisplayTypeCatalog {
+        &self.digital_display_types
+    }
+
+    /// Phobos DigitalDisplay globals (`[AudioVisual]`).
+    #[cfg(feature = "phobos")]
+    pub fn digital_display_globals(&self) -> &crate::rules::digital_display::DigitalDisplayGlobals {
+        &self.digital_display_globals
+    }
+
+    /// `TechnoExt::ProcessDigitalDisplays`'s list resolution: an explicit
+    /// `DigitalDisplayTypes=` wins; unknown names are skipped; otherwise the
+    /// category's `[AudioVisual]` default list applies. Yields catalog
+    /// indices in list order without allocating.
+    #[cfg(feature = "phobos")]
+    pub fn digital_display_indices<'a>(
+        &'a self,
+        object: &'a crate::rules::object_type::ObjectType,
+    ) -> impl Iterator<Item = usize> + 'a {
+        let explicit = object.digital_display_types();
+        let names: &[String] = if !explicit.is_empty() {
+            explicit
+        } else {
+            match object.category {
+                crate::rules::object_type::ObjectCategory::Building => {
+                    &self.digital_display_globals.buildings_default
+                }
+                crate::rules::object_type::ObjectCategory::Infantry => {
+                    &self.digital_display_globals.infantry_default
+                }
+                crate::rules::object_type::ObjectCategory::Vehicle => {
+                    &self.digital_display_globals.vehicles_default
+                }
+                crate::rules::object_type::ObjectCategory::Aircraft => {
+                    &self.digital_display_globals.aircraft_default
+                }
+            }
+        };
+        names
+            .iter()
+            .filter_map(|name| self.digital_display_types.index_of(name))
+    }
+
+    /// Phobos placement preview globals (`[AudioVisual]`).
+    #[cfg(feature = "phobos")]
+    pub fn placement_preview_globals(
+        &self,
+    ) -> &crate::rules::phobos_placement_preview::PlacementPreviewGlobals {
+        &self.placement_preview_globals
+    }
+
     /// Look up a projectile by ID (case-insensitive, gamemd parity).
     pub fn projectile(&self, id: &str) -> Option<&ProjectileType> {
         Self::lookup_ci(&self.projectiles, id)
@@ -6244,6 +6519,22 @@ impl RuleSet {
             .map(|object| (object.id.to_ascii_uppercase(), &object.foundation))
             .collect::<BTreeMap<_, _>>()
             .hash(&mut hasher);
+        // ReadOwners4750D0 retains an explicit zero RequiredHouses mask
+        // through later absent/empty reads. Current-pass source text does
+        // not encode this history; keep ordinary stock hashes unchanged.
+        let mut empty_required_houses: Vec<_> = self
+            .object_list
+            .iter()
+            .filter(|object| {
+                object.required_houses.is_empty() && object.required_houses_mask(self) == 0
+            })
+            .map(|object| (object.category, object.id.to_ascii_uppercase()))
+            .collect();
+        if !empty_required_houses.is_empty() {
+            empty_required_houses.sort_unstable();
+            b"required-houses-explicit-empty-v1".hash(&mut hasher);
+            empty_required_houses.hash(&mut hasher);
+        }
         // Bullet46BEE0 retains this byte even when a later raw value is
         // invalid. Equal flattened INIs can therefore have different flight
         // damage. Preserve the previous hash domain for all-false stock rules.
@@ -6297,12 +6588,62 @@ impl RuleSet {
         }
         #[cfg(feature = "phobos")]
         {
+            b"phobos-sidebar-gdi-positions-v1".hash(&mut hasher);
+            self.side_gdi_positions.hash(&mut hasher);
+        }
+        #[cfg(feature = "phobos")]
+        {
             b"phobos-radiation-types-v1".hash(&mut hasher);
             self.radiation.radiation_types.hash(&mut hasher);
             // Bound weapon `RadType=` names, in registry order.
             self.weapons
                 .iter()
                 .map(|(id, weapon)| (id, &weapon.rad_type))
+                .collect::<Vec<_>>()
+                .hash(&mut hasher);
+            b"phobos-shield-types-v1".hash(&mut hasher);
+            self.shield_types.hash(&mut hasher);
+            self.shield_globals.apply_armor_mult.hash(&mut hasher);
+            self.shield_globals
+                .condition_yellow
+                .to_bits()
+                .hash(&mut hasher);
+            self.shield_globals
+                .condition_red
+                .to_bits()
+                .hash(&mut hasher);
+            self.shield_globals.pips.hash(&mut hasher);
+            self.shield_globals.pips_building.hash(&mut hasher);
+            self.shield_globals.pips_background.hash(&mut hasher);
+            self.shield_globals.pips_building_empty.hash(&mut hasher);
+            // Bound techno `ShieldType=` names, in registry order.
+            self.object_list
+                .iter()
+                .map(|object| (&object.id, object.shield_type()))
+                .collect::<Vec<_>>()
+                .hash(&mut hasher);
+            b"phobos-digital-display-v1".hash(&mut hasher);
+            self.digital_display_types.hash(&mut hasher);
+            self.digital_display_globals.hash(&mut hasher);
+            b"phobos-placement-preview-v1".hash(&mut hasher);
+            self.placement_preview_globals.hash(&mut hasher);
+            self.object_list
+                .iter()
+                .map(|object| {
+                    (
+                        &object.id,
+                        object.digital_display_types(),
+                        object.digital_display_disable(),
+                        object.digital_display_health_fake_at_disguise(),
+                        object.placement_preview(),
+                        object.placement_preview_shape(),
+                        object.placement_preview_shape_frame(),
+                        object.placement_preview_offset(),
+                        object.placement_preview_remap(),
+                        object.placement_preview_palette(),
+                        object.placement_preview_translucency(),
+                    )
+                })
                 .collect::<Vec<_>>()
                 .hash(&mut hasher);
         }
@@ -6376,11 +6717,22 @@ impl RuleSet {
             .map(|(name, terrain)| (name.to_ascii_uppercase(), terrain.armor_id()))
             .collect::<BTreeMap<_, _>>()
             .hash(&mut hasher);
+        #[cfg(feature = "phobos")]
+        {
+            // TerrainTypeExt::LoadFromINI retains these across Process calls.
+            // They change spawner placement, particle births and RNG draws.
+            b"phobos-retained-ore-spawners-v1".hash(&mut hasher);
+            self.terrain_object_types
+                .iter()
+                .map(|(name, terrain)| (name.to_ascii_uppercase(), &terrain.spawns_tiberium_ext))
+                .collect::<BTreeMap<_, _>>()
+                .hash(&mut hasher);
+        }
         // TerrainTypeReadINI71DEA0 retains post-read writes and ReadInt
         // defaults across Process calls. Equal current text can admit
         // different Strength, Logic members, targets or occupation, so identify
         // the effective fields as well as the current source layers.
-        b"terrain-strength-logic-targeting-occupation-and-foundation-v5".hash(&mut hasher);
+        b"terrain-strength-logic-targeting-occupation-and-foundation-v6".hash(&mut hasher);
         self.terrain_object_types
             .iter()
             .map(|(name, terrain)| {
@@ -6414,7 +6766,11 @@ impl RuleSet {
                 .map(|object| {
                     (
                         (object.category, object.id.to_ascii_uppercase()),
-                        object.emp_rules(),
+                        (
+                            object.emp_rules(),
+                            object.self_attach_effect(),
+                            object.cloak_allowed(),
+                        ),
                     )
                 })
                 .collect::<BTreeMap<_, _>>()
@@ -6459,6 +6815,7 @@ impl RuleSet {
         self.general.tree_strength.hash(&mut hasher);
         self.general.infantry_repair_step.hash(&mut hasher);
         self.general.unit_repair_rate.to_bits().hash(&mut hasher);
+        self.general.charge_to_drain_ratio.hash(&mut hasher);
         self.general
             .infantry_repair_rate
             .to_bits()
@@ -6650,6 +7007,18 @@ impl RuleSet {
             b"airburst-weapons-v1".hash(&mut hasher);
             airburst_weapons.hash(&mut hasher);
         }
+        // A later invalid raw token retains BulletType+294. Equal flattened
+        // INIs can therefore differ in the child-fan and parent-cluster gates.
+        let airburst_flags = self
+            .projectiles
+            .iter()
+            .filter(|(_, projectile)| projectile.airburst)
+            .map(|(id, _)| id.to_ascii_uppercase())
+            .collect::<std::collections::BTreeSet<_>>();
+        if !airburst_flags.is_empty() {
+            b"airburst-retained-flag-v1".hash(&mut hasher);
+            airburst_flags.hash(&mut hasher);
+        }
         self.super_weapons
             .iter()
             .map(|(id, super_weapon)| {
@@ -6752,6 +7121,12 @@ impl RuleSet {
                 .hash(&mut hasher);
         }
         self.anim_type_references.hash(&mut hasher);
+        self.combat_damage.ammo_crate_damage.hash(&mut hasher);
+        self.general.barrel_explode.hash(&mut hasher);
+        self.general.barrel_debris.hash(&mut hasher);
+        for kind in &self.voxel_anim_types {
+            kind.damage.hash(&mut hasher);
+        }
         (
             self.combat_damage.flame_damage2(),
             &self.bridge_warheads.c4_name,
@@ -6768,6 +7143,9 @@ impl RuleSet {
         )
             .hash(&mut hasher);
         let general = &self.general;
+        if crate::rules::NPATCH_ENABLED {
+            general.vehicle_parachute.hash(&mut hasher);
+        }
         (
             (
                 &general.ore_twinkle,
@@ -6831,6 +7209,8 @@ impl RuleSet {
                 &self.soviet_base_defense_types,
                 &self.third_base_defense_types,
                 &self.concrete_wall_types,
+                &self.ns_gate_types,
+                &self.ew_gate_types,
             ),
         )
             .hash(&mut hasher);
@@ -6856,6 +7236,16 @@ impl RuleSet {
         self.general.lightning_warhead.hash(&mut hasher);
         self.general.weather_con_bolt_explosion.hash(&mut hasher);
         self.general.weapon_nullify_anim.hash(&mut hasher);
+        #[cfg(feature = "phobos")]
+        self.general.building_production_queue.hash(&mut hasher);
+        #[cfg(feature = "phobos")]
+        {
+            b"phobos-ai-dehardcode-v1".hash(&mut hasher);
+            self.general.ai_fire_sale.hash(&mut hasher);
+            self.general.ai_fire_sale_delay.hash(&mut hasher);
+            self.general.ai_all_to_hunt.hash(&mut hasher);
+            self.general.gather_when_mcv_deploy.hash(&mut hasher);
+        }
         self.combat_damage.splash_list.hash(&mut hasher);
         self.combat_damage.death_weapon.hash(&mut hasher);
         // The live family order is independent of HashMap iteration and may
@@ -7453,6 +7843,16 @@ impl RuleSet {
         self.side_indices.get(&id.to_ascii_uppercase()).copied()
     }
 
+    /// Phobos `Sidebar.GDIPositions=` for a native side index. A missing or
+    /// out-of-range side falls back to the first-side default (index 0 true).
+    #[cfg(feature = "phobos")]
+    pub fn side_gdi_positions(&self, index: i32) -> bool {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| self.side_gdi_positions.get(index).copied())
+            .unwrap_or(index == 0)
+    }
+
     /// Resolve a side index back to its source spelling.
     pub fn side_name(&self, index: SideIdx) -> Option<&str> {
         self.side_ids.get(index.0 as usize).map(String::as_str)
@@ -7631,6 +8031,11 @@ impl RuleSet {
             .copied()
     }
 
+    /// Parsed VoxelAnim Types in their retained registry order.
+    pub fn voxel_anim_types_iter(&self) -> impl Iterator<Item = &VoxelAnimType> {
+        self.voxel_anim_types.iter()
+    }
+
     /// Look up a `[VoxelAnims]` type by ID. Panics if `id` is out of range.
     pub fn voxel_anim_type(&self, id: VoxelAnimTypeId) -> &VoxelAnimType {
         &self.voxel_anim_types[id.0 as usize]
@@ -7643,8 +8048,7 @@ impl RuleSet {
             .copied()
     }
 
-    /// Number of `[VoxelAnims]` types loaded.
-    #[cfg(any(test, feature = "test-support"))]
+    /// Number of `[VoxelAnims]` types loaded, also used to validate saved IDs.
     pub fn voxel_anim_type_count(&self) -> usize {
         self.voxel_anim_types.len()
     }
@@ -7829,6 +8233,25 @@ impl RuleSet {
     /// Read the same bound ART owner used during construction and gameplay.
     pub fn art(&self) -> &crate::rules::art_data::ArtRegistry {
         &self.art_registry
+    }
+
+    /// Registered AnimType identities selected by Phobos' gather overlay.
+    /// Keep the type identity: its existing image owner resolves retained load
+    /// requests, Image aliases and theater filenames.
+    #[cfg(feature = "phobos")]
+    pub fn harvest_overlay_anim_types(&self) -> Vec<&str> {
+        let mut anims = Vec::new();
+        for object in &self.object_list {
+            if object.category != ObjectCategory::Vehicle {
+                continue;
+            }
+            for anim in &object.ore_gathering().anims {
+                if !anims.contains(&anim.as_str()) {
+                    anims.push(anim.as_str());
+                }
+            }
+        }
+        anims
     }
 
     /// AnimTypeArray8B4154's retained constructor order, including types
@@ -9481,6 +9904,30 @@ CellSpread=0
         assert_eq!(rules.side_index("north"), Some(SideIdx(0)));
         assert_eq!(rules.side_index("SOUTH"), Some(SideIdx(1)));
         assert_eq!(rules.side_name(SideIdx(0)), Some("North"));
+    }
+
+    #[cfg(feature = "phobos")]
+    #[test]
+    fn sidebar_gdi_positions_default_the_first_side_and_read_side_sections() {
+        let ini = IniFile::from_str(
+            "[Countries]\n0=Alpha\n1=Beta\n2=Gamma\n\
+             [Sides]\nNorth=Alpha\nSouth=Beta\nThird=Gamma\n\
+             [North]\nSidebar.GDIPositions=no\n\
+             [Third]\nSidebar.GDIPositions=yes\n",
+        );
+        let rules = RuleSet::from_ini(&ini).expect("side sections parse");
+        assert!(!rules.side_gdi_positions(0), "explicit no");
+        assert!(!rules.side_gdi_positions(1), "default non-first side");
+        assert!(rules.side_gdi_positions(2), "explicit yes");
+        assert!(!rules.side_gdi_positions(99), "missing side is NOD");
+        assert!(!rules.side_gdi_positions(-1), "negative side is NOD");
+
+        let defaults = RuleSet::from_ini(&IniFile::from_str(
+            "[Countries]\n0=Alpha\n1=Beta\n[Sides]\nNorth=Alpha\nSouth=Beta\n",
+        ))
+        .expect("default side positions parse");
+        assert!(defaults.side_gdi_positions(0));
+        assert!(!defaults.side_gdi_positions(1));
     }
 
     #[test]
@@ -11508,6 +11955,28 @@ DefaultSparkSystem=SparkSys
         IniFile::from_str(&text)
     }
 
+    #[cfg(feature = "phobos")]
+    #[test]
+    fn ai_dehardcode_keys_default_and_read_general() {
+        let defaults = GeneralRules::default();
+        assert!(defaults.ai_fire_sale);
+        assert_eq!(defaults.ai_fire_sale_delay, 0);
+        assert!(defaults.ai_all_to_hunt);
+        assert!(defaults.gather_when_mcv_deploy);
+
+        let read = GeneralRules::from_ini(&ini_with_general(
+            "AIFireSale=no\nAIFireSaleDelay=450\nAIAllToHunt=no\nGatherWhenMCVDeploy=no",
+        ));
+        assert!(!read.ai_fire_sale);
+        assert_eq!(read.ai_fire_sale_delay, 450);
+        assert!(!read.ai_all_to_hunt);
+        assert!(!read.gather_when_mcv_deploy);
+
+        let partial = GeneralRules::from_ini(&ini_with_general("AIFireSaleDelay=-3"));
+        assert!(partial.ai_fire_sale && partial.ai_all_to_hunt && partial.gather_when_mcv_deploy);
+        assert_eq!(partial.ai_fire_sale_delay, -3);
+    }
+
     #[test]
     fn sparking_probability_defaults_and_override() {
         // Stock INI omits both keys -> the verified RulesClass ctor defaults
@@ -12153,6 +12622,7 @@ Projectile=Invisible
              BuildTech=tech, TECH\n\
              BuildWeapons=weap\n\
              BuildRadar=rad,<none>,RAD\n\
+             NSGates=con,,none,CON\nEWGates=pow,<none>,POW\n\
              [VehicleTypes]\n0=HARV\n1=AUNIT\n\
              [BuildingTypes]\n0=CON\n1=POW\n2=REF\n3=BAR\n4=TECH\n5=WEAP\n6=RAD\n7=POISON\n\
              [HARV]\nStrength=1\n[AUNIT]\nStrength=1\n\
@@ -12174,6 +12644,8 @@ Projectile=Invisible
         );
         assert_eq!(rules.build_weapons_types, ["WEAP"]);
         assert_eq!(rules.build_radar_types, ["RAD", "RAD"]);
+        assert_eq!(rules.ns_gate_types, ["CON", "CON"]);
+        assert_eq!(rules.ew_gate_types, ["POW", "POW"]);
         assert_eq!(
             rules.harvester_unit_types,
             ["HARV", "HARV", " AUNIT"],
@@ -12189,6 +12661,7 @@ Projectile=Invisible
         let mut layers = RulesLayerStack::new(IniFile::from_str(
             "[General]\nHarvesterUnit=HARV\n\
              [AI]\nBuildConst=CON\nBuildPower=POW\nBuildTech=TECH\n\
+             NSGates=CON\nEWGates=POW\n\
              [VehicleTypes]\n0=HARV\n[HARV]\nStrength=1\n\
              [BuildingTypes]\n0=CON\n1=POW\n2=TECH\n3=NEWPOW\n\
              [CON]\nFoundation=1x1\n[POW]\nFoundation=1x1\n\
@@ -12198,7 +12671,7 @@ Projectile=Invisible
             RulesLayerKind::Scenario,
             IniFile::from_str(
                 "[General]\nHarvesterUnit=\nUnrelated=1\n\
-                 [AI]\nBuildConst=\nBuildPower=NEWPOW\n",
+                 [AI]\nBuildConst=\nBuildPower=NEWPOW\nNSGates=\n",
             ),
         );
         let rules = RuleSet::from_rules_layers(&layers).expect("layered Recalc lists");
@@ -12206,6 +12679,8 @@ Projectile=Invisible
         assert_eq!(rules.build_const_types, ["CON"]);
         assert_eq!(rules.build_power_types, ["NEWPOW"]);
         assert_eq!(rules.build_tech_types, ["TECH"]);
+        assert_eq!(rules.ns_gate_types, ["CON"]);
+        assert_eq!(rules.ew_gate_types, ["POW"]);
     }
 
     #[test]
@@ -12874,6 +13349,14 @@ Projectile=Invisible
             (
                 "ConcreteWalls",
                 Box::new(move |rules| rules.concrete_wall_types = names()),
+            ),
+            (
+                "NSGates",
+                Box::new(move |rules| rules.ns_gate_types = names()),
+            ),
+            (
+                "EWGates",
+                Box::new(move |rules| rules.ew_gate_types = names()),
             ),
             (
                 "CrateImg",

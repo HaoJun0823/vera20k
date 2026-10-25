@@ -19,6 +19,25 @@ use crate::render::tile_atlas::TileAtlas;
 
 use super::merge_passes;
 
+/// One isolated pass for the Phobos placement preview artwork. The texture is
+/// owned by a `RefCell` cache, so the pass must end inside this call and the
+/// caller recreates its own pass afterwards.
+#[cfg(feature = "phobos")]
+fn draw_placement_ghost_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+    clip: [u32; 4],
+    batch: &BatchRenderer,
+    texture: &BatchTexture,
+    buffer: &wgpu::Buffer,
+    count: u32,
+) {
+    let mut pass = begin_main_load_pass(encoder, view, depth);
+    pass.set_scissor_rect(clip[0], clip[1], clip[2], clip[3]);
+    batch.draw_with_buffer_passthrough(&mut pass, texture, buffer, count);
+}
+
 /// Data from the instance-building phase that the draw pass needs beyond `AppState`.
 ///
 /// These are local variables in `render_game()` that can't be accessed through `state`
@@ -688,7 +707,7 @@ pub(super) fn dispatch_draw_passes(
     // BeaconManager Draw 430AC0 (6D46B6) precedes BandBox. Its flags 600
     // bypass A and Z; each House row has its own Convert strip.
     if let Some(art) = state.match_state.match_presentation.beacon_art.as_ref() {
-        for house in 0..crate::app::match_runtime::beacons::BEACON_HOUSES {
+        for house in 0..art.house_count() {
             if let (Some(strip), Some((buffer, count))) =
                 (art.tactical_strip(house), pool.get_page("beacons", house))
             {
@@ -764,6 +783,36 @@ pub(super) fn dispatch_draw_passes(
             buffer,
             count,
         );
+    }
+    // Phobos placement preview artwork (`0x6D528A`), after the PLACE cells.
+    // The texture lives behind the cache's RefCell borrow, so end this pass
+    // before releasing the guard and recreate it for the following stages.
+    #[cfg(feature = "phobos")]
+    if let Some((buffer, count)) = pool.get("placement_ghost")
+        && count > 0
+    {
+        {
+            let art = state
+                .match_state
+                .match_presentation
+                .placement_preview_art
+                .borrow();
+            if let Some(texture) = art.current_texture() {
+                drop(pass);
+                draw_placement_ghost_pass(
+                    encoder,
+                    view,
+                    &state.renderer.depth_view,
+                    [tac_x, tac_y, tac_w, tac_h],
+                    &state.renderer.batch_renderer,
+                    texture,
+                    buffer,
+                    count,
+                );
+                pass = begin_main_load_pass(encoder, view, &state.renderer.depth_view);
+                pass.set_scissor_rect(tac_x, tac_y, tac_w, tac_h);
+            }
+        }
     }
 
     // --- Step 10.5: PixelFX water/ore sparkles ---

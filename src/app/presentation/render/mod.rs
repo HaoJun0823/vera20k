@@ -49,10 +49,10 @@ mod target_laser_gpu_tests;
 pub(crate) use draw_passes::{draw_bridge_shadows, draw_pooled_cell_bodies};
 pub(crate) mod draw_plan_lowering;
 mod merge_passes;
+pub(crate) mod minimap_transaction;
 mod object_stages;
 #[cfg(test)]
 mod object_stages_gpu_tests;
-pub(crate) mod minimap_transaction;
 
 use anyhow::Result;
 #[cfg(feature = "telemetry-dashboard")]
@@ -201,6 +201,8 @@ pub(crate) fn render_game(
     );
 
     let local_owner = preferred_local_owner_name(state);
+    let translucent_fog = state.translucent_fog_enabled();
+    let sandbox = state.match_state.sandbox_full_visibility;
     // Effective viewport in world pixels — zoom shrinks what's visible.
     let z = state.match_state.input.zoom_level;
     let vsw = sw / z;
@@ -477,11 +479,38 @@ pub(crate) fn render_game(
         state.match_state.sim_runtime.as_mut(),
         &mut state.frontend.frontend_main_rng,
     );
+    let sim = state
+        .match_state
+        .sim_runtime
+        .as_ref()
+        .map(|runtime| runtime.view().simulation());
+    let viewer = local_owner
+        .as_deref()
+        .and_then(|name| sim?.interner().get(name));
+    // Use the same authoritative cell visibility as object admission. The
+    // shaded screen A plane can include edge blends and height projection;
+    // its brightness is not a separate visibility decision.
+    let effect_hidden = |x: i32, y: i32| {
+        let (rx, ry) = crate::app::presentation::instances::lepton_cell(x, y);
+        translucent_fog
+            && !sandbox
+            && sim.is_some_and(|sim| {
+                crate::app::presentation::instances::translucent_fog_conceals_cell(
+                    viewer,
+                    Some(sim.fog()),
+                    rx,
+                    ry,
+                    sim.session().game_options().fog_of_war,
+                )
+            })
+    };
     let bolt_lines = {
         presentation.lasers.composite(&mut main);
         presentation
             .electric_bolts
-            .composite(viewport, palette, &mut main)
+            .composite(viewport, palette, &mut main, |birth| {
+                !effect_hidden(birth.to.x, birth.to.y)
+            })
     };
     // Tactical6D48F1 follows Laser/Bolt Main requests and interleaves the
     // opaque action stores with each owning Airstrike designation. Uploads
@@ -492,29 +521,49 @@ pub(crate) fn render_game(
         &main,
         viewport,
     );
-    let sim = state
-        .match_state
-        .sim_runtime
-        .as_ref()
-        .map(|runtime| runtime.view().simulation());
-    let segments = presentation.line_trails.composite(|id| {
-        let sim = sim?;
-        sim.projectiles().get(id).map(|bullet| {
-            presentation
-                .interpolation
-                .sample_point(
-                    crate::app::presentation::interpolation::PointKind::Bullet,
-                    id,
-                    crate::app::presentation::interpolation::PointPose::bullet(bullet),
-                    sim.session().binary_frame(),
-                )
-                .projectile_coord()
-        })
-    });
+    let segments = presentation.line_trails.composite(
+        |id| {
+            let sim = sim?;
+            let bullet = sim.projectiles().get(id)?;
+            Some(
+                presentation
+                    .interpolation
+                    .sample_point(
+                        crate::app::presentation::interpolation::PointKind::Bullet,
+                        id,
+                        crate::app::presentation::interpolation::PointPose::bullet(bullet),
+                        sim.session().binary_frame(),
+                    )
+                    .projectile_coord(),
+            )
+        },
+        |owner, coord| {
+            if !translucent_fog || sandbox {
+                return true;
+            }
+            let Some(sim) = sim else {
+                return true;
+            };
+            if let Some(bullet) = owner.and_then(|id| sim.projectiles().get(id)) {
+                return !crate::app::presentation::instances::translucent_fog_conceals_bullet(
+                    sim,
+                    bullet,
+                    [coord.x, coord.y, coord.z],
+                    local_owner.as_deref(),
+                    viewer,
+                    sim.session().game_options().fog_of_war,
+                );
+            }
+            !effect_hidden(coord.x, coord.y)
+        },
+    );
     let frame_rate = presentation.detail.borrow().frame_rate();
-    presentation.radiation_beams.composite(frame_rate, viewport);
+    presentation
+        .radiation_beams
+        .composite(frame_rate, viewport, |birth| {
+            !effect_hidden(birth.to.x, birth.to.y)
+        });
     let shroud = presentation.shroud_buffer.as_ref();
-    let sandbox = state.match_state.sandbox_full_visibility;
     let mut alpha = |point: [i32; 2]| {
         if sandbox {
             127
@@ -534,10 +583,14 @@ pub(crate) fn render_game(
     let terrain = &mut state.renderer.terrain_draw_renderer;
     let gpu = &state.renderer.gpu;
     terrain.begin_surface_lines();
+    let laser_draws = presentation
+        .lasers
+        .draws()
+        .filter(|draw| !effect_hidden(draw.to.x, draw.to.y));
     let surface_effects = terrain.prepare_surface_lines(
         &gpu.device,
         &gpu.queue,
-        presentation.lasers.draws(),
+        laser_draws,
         bolt_lines
             .iter()
             .copied()
@@ -779,6 +832,8 @@ fn upload_to_gpu(
     pool.upload(&state.renderer.gpu, "drag", &ui.drag);
     pool.upload(&state.renderer.gpu, "software_cursor", &ui.software_cursor);
     pool.upload(&state.renderer.gpu, "placement", &ui.placement);
+    #[cfg(feature = "phobos")]
+    pool.upload(&state.renderer.gpu, "placement_ghost", &ui.placement_ghost);
     pool.upload(
         &state.renderer.gpu,
         "factory_rally_first",

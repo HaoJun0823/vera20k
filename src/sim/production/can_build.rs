@@ -142,9 +142,8 @@ pub(crate) fn can_build(
             rules,
             sim.interner.resolve(house.house_type_id()),
         );
-        if !obj.required_houses.is_empty()
-            && rules.house_type_mask(&obj.required_houses) & house_bit == 0
-        {
+        let required = obj.required_houses_mask(rules);
+        if required != u32::MAX && required & house_bit == 0 {
             return CanBuild::No;
         }
         // CanBuild4F7A7D treats raw-1 as its skip sentinel, even when a
@@ -597,7 +596,7 @@ pub fn object_find_factory(
     require_online: bool,
 ) -> Option<u64> {
     let object = sim.entities().get(object_id)?;
-    let object_type = sim.object_type(object.type_ref(), rules)?;
+    let object_type = sim.entity_object_type(object, rules)?;
     find_factory(
         sim,
         rules,
@@ -691,7 +690,7 @@ fn query_factory(
         let Some(building) = sim.substrate.entities.get(id) else {
             continue;
         };
-        let Some(building_type) = sim.object_type(building.type_ref(), rules) else {
+        let Some(building_type) = sim.entity_object_type(building, rules) else {
             continue;
         };
         if !building.lifecycle.in_limbo()
@@ -787,7 +786,7 @@ pub(crate) fn initialize_factory_primary(sim: &mut Simulation, rules: &RuleSet, 
     if building.category() != EntityCategory::Structure || building.lifecycle.in_limbo() {
         return;
     }
-    let Some(ty) = sim.object_type(building.type_ref(), rules) else {
+    let Some(ty) = sim.entity_object_type(building, rules) else {
         return;
     };
     let Some(factory) = ty.factory_type() else {
@@ -811,7 +810,7 @@ pub(crate) fn initialize_factory_primary(sim: &mut Simulation, rules: &RuleSet, 
                     .is_some_and(|candidate| {
                         !candidate.lifecycle.in_limbo()
                             && sim.production.is_primary_factory(candidate_id)
-                            && sim.object_type(candidate.type_ref(), rules).is_some_and(
+                            && sim.entity_object_type(candidate, rules).is_some_and(
                                 |candidate_type| {
                                     candidate_type.factory_type() == Some(factory)
                                         && candidate_type.naval == ty.naval
@@ -837,7 +836,7 @@ pub fn can_select_factory_primary(sim: &Simulation, rules: &RuleSet, id: u64) ->
         building.category() == EntityCategory::Structure
             && !sim.production.is_primary_factory(id)
             && sim
-                .object_type(building.type_ref(), rules)
+                .entity_object_type(building, rules)
                 .is_some_and(|ty| !ty.invisible_in_game && ty.factory_type().is_some())
     })
 }
@@ -856,7 +855,7 @@ pub(crate) fn toggle_factory_primary(sim: &mut Simulation, rules: &RuleSet, id: 
             if building.category() != EntityCategory::Structure {
                 return None;
             }
-            let ty = sim.object_type(building.type_ref(), rules)?;
+            let ty = sim.entity_object_type(building, rules)?;
             Some((
                 building.owner(),
                 ty.factory_type()?,
@@ -881,11 +880,9 @@ pub(crate) fn toggle_factory_primary(sim: &mut Simulation, rules: &RuleSet, id: 
             .filter(|&peer| {
                 sim.substrate.entities.get(peer).is_some_and(|candidate| {
                     !candidate.lifecycle.in_limbo()
-                        && sim
-                            .object_type(candidate.type_ref(), rules)
-                            .is_some_and(|ty| {
-                                ty.factory_type() == Some(factory) && ty.naval == naval
-                            })
+                        && sim.entity_object_type(candidate, rules).is_some_and(|ty| {
+                            ty.factory_type() == Some(factory) && ty.naval == naval
+                        })
                 })
             })
             .collect();

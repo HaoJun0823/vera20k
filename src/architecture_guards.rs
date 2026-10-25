@@ -115,6 +115,9 @@ fn raw_ini_walks_have_pinned_production_callers() {
             "raw_entries",
             &[
                 ("rules/ini_parser.rs", 1), // the definition
+                // Copy Hotkey entries into the separate writable profile.
+                ("app/persistence/keyboard.rs", 1),
+                ("app/persistence/profile_file.rs", 1),
                 // `ini-get --reader raw` and the presence report.
                 ("asset_tools/verb_ini.rs", 1),
                 // `[Colors]` entries copied into the processed registry.
@@ -125,9 +128,7 @@ fn raw_ini_walks_have_pinned_production_callers() {
             "registry_ids",
             &[
                 ("rules/ini_parser.rs", 1), // the definition
-                ("rules/overlay_types.rs", 2),
-                // Phobos `[RadiationTypes]`, read only in Phobos builds.
-                ("rules/phobos_radiation.rs", 1),
+                ("rules/overlay_types.rs", 1),
                 // Includes parse_registry copying already resolved stored IDs.
                 ("rules/ruleset.rs", 3),
                 ("rules/smudge_type.rs", 1),
@@ -1225,6 +1226,12 @@ fn mutable_handouts_and_setters_are_owner_operations() {
         ),
         ("net/lockstep.rs", "payload_mut", PAYLOAD),
         (
+            "net/udp.rs",
+            "deref_mut",
+            "UdpWriteGuard construction is private to LanUdpTransport::write; its only callers \
+             project the existing LanConnections and GlobalChannel owners, whose fields are private",
+        ),
+        (
             "rules/art_data.rs",
             "get_mut",
             "art rules installed at load: the registry fills SHP frame sizes into its own \
@@ -1403,6 +1410,12 @@ fn mutable_handouts_and_setters_are_owner_operations() {
             "sim/movement/fly_height.rs",
             "set_flight_level",
             "Horizontal_Step's height target (0x004CF3F6, 0x004CF4B6, 0x004CF4CF)",
+        ),
+        (
+            "sim/movement/navcom.rs",
+            "set_nav_com_aux",
+            "FootClass::Set_NavComAux (0x004D94A0) stores Foot+0x5A0; EventClass::Execute \
+             calls it after Set_Destination (0x004C74BA)",
         ),
         (
             "sim/movement/teleport_movement.rs",

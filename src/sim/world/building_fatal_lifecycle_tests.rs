@@ -469,10 +469,11 @@ impl Fixture {
             power_system::assess_house_power(
                 self.sim.power_states.get_mut(&house).unwrap(),
                 &self.sim.substrate.entities,
+                self.sim.houses[&house].base_projection().buildings(),
                 &self.rules,
-                house,
                 &self.sim.interner,
                 self.sim.session.binary_frame(),
+                false,
             );
         }
     }

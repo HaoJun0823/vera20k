@@ -18,6 +18,8 @@ struct Encounter {
     squid: u64,
     ship: u64,
     elite: bool,
+    last_sound_events: Vec<super::SimSoundEvent>,
+    lighting_events: Vec<crate::sim::light_sources::LightingEvent>,
 }
 
 impl Encounter {
@@ -172,6 +174,8 @@ impl Encounter {
             squid,
             ship,
             elite,
+            last_sound_events: Vec::new(),
+            lighting_events: Vec::new(),
         })
     }
 
@@ -189,6 +193,8 @@ impl Encounter {
             )
             .expect("ordinary open-water Squid combat frame");
         assert!(output.tick.frame_committed);
+        self.last_sound_events = output.sound_events;
+        self.lighting_events.extend(output.lighting_events);
         output.fire_events
     }
 
@@ -495,6 +501,24 @@ fn entire_grapple(elite: bool) {
                 previous_z - 5,
                 "cull sinks in the victim's same Unit turn"
             );
+            let lowered_z = position_world_coord(&ship.position).z;
+            let sinking_sound = scene
+                .rules
+                .object("DEST")
+                .unwrap()
+                .sinking_sound
+                .as_ref()
+                .or(scene.rules.general.sinking_sound.as_ref())
+                .unwrap()
+                .clone();
+            // Foot4DABC7 precedes ParasiteAI629FD0's cull. Unit7364A1
+            // then lowers the hull; the NEXT Foot edge plays at that Z.
+            assert!(
+                !scene.last_sound_events.iter().any(|event| matches!(event,
+                super::SimSoundEvent::AnimationStarted { anim_id, sound_id, .. }
+                    if *anim_id == scene.ship && sound_id.eq_ignore_ascii_case(&sinking_sound))),
+                "culling cannot retroactively run the earlier sinking-sound edge"
+            );
             scene.assert_released(anim);
             assert!(
                 !scene
@@ -507,6 +531,14 @@ fn entire_grapple(elite: bool) {
                     .is_paralyzed(scene.sim.session.binary_frame())
             );
             culled = true;
+            scene.step();
+            assert!(
+                scene.last_sound_events.iter().any(|event| matches!(event,
+                super::SimSoundEvent::AnimationStarted { anim_id, sound_id, world }
+                    if *anim_id == scene.ship && sound_id.eq_ignore_ascii_case(&sinking_sound)
+                        && world.z == lowered_z)),
+                "next Foot visit uses the already-lowered hull coordinate"
+            );
             break;
         }
         if ship.health.current() < previous_health {
@@ -592,6 +624,44 @@ fn stock_squid_grapple_keeps_depth_separate_from_cell_lighting() {
             scene.step();
         }
     }
+}
+
+#[test]
+fn stock_squid_publishes_retained_light_only_at_owner_assignment() {
+    use crate::sim::light_sources::LightingEvent;
+    let Some(mut scene) = Encounter::retail(false) else {
+        return;
+    };
+    scene.attach_after_actual_shot();
+    let id = scene.wait_for_roll();
+    let captures = |events: &[LightingEvent]| {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                LightingEvent::RetainAnimIntensity {
+                    anim,
+                    cell: Some(cell),
+                } if *anim == id => Some(*cell),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(captures(&scene.lighting_events), [(25, 24)]);
+    scene.lighting_events.clear();
+    for _ in 0..12 {
+        scene.step();
+    }
+    assert!(
+        captures(&scene.lighting_events).is_empty(),
+        "same-owner629DBF retains FC"
+    );
+    assert_eq!(scene.sim.anim(id).unwrap().z_adjust(), 0);
+    // Controlled native owner-change arm after the actual stock launch and
+    // attachment. This does not claim a new stock command that detaches it.
+    scene.sim.set_anim_owner_object(id, None, &scene.rules);
+    scene.step();
+    assert_eq!(scene.sim.anim(id).unwrap().owner_entity(), Some(scene.ship));
+    assert_eq!(captures(&scene.lighting_events), [(25, 24)]);
 }
 
 #[test]

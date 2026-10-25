@@ -206,18 +206,34 @@ fn random_map_preview_cells(
             let Some(kind) = rules
                 .rules
                 .terrain_object_type_case_insensitive(&object.name)
-                .filter(|kind| kind.has_occupy_list())
             else {
                 continue;
             };
-            for (dx, dy) in crate::rules::foundation::foundation_cell_offsets(&kind.foundation) {
-                terrain_heads.insert(
-                    (
-                        object.rx.wrapping_add_signed(dx),
-                        object.ry.wrapping_add_signed(dy),
-                    ),
-                    kind.radar_color,
+            let offsets = match kind.occupied_cell_offsets() {
+                Ok(offsets) => offsets,
+                Err(error) => {
+                    // Actual Terrain construction rejects the native
+                    // unterminated list; preview must not invent a footprint.
+                    log::warn!("Cannot project random-map Terrain: {error}");
+                    continue;
+                }
+            };
+            // RMG placements are positive map cells. The constructor's zero
+            // sentinel71BC34 skips Unlimbo; PlaceDown guards each allocation.
+            if (object.rx, object.ry) == (0, 0) {
+                continue;
+            }
+            for (dx, dy) in offsets {
+                let cell = (
+                    object.rx.wrapping_add_signed(dx),
+                    object.ry.wrapping_add_signed(dy),
                 );
+                if let Some(index) =
+                    resolved_terrain.native_fixed_cell_index(cell.0 as i16, cell.1 as i16)
+                {
+                    let cell = &resolved_terrain.cells()[index];
+                    terrain_heads.insert((cell.rx, cell.ry), kind.radar_color);
+                }
             }
         }
     }
@@ -519,6 +535,27 @@ pub(super) struct PreparedRandomMapGeneration {
     pub(super) resolved_inputs: crate::map::rmg::build::ResolvedTheaterInputs,
     pub(super) blocks: crate::map::rmg::theater_blocks::TheaterTileBlocks,
     pub(super) tech_types: Vec<crate::map::rmg::phases::tech_buildings::TechType>,
+}
+
+impl PreparedRandomMapGeneration {
+    /// These are the same resolved settings, theater, TMP geometry and neutral
+    /// structures passed to `generate_map`; preparation does not consume RNG.
+    pub(super) fn multiplayer_digest(&self) -> String {
+        let mut bytes = b"VERA20k RMG dependencies v1\0".to_vec();
+        bytes.extend_from_slice(self.settings.multiplayer_digest().as_bytes());
+        bytes.extend_from_slice(crate::util::sha256::sha256_hex(&self.theater.ini_data).as_bytes());
+        bytes.extend_from_slice(self.blocks.multiplayer_digest().as_bytes());
+        for technology in &self.tech_types {
+            bytes.extend_from_slice(&(technology.name.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(technology.name.as_bytes());
+            bytes.extend_from_slice(&(technology.footprint.len() as u64).to_le_bytes());
+            for (x, y) in &technology.footprint {
+                bytes.extend_from_slice(&x.to_le_bytes());
+                bytes.extend_from_slice(&y.to_le_bytes());
+            }
+        }
+        crate::util::sha256::sha256_hex(&bytes)
+    }
 }
 
 pub(super) fn prepare_random_map_generation(
@@ -1489,6 +1526,62 @@ mod terrain_preview_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_generated_seed_keeps_a_complete_admissible_start_table() {
+        let Some((retail_dir, _)) = crate::rules::retail_ini_fixture::retail_assets() else {
+            return;
+        };
+        let mut assets = crate::assets::asset_manager::AssetManager::new(
+            &retail_dir,
+            crate::assets::asset_manager::MediaArchiveMode::STOCK_DIGITAL,
+        )
+        .unwrap();
+        let audio = crate::rules::audio_sources::AudioDefinitions::select(&assets);
+        let (_, _, rules) = crate::rules::retail_sources::load_startup_rules(
+            &assets,
+            std::sync::Arc::clone(audio.sounds()),
+            std::sync::Arc::clone(audio.eva()),
+        )
+        .unwrap()
+        .into_parts();
+        let options = crate::map::rmg::RmgOptions {
+            seed: 26702,
+            num_players: 2,
+            region_size: 46,
+            ruggedness: 76,
+            accessibility: 84,
+            water_amount: 21,
+            tiberium: 20,
+            tiberium_layout: 90,
+            vegetation: 62,
+            urban_presence: 2,
+            ..Default::default()
+        };
+        let prepared =
+            prepare_random_map_generation(&mut assets, &options, Some(&rules), None).unwrap();
+        let generated = crate::map::rmg::build::generate_map(
+            &options,
+            &prepared.settings,
+            &prepared.resolved_inputs,
+            &prepared.blocks,
+            &prepared.tech_types,
+        );
+        let staging = crate::app::loading::composition::scenario_start_staging(
+            &generated.map_file,
+            &generated.start_waypoints,
+        );
+        assert!(
+            crate::app::shell_network_setup::maps::checked_staging(
+                &staging.to_w_text(),
+                options.num_players,
+            )
+            .is_ok(),
+            "{staging:?}; starts={:?}; unfilled={}",
+            generated.start_waypoints,
+            generated.unfilled_start_slots,
+        );
+    }
 
     #[test]
     fn generated_raised_clear_preview_matches_original_tmp_level_colors() {

@@ -28,8 +28,25 @@ macro_rules! command {
     };
 }
 
+/// Every command the keyboard page lists: the retail registration, then the
+/// commands this build adds to it — auto play's own switches, and VeraX's
+/// under its feature.
 pub(crate) fn registered_commands() -> &'static [CommandMetadata] {
-    &REGISTERED_COMMANDS
+    use std::sync::OnceLock;
+    static ALL: OnceLock<Vec<CommandMetadata>> = OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut all = retail_commands().to_vec();
+        all.extend_from_slice(&AUTOPLAY_COMMANDS);
+        #[cfg(feature = "verax")]
+        all.extend_from_slice(&VERA_COMMANDS);
+        all
+    })
+}
+
+/// Original gamemd registration only; the keyboard-page fixture compares it
+/// row for row, so VeraX's own commands stay outside it.
+pub(crate) fn retail_commands() -> &'static [CommandMetadata] {
+    &RETAIL_COMMANDS
 }
 
 /// VERA's own hotkey category, listed after every retail one.
@@ -41,7 +58,7 @@ pub(crate) fn registered_commands() -> &'static [CommandMetadata] {
 /// commands. The CSF has no entry, so the page shows the key itself.
 pub(crate) const VERA_CATEGORY_KEY: &str = "vera20k";
 
-const REGISTERED_COMMANDS: [CommandMetadata; 90] = [
+const RETAIL_COMMANDS: [CommandMetadata; 87] = [
     command!(
         HotkeyCommand::Follow,
         "Follow",
@@ -738,12 +755,15 @@ const REGISTERED_COMMANDS: [CommandMetadata; 90] = [
         "Cmnd:DeleteDesc",
         None
     ),
-    // VERA's own, appended after the retail commands. It carries no default
-    // key: the retail KEYBOARDMD.INI has no entry for it, so the player picks
-    // one in the keyboard page. The CSF has no entry either and falls back to
-    // showing the key. The category must stay the one `VERA_CATEGORY_KEY`
-    // names, or this command opens a second category of its own — the macro
-    // takes a literal, so a test pins the two together.
+];
+
+/// Auto play's own commands, registered after every retail one. They carry no
+/// default key: the retail KEYBOARDMD.INI has no entry for them, so the player
+/// picks one in the keyboard page. The CSF has no entry either and falls back
+/// to showing the key. The category must stay the one `VERA_CATEGORY_KEY`
+/// names, or these commands open a second category of their own — the macro
+/// takes a literal, so a test pins the two together.
+const AUTOPLAY_COMMANDS: [CommandMetadata; 3] = [
     command!(
         HotkeyCommand::ToggleAutoPlay,
         "AutoPlay",
@@ -752,8 +772,8 @@ const REGISTERED_COMMANDS: [CommandMetadata; 90] = [
         "VERA:AutoPlayDesc",
         None
     ),
-    // Auto play's second switch: the forces half alone. Same category, same
-    // unbound default, so a player can assign it next to the master toggle.
+    // Auto play's second switch: the forces half alone, so the base keeps
+    // building while the player takes the troops back.
     command!(
         HotkeyCommand::ToggleAutoPlayForces,
         "AutoPlayForces",
@@ -774,3 +794,16 @@ const REGISTERED_COMMANDS: [CommandMetadata; 90] = [
         None
     ),
 ];
+
+/// VeraX's own commands, registered after every retail one. The CSF has no
+/// entries, so the page shows these strings themselves.
+#[cfg(feature = "verax")]
+const VERA_COMMANDS: [CommandMetadata; 1] = [command!(
+    HotkeyCommand::AutoLoad,
+    "AutoLoad",
+    "AutoLoad",
+    // Keep equal to [`VERA_CATEGORY_KEY`]; the macro takes a literal.
+    "vera20k",
+    "Load the selected infantry and vehicles into nearby transports",
+    None
+)];

@@ -513,15 +513,31 @@ pub(crate) fn build_shp_instances_from_inputs(
         let extra_light = rules.map_or(0, |rules| {
             crate::app::presentation::lighting::body_extra_light(entity, rules, sim, cells.as_ref())
         });
-        let tint = shp_body_tint(
-            input.lighting,
-            (pos.rx(), pos.ry()),
-            entity.category(),
-            extra_light,
-        );
+        // Infantry5192C9 retains Object5F69C0 -> Foot4DBDF0's navigation
+        // Cell for both top-light arms51940A/51943F. A destination alone
+        // does not change it: the active locomotor's head/null-current
+        // projection (or Tube exit) owns this read. Physical position still
+        // owns shroud, depth and the extra's side/ground/height queries.
+        let physical_cell = (pos.rx(), pos.ry());
+        let light_cell = if entity.category() == EntityCategory::Infantry {
+            sim.foot_navigation_coordinate(stable_id)
+                .map(|coord| {
+                    (
+                        crate::util::lepton::lepton_to_cell_packed(coord.x) as u16,
+                        crate::util::lepton::lepton_to_cell_packed(coord.y) as u16,
+                    )
+                })
+                // Incomplete pre-bind/headless actors can lack an active
+                // locomotor or Tube descriptor. Preserve their prior physical
+                // cell fallback; a missing light-grid entry still uses1000.
+                .unwrap_or(physical_cell)
+        } else {
+            physical_cell
+        };
+        let tint = shp_body_tint(input.lighting, light_cell, entity.category(), extra_light);
         let selected_palette_light = crate::app::presentation::lighting::body_palette_light(
             input.lighting,
-            (pos.rx(), pos.ry()),
+            light_cell,
             extra_light,
         );
         let palette_light = if entity.category() == EntityCategory::Structure {
@@ -544,6 +560,8 @@ pub(crate) fn build_shp_instances_from_inputs(
             tint,
             palette_light,
             sim,
+            rules,
+            crate::app::presentation::lighting::TechnoDraw::Shape,
         );
         let colour_word = match rules {
             Some(rules) => {
@@ -789,9 +807,12 @@ pub(crate) fn build_shp_instances_from_inputs(
                     draw_decision,
                 );
             }
+        }
+        if entity.category() == EntityCategory::Structure {
             // Building voxel guns remain inside their SHP hull's draw call.
             if let Some(rules_obj) = rules.and_then(|r| r.object(type_str))
                 && rules_obj.turret_anim_is_voxel
+                && building_voxel_turret_visible(entity, rules_obj.artillary)
                 && let Some(unit_atlas) = input.unit_atlas
             {
                 let turret_offset = art_reg
@@ -806,6 +827,8 @@ pub(crate) fn build_shp_instances_from_inputs(
                         tint,
                         selected_palette_light,
                         sim,
+                        rules,
+                        crate::app::presentation::lighting::TechnoDraw::Voxel,
                     );
                 emit_building_turret_vxl(
                     unit_atlas,
@@ -1014,6 +1037,27 @@ fn infantry_air_shadow_piece(
     })
 }
 
+/// BuildingClass::DrawIt/DrawBody @ 0x0043DA80, original instructions
+/// 0x0043DF6E..0x0043DFBB: Construction in either current (+AC) or queued
+/// (+B4) mission hides the gun before the last Buildup stage (+F8, type
+/// +F04/+F08). Selling checks only current and hides it after stage zero.
+/// Artillary (type+16CA) bypasses both gates; BState does not gate the gun.
+fn building_voxel_turret_visible(
+    entity: &crate::sim::game_entity::GameEntity,
+    artillary: bool,
+) -> bool {
+    use crate::sim::mission::MissionType;
+    let current = entity.mission.current().known();
+    let queued = entity.mission.queued().known();
+    let stage = entity.construction_stage_value();
+    let [start, count, _] = entity.building_construction_control();
+    let constructing =
+        current == Some(MissionType::Construction) || queued == Some(MissionType::Construction);
+    artillary
+        || !(constructing && stage < start.wrapping_add(count).wrapping_sub(1)
+            || current == Some(MissionType::Selling) && stage > 0)
+}
+
 /// Emit a building's native B8 turret and C0 barrel at its TurretAnim anchor.
 ///
 /// Building draw43DA80 uses the current primary facing and retained +148 HVA
@@ -1156,6 +1200,9 @@ fn emit_building_turret_vxl(
     }
 }
 
+#[cfg(test)]
+#[path = "building_turret_visibility_tests.rs"]
+mod building_turret_visibility_tests;
 #[cfg(test)]
 #[path = "building_voxel_tests.rs"]
 mod building_voxel_tests;
@@ -1640,6 +1687,7 @@ fn emit_building_anims(
                     tint,
                     attached_palette,
                     sim,
+                    rules,
                 )
             }
         } else {
@@ -1658,7 +1706,13 @@ fn emit_building_anims(
         // Preserve the existing body's color-word path. The shared pass
         // builder clears it independently for the later shadow.
         let policy = BlitPolicy::z_read(SpriteEncoding::Plain);
-        let palette_light = palette_light.with_colour_word(anim_word(anim_id));
+        // AnimClass::Draw's tint hook (`0x00423420`) ORs the custom shield
+        // tint into the building anim's colour word independently of the
+        // ShouldUseCellDrawer intensity arm.
+        let shield_word = rules.map_or(0, |rules| {
+            crate::app::presentation::lighting::shield_tint(building, sim, rules).0
+        });
+        let palette_light = palette_light.with_colour_word(anim_word(anim_id) | shield_word);
         // DrawIt422CA0 -> 4AED70 retains the Anim's Convert selector. Reducing
         // it to alpha loses the indexed palette/A lookup and packed RGB565
         // blend (spatial_oracle/building_anim_translucency). The inherited
@@ -1812,8 +1866,14 @@ fn emit_unit_terrain_body(
     // Techno7060CC..70610A uses Cell+34 and the common/ground light+10C.
     let palette_light = crate::render::palette_light::PaletteLight::cell(grid, cell, false);
     let tint = grid.terrain_object_tint_for_type(cell, false);
-    let (tint, palette_light) =
-        crate::app::presentation::lighting::techno_effect_light(entity, tint, palette_light, sim);
+    let (tint, palette_light) = crate::app::presentation::lighting::techno_effect_light(
+        entity,
+        tint,
+        palette_light,
+        sim,
+        Some(&runtime.resources.rules),
+        crate::app::presentation::lighting::TechnoDraw::Shape,
+    );
     let depth = compute_sprite_depth_params(
         input.axis.origin_y,
         input.axis.world_height,

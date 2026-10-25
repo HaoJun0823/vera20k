@@ -7,6 +7,8 @@ use crate::rules::ini_parser::IniFile;
 use crate::sim::terrain_spawn::{
     TerrainAnimationState, construct_terrain_objects, seed_terrain_spawner_animation,
 };
+// Direct stock-context spreads remain stock in a Phobos build; only an
+// active terrain-spawner context selects the replacement scan.
 use crate::sim::tiberium::{
     NewTiberiumAdmission, PlaceTiberiumContext, TiberiumPlacementObjectContext, spread_tiberium,
 };
@@ -91,6 +93,21 @@ fn fixture(input: &Value, stock: &Value) -> (Scene, Vec<(u16, u16)>) {
         }
     }
     construct_terrain_objects(&mut s.sim, &trees, &s.rules, false);
+    // tools/spatial_oracle/tibtre.py supplies these Cell+E4 heads directly;
+    // full Terrain construction/placement is outside that native fixture.
+    let prepared_heads: Vec<_> = s
+        .sim
+        .terrain_objects
+        .objects()
+        .values()
+        .filter(|object| object.is_live())
+        .map(|object| (object.cell(), object.stable_id()))
+        .collect();
+    for (at, id) in prepared_heads {
+        if s.sim.terrain_objects.id_at(at).is_none() {
+            s.sim.terrain_objects.add_to_cell(id, at);
+        }
+    }
     seed_terrain_spawner_animation(
         &s.sim.interner,
         &mut s.sim.terrain_objects,
@@ -200,6 +217,8 @@ fn fixture(input: &Value, stock: &Value) -> (Scene, Vec<(u16, u16)>) {
     (s, coords)
 }
 
+/// The per-visit state the two stock-spread replays compare: stage, timer,
+/// overlay bytes and the ore queues a forced spread fed.
 fn compare(s: &Scene, coords: &[(u16, u16)], native: &Value, context: &str) {
     for (at, expected) in coords.iter().zip(native["actors"].as_array().unwrap()) {
         let state = serde_json::to_value(
@@ -266,7 +285,10 @@ fn compare(s: &Scene, coords: &[(u16, u16)], native: &Value, context: &str) {
     );
 }
 
+/// The stock Terrain AI timelines end in the stock forced spread, which a
+/// Phobos build replaces with its own `SpawnsTiberium.*` scan.
 #[test]
+#[cfg(not(feature = "phobos"))]
 fn terrain_ai_timelines_match_native_stage_timers_ore_queues_and_rng() {
     let corpus = corpus();
     let stock = &corpus["retail_inputs"]["rows"][0];
@@ -337,6 +359,7 @@ fn forced_spread_matches_original_admission_placement_queues_and_rng() {
             },
             coords[0],
             true,
+            None,
         );
         let succeeded = result.is_some();
         crate::sim::world::Simulation::publish_overlay_constructions(

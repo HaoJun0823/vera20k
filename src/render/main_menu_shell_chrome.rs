@@ -268,12 +268,41 @@ pub fn build_main_menu_shell_chrome_atlas(
 
 /// Decode mandatory buttons before GPU upload, retaining the asset and parser error.
 fn load_main_menu_button_frames(assets: &AssetManager) -> Result<Vec<RenderedChromeEntry>> {
+    let palette = read_main_menu_button_palette(assets)?;
+    let shp = read_main_menu_button_shape(assets)?;
+    render_main_menu_button_frames(&shp, &palette)
+}
+
+/// The installer reports both missing sources together. Keep palette fallback,
+/// shape validation and frame decoding shared with the actual menu loader.
+pub(crate) fn inspect_main_menu_button_art(assets: &AssetManager) -> Vec<String> {
+    let palette = read_main_menu_button_palette(assets);
+    let shp = read_main_menu_button_shape(assets);
+    match (palette, shp) {
+        (Ok(palette), Ok(shp)) => render_main_menu_button_frames(&shp, &palette)
+            .err()
+            .map(|error| format!("{error:#}"))
+            .into_iter()
+            .collect(),
+        (palette, shp) => palette
+            .err()
+            .into_iter()
+            .chain(shp.err())
+            .map(|error| format!("{error:#}"))
+            .collect(),
+    }
+}
+
+fn read_main_menu_button_palette(assets: &AssetManager) -> Result<Palette> {
     // Preserve the existing SHELL2 fallback when the dedicated palette is unavailable.
-    let palette = read_named_palette(assets, "SDBTNANM.PAL").or_else(|primary| {
+    read_named_palette(assets, "SDBTNANM.PAL").or_else(|primary| {
         read_named_palette(assets, "SHELL2.PAL").with_context(|| {
             format!("Game-menu button palette failed: {primary:#}; fallback also failed")
         })
-    })?;
+    })
+}
+
+fn read_main_menu_button_shape(assets: &AssetManager) -> Result<ShpFile> {
     let load = assets
         .load_file_from_mix("SDBTNANM.SHP")
         .context("Required game-menu artwork SDBTNANM.SHP is missing or unreadable")?;
@@ -283,12 +312,19 @@ fn load_main_menu_button_frames(assets: &AssetManager) -> Result<Vec<RenderedChr
         "SDBTNANM.SHP has {} frames; game-menu buttons require frames 2, 3 and 4",
         shp.frames.len()
     );
+    Ok(shp)
+}
+
+fn render_main_menu_button_frames(
+    shp: &ShpFile,
+    palette: &Palette,
+) -> Result<Vec<RenderedChromeEntry>> {
     (0..shp.frames.len().min(SDBTNANM_WAVE_FRAMES))
         .map(|frame| {
             shp_frame_entry(
-                &shp,
+                shp,
                 "SDBTNANM.SHP",
-                &palette,
+                palette,
                 frame,
                 Some(&format!("wave#{frame}")),
             )

@@ -135,10 +135,10 @@ pub use in_range::can_fire_at_target;
 pub use in_range::{MaplessTarget, can_fire_at_target_in_query, mapless_in_range};
 pub use object_health::{Health, health_category};
 pub(crate) use projectile_delivery::{FiredBullet, admit_fired_bullet};
-pub use receiver_call::TerrainDamageEvent;
+pub use receiver_call::{DamageWriteback, TerrainDamageEvent};
 pub(crate) use receiver_call::{
     BaseDefenseResponseCallSite, EntityDamageEvent, RAD_NO_ATTACKER, ReceiverCallFlags,
-    wave_post_object_damage,
+    receiver_divisors, wave_post_object_damage,
 };
 pub(crate) use receiver_health::BerserkState;
 pub(crate) use record_kill::{KillCallback, KillRecord, KillSource};
@@ -158,13 +158,15 @@ use attack_target::{attack_world_z_leptons, cell_center_coords, target_coords};
 use projectile_delivery::{
     ProjectileDelivery, bullet_type, classify_projectile_delivery, projectile_arm_delay,
 };
+#[cfg(feature = "phobos")]
+use receiver_call::resolve_receive_damage_with_input;
 use receiver_call::{
     BuildingReceivePrelude, ResolvedReceiveDamage, apply_building_receive_prelude,
     area_near_center_ic_isolation_armed, near_center_ic_isolation_armed,
     postmortem_duration_for_event, receiver_anger_delta, resolve_receive_damage,
 };
 use shrapnel::emit_projectile_shrapnel;
-use techno_death::{ConcreteDeathSmudgePlan, append_selected_death_sounds, throw_debris_for_death};
+use techno_death::{ConcreteDeathSmudgePlan, throw_debris_for_death};
 
 #[cfg(any(test, feature = "test-support"))]
 pub use attack_target::{

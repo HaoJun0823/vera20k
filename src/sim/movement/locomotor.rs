@@ -249,8 +249,14 @@ impl LocomotorState {
 
     /// Native Fly current speed (`Fly+0x48`), read by the normal-Fly
     /// `Draw_Matrix @ 0x004CF610` PitchSpeed gate through its ILocomotion view.
-    pub fn current_fly_speed(&self) -> Option<crate::util::fixed_math::SimFixed> {
+    pub fn current_fly_speed(&self) -> Option<crate::util::native_x87::NativeF64Bits> {
         self.fly_runtime().map(|state| state.current_speed())
+    }
+
+    /// Fly+50/+51 callbacks, read by Draw_Point4CF8B8..4CF8BE.
+    pub fn fly_phase_callbacks(&self) -> Option<(bool, bool)> {
+        self.fly_runtime()
+            .map(|state| (state.taking_off(), state.landing()))
     }
 
     pub(crate) fn fly_runtime_mut(&mut self) -> Option<&mut super::fly_height::FlyRuntime> {

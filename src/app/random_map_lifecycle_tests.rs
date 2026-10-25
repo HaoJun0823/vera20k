@@ -18,7 +18,9 @@ use crate::ui::skirmish_shell::{
 struct SilentProgress;
 
 impl LoadingProgressSink for SilentProgress {
-    fn milestone(&mut self, _percent: u32) {}
+    fn milestone(&mut self, _percent: u32) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 fn launch_session(seed_name: &str) -> SkirmishLaunchSession {
@@ -550,23 +552,23 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
         Some(crate::sim::crates::CratePlacement {
             requested: 1,
             accepted: 1,
-            visible: ui_launch
-                .startup_crate_slots
-                .iter()
-                .filter(|(_, _, overlay)| overlay.is_some())
-                .count() as u32,
+            visible: 0,
         }),
         "accepted playable RMG must reach the ordinary startup-crate post-map seam"
     );
     assert_eq!(ui_launch.startup_crate_slots.len(), 1);
-    let (slot_index, slot, live_overlay) = ui_launch.startup_crate_slots[0];
+    let (slot_index, slot, live_overlay, slope) = ui_launch.startup_crate_slots[0];
     assert_eq!(slot_index, 0, "first accepted crate owns slot zero");
     assert!(!slot.is_empty());
     assert_eq!(slot.start_frame, 0);
     assert_ne!(slot.aux, 0);
     assert!(slot.duration > 0);
-    let (_, data) = live_overlay.expect("retail lifecycle fixture places a visible startup crate");
-    assert_eq!(data, u8::MAX);
+    //OverlayClass::Mark5FC5CD..5FC5E3 rejects slope>4 except raw typeB2,
+    //returning false at5FC784 before writing the identity. CrateValidate
+    //4A198F..4A1A83 still accepts, so this unchanged retail fixture owns a
+    //timed ghost after the ordinary two-start RMG pass, not a visible overlay.
+    assert!(slope.expect("accepted crate cell has resolved terrain") > 4);
+    assert_eq!(live_overlay, None);
     assert!(ui_launch.startup_crate.crates_enabled);
     assert_eq!(ui_launch.startup_crate.minimum, 1);
     assert_eq!(ui_launch.startup_crate.maximum, 255);
@@ -593,16 +595,18 @@ fn gsi_04_12_random_map_ui_to_sed_launch_lifecycle_converges() {
         .water_id
         .expect("installed WCRATE overlay identity");
     assert_ne!(wood_id, water_id);
+    assert_ne!(
+        wood_id, 0xB2,
+        "ordinary CRATE is not Mark's steep-slope exception"
+    );
+    assert_ne!(
+        water_id, 0xB2,
+        "ordinary WCRATE is not Mark's steep-slope exception"
+    );
     assert_eq!(ui_launch.startup_crate.body_frame, 0);
-    assert_eq!(ui_launch.startup_crate.presented.len(), 1);
-    assert_eq!(
-        ui_launch.startup_crate.presented[0],
-        (
-            u16::try_from(slot.cell_x).expect("positive crate x"),
-            u16::try_from(slot.cell_y).expect("positive crate y"),
-            live_overlay.expect("visible overlay").0,
-            u8::MAX,
-        )
+    assert!(
+        ui_launch.startup_crate.presented.is_empty(),
+        "a timed ghost cannot enter initial overlay presentation"
     );
     println!(
         "STARTUP_CRATE_PRODUCTION rules=min:{} max:{} regen_bits:{:#018X} wood:{} common:{} water:{} ids:{wood_id}/{water_id} frame:{}",

@@ -27,7 +27,7 @@ use crate::ui::main_menu_shell::{
     MainMenuControlId, MainMenuMovieBase, MainMenuShellLayout, csf_key_for_control,
     tooltip_csf_key_for_control,
 };
-use crate::ui::shell::geom::{SDBTNANM_CELL_H, SDBTNANM_CELL_W_NARROW, ShellScale};
+use crate::ui::shell::geom::{SDBTNANM_CELL_H, SDBTNANM_CELL_W_NARROW};
 use crate::ui::shell::static_reveal::{Kind1PaintWindow, Kind1RevealReceipt, Kind1RevealWindow};
 
 /// Archive holding the Red Alert 2 menu loop used by the unchecked default.
@@ -734,6 +734,7 @@ fn render_main_menu_shell_to_target_inner(
         }),
         timestamp_writes: None,
         occlusion_query_set: None,
+        multiview_mask: None,
     });
     if let Some((buffer, count)) = background_buffer.as_ref() {
         state.renderer.batch_renderer.draw_with_buffer_passthrough(
@@ -854,11 +855,7 @@ fn build_shell_message_box_overlay(state: &AppState) -> Option<shell_paint::Moda
     use crate::ui::shell::modal;
     let modal_state = &state.frontend.shell_message_box.as_ref()?.labels;
     let atlas = state.frontend.skirmish_shell_chrome.as_ref()?;
-    let layout = modal::message_box_layout(
-        modal_state.kind(),
-        state.renderer.gpu.config.width as i32,
-        state.renderer.gpu.config.height as i32,
-    );
+    let layout = shell_layout::shell_message_box_layout(state, modal_state.kind());
     let pressed = state.frontend.shell_controller.pressed();
     let ok_pressed = pressed == Some(modal::control::OK);
     let cancel_pressed = pressed == Some(modal::control::CANCEL);
@@ -880,7 +877,9 @@ fn build_shell_message_box_overlay(state: &AppState) -> Option<shell_paint::Moda
         },
         PaintLabel {
             text: (&modal_state.confirm).into(),
-            rect: owner_draw_button_label_rect(layout.ok, ok_pressed),
+            rect: layout.scale.derive_rect(layout.ok, |rect| {
+                owner_draw_button_label_rect(rect, ok_pressed)
+            }),
             align: ShellAlign::H_CENTER | ShellAlign::V_CENTER,
             rgb: SHELL_TEXT_RGB_ENABLED,
             path_a_reveal: None,
@@ -894,7 +893,9 @@ fn build_shell_message_box_overlay(state: &AppState) -> Option<shell_paint::Moda
         });
         labels.push(PaintLabel {
             text: (&modal_state.cancel).into(),
-            rect: owner_draw_button_label_rect(rect, cancel_pressed),
+            rect: layout.scale.derive_rect(rect, |rect| {
+                owner_draw_button_label_rect(rect, cancel_pressed)
+            }),
             align: ShellAlign::H_CENTER | ShellAlign::V_CENTER,
             rgb: SHELL_TEXT_RGB_ENABLED,
             path_a_reveal: None,
@@ -907,7 +908,7 @@ fn build_shell_message_box_overlay(state: &AppState) -> Option<shell_paint::Moda
         layout.dialog,
         &buttons,
         &labels,
-        ShellScale::RETAIL,
+        layout.scale,
         EXIT_CONFIRM_MODAL_DEPTHS,
     ))
 }

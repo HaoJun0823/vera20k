@@ -33,6 +33,17 @@ pub(super) enum ComponentOrigin {
 }
 
 impl Simulation {
+    /// Actual receiver's constructor type; unlike the name-only convenience
+    /// lookup, this preserves GetTechnoType's class registry (Infantry51FAF0).
+    pub fn entity_object_type<'r>(
+        &self,
+        entity: &GameEntity,
+        rules: &'r RuleSet,
+    ) -> Option<&'r ObjectType> {
+        self.interner
+            .object_type_in_category(entity.type_ref(), entity.category().into(), rules)
+    }
+
     pub(super) fn construct_runtime_techno(
         &mut self,
         type_id: &str,
@@ -47,6 +58,23 @@ impl Simulation {
         let Some(obj) = rules.object(type_id) else {
             return Ok(None);
         };
+        self.construct_resolved_runtime_techno(obj, type_id, owner, rx, ry, facing, z, rules, init)
+    }
+
+    /// Type::CreateInstance (FactoryStart4C9C70) consumes the selected typed
+    /// pointer. Both broad-name and typed callers share this constructor body.
+    pub(super) fn construct_resolved_runtime_techno(
+        &mut self,
+        obj: &ObjectType,
+        type_id: &str,
+        owner: &str,
+        rx: u16,
+        ry: u16,
+        facing: u8,
+        z: u8,
+        rules: &RuleSet,
+        init: TechnoConstructorInit,
+    ) -> Result<Option<GameEntity>, GeneratedTechnoInitError> {
         // Native class constructors copy signed type Strength unchanged.
         // Original copy slices: object_health corpus / constructors.
         let health = Health::new(obj.strength);
@@ -127,6 +155,21 @@ impl Simulation {
         }
 
         stamp_scoring_flags(ge, obj, rules);
+        // Phobos `TechnoClass_Init` (`Hooks.cpp:297..301`): allocate the
+        // ShieldClass only when the bound type resolves and its `Strength` is
+        // above zero; `SetHP(InitialStrength.Get(Strength))` clamps at creation.
+        #[cfg(feature = "phobos")]
+        if let Some(object) = obj
+            && let Some(name) = object.shield_type()
+            && let Some(ty) = rules.shield_type(name)
+            && ty.strength() > 0
+        {
+            ge.shield = Some(crate::sim::shield::ShieldState::new(
+                name.to_owned(),
+                ty.initial_strength(),
+                ty.strength(),
+            ));
+        }
         if let Some(object) = obj {
             ge.sight.stamp_type_sight(object.sight);
         }
@@ -231,12 +274,16 @@ impl Simulation {
                     .ensure_installed_track_state();
             }
         }
-        // The concrete Foot constructors all select InitialAmmo unless it is
+        // Building InitManagers442C81..442C92 and the concrete Foot
+        // constructors select InitialAmmo unless it is
         // exactly -1; otherwise Ammo. Chrono reinforcement65EC30 also reads
         // and decrements this count for ground Units (ammo module evidence).
         if matches!(
             category,
-            EntityCategory::Unit | EntityCategory::Infantry | EntityCategory::Aircraft
+            EntityCategory::Unit
+                | EntityCategory::Infantry
+                | EntityCategory::Aircraft
+                | EntityCategory::Structure
         ) {
             ge.initialize_ammo_from_type(obj);
         }
@@ -257,17 +304,10 @@ impl Simulation {
             let storage = obj.storage.max(0) as u16;
             ge.miner = Some(Miner::new(kind, &mcfg, storage));
         }
-        // Passenger cargo for transports and garrisonable buildings.
+        // Cargo+114 is independent of Building occupants+684 (Ctor43B8DC).
         if obj.passengers > 0 {
             ge.passenger_role = crate::sim::passenger::PassengerRole::transport(
                 crate::sim::passenger::PassengerCargo::new(obj.passengers as u32, obj.size_limit),
-            );
-        } else if obj.can_be_occupied && obj.max_number_occupants > 0 {
-            ge.passenger_role = crate::sim::passenger::PassengerRole::transport(
-                crate::sim::passenger::PassengerCargo::new(
-                    obj.max_number_occupants,
-                    obj.size_limit,
-                ),
             );
         }
 

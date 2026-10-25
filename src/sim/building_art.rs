@@ -355,10 +355,7 @@ impl Simulation {
             object.strength,
             rules.general.condition_yellow,
         );
-        let garrisoned = entity
-            .passenger_role
-            .cargo()
-            .is_some_and(|cargo| !cargo.passengers().is_empty());
+        let garrisoned = !entity.passenger_role.occupants().is_empty();
         // 0x00446382..0x004463B4: the built type's InfantryGainSelfHeal and
         // UnitsGainSelfHeal join the owner's house. Natively a capture of a
         // placed building skips this add (0x00445FD0) and ChangeOwner's tail
@@ -414,21 +411,26 @@ impl Simulation {
         // (Location `+0x9C` / 256) on a capture too. The fog border redraw
         // around it (`0x00567DA0`, radius + 3) is presentation: the shroud
         // renderer rebuilds from the vision owner.
-        if object.reveal_to_all && !self.house_is_human_player(owner) {
-            if !captured {
+        if object.reveal_to_all {
+            if !captured
+                && (self.session.game_mode().is_network() || !self.house_is_human_player(owner))
+            {
                 self.reveal_sight_to_current_house(
                     id,
                     crate::sim::world::UninitContext::new(rules, registry).with_effects(effects),
+                    None,
                 );
             }
-            self.sound_events
-                .emit(crate::sim::world::SimSoundEvent::RadarEvent {
-                    radar: crate::sim::radar::RadarEventRequest::new(
-                        crate::sim::radar::RadarEventType::ConstructionComplete,
-                        cell.0,
-                        cell.1,
-                    ),
-                });
+            if !self.house_is_human_player(owner) {
+                self.sound_events
+                    .emit(crate::sim::world::SimSoundEvent::RadarEvent {
+                        radar: crate::sim::radar::RadarEventRequest::new(
+                            crate::sim::radar::RadarEventType::ConstructionComplete,
+                            cell.0,
+                            cell.1,
+                        ),
+                    });
+            }
         }
         //44699A..446A5B: default naval rally, before placement/power publication.
         self.initialize_naval_rally_point(id, rules);
@@ -572,10 +574,7 @@ impl Simulation {
                 object.strength,
                 rules.general.condition_yellow,
             );
-            let garrisoned = entity
-                .passenger_role
-                .cargo()
-                .is_some_and(|cargo| !cargo.is_empty());
+            let garrisoned = !entity.passenger_role.occupants().is_empty();
             self.set_building_anim_slot(id, slot as u8, damaged, garrisoned, 0, rules);
         }
     }
@@ -796,10 +795,7 @@ impl Simulation {
                 == crate::sim::mission::MissionId::from_known(
                     crate::sim::mission::MissionType::Repair,
                 );
-        let garrisoned = entity
-            .passenger_role
-            .cargo()
-            .is_some_and(|cargo| !cargo.passengers().is_empty());
+        let garrisoned = !entity.passenger_role.occupants().is_empty();
         let delayed_fire = self.building_anim_delayed_fire(owner, rules);
         self.substrate.clear_building_anim_reference(expired);
         let next = match slot {
@@ -1065,12 +1061,9 @@ pub fn current_body_frame(
             gate_stages: object
                 .gate
                 .then_some(art.map_or(9, |entry| entry.building_gate_stages)),
-            occupants: object.can_be_occupied.then_some(
-                entity
-                    .passenger_role
-                    .cargo()
-                    .map_or(0, |cargo| cargo.count()) as i32,
-            ),
+            occupants: object
+                .can_be_occupied
+                .then_some(entity.passenger_role.occupants().count()),
             tech_level,
             selling: entity.building_down(),
             buildup: [control[0], control[1]],
@@ -1113,12 +1106,9 @@ pub(crate) fn receiver_body_frame(
             gate_stages: object
                 .gate
                 .then_some(art.map_or(9, |art| art.building_gate_stages)),
-            occupants: object.can_be_occupied.then_some(
-                entity
-                    .passenger_role
-                    .cargo()
-                    .map_or(0, |cargo| cargo.passengers().len() as i32),
-            ),
+            occupants: object
+                .can_be_occupied
+                .then_some(entity.passenger_role.occupants().count()),
             tech_level,
             selling: false,
             buildup: [0, 1],

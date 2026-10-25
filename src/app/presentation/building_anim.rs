@@ -130,6 +130,26 @@ impl SoundPlaybackInputs<'_> {
         SoundSpatialContext::new(self.catalog.sounds(), &self.listener, sim, local_owner)
     }
 
+    /// Foot4DADF0 reaches750D40 before Scatter and later callbacks. Use
+    /// that coordinate and the existing handle, including a kept sound.
+    pub(crate) fn update_looping_sound(
+        &self,
+        sfx: &mut crate::audio::sfx::SfxPlayer,
+        sim: &crate::sim::world::Simulation,
+        local_owner: Option<&str>,
+        owner: u64,
+        world: crate::sim::anim_class::AnimWorldCoord,
+    ) {
+        let Some(sound) = sfx.handle_sound_id(owner) else {
+            return;
+        };
+        let source = crate::app::match_runtime::sound_dispatch::anim_world_sound_source(world);
+        let gain = self
+            .spatial_context(Some(sim), local_owner)
+            .gain_for(&sound, Some(source));
+        sfx.update_looping_sound(owner, gain, self.catalog.sounds());
+    }
+
     /// Consume ordered requests through the sole SFX owner. Periodic voice,
     /// positional-owner and bomb maintenance stay in the frame-tail drain.
     pub(crate) fn consume(
@@ -387,7 +407,27 @@ pub(crate) fn power_bar_budget_px(state: &AppState) -> i32 {
     (layout.cameo_grid_bottom - layout.cameo_grid_top) as i32 + 3
 }
 
-/// Update radar availability from ECS and tick the radar chrome animation.
+/// House508DF0 -> Radar656BE0 -> Voc750920: centred, volume 1, NULL
+/// handle. Both one-shots survive a reversal independently of the movie loop.
+pub(crate) fn radar_availability_sound(
+    rules: &crate::rules::ruleset::RuleSet,
+    cue: crate::render::radar::anim::RadarAvailabilityCue,
+) -> Option<crate::audio::events::GameSoundEvent> {
+    use crate::render::radar::anim::RadarAvailabilityCue;
+    let sound = match cue {
+        RadarAvailabilityCue::On => &rules.general.radar_on,
+        RadarAvailabilityCue::Off => &rules.general.radar_off,
+    };
+    sound
+        .clone()
+        .map(|sound_id| crate::audio::events::GameSoundEvent::VocAt {
+            sound_id,
+            source: None,
+        })
+}
+
+/// Reconcile view/tool changes with the same radar owner the reached House
+/// boundaries update. Its equality guard suppresses already-delivered edges.
 pub(crate) fn update_radar_state(state: &mut AppState) {
     let new_has_radar: bool = match (
         state
@@ -412,24 +452,13 @@ pub(crate) fn update_radar_state(state: &mut AppState) {
         .as_mut()
         .and_then(|radar| radar.set_has_radar(new_has_radar));
     if let Some(cue) = cue {
-        use crate::render::radar::anim::RadarAvailabilityCue;
         //656BE0 ends the radar's movie loop before either cue.
         crate::app::radar_movie::end_radar_sound_loop(state);
-        let sound = state.rules().and_then(|rules| match cue {
-            RadarAvailabilityCue::On => rules.general.radar_on.as_ref(),
-            RadarAvailabilityCue::Off => rules.general.radar_off.as_ref(),
-        });
-        if let Some(sound_id) = sound.cloned() {
-            // House508DF0→656DF0/656BE0→750920: EDX2000, volume1.0,
-            // NULL handle. The common pool owns both one-shots through a
-            // reversal; neither cue is bound to the housing/movie handle.
-            // Source: tools/input_oracle/radar_availability_audio.md.
-            state.match_state.match_audio.sound_events.push(
-                crate::audio::events::GameSoundEvent::VocAt {
-                    sound_id,
-                    source: None,
-                },
-            );
+        if let Some(sound) = state
+            .rules()
+            .and_then(|rules| radar_availability_sound(rules, cue))
+        {
+            state.match_state.match_audio.sound_events.push(sound);
         }
     }
 }
@@ -552,6 +581,11 @@ fn drain_sound_events_inner(state: &mut AppState, redrive_owners: bool) {
             sfx.stop_animation_sound(owner);
             continue;
         };
+        // Techno6FA04F updates the turret handle at its reached AI visit.
+        // A tail poll could restart it after a later Stop/Release boundary.
+        if crate::sim::world::turret_rotate_sound_techno(owner).is_some() {
+            continue;
+        }
         // `ObjectClass::AI` replays an object's `+0x3C`/`+0x50` handles with
         // `VocClass::PlayAt` on each visit (the sim's `AnimationStarted`);
         // 750D40 never runs on them.
@@ -559,6 +593,23 @@ fn drain_sound_events_inner(state: &mut AppState, redrive_owners: bool) {
             if !alive {
                 sfx.stop_animation_sound(owner);
             }
+            continue;
+        }
+        // Building43FC34 already updated +6B4 on its unchanged operational
+        // branch, before later C4/destructor callbacks. Changed edges only
+        // Detach/Play; neither branch admits a final-position update here.
+        if crate::sim::world::working_sound_building(owner).is_some() {
+            continue;
+        }
+        // Techno6F9EA8 and Foot4DADF0 re-drive their handles at the actual
+        // AI visit. A tail poll could overwrite that position or restart a
+        // loop after a later callback. Turret and Anim stay separate.
+        if crate::sim::combat::gattling::gattling_sound_techno(owner).is_some()
+            || sim.entities().get(owner).is_some_and(|entity| {
+                use crate::map::entities::EntityCategory::{Aircraft, Infantry, Unit};
+                matches!(entity.category(), Unit | Infantry | Aircraft)
+            })
+        {
             continue;
         }
         let Some(world) = sim.looping_sound_owner_coord(owner) else {

@@ -18,7 +18,7 @@
 use crate::map::entities::EntityCategory;
 use crate::sim::ammo::TechnoAmmo;
 use crate::sim::animation::Animation;
-use crate::sim::cloak_disguise::{CloakRuntime, DisguiseRuntime};
+use crate::sim::cloak_disguise::{CloakRuntime, DisguiseRuntime, StealthAbility};
 use crate::sim::combat::base_defense_response::BaseDefenseResponseState;
 use crate::sim::combat::{Health, TarCom};
 use crate::sim::components::{NavigationState, Position};
@@ -107,6 +107,17 @@ pub struct GameEntity {
     /// this displacement through70BE50; no simulation/RNG/timer consumer.
     /// Retain the raw datum, not a renderer-owned reconstructed animation.
     native_cloak_displacement: crate::util::native_x87::NativeF32Bits,
+    /// Techno+3D0: TechnoClass::Constructor `0x006F2B40` clears it at
+    /// `0x006F2F3D`; UnitClass::Mission_Harvest `0x0073E5E0` sets/clears it at
+    /// `0x0073E8FA`/`0x0073E925`, and the repair depot reads it at
+    /// `0x0044C4BC`. This belongs to common Techno state, not the optional
+    /// `Miner`, because owner changes retain it and the depot consumes it.
+    #[serde(default)]
+    useless: bool,
+    /// Techno+300: constructor6F2EA4 initializes zero. Factory StartProduction
+    /// 4C9DED retains its owner's Cost_Of quote; Grand_Opening446AF2 consumes
+    /// it independently of remaining debt and later House discounts (gamemd).
+    production_start_price: i32,
     /// Techno+504 and Ares held sparkle. One private counter owner; stock
     /// constructor remains zero and only the feature-gated EMP producer writes it.
     #[serde(default)]
@@ -115,6 +126,10 @@ pub struct GameEntity {
     #[cfg(feature = "ares")]
     #[serde(default)]
     attach_effects: attach_effect::AttachEffects,
+    /// Phobos ShieldClass state: shield points and their recovery timers.
+    #[cfg(feature = "phobos")]
+    #[serde(default)]
+    pub(super) shield: Option<crate::sim::shield::ShieldState>,
     /// Low word of the one raw Scenario RNG draw performed by the active-retail
     /// `TechnoClass` constructor (`0x006F3254`, stored at native `+0x3C8`).
     /// Later report-selection consumers read this persistent value; placement
@@ -123,6 +138,11 @@ pub struct GameEntity {
     /// Building+6F4, constructor43B9B5 null; startup68C1B5 assigns a type
     /// pointer and Load453FB0 swizzles it. Capture never rerolls the reward.
     secret_lab_fallback: Option<(crate::rules::object_type::ObjectCategory, InternedId)>,
+    /// gamemd.exe TechnoClass::Constructor @0x006F2B40 stores -1 at6F2D0F.
+    /// One signed +214 owner for scenario recruitment and local control groups.
+    /// Team removal, Limbo and ChangeOwner preserve it; raw Save70C250 and
+    /// Load70BF50 retain it with the rest of the concrete object body.
+    object_group: i32,
     /// One native Techno stage clock. Class receivers mutate through this
     /// owner; animation, miner and buildup components carry no competing copy.
     stage: crate::sim::stage::StageClass,
@@ -319,6 +339,9 @@ pub struct GameEntity {
     /// remain visible after a DriveTrack segment has cleared.
     #[serde(default)]
     pub navigation: NavigationState,
+    /// Foot+5DC, retained across mission changes and swizzled by native Load.
+    #[serde(default)]
+    pub(crate) patrol_post: crate::sim::world::PatrolPost,
     /// Live Foot-owned applied speed; survives active locomotor replacement.
     #[serde(default)]
     pub foot_speed: crate::sim::components::FootSpeedState,
@@ -569,6 +592,9 @@ pub struct GameEntity {
     /// object.
     #[serde(default)]
     pub cloak: Option<CloakRuntime>,
+    /// Instance stealth grant; sim::cloak_disguise owns its mutations.
+    #[serde(default)]
+    pub(crate) stealth_ability: StealthAbility,
     /// Last sensor coverage actually deposited into CellClass counters.
     /// Removal must use these cached owner/location/radius values after the
     /// entity's current facts have changed.
@@ -651,6 +677,9 @@ pub struct GameEntity {
     /// Shared signed Techno+0x2FC, with aircraft release/dock state where
     /// applicable. The `ammo` owner exposes the count's native mutations.
     ammo: Option<TechnoAmmo>,
+    /// Techno+1FC/+204, constructed running at (binary frame,0) by
+    /// TechnoClass6F2CE7..6F2CF3. Independent of the weapon rearm clock.
+    ammo_reload_timer: crate::sim::timer::CdTimer,
     /// The spot an infantryman holds in its cell, an [`InfantrySpot`] cache
     /// that `movement::foot_mark` owns.
     ///
@@ -867,6 +896,13 @@ fn default_build_rejects_saved_delivery_base_override_and_keeps_base_space() {
 }
 
 impl GameEntity {
+    /// Read-only Phobos shield state for presentation. Construction and the
+    /// shield owner retain simulation-side mutation authority.
+    #[cfg(feature = "phobos")]
+    pub fn shield(&self) -> Option<&crate::sim::shield::ShieldState> {
+        self.shield.as_ref()
+    }
+
     /// Infantry+6D9: building survivor identity, not Type.Nominal.
     /// Added_To_Game502C3C skips its active counter; UI-name51F2C0 uses
     /// TXT_TECHNICIAN. The flag persists across placement and capture.
@@ -946,12 +982,103 @@ impl GameEntity {
         self.ammo.as_mut()
     }
 
-    /// Unit735592, Infantry517D69 and Aircraft414033 constructor writes.
+    /// Building442C81, Unit735592, Infantry517D69 and Aircraft414033 writes.
     pub(crate) fn initialize_ammo_from_type(
         &mut self,
         object: &crate::rules::object_type::ObjectType,
     ) {
         self.ammo = Some(TechnoAmmo::from_type(object));
+    }
+
+    /// The authoritative Techno reload clock, preserved verbatim in saves.
+    pub const fn ammo_reload_timer(&self) -> crate::sim::timer::CdTimer {
+        self.ammo_reload_timer
+    }
+
+    /// Techno ReceiveDamage701ADB..701B62, after the early immunity gates
+    /// and before the bunker/warhead gates. StartReloading is unconditional
+    /// after the count write; its own full-count check decides the timer.
+    pub(crate) fn reduce_ammo_for_damage(
+        &mut self,
+        object: &crate::rules::object_type::ObjectType,
+        damage: i32,
+        now: i32,
+    ) {
+        if !object.damage_reduces_readiness {
+            return;
+        }
+        if let Some(ammo) = self.ammo_mut() {
+            ammo.reduce_readiness(
+                damage,
+                object.strength,
+                object.ammo,
+                object.readiness_reduction_multiplier,
+            );
+            self.start_reloading_ammo(object, now);
+        }
+    }
+
+    /// TechnoClass::StartReloading6FB080: current type/count, signed raw
+    /// frames and wrapping integer products; a full count leaves the clock.
+    pub(crate) fn start_reloading_ammo(
+        &mut self,
+        object: &crate::rules::object_type::ObjectType,
+        now: i32,
+    ) {
+        let Some(ammo) = self.ammo() else {
+            return;
+        };
+        let current = ammo.current();
+        if current >= object.ammo {
+            return;
+        }
+        let duration = if current == 0 && object.empty_reload != -1 {
+            object.empty_reload
+        } else {
+            let quotient = if object.pip_wrap() == 0 {
+                1
+            } else {
+                // Native IDIV likewise faults for MIN/-1; the ordinary
+                // signed quotient truncates toward zero.
+                current / object.pip_wrap()
+            };
+            object.reload.wrapping_add(
+                object
+                    .reload_increment
+                    .wrapping_mul(quotient)
+                    .wrapping_mul(quotient),
+            )
+        };
+        self.ammo_reload_timer.start(now, duration);
+    }
+
+    /// UnitClass::Reload736CA0, reached at UnitAI736689 only. MobileFire=no
+    /// uses ILocomotion+10; a moving positive clock is re-anchored, not paused.
+    /// The inherited Techno Reload6FB010 then adds at most one round.
+    pub(crate) fn reload_unit_ammo(
+        &mut self,
+        object: &crate::rules::object_type::ObjectType,
+        now: i32,
+    ) -> Result<(), String> {
+        if !object.mobile_fire {
+            let moving = crate::sim::movement::motion_query::is_moving(self).ok_or_else(|| {
+                "Unit Reload736CA0 requires ILocomotion+10 (E_POINTER)".to_owned()
+            })?;
+            let remaining = self.ammo_reload_timer.remaining(now);
+            if moving && remaining > 0 {
+                self.ammo_reload_timer.start(now, remaining.wrapping_add(1));
+            }
+        }
+        if object.ammo != -1
+            && self.ammo().is_some_and(|ammo| ammo.current() < object.ammo)
+            && self.ammo_reload_timer.remaining(now) == 0
+        {
+            self.ammo_mut().unwrap().reload_round();
+            // Foot/Unit Mark(2)4D3780 returns immediately, before any
+            // callback or spatial write. No redraw event is synthesized.
+            self.start_reloading_ammo(object, now);
+        }
+        Ok(())
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1103,6 +1230,12 @@ impl GameEntity {
         self.stage.restart(value, now, rate);
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_native_stage_value(&mut self, value: i32) {
+        self.stage.set_value(value);
+    }
+
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) fn set_native_stage_value(&mut self, value: i32) {
         self.stage.set_value(value);
     }
@@ -1248,7 +1381,9 @@ impl GameEntity {
         if self.category != EntityCategory::Aircraft {
             return;
         }
-        let Some(object) = rules.object(type_id) else {
+        let Some(object) =
+            rules.object_in_category(crate::rules::object_type::ObjectCategory::Aircraft, type_id)
+        else {
             return;
         };
         let camera =
@@ -1369,11 +1504,37 @@ impl GameEntity {
     pub const fn techno_ctor_random_word(&self) -> u16 {
         self.techno_ctor_random_word
     }
+
+    /// The native signed Techno+214 value, shared by Recruit6EAA90 and
+    /// TeamAssign731060. It is independent of live Team membership.
+    pub const fn object_group(&self) -> i32 {
+        self.object_group
+    }
+
+    /// Callers own admission/order; scenario readers and
+    /// TeamType::Get_Group6F1870 supply raw signed values.
+    pub(crate) fn assign_object_group(&mut self, group: i32) {
+        self.object_group = group;
+    }
+
+    pub(crate) const fn production_start_price(&self) -> i32 {
+        self.production_start_price
+    }
+
+    /// Factory StartProduction4C9DED writes this once on a newly created
+    /// product. Hold/resume, placement and owner changes retain it (gamemd).
+    pub(crate) fn record_production_start_price(&mut self, price: i32) {
+        self.production_start_price = price;
+    }
 }
 
 /// Fixture setup for the identity a constructor or decoder establishes.
 #[cfg(any(test, feature = "test-support"))]
 impl GameEntity {
+    pub fn set_object_group_for_test(&mut self, group: i32) {
+        self.assign_object_group(group);
+    }
+
     pub fn set_stable_id_for_test(&mut self, stable_id: u64) {
         self.stable_id = stable_id;
     }
@@ -1537,6 +1698,17 @@ impl GameEntity {
             .is_some_and(|miner| miner.kind() != crate::sim::miner::MinerKind::Slave)
     }
 
+    /// The native Techno+3D0 useless latch read by Repair depots.
+    pub(crate) const fn is_useless(&self) -> bool {
+        self.useless
+    }
+
+    /// `Mission_Harvest`'s two writes to Techno+3D0 (`0x0073E8FA`,
+    /// `0x0073E925`). Other systems only read this shared Techno state.
+    pub(crate) fn set_useless(&mut self, useless: bool) {
+        self.useless = useless;
+    }
+
     /// The committed mission read at TechnoAI6FA697, before its class's
     /// subsequent Ready/Commence checkpoint. Clearing a target or destination
     /// does not change this selector; only the mission owner can commence a
@@ -1587,11 +1759,14 @@ impl GameEntity {
             stable_id,
             native_unique_id,
             native_cloak_displacement: crate::util::native_x87::NativeF32Bits::POSITIVE_ZERO,
+            useless: false,
+            production_start_price: 0,
             emp: Default::default(),
             #[cfg(feature = "ares")]
             attach_effects: Default::default(),
             techno_ctor_random_word,
             secret_lab_fallback: None,
+            object_group: -1,
             stage: crate::sim::stage::StageClass::constructed(construction_frame as i32),
             discovery: Default::default(),
             building_upgrades: crate::sim::building_upgrades::BuildingUpgrades::default(),
@@ -1637,6 +1812,7 @@ impl GameEntity {
             distributed_fire: Default::default(),
             locomotor: None,
             navigation: NavigationState::at_frame(construction_frame),
+            patrol_post: Default::default(),
             foot_speed: crate::sim::components::FootSpeedState::default(),
             flight_attitude: Default::default(),
             ion_blast_lift: 0,
@@ -1687,6 +1863,7 @@ impl GameEntity {
             slave: Default::default(),
             mega_mission: Default::default(),
             cloak: None,
+            stealth_ability: StealthAbility::default(),
             sensor_deposit: None,
             disguise: Some(DisguiseRuntime::new(construction_frame)),
             low_bridge_tube_state: None,
@@ -1704,6 +1881,7 @@ impl GameEntity {
             pending_entry: Default::default(),
             building_entry: Default::default(),
             ammo: None,
+            ammo_reload_timer: crate::sim::timer::CdTimer::started(construction_frame as i32, 0),
             // Infantry get sub-cell 2 (first distinct position) at spawn so
             // they don't all pile up at cell center when multiple are created.
             sub_cell: crate::sim::movement::foot_mark::InfantrySpot::new(
@@ -1752,6 +1930,8 @@ impl GameEntity {
             produce_cash: crate::sim::credit_income::ProduceCash::new(construction_frame),
             drain: Default::default(),
             parasite: crate::sim::combat::parasite::FootParasite::new(construction_frame),
+            #[cfg(feature = "phobos")]
+            shield: None,
         }
     }
 
@@ -1845,6 +2025,18 @@ impl GameEntity {
         self.fall.parachuted()
     }
 
+    pub(crate) fn parachute_animation(&self) -> Option<u64> {
+        self.fall.parachute_animation()
+    }
+
+    pub(crate) fn set_parachute_animation(&mut self, animation: Option<u64>) {
+        self.fall.set_parachute_animation(animation);
+    }
+
+    pub(crate) fn parachute_animation_expired(&mut self, animation: u64) {
+        self.fall.parachute_animation_expired(animation);
+    }
+
     /// Paradrop5F5940 raises +84/+8D and resets +2C before placement.
     pub(crate) fn begin_parachute_fall(&mut self, z: i32) {
         self.position.put_z(z);
@@ -1858,6 +2050,11 @@ impl GameEntity {
 
     pub(crate) fn finish_fall(&mut self) {
         self.fall.finish();
+    }
+
+    /// FootClass::AI's +8D/+8E edge; true as a DropAsBomb fall starts.
+    pub(crate) fn observe_falling_edge(&mut self) -> bool {
+        self.fall.observe_falling_edge()
     }
 
     /// ObjectAI5F3FBC..3FFA updates even the grounding frame's rate.

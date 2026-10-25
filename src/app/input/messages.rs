@@ -513,6 +513,15 @@ fn post_grey_row(state: &mut AppState, text: &str, localize: bool, silent: bool)
     );
 }
 
+pub(super) fn post_command_backpressure(state: &mut AppState) {
+    post_grey_row(
+        state,
+        "Commands are still being sent. Try again shortly.",
+        false,
+        true,
+    );
+}
+
 /// Post a row whose `text` is a CSF key.
 fn post_localized_message(state: &mut AppState, post: &crate::ui::messages::MessagePost<'_>) {
     post_message(state, post, true);
@@ -651,6 +660,11 @@ pub(crate) fn build_message_instances(
     message_instances(
         &state.renderer.bit_font,
         &state.match_state.match_presentation.message_list,
+        state
+            .platform
+            .ime
+            .composition(crate::app::input::ime::ImeTarget::InGameChat)
+            .map(|(units, _)| units),
         [
             state.match_state.input.camera_x,
             state.match_state.input.camera_y,
@@ -658,9 +672,31 @@ pub(crate) fn build_message_instances(
     )
 }
 
+/// The open edit line in window pixels, where the input method shows its
+/// candidates; `None` while no edit is open.
+pub(crate) fn ime_edit_rect(state: &AppState) -> Option<crate::ui::shell::geom::RectPx> {
+    if state.frontend.screen != GameScreen::InGame {
+        return None;
+    }
+    let list = &state.match_state.match_presentation.message_list;
+    let edit = list.edit_line()?;
+    let font = &state.renderer.bit_font;
+    // The message rows are tactical pixels; the zoom pass stretches them over
+    // the window.
+    let sx = state.renderer.gpu.config.width as f32 / state.render_width().max(1) as f32;
+    let sy = state.renderer.gpu.config.height as f32 / state.render_height().max(1) as f32;
+    Some(crate::ui::shell::geom::RectPx::new(
+        (list.x() as f32 * sx) as i32,
+        (edit.y as f32 * sy) as i32,
+        (font.text_width(&edit.text) as f32 * sx) as i32,
+        (font.cell_height() as f32 * sy) as i32,
+    ))
+}
+
 fn message_instances(
     font: &crate::render::bit_font::BitFont,
     list: &crate::ui::messages::MessageList,
+    composition: Option<&[u16]>,
     camera_offset: [f32; 2],
 ) -> (Vec<SpriteInstance>, Vec<SpriteInstance>) {
     let x = list.x() as f32;
@@ -671,7 +707,22 @@ fn message_instances(
     let edit = list
         .edit_line()
         .map(|edit| crate::ui::messages::Message::edit_row(&edit));
-    for m in edit.iter().chain(list.messages()) {
+    // The open composition follows the typed text (`app::input::ime`).
+    let composition = edit.as_ref().zip(composition).map(|(row, units)| {
+        let mut row = row.clone();
+        row.text = String::from_utf16_lossy(units);
+        row.rgb = crate::app::input::ime::COMPOSITION_RGB.map(|c| f32::from(c) / 255.0);
+        row
+    });
+    let composition_x = edit
+        .as_ref()
+        .map_or(x, |row| x + font.text_width(&row.text) as f32);
+    let rows = edit
+        .iter()
+        .map(|row| (x, row))
+        .chain(composition.iter().map(|row| (composition_x, row)))
+        .chain(list.messages().iter().map(|row| (x, row)));
+    for (x, m) in rows {
         // Message rows are screen-space, but `draw_pooled_ui` binds the
         // live world camera and the shader subtracts it. Add that camera
         // back here so scrolling cannot displace the HUD text.
@@ -1028,9 +1079,9 @@ mod tests {
             4,
         );
         assert_eq!(list.advance_reveal(now as u32), 1);
-        assert_eq!(message_instances(&font, &list, [0.0; 2]).1.len(), 1);
+        assert_eq!(message_instances(&font, &list, None, [0.0; 2]).1.len(), 1);
         assert_eq!(list.advance_reveal(now as u32 + 16), 1);
-        assert_eq!(message_instances(&font, &list, [0.0; 2]).1.len(), 2);
+        assert_eq!(message_instances(&font, &list, None, [0.0; 2]).1.len(), 2);
         // Offline menus skip Manage. Equality still retains the row; a
         // first resumed poll past the deadline removes it immediately.
         assert!(!list.manage(deadline));
@@ -1091,6 +1142,29 @@ mod tests {
     }
 
     #[test]
+    fn open_composition_paints_after_the_typed_text_in_its_colour() {
+        use crate::render::bit_font::tests::make_test_font;
+
+        let font = make_test_font(&[(b'a' as u16, 6), (0x4E2D, 15)], 4);
+        let mut list = crate::ui::messages::MessageList::new(3, 0, 6, 1_000);
+        assert!(list.add_edit("a", [1.0, 1.0, 1.0], true));
+        let (fills, texts) = message_instances(&font, &list, Some(&[0x4E2D]), [0.0; 2]);
+        let expected = font.build_text_label(
+            "\u{4E2D}",
+            3.0 + font.text_width("a") as f32,
+            list.edit_line().unwrap().y as f32,
+            0.00022,
+            [0.0; 2],
+            crate::app::input::ime::COMPOSITION_RGB,
+            0,
+        );
+        assert_eq!(texts.len(), 2);
+        assert_eq!(texts[1].position, expected[0].position);
+        assert_eq!(texts[1].tint, expected[0].tint);
+        assert_eq!(fills.len(), 2, "the composition has its own backing box");
+    }
+
+    #[test]
     fn gsi_02_14_message_glyphs_compensate_for_ui_camera() {
         use crate::render::bit_font::tests::make_test_font;
 
@@ -1108,9 +1182,9 @@ mod tests {
             &|text| font.text_width(text) as i32,
         );
 
-        let at_origin = message_instances(&font, &list, [0.0, 0.0]).1;
+        let at_origin = message_instances(&font, &list, None, [0.0, 0.0]).1;
         let ui_camera = [640.0_f32, 480.0_f32];
-        let panned = message_instances(&font, &list, ui_camera).1;
+        let panned = message_instances(&font, &list, None, ui_camera).1;
 
         assert_eq!(at_origin.len(), 3);
         assert_eq!(panned.len(), at_origin.len());

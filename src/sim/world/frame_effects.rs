@@ -7,7 +7,7 @@
 
 use crate::rules::overlay_types::OverlayTypeRegistry;
 use crate::rules::ruleset::RuleSet;
-use crate::sim::command::CommandEnvelope;
+use crate::sim::command::{CommandEnvelope, CommandRecord};
 
 use super::{SimSoundEvent, Simulation};
 
@@ -17,6 +17,23 @@ use super::{SimSoundEvent, Simulation};
 pub trait SoundBoundary {
     fn consume(&self, sim: &Simulation, rules: &RuleSet, events: &[SimSoundEvent]);
     fn delivered(&self) -> usize;
+
+    /// One reached750D40 owner update. Headless/replay has no device handle;
+    /// a client reuses its existing handle and the coordinate at this phase.
+    fn update_looping_sound(
+        &self,
+        _sim: &Simulation,
+        _owner: u64,
+        _world: crate::sim::anim_class::AnimWorldCoord,
+    ) {
+    }
+}
+
+/// The process-owned Radar656DF0 setter at reached House call sites. The
+/// implementation keeps animation/audio state outside the simulation and
+/// delivers preceding sound facts before applying the requested transition.
+pub trait TacticalRadarBoundary {
+    fn set_available(&self, sim: &Simulation, rules: &RuleSet, available: bool);
 }
 
 /// HouseClass::Update4F860F/4F8736 waits before publishing its result
@@ -105,11 +122,13 @@ impl NetworkCommandBoundary for std::cell::RefCell<crate::sim::command_queue::Fr
 #[derive(Clone, Copy, Default)]
 pub struct FrameEffects<'a> {
     sound: Option<&'a dyn SoundBoundary>,
+    tactical_radar: Option<&'a dyn TacticalRadarBoundary>,
     outcome_wait: Option<&'a dyn OutcomeWaitBoundary>,
     local_planning: Option<&'a dyn LocalPlanningBoundary>,
     network_commands: Option<&'a dyn NetworkCommandBoundary>,
     overlay_registry: Option<&'a OverlayTypeRegistry>,
     before_logic: Option<&'a dyn Fn(&Simulation)>,
+    command_applied: Option<&'a dyn Fn(&Simulation, &CommandRecord, bool)>,
     production_factories: &'a [crate::sim::production::ProductionFactoryVisit],
     production_request_cleared: Option<&'a dyn Fn(crate::sim::intern::InternedId)>,
 }
@@ -127,11 +146,13 @@ impl<'a> FrameEffects<'a> {
     pub const fn empty() -> Self {
         Self {
             sound: None,
+            tactical_radar: None,
             outcome_wait: None,
             local_planning: None,
             network_commands: None,
             overlay_registry: None,
             before_logic: None,
+            command_applied: None,
             production_factories: &[],
             production_request_cleared: None,
         }
@@ -140,13 +161,33 @@ impl<'a> FrameEffects<'a> {
     pub fn for_sound(sound: &'a dyn SoundBoundary) -> Self {
         Self {
             sound: Some(sound),
+            tactical_radar: None,
             outcome_wait: None,
             local_planning: None,
             network_commands: None,
             overlay_registry: None,
             before_logic: None,
+            command_applied: None,
             production_factories: &[],
             production_request_cleared: None,
+        }
+    }
+
+    pub fn with_tactical_radar(self, boundary: &'a dyn TacticalRadarBoundary) -> Self {
+        Self {
+            tactical_radar: Some(boundary),
+            ..self
+        }
+    }
+
+    pub(crate) fn set_tactical_radar_available(
+        self,
+        sim: &Simulation,
+        rules: &RuleSet,
+        available: bool,
+    ) {
+        if let Some(boundary) = self.tactical_radar {
+            boundary.set_available(sim, rules, available);
         }
     }
 
@@ -196,6 +237,24 @@ impl<'a> FrameEffects<'a> {
         Self {
             before_logic: Some(boundary),
             ..self
+        }
+    }
+
+    /// Optional process observation after the gameplay receiver handled a command.
+    /// The observer stores no command queue and cannot mutate the simulation.
+    pub fn with_command_applied(
+        self,
+        observer: &'a dyn Fn(&Simulation, &CommandRecord, bool),
+    ) -> Self {
+        Self {
+            command_applied: Some(observer),
+            ..self
+        }
+    }
+
+    pub(crate) fn command_applied(self, sim: &Simulation, command: &CommandRecord, applied: bool) {
+        if let Some(observer) = self.command_applied {
+            observer(sim, command, applied);
         }
     }
 
@@ -290,6 +349,21 @@ impl<'a> FrameEffects<'a> {
         if let Some(sound) = self.sound {
             sound.consume(sim, rules, &sim.sound_events);
             assert_eq!(sound.delivered(), sim.sound_events.len());
+        }
+    }
+
+    /// Finish preceding PlayAt/Stop/Release operations before the native
+    /// positional update; neither the coordinate nor callback is retained.
+    pub(crate) fn update_looping_sound(
+        self,
+        sim: &Simulation,
+        rules: &RuleSet,
+        owner: u64,
+        world: crate::sim::anim_class::AnimWorldCoord,
+    ) {
+        self.flush_sound(sim, rules);
+        if let Some(sound) = self.sound {
+            sound.update_looping_sound(sim, owner, world);
         }
     }
 

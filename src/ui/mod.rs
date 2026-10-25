@@ -10,6 +10,7 @@
 pub mod campaign_score_shell;
 pub(crate) mod coop_score_shell;
 pub mod campaign_shell;
+pub(crate) mod chat_translation;
 pub mod gadget;
 pub mod game_screen;
 pub(crate) mod lan_shell;

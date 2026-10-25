@@ -10,6 +10,9 @@ use std::hash::{Hash, Hasher};
 pub(crate) struct ShroudKnowledge {
     counter: i32,
     gap_counter: i32,
+    /// Cell+13C, initialized to zero by CellClass47BD50. Source: gamemd.exe.
+    /// Unlike +134, map reveal/reset stores preserve this signed counter.
+    friendly_gap_counter: i32,
     open: bool,
     pending: bool,
     local_sources: u32,
@@ -21,6 +24,7 @@ impl Default for ShroudKnowledge {
         Self {
             counter: 1,
             gap_counter: 0,
+            friendly_gap_counter: 0,
             open: false,
             pending: false,
             local_sources: 0,
@@ -31,7 +35,6 @@ impl Default for ShroudKnowledge {
 }
 impl ShroudKnowledge {
     /// The shroud counter: positive is shrouded, zero or negative mapped.
-    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn counter(&self) -> i32 {
         self.counter
     }
@@ -40,6 +43,21 @@ impl ShroudKnowledge {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn gap_counter(&self) -> i32 {
         self.gap_counter
+    }
+
+    pub(crate) fn friendly_gap_counter(&self) -> i32 {
+        self.friendly_gap_counter
+    }
+
+    /// CreateGap6FB408..414 / DestroyGap6FB6E5..6F1 use wrapping INC/DEC,
+    /// including removal after a hostile activation and a later defeat.
+    /// Source: original gamemd.exe instructions; no saturation or receipt gate.
+    pub(super) fn count_friendly_gap(&mut self, active: bool) {
+        self.friendly_gap_counter = if active {
+            self.friendly_gap_counter.wrapping_add(1)
+        } else {
+            self.friendly_gap_counter.wrapping_sub(1)
+        };
     }
 
     /// Mapped.
@@ -69,7 +87,7 @@ impl ShroudKnowledge {
     /// The published flags of this cell (the projection's `FLAG_*` bits).
     pub(super) fn published_flags(&self) -> u8 {
         use super::{
-            FLAG_EFFECTIVE_GAP_SIGHT, FLAG_GAP_COVERED, FLAG_HOSTILE_GAP_PRESENT,
+            FLAG_EFFECTIVE_GAP_SIGHT, FLAG_GAP_COVERED, FLAG_GAP_FOG, FLAG_HOSTILE_GAP_PRESENT,
             FLAG_PENDING_GAP_CONCEAL, FLAG_REVEALED, FLAG_SUSTAINED_SIGHT, FLAG_VISIBLE,
         };
         let mut flags = 0;
@@ -95,6 +113,10 @@ impl ShroudKnowledge {
             if !self.open {
                 flags |= FLAG_GAP_COVERED;
             }
+        }
+        // IsFogged58652E..586536 takes JLE for Cell+13C <= 0.
+        if self.friendly_gap_counter > 0 {
+            flags |= FLAG_GAP_FOG;
         }
         flags
     }
@@ -223,12 +245,13 @@ impl ShroudKnowledge {
         self.transient_visible = value;
     }
 
-    /// This cell's state hash record: the four counters little-endian, then
-    /// the flags.
+    /// The established sight/shroud hash prefix: four counters and flags.
+    /// OwnerVisibility hashes the retained friendly gap plane separately.
     pub(super) fn hash_record(&self) -> [u8; 17] {
         let Self {
             counter,
             gap_counter,
+            friendly_gap_counter: _,
             open,
             pending,
             local_sources,
@@ -244,19 +267,19 @@ impl ShroudKnowledge {
         record
     }
 
-    pub fn reveal(&mut self) {
+    pub fn reveal(&mut self, ground_was_fully_open: bool) {
         if self.counter == 1 {
             self.counter = 0;
         }
         self.counter = self.counter.wrapping_sub(1);
         if self.counter <= 0 {
-            //487630 opens missing18 and returns. Only the already-open branch
-            //cancels20: a second gap followed by return must retain pending.
-            if self.open {
+            // CellClass::Reveal @ 0x00487630 tests prior Cell+12C bits18.
+            // Opening missing bits returns before the pending20 cancellation;
+            // the projected `open` also admits explored-only ground08.
+            if ground_was_fully_open {
                 self.pending = false;
-            } else {
-                self.open = true;
             }
+            self.open = true;
         }
     }
     pub fn leave(&mut self) {
@@ -416,13 +439,17 @@ impl SightFacts {
     }
 }
 
-/// Native Foot65C/664 countdown, one logical native client per viewer. The
-/// constructor initial value is retained so an unseen/nonallied viewer never
-/// borrows another viewer's timer history. Admission release does not reset it.
+/// Native Foot65C/664 countdown and Techno264 sight height, one logical
+/// native client per viewer. Admission release does not reset either history.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct SightRefreshTimers {
     initial: crate::sim::timer::CdTimer,
-    by_viewer: std::collections::BTreeMap<InternedId, crate::sim::timer::CdTimer>,
+    by_viewer: std::collections::BTreeMap<InternedId, SightRefreshClient>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+struct SightRefreshClient {
+    timer: crate::sim::timer::CdTimer,
+    last_height: i32,
 }
 impl SightRefreshTimers {
     pub(crate) fn at_construction(frame: u32) -> Self {
@@ -432,13 +459,27 @@ impl SightRefreshTimers {
         }
     }
     pub(crate) fn timer(&self, viewer: InternedId) -> crate::sim::timer::CdTimer {
-        self.by_viewer.get(&viewer).copied().unwrap_or(self.initial)
+        self.by_viewer
+            .get(&viewer)
+            .map_or(self.initial, |state| state.timer)
+    }
+    pub(crate) fn last_height(&self, viewer: InternedId) -> i32 {
+        // Techno constructor6F2D9C initializes264 independently of sight250.
+        self.by_viewer
+            .get(&viewer)
+            .map_or(0, |state| state.last_height)
+    }
+    fn client_mut(&mut self, viewer: InternedId) -> &mut SightRefreshClient {
+        self.by_viewer.entry(viewer).or_insert(SightRefreshClient {
+            timer: self.initial,
+            last_height: 0,
+        })
+    }
+    pub(crate) fn set_last_height(&mut self, viewer: InternedId, height: i32) {
+        self.client_mut(viewer).last_height = height;
     }
     pub(crate) fn reload(&mut self, viewer: InternedId, frame: u32) {
-        self.by_viewer.insert(
-            viewer,
-            crate::sim::timer::CdTimer::started(frame as i32, 15),
-        );
+        self.client_mut(viewer).timer = crate::sim::timer::CdTimer::started(frame as i32, 15);
     }
 
     /// The viewer has its own countdown.

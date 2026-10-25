@@ -1174,7 +1174,8 @@ impl OreGrowthState {
                 spread_enabled,
                 dirty_cells: dirty_cells.as_deref_mut(),
             };
-            if let Some(placed) = spread_tiberium(&mut placement, (entry.rx, entry.ry), false) {
+            if let Some(placed) = spread_tiberium(&mut placement, (entry.rx, entry.ry), false, None)
+            {
                 stats.placed_entries += 1;
                 stats
                     .overlay_constructions

@@ -253,7 +253,10 @@ impl App {
         if let Some(player) = state.audio.sfx_player.as_mut() {
             player.set_focus_output_active(active);
         }
-        if state.platform.pause_on_focus_loss && active {
+        if state.platform.pause_on_focus_loss
+            && active
+            && state.match_state.session_mode().is_single_player()
+        {
             // Only the configured freeze leaves a deactivated span to forget:
             // without it the match keeps pacing in the background. Forget the
             // pacing window so exactly one frame runs immediately on return,
@@ -400,7 +403,7 @@ impl App {
         }
         if next == InGameMenuState::Menu {
             state.match_state.match_presentation.pause_menu_has_saves =
-                !state.persistence.repository.browser_entries().is_empty();
+                state.persistence.repository.has_browser_entry();
             crate::app::input::pause_menu::on_open(state);
         }
         if next == InGameMenuState::AbortConfirm {

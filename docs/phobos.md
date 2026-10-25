@@ -32,4 +32,13 @@ other mode, even with identical retail INIs.
 Supported extensions:
 
 - [Custom radiation types](phobos-custom-radiation.md)
+- [Shields](phobos-shields.md) (damage absorption, shield bar, shield tint, break, respawn and self-healing)
+- [Custom ore spawners](phobos-ore-spawners.md)
+- [Custom gather animations](phobos-harvester-gather-animations.md)
+- [Ore-stage animation hiding](phobos-hide-if-no-ore-threshold.md)
 - [Superweapon techno gates](phobos-superweapon-technos.md)
+- [Digital display](phobos-digital-display.md) (numeric health/ammo/cargo/timer values near the health bar)
+- [Placement preview](phobos-placement-preview.md) (building artwork and grid translucency while placing)
+- [Sidebar positions](phobos-sidebar-gdi.md) (per-side GDI/NOD sidebar coordinates)
+- [Building production queue](phobos-building-queue.md) (queue buildings and start the next after placement)
+- [Skirmish AI dehardcoding](phobos-ai-dehardcode.md) (last-legs sale/hunt switches and MCV deploy regroup)

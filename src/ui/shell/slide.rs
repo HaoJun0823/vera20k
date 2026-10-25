@@ -403,6 +403,16 @@ pub(crate) const RENDERED_SHELL_SLIDES: &[SlideDialogSpec] = &[
         top_panel: false,
         campaign_score: true,
     },
+    // The LAN Cooperative campaign end `0xBC7`: the same record, Continue
+    // (`0x6D1`) alone in the bottom list.
+    SlideDialogSpec {
+        dialog_id: 0x0BC7,
+        top_buttons: 0,
+        bottom_button: true,
+        map_button: false,
+        top_panel: false,
+        campaign_score: true,
+    },
     // The random-map dialog: Use Map, Load, Save and Delete Map, Cancel, and
     // the top panel (`0x0062290E`).
     SlideDialogSpec {

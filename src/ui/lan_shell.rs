@@ -114,6 +114,27 @@ pub(crate) struct LanListState {
     pub(crate) last_press: Option<(Instant, i32, i32)>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PlayerNameMatch {
+    Exact,
+    IgnoreAsciiCase,
+}
+
+/// RestorePlayerList `0x005E6230` shares name matching across WOL and LAN:
+/// its multi-select arm compares `WideWstring` exactly through `wcscmp`
+/// (`0x007B67C0` -> `0x007CA5D3`), while LAN's single-select `0x4CA` lookup
+/// uses `_wcsicmp`. Keep that policy explicit at each lobby caller.
+pub(crate) fn saved_player_name_matches(
+    saved_name: &str,
+    current_name: &str,
+    matching: PlayerNameMatch,
+) -> bool {
+    match matching {
+        PlayerNameMatch::Exact => saved_name == current_name,
+        PlayerNameMatch::IgnoreAsciiCase => saved_name.eq_ignore_ascii_case(current_name),
+    }
+}
+
 impl LanListState {
     pub(crate) fn geometry(
         &self,
@@ -437,9 +458,9 @@ impl LanLobbyState {
         self.players = players;
         self.player_list.reconcile(self.players.len());
         self.player_list.selected = selected.and_then(|name| {
-            self.players
-                .iter()
-                .position(|row| row.name.eq_ignore_ascii_case(&name))
+            self.players.iter().position(|row| {
+                saved_player_name_matches(&name, &row.name, PlayerNameMatch::IgnoreAsciiCase)
+            })
         });
     }
 

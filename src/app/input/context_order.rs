@@ -180,8 +180,18 @@ fn friendly_attack_is_admitted(
 /// that is its TerrainType's `LegalTarget=` (retail: only `VEINHOLE`), else
 /// `[CombatDamage] TreeTargeting=` (`Rules+0x17E9`, retail no) or the
 /// `TerrainFire=` (`+0x138`) of the weapon SelectWeapon picks for it
-/// (`0x0070EF0C..0x0070EF4B`). A Techno target passes here (#605).
-fn terrain_target_is_legal(
+/// (`0x0070EF0C..0x0070EF4B`). A Techno uses its own ObjectType byte.
+///
+/// RESIDUAL: for a Techno, vt+0x398 also answers yes when the picked weapon
+/// is `TerrainFire=` and the target IsDisguised (vt+0xC4) with no worn house
+/// (vt+0xD0(1), `0x0070EF53..0x0070EFB9`); this asks `LegalTarget=` alone.
+/// Trigger: a layer clears a Techno's `LegalTarget=`, and an actor whose
+/// picked weapon is `TerrainFire=` (retail: only `TankMakeupKit`) clicks it
+/// while it is so disguised. Effect: that unforced click leaves the rung,
+/// where native stays on it; Ctrl is unaffected. Frequency: nil on retail
+/// data, where no rules or mode INI clears `LegalTarget=` on a Techno.
+/// Downstream: only that click's cursor and order.
+fn object_target_is_legal(
     sim: &crate::sim::world::Simulation,
     rules: &crate::rules::ruleset::RuleSet,
     actor_id: u64,
@@ -190,7 +200,11 @@ fn terrain_target_is_legal(
     use crate::sim::combat::combat_weapon;
 
     let Some(terrain) = sim.terrain_objects().get(target_id) else {
-        return true;
+        return sim.entities().get(target_id).is_some_and(|target| {
+            sim.interner()
+                .object_type_in_category(target.type_ref(), target.category().into(), rules)
+                .is_some_and(|kind| kind.legal_target)
+        });
     };
     if rules
         .terrain_object_type_case_insensitive(sim.interner().resolve(terrain.type_ref()))
@@ -254,21 +268,19 @@ fn terrain_target_is_legal(
 /// [`friendly_attack_is_admitted`]. A different allied House therefore takes
 /// the identity-sensitive tail, then the existing class postprocessing.
 ///
-/// Unforced, a Terrain object must pass [`terrain_target_is_legal`].
+/// Unforced, an object target must pass [`object_target_is_legal`].
 ///
 /// RESIDUAL (#605): the rest of admission (`0x00700255..0x0070043E`) is not
 /// ported as one gate. Unforced, native also leaves the rung for:
 /// - an object disguised to the actor's house (vt+0xC8), unless that grant
 ///   holds, `[Rules+0xD6C]` is set, its type is `PermaDisguise=` (`+0xD30`),
 ///   its `+0x1EC`/`+0x1F4` timer runs, or it wears no house (vt+0xD0) and the
-///   weapon may fire at terrain (vt+0x398, `0x0070EF00`, `TerrainFire=`);
-/// - a Techno type that is not `LegalTarget=` (`+0x231`), unless that
-///   terrain test passes. No retail Techno type clears `LegalTarget=`.
+///   weapon may fire at terrain (vt+0x398, `0x0070EF00`, `TerrainFire=`).
 ///
 /// Active YR Battle authors AttackCursorOnDisguise=yes, and SPY also authors
 /// PermaDisguise=yes: an ordinary stock Spy/Mirage is not evidence of a missed
-/// rejection. A layer disabling those grants or a non-LegalTarget type still
-/// requires the remaining admission. Those conditional paths remain open.
+/// rejection. A layer disabling those disguise grants still requires the
+/// remaining disguise admission; that conditional path remains open.
 pub(crate) fn attack_action(
     sim: &crate::sim::world::Simulation,
     rules: &crate::rules::ruleset::RuleSet,
@@ -292,7 +304,7 @@ pub(crate) fn attack_action(
                 && (armed || infiltrator)
                 && (forced
                     || (friendly_attack_is_admitted(sim, rules, actor_id, *target_id)
-                        && terrain_target_is_legal(sim, rules, actor_id, *target_id)))
+                        && object_target_is_legal(sim, rules, actor_id, *target_id)))
         }
         TargetKind::Cell(..) => human,
     };
@@ -1134,6 +1146,9 @@ fn command_actor_id(command: &Command) -> Option<u64> {
         | Command::ToggleInfantryDeploy { entity_id }
         | Command::DeployMcv { entity_id }
         | Command::UndeployBuilding { entity_id }
+        // BuildingClass::ClickedAction_Cell @ 0x004436F0 emits SELL16 after
+        // ARCHIVE1E; Selection @ 0x004AE750 keeps both at this actor's index.
+        | Command::SellBuilding { entity_id }
         | Command::ArchiveObject { entity_id, .. }
         | Command::Stop { entity_id } => Some(*entity_id),
         Command::Attack { attacker_id, .. }
@@ -1291,6 +1306,7 @@ fn finish_order(
     queued: Vec<CommandEnvelope>,
     speaker_id: Option<u64>,
     rally_announce: bool,
+    clicked_cell: Option<(u16, u16)>,
 ) -> bool {
     let admitted = if state.match_state.input.planning.active() {
         let mut queued = queued;
@@ -1305,7 +1321,7 @@ fn finish_order(
             state.match_state.input.selection_order_pending,
         );
         restore_selection_dispatch_order(&mut queued, &selected);
-        crate::app::input::planning_mode::queue_orders(state, &selected, queued)
+        crate::app::input::planning_mode::queue_orders(state, &selected, queued, clicked_cell)
     } else {
         let mut queued = queued;
         restore_selection_dispatch_order(
@@ -1342,20 +1358,27 @@ fn finish_order(
         } else {
             (queued.clone(), queued)
         };
+        let mut accepted = true;
         if !encoded.is_empty() {
-            if let Some(speaker_id) = speaker_id {
-                emit_resolved_order_voice(state, speaker_id, &feedback);
-            }
             if let Some(sim) = state
                 .match_state
                 .sim_runtime
                 .as_mut()
                 .map(|rt| &mut rt.simulation)
             {
-                sim.issue_local_commands(encoded);
+                let network = sim.session().game_mode().is_network();
+                accepted = sim.issue_local_commands(encoded) || !network;
+            }
+            if accepted {
+                if let Some(speaker_id) = speaker_id {
+                    emit_resolved_order_voice(state, speaker_id, &feedback);
+                }
             }
         }
-        true
+        if !accepted {
+            super::messages::post_command_backpressure(state);
+        }
+        accepted
     };
     // Building4437A3 passes announce=true to443860 in planning too.
     // LeftUp4ABF78..4ABF8E refuses before dispatch; admitted clicks announce
@@ -1959,6 +1982,7 @@ pub(crate) fn try_queue_context_order(
     // after the sim borrow below ends.
     let mut rally_announce = false;
     let mut consumed_attack_action = false;
+    let mut planning_cell = None;
     let planning = state.match_state.input.planning.active();
 
     if let Some(rt) = state.match_state.sim_runtime.as_mut() {
@@ -2093,7 +2117,9 @@ pub(crate) fn try_queue_context_order(
                 (target_rx, target_ry),
                 owner_id,
             ) {
-                LeftRelease::Dispatch => finish_order(state, queued, speaker_id, rally_announce),
+                LeftRelease::Dispatch => {
+                    finish_order(state, queued, speaker_id, rally_announce, None)
+                }
                 LeftRelease::Nothing => true,
                 LeftRelease::Select => false,
             };
@@ -2124,7 +2150,7 @@ pub(crate) fn try_queue_context_order(
             selected_units.retain(|id| !repair_dispatch.receivers.contains(id));
             selected_ids.retain(|id| !repair_dispatch.receivers.contains(id));
             if selected_ids.is_empty() {
-                let sent = finish_order(state, queued, speaker_id, rally_announce);
+                let sent = finish_order(state, queued, speaker_id, rally_announce, None);
                 return sent || (consumed_attack_action && !repair_dispatch.select_fallback);
             }
         }
@@ -2168,7 +2194,7 @@ pub(crate) fn try_queue_context_order(
                 selected_units.retain(|id| !engineers.contains(id));
                 selected_ids.retain(|id| !engineers.contains(id));
                 if friendly || selected_units.is_empty() {
-                    return finish_order(state, queued, speaker_id, rally_announce);
+                    return finish_order(state, queued, speaker_id, rally_announce, None);
                 }
             }
         }
@@ -2198,7 +2224,7 @@ pub(crate) fn try_queue_context_order(
                             .is_some_and(|actor| actor.category() == EntityCategory::Structure)
                 });
                 if selected_ids.is_empty() {
-                    return finish_order(state, queued, speaker_id, rally_announce)
+                    return finish_order(state, queued, speaker_id, rally_announce, None)
                         || consumed_attack_action;
                 }
             }
@@ -2356,7 +2382,7 @@ pub(crate) fn try_queue_context_order(
             .filter(|id| !attack_receivers.contains(id))
             .collect();
         if selected_ids.is_empty() {
-            let sent = finish_order(state, queued, speaker_id, rally_announce);
+            let sent = finish_order(state, queued, speaker_id, rally_announce, None);
             return sent || (consumed_attack_action && !select_fallback);
         }
         selected_units.retain(|id| !attack_receivers.contains(id));
@@ -2432,7 +2458,7 @@ pub(crate) fn try_queue_context_order(
                     );
                 }
                 if consumed_building_action && selected_units.is_empty() {
-                    return finish_order(state, queued, speaker_id, rally_announce);
+                    return finish_order(state, queued, speaker_id, rally_announce, None);
                 }
             }
 
@@ -2461,7 +2487,7 @@ pub(crate) fn try_queue_context_order(
                         .map(|command| CommandEnvelope::new(owner_id, execute_tick, command)),
                 );
                 if selected_units.is_empty() {
-                    return finish_order(state, queued, speaker_id, rally_announce);
+                    return finish_order(state, queued, speaker_id, rally_announce, None);
                 }
             }
 
@@ -2474,7 +2500,7 @@ pub(crate) fn try_queue_context_order(
                             .into_iter()
                             .map(|command| CommandEnvelope::new(owner_id, execute_tick, command)),
                     );
-                    return finish_order(state, queued, speaker_id, rally_announce);
+                    return finish_order(state, queued, speaker_id, rally_announce, None);
                 }
             }
 
@@ -2499,7 +2525,7 @@ pub(crate) fn try_queue_context_order(
                             },
                         ));
                     }
-                    return finish_order(state, queued, speaker_id, rally_announce);
+                    return finish_order(state, queued, speaker_id, rally_announce, None);
                 }
             }
 
@@ -2521,7 +2547,7 @@ pub(crate) fn try_queue_context_order(
                 )
             {
                 queued.push(CommandEnvelope::new(owner_id, execute_tick, cmd));
-                return finish_order(state, queued, speaker_id, rally_announce);
+                return finish_order(state, queued, speaker_id, rally_announce, None);
             }
             if context_actions_enabled
                 && hover.as_ref().is_some_and(|target| {
@@ -2536,7 +2562,7 @@ pub(crate) fn try_queue_context_order(
                     )
                 })
             {
-                return finish_order(state, queued, speaker_id, rally_announce);
+                return finish_order(state, queued, speaker_id, rally_announce, None);
             }
             if context_actions_enabled
                 && let Some(target) = hover.as_ref()
@@ -2555,7 +2581,7 @@ pub(crate) fn try_queue_context_order(
                         queued.extend(
                             order.map(|order| CommandEnvelope::new(owner_id, execute_tick, order)),
                         );
-                        finish_order(state, queued, speaker_id, rally_announce)
+                        finish_order(state, queued, speaker_id, rally_announce, None)
                     }
                     _ => true,
                 };
@@ -2588,7 +2614,7 @@ pub(crate) fn try_queue_context_order(
                             },
                         ));
                     }
-                    return finish_order(state, queued, speaker_id, rally_announce);
+                    return finish_order(state, queued, speaker_id, rally_announce, None);
                 }
             }
             // The cursor owner's What_Action distinguishes a different allied
@@ -2616,7 +2642,7 @@ pub(crate) fn try_queue_context_order(
                     || consumed_attack_action)
             {
                 return if consumed_building_action || consumed_attack_action {
-                    finish_order(state, queued, speaker_id, rally_announce)
+                    finish_order(state, queued, speaker_id, rally_announce, None)
                 } else {
                     false
                 };
@@ -2707,6 +2733,9 @@ pub(crate) fn try_queue_context_order(
                 // A dispatched release selects nothing, whatever each
                 // receiver sends (`0x004ABE88`).
                 consumed_attack_action = true;
+            }
+            if attack_target.is_none() && force_move_target.is_none() {
+                planning_cell = Some((target_rx, target_ry));
             }
             for stable_id in selected_units {
                 let payload = if let Some(target_id) = attack_target {
@@ -2843,7 +2872,7 @@ pub(crate) fn try_queue_context_order(
         }
     }
 
-    finish_order(state, queued, speaker_id, rally_announce) || consumed_attack_action
+    finish_order(state, queued, speaker_id, rally_announce, planning_cell) || consumed_attack_action
 }
 
 /// A receiver's order when its ClickedAction on a Cell re-asks its What_Action
@@ -3172,8 +3201,8 @@ fn self_action(
         return None;
     }
     // Unit740023/740107: a unit in a tank bunker skips the transport arm
-    // and offers Deploy whenever CanDeploySlashUnload admits it; its Unload
-    // leaves the bunker (the DEPLOY event, `deploy::issue_order`).
+    // and offers Deploy whenever CanDeploySlashUnload admits it; its normal
+    // Unload mission releases the installed tank from the bunker.
     if entity.category() == EntityCategory::Unit && entity.bunker.link().installed_in().is_some() {
         return Some(Command::DeployMcv {
             entity_id: target.stable_id,
@@ -3193,12 +3222,10 @@ fn self_action(
     }
     if entity.category() == EntityCategory::Structure {
         // Building44731C..447358 keeps self action for cargo/garrisons or
-        // factory primary selection. Repacking is a cell-targeted order.
-        return if entity.bunker.occupant().is_some() {
-            Some(Command::EjectBunker {
-                bunker_id: target.stable_id,
-            })
-        } else if crate::sim::production::can_select_factory_primary(sim, rules, target.stable_id) {
+        // factory primary selection. The tank-bunker link is separate from
+        // those containers and does not grant the Building a self action.
+        // Repacking is a cell-targeted order.
+        return if crate::sim::production::can_select_factory_primary(sim, rules, target.stable_id) {
             // Building4472EC preserves Action4 only for a nonprimary
             // factory; Click443450..443494 queues this target's Event17.
             Some(Command::TogglePrimaryFactory {
@@ -3952,7 +3979,7 @@ fn shot_is_illegal(
 /// A query the sim cannot answer (no map cells) keeps Move: VERA-internal, as
 /// a live gamemd session always has a map.
 #[allow(clippy::too_many_arguments)]
-fn building_cell_orders(
+pub(super) fn building_cell_orders(
     sim: &crate::sim::world::Simulation,
     rules: &crate::rules::ruleset::RuleSet,
     registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
@@ -4306,6 +4333,45 @@ mod tests {
     use crate::sim::combat::Health;
     use crate::sim::game_entity::GameEntity;
     use crate::sim::world::Simulation;
+
+    #[test]
+    fn ordinary_attack_click_honors_techno_legal_target_but_ctrl_bypasses_it() {
+        let Some((_, assets)) = crate::rules::retail_ini_fixture::retail_assets() else {
+            return;
+        };
+        let (rules, _, _, _) = crate::rules::retail_ini_fixture::retail_rules_owner(&assets)
+            .load_scenario(
+                crate::rules::process_owner::NativeScenarioRulesPrefix::Campaign(None),
+                &crate::rules::ini_parser::IniFile::from_str("[HTNK]\nLegalTarget=no\n"),
+            )
+            .unwrap()
+            .into_parts();
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 1);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let tank = sim
+            .spawn_object("MTNK", "Americans", 10, 10, 64, &rules)
+            .unwrap();
+        let target = sim
+            .spawn_object("HTNK", "Russians", 12, 10, 64, &rules)
+            .unwrap();
+        let ordinary = sim
+            .spawn_object("MTNK", "Russians", 12, 12, 64, &rules)
+            .unwrap();
+        let action = |target, forced| {
+            attack_action(
+                &sim,
+                &rules,
+                tank,
+                &TargetKind::Entity(target),
+                forced,
+                None,
+            )
+        };
+        assert_ne!(action(target, false), AttackAction::Attack);
+        assert_eq!(action(target, true), AttackAction::Attack);
+        assert_eq!(action(ordinary, false), AttackAction::Attack);
+    }
 
     /// Without resolved terrain the attack cursor asks the shared mapless
     /// range (`sim::combat::mapless_in_range`), as the fire gate and the
@@ -7418,6 +7484,10 @@ mod retail_inactive_unit_tests;
 #[cfg(test)]
 #[path = "context_order_retail_self_deploy_tests.rs"]
 mod retail_self_deploy_tests;
+
+#[cfg(test)]
+#[path = "building_bunker_self_click_tests.rs"]
+mod building_bunker_self_click_tests;
 
 #[cfg(test)]
 #[path = "context_order_retail_ifv_repair_tests.rs"]
