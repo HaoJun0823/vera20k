@@ -126,7 +126,7 @@ each step is a command rather than a house-state write:
 | Raise the teams its triggers pick | the house's own team block (`HouseClass::Update`, `0x004F8A00`), asked as a state intent and applied by the control board through `sim::ai_team_creation` | — (no command) |
 | Ask for a combat unit | `AI_Choose_Unit 0x004F4D40`'s Unit, Infantry and Aircraft branches over the house's forming teams (`TeamClass::Get_Needed_Types`) | `QueueProduction` |
 | Send the army at the nearest enemy object | what an attack click on that object means; native's teams and their scripts are absent. Targets are houses this one is at war with — the ally graph's complement — never a `MultiplayPassive` house, which owns the map's tech buildings, garrisonable houses and parked cars | `Attack` |
-| Send an engineer to the nearest capturable building | what an engineer click on that building means | `CaptureBuilding` |
+| Send an engineer or a spy into the nearest building it may take | what a Capture click on that building means; `InfantryClass::PerCellProcess` decides between capturing and infiltrating on arrival | `CaptureBuilding` |
 
 ### Two switches
 

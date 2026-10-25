@@ -120,7 +120,7 @@ impl Brain for RetailBrain {
     fn think(&mut self, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
         expand::deploy_yard_maker(self, rules, obs, out);
         build::spend(self, rules, obs, out);
-        orders::engineers(self, rules, obs, out);
+        orders::captures(self, rules, obs, out);
         // A house that is pushing owns its whole army for the frame; one that
         // is not keeps holding its base.
         if !advance::advance(self, rules, obs, out) {
