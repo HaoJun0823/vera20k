@@ -65,6 +65,11 @@ pub(crate) enum HotkeyCommand {
     /// VERA's own: flip only the forces half of an installed host, so the base
     /// keeps building while the player takes the troops back, or the other way.
     ToggleAutoPlayForces,
+    /// VERA's own: the production half on its own, the mirror of
+    /// [`Self::ToggleAutoPlayForces`]. With both keys bound the player has two
+    /// independent switches — the base and the army — and
+    /// [`Self::ToggleAutoPlay`] stays the one key that runs both.
+    AutoPlayBuild,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

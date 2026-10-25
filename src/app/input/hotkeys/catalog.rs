@@ -41,7 +41,7 @@ pub(crate) fn registered_commands() -> &'static [CommandMetadata] {
 /// commands. The CSF has no entry, so the page shows the key itself.
 pub(crate) const VERA_CATEGORY_KEY: &str = "vera20k";
 
-const REGISTERED_COMMANDS: [CommandMetadata; 89] = [
+const REGISTERED_COMMANDS: [CommandMetadata; 90] = [
     command!(
         HotkeyCommand::Follow,
         "Follow",
@@ -760,6 +760,17 @@ const REGISTERED_COMMANDS: [CommandMetadata; 89] = [
         "VERA:AutoPlayForces",
         "vera20k",
         "VERA:AutoPlayForcesDesc",
+        None
+    ),
+    // The production half on its own, the mirror of the forces key: bound
+    // together they are two independent switches, and the master key above
+    // remains the one that runs both.
+    command!(
+        HotkeyCommand::AutoPlayBuild,
+        "AutoPlayBuild",
+        "VERA:AutoPlayBuild",
+        "vera20k",
+        "VERA:AutoPlayBuildDesc",
         None
     ),
 ];

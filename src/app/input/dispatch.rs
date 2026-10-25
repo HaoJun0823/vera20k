@@ -1832,39 +1832,69 @@ const AUTO_PLAY_POLICY_SEED: u64 = 0x5EED_2_1;
 /// and the residuals.
 fn toggle_auto_play(state: &mut AppState) {
     let previous = state.match_state.auto_play.take();
-    let installing = previous.is_none();
-    if installing {
-        let Some(owner) = state
-            .match_state
-            .sim_runtime
-            .as_ref()
-            .and_then(|runtime| runtime.simulation.session().current_house())
-        else {
-            return;
-        };
-        state.match_state.auto_play = Some(crate::sim::autoplay::AutoPlayHost::new(
-            Box::new(crate::sim::strategy::retail::RetailBrain::new(
-                AUTO_PLAY_POLICY_SEED,
-            )),
-            owner,
-            AUTO_PLAY_COMMANDS_PER_FRAME,
-        ));
+    if previous.is_none() {
+        install_auto_play(
+            state,
+            crate::sim::control::board::AutoPlayDomains::ALL,
+        );
     }
     post_auto_play_state(state);
 }
 
-/// The second switch: the forces half alone. Turning it off leaves the base
-/// building and stops new unit orders; orders already given keep running, so
-/// the player can take the troops back without them dropping their work.
-fn toggle_auto_play_forces(state: &mut AppState) {
-    let Some(host) = state.match_state.auto_play.as_mut() else {
-        // Without a host there is nothing to flip; say so rather than install one.
-        crate::app::input::messages::post_selection_navigation_text(state, "Auto play off");
+/// Install a host running `domains`. `false` when there is no house to drive.
+fn install_auto_play(
+    state: &mut AppState,
+    domains: crate::sim::control::board::AutoPlayDomains,
+) -> bool {
+    let Some(owner) = state
+        .match_state
+        .sim_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.simulation.session().current_house())
+    else {
+        return false;
+    };
+    let mut host = crate::sim::autoplay::AutoPlayHost::new(
+        Box::new(crate::sim::strategy::retail::RetailBrain::new(
+            AUTO_PLAY_POLICY_SEED,
+        )),
+        owner,
+        AUTO_PLAY_COMMANDS_PER_FRAME,
+    );
+    host.set_domains(domains);
+    state.match_state.auto_play = Some(host);
+    true
+}
+
+/// One half's switch, so the base and the army are two decisions.
+///
+/// With no host running it installs one on that half alone; with one running
+/// it flips that half; and with both halves off it takes the host down, so the
+/// two keys never leave a host driving nothing. Turning the forces half off
+/// stops new unit orders while orders already given keep running, so a player
+/// can take the troops back without the units dropping their work.
+fn toggle_auto_play_half(state: &mut AppState, production: bool) {
+    let Some(mut host) = state.match_state.auto_play.take() else {
+        install_auto_play(
+            state,
+            crate::sim::control::board::AutoPlayDomains {
+                production,
+                forces: !production,
+            },
+        );
+        post_auto_play_state(state);
         return;
     };
     let mut domains = host.domains();
-    domains.forces = !domains.forces;
-    host.set_domains(domains);
+    if production {
+        domains.production = !domains.production;
+    } else {
+        domains.forces = !domains.forces;
+    }
+    if domains.production || domains.forces {
+        host.set_domains(domains);
+        state.match_state.auto_play = Some(host);
+    }
     post_auto_play_state(state);
 }
 
@@ -1963,7 +1993,8 @@ fn dispatch_retail_hotkey(state: &mut AppState, command: HotkeyCommand) {
         // VERA's own: auto play is on while a host is installed; the second key
         // flips only the forces half.
         HotkeyCommand::ToggleAutoPlay => toggle_auto_play(state),
-        HotkeyCommand::ToggleAutoPlayForces => toggle_auto_play_forces(state),
+        HotkeyCommand::AutoPlayBuild => toggle_auto_play_half(state, true),
+        HotkeyCommand::ToggleAutoPlayForces => toggle_auto_play_half(state, false),
         HotkeyCommand::ScatterObject => queue_scatter_for_selected(state),
         HotkeyCommand::AllToCheer => queue_house_cheer(state),
         HotkeyCommand::VeterancyNav => selection_navigation::execute_category_navigation(
