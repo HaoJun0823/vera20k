@@ -11,12 +11,12 @@
 //! Three jobs, in this order each frame:
 //!
 //! - **Get a base started**: deploy the MCV, so the yard exists to build
-//!   from ([`expand`]).
+//!   from, and buy another one back when the yard is gone ([`expand`]).
 //! - **Spend the money**: place what the yard has finished, start the next
-//!   structure, keep the factories on harvesters and then on soldiers
-//!   ([`build`]). That module holds the economy; it is this brain's own,
-//!   because the native one is a computer house's and comes with money the
-//!   house has not earned.
+//!   structure, keep the factories on harvesters and then on what the army is
+//!   short of ([`build`], over the job weights in `rules::unit_role`). That
+//!   module holds the economy; it is this brain's own, because the native one
+//!   is a computer house's and comes with money the house has not earned.
 //! - **Use what it has**: engineers take what they can capture, an army large
 //!   enough is sent at the enemy's base ([`advance`]), and while it is not,
 //!   an idle combat unit holds the base ([`orders`]).
@@ -31,7 +31,10 @@
 //!   losing keeps going. Each unit's actual fight is the sim's `AttackMove`
 //!   and `Guard`.
 //! - The army sees the whole map: fog honesty is still the open question
-//!   `docs/autoplay.md` records.
+//!   `docs/autoplay.md` records. So does the purchase: the enemy's composition
+//!   is read past the fog, and `unit_role` reads a type's warheads rather than
+//!   the armour it will actually meet, so a type's range against the enemy's
+//!   and what a turret can bring to bear are not in the ranking yet.
 //! - Target selection is one predicate, not the native one: another house's
 //!   object this house is at war with, nearest first, and only inside the
 //!   base radius.
