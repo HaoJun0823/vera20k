@@ -2316,7 +2316,10 @@ impl HouseState {
 
     /// Read-only snapshot of the four independent activation bytes. HouseState
     /// owns all runtime writes; consumers cannot replace the retained block.
-    pub(crate) const fn ai_activation(&self) -> HouseAiActivationLatches {
+    /// Public because a run's diagnosis ("was the AI trigger latch ever armed
+    /// for this house?") is a plain read of House+1EF..+1F3, not a decision a
+    /// policy layer makes.
+    pub const fn ai_activation(&self) -> HouseAiActivationLatches {
         self.ai_activation
     }
 

@@ -33,6 +33,24 @@
 //!   has no retreat, no regrouping and no wave timing, so a push that is
 //!   losing keeps going. Each unit's actual fight is the sim's `AttackMove`
 //!   and `Guard`.
+//! - Who fights, measured (`autoplay-match --dump-teams`, pinned
+//!   `Death.mmx`/`0x5eed`): this house never has a native `TeamClass` at all —
+//!   `HouseClass::Update`'s team block is gated on the house not being human
+//!   (`ai_team_creation::update_team_creation`), which is native behaviour and
+//!   stays. The computer house does get teams, and their retail scripts run
+//!   (action ids 54/58/5 were observed mid-match), but only about two at a
+//!   time and roughly ten of its units are in them; none of its 165
+//!   `AITriggerTypes` produced a completed team by tick 6000. So on this side
+//!   this brain is the whole army, and no unit of ours is ever inside a team
+//!   for the native script and this module to fight over.
+//! - Three push variants were built, run end to end and reverted, because
+//!   each lost the match the current rule wins at tick 25636: per-unit targets
+//!   matched to a structure's defenders by `unit_role` weights (timeout at
+//!   36000, enemy still at 4), the fist aimed from the army's own centre
+//!   instead of its first fighter (timeout, enemy 4), and one target held
+//!   until destroyed (timeout, enemy 11). The push is sensitive to the exact
+//!   target sequence, so a change here needs a better model of *why* the
+//!   current sequence works before it can be replaced.
 //! - The army sees the whole map: fog honesty is still the open question
 //!   `docs/autoplay.md` records. So does the purchase: the enemy's composition
 //!   is read past the fog, and `unit_role` reads a type's warheads rather than

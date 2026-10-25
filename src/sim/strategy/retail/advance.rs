@@ -6,12 +6,22 @@
 //! so without this module its army sits on area guard for the whole match and
 //! the house can only lose by attrition.
 //!
-//! This is the player's substitute, and deliberately one rule: when the army
-//! is large enough to be worth spending, every idle fighting unit is sent at
-//! the enemy structure nearest it. What it shoots on the way, and whether it
-//! holds what it took, stay the sim's own `AttackMove` and `Guard`
-//! behaviours: this module decides *when* to push and *where*, not how to
-//! fight.
+//! This is the player's substitute, and deliberately two rules. The first is
+//! *when*: an army large enough to be worth spending, a base that can replace
+//! it, and nothing already at the yard. The second is *where*: one structure
+//! for the whole army — the enemy economy structure nearest the first fighter
+//! in entity-store order — because a fist takes a base, and units that walk
+//! at their own nearest building arrive one at a time and die one at a time.
+//!
+//! One goal for the army is a measurement, not a preference. Three variants
+//! were run end to end against the pinned `Death.mmx` match and all three
+//! lost the push the current rule wins: aiming each unit at the structure its
+//! own weapons answer best, aiming the fist from the army's centre instead of
+//! that first fighter, and holding one target until it is destroyed instead
+//! of re-reading the nearest one each frame (`super::RESIDUALS` has the
+//! ticks). What it shoots on the way, and whether it holds what it took, stay
+//! the sim's own `AttackMove` and `Guard` behaviours: this module decides
+//! *when* to push and *where*, not how to fight.
 //!
 //! While it is pushing it owns the whole army, so the area-guard step stands
 //! down for the frame; a house that has not got an army yet keeps holding its

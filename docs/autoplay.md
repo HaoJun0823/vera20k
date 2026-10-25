@@ -92,7 +92,7 @@ Timing the agent must be written against:
 | `src/sim/control/brain.rs` | Implemented: `Brain` and `Outbox`, the decision port. Declared on the L2 side so L2 never names a brain. See [the AI layers](ai-layers.md). |
 | `src/sim/control/board.rs` | Implemented: `ControlBoard::step` — state requests → decisions → managed stepping → gate → `queue_commands`, with the two domain switches and the per-frame budget. The gate reuses `Simulation::entity_owned_by_id` and `Simulation::order_actor_admits` rather than restating them, and refuses any command whose actor is one of the player's control groups. Its four counts are logged every ten seconds, because "the brain does nothing" and "the brain is refused" look the same from the screen. |
 | `src/sim/behavior/` | Implemented: the L1 execution layer — the `Goal` vocabulary, the single `Funnel` with its readiness gate, `ObjectView`/`ThreatView`, and the managed routine contract. |
-| `src/sim/strategy/retail/` | Implemented: `RetailBrain`, the retail decision layer. It generates the native BasePlan with `recalc_base_plan` from its own `BasePlanState` and `SimRng`, adopts a base that already stands, and answers in orders and intents: deploy the Construction Yard maker, queue the first open node's type, splice a power plant ahead of a node whose drain would black the house out, place the finished product, count the node satisfied, keep the harvesters `AI_Choose_Unit`'s branch asks for, ask its factories for combat units, send the army at the nearest enemy object, and raise the teams its own selector picks. It also carries a way back from a lost yard: buy the maker the factories can still make, drive it to a cell that admits the yard before pressing D, and pay for the maker's own `Prerequisite=` while the wallet is rich. See [the retail policy chain](#the-retail-policy-chain). |
+| `src/sim/strategy/retail/` | Implemented: `RetailBrain`, the retail decision layer. It generates the native BasePlan with `recalc_base_plan` from its own `BasePlanState` and `SimRng`, adopts a base that already stands, and answers in orders and intents: deploy the Construction Yard maker, queue the first open node's type, splice a power plant ahead of a node whose drain would black the house out, place the finished product, count the node satisfied, keep the harvesters `AI_Choose_Unit`'s branch asks for, ask its factories for combat units, send the army at the nearest enemy object. It raises no `TeamClass` of its own: the native team block is gated on the house not being human, so there is no team for this brain to raise (measured, see [the native team pipeline, measured](#the-native-team-pipeline-measured)). It also carries a way back from a lost yard: buy the maker the factories can still make, drive it to a cell that admits the yard before pressing D, and pay for the maker's own `Prerequisite=` while the wallet is rich. See [the retail policy chain](#the-retail-policy-chain). |
 | `src/rules/unit_role.rs` | Implemented: what each type is *for*, derived from the rules rather than from a table of names — the type's warheads' `Verses=` read into seven job weights (anti-infantry, anti-vehicle, anti-structure, anti-air, scout, artillery, support), with armour classes bracketed by what retail's warheads actually do. A type carries several weights at once, and `answer(need)` ranks the roster against one composition. A mod that retunes a warhead moves the weights; nothing here lists mod content. |
 | `src/sim/autoplay/scripted_policy.rs` | Implemented: `ScriptedPolicy`, a fixed `(frame, Command)` schedule — a test brain, not what the hotkey installs. |
 | `src/sim/autoplay/host.rs` | Implemented: `AutoPlayHost`, the facade the client holds. It forwards to `ControlBoard` and exposes the domain switch, the brain name, the rejection counts and the managed table. |
@@ -123,12 +123,49 @@ each step is a command rather than a house-state write:
 | Make another yard maker after losing the yard | `UnitClass::Deploy 0x007393C0`'s lifted `CanPlaceAt` for the site; retail `[AMCV] Prerequisite=GAWEAP,GADEPT` | `QueueProduction`, `Move`, `DeployMcv` |
 | Make what the house's own teams need | `HouseClass::Suggest_New_Object 0x004FBD80`, whose slot `HouseClass::Update` fills from `TeamClass::Get_Needed_Types` over `AIMD.INI`'s TaskForces — an engineer, a spy or a transport is only ever asked for here. For a human house `Factory_AI` never reads the slot, so the policy reads it | `QueueProduction` |
 | Buy what the army is short of, when no team asked | no native body: the enemy's composition against the army's job weights (`rules::unit_role` + `build::shortfall`) | `QueueProduction` |
-| Raise the teams its triggers pick | the house's own team block (`HouseClass::Update`, `0x004F8A00`), asked as a state intent and applied by the control board through `sim::ai_team_creation` | — (no command) |
+| Raise the teams its triggers pick | not built, and not reachable as a command: `HouseClass::Update`'s team block (`0x004F8A00`) is gated on the house not being human, so it never runs here. `sim::ai_team_creation` is called once per house per frame from `HouseClass::Update` itself and has no intent or command behind it. See [the native team pipeline, measured](#the-native-team-pipeline-measured) | — (unreachable) |
 | Ask for a combat unit | `AI_Choose_Unit 0x004F4D40`'s Unit, Infantry and Aircraft branches over the house's forming teams (`TeamClass::Get_Needed_Types`) | `QueueProduction` |
 | Send the army at the nearest enemy object | what an attack click on that object means; native's teams and their scripts are absent. Targets are houses this one is at war with — the ally graph's complement — never a `MultiplayPassive` house, which owns the map's tech buildings, garrisonable houses and parked cars | `Attack` |
 | Send an engineer, or a spy at what is worth the walk, into a building it may take | what a Capture click on that building means; `InfantryClass::PerCellProcess` decides between capturing and infiltrating on arrival. The two clicks differ in what they accept — `Capturable=` for an engineer, `Spyable=` for a spy (`InfantryClass::What_Action_OnObject 0x0051EE3B..0x0051EEEF`) — and the spy's order of targets follows `AIMD.INI`'s own spy teams (`General Spy vs Soviet Power` before `vs Allied War`, `vs Sov Tech`) | `CaptureBuilding` |
 | Walk an engineer into a `BridgeRepairHut=` whose span is down | the engineer's PerCell entry into the hut, which is the only thing that rebuilds a bridge: no timer, no `Capturable=`, no other command reaches it | `CaptureBuilding` |
 | Garrison a building near home | `BuildingClass::CanBeOccupiedBy 0x00457CE0` decides whether this `Occupier=` infantryman may walk in; the entry itself is the same Enter click a player makes | `MegaMission { Enter }` |
+
+### The native team pipeline, measured
+
+`autoplay-match --dump-teams <frames>` prints, every 600 frames and at the end,
+each side's activation latches, chosen enemy, live `TeamClass` count, the units
+they hold, each team's TeamType/script/cursor/current action, and how many
+orderable non-building units stand outside every team. It is read-only: it
+walks `TeamScriptVm::teams_in_order`, `team_for_member` and the entity store,
+and never steps the simulation. The same run answers "who is fighting".
+
+On the pinned match (`Death.mmx`, seed `0x5eed`, normal difficulty):
+
+| Frame | Player (this brain) | Computer house |
+|---|---|---|
+| 0 | 0 teams, 13 loose | 0 teams, 17 loose |
+| 600 | 0 teams, 12 loose, `ai_triggers_active=false` | 0 teams, 16 loose, `ai_triggers_active=true`, enemy = Player |
+| 3000 | 0 teams, 13 loose | 1 team, 5 members, action `-1` (forming) |
+| 3600 | 0 teams, 13 loose | 1 team, 8 members, action 54 |
+| 4800 | 0 teams, 14 loose | 1 team, 8 members, action 5 |
+| 6000 | 0 teams, 15 loose | 2 teams, 10 members, 12 loose |
+
+So: this house never has a native team at all — `HouseClass::Update`'s team
+block refuses a human house (`ai_team_creation::update_team_creation`'s
+`is_controlled_by_human`), which is native behaviour and stays. The computer
+house does get teams and its retail scripts do advance (54 → 58 → 5), but two
+teams at a time and about ten of its units inside them. None of its 165
+registered `AITriggerTypes` had produced a completed team by frame 6000, which
+is the trigger table's own accounting (`RegisterSuccess`/`RegisterFailure` run
+when a team ends), not proof that no trigger ever fired.
+
+Consequences for the brain: it is the whole army on this side, no unit of ours
+is ever inside a team, and there is nothing for the native script and this
+module to fight over. The script surface is not the gap either: of the 20
+action ids the retail team scripts referenced by `AIMD.INI`'s `[TeamTypes]`
+actually use (`0,5,6,8,9,11,14,21,43,46,47,49,53,54,55,57,58,61,62,63`), all 20
+are implemented in `team_script_vm/actions.rs`; the 25 implemented ids retail's
+team scripts never reference are transport, entry and camera steps.
 
 ### Two switches
 
@@ -447,6 +484,33 @@ The seam is in place, and the base-building half of the retail policy now occupi
 - No native comparison: this is not a port. If a later stage ports policy from gamemd,
   that stage states its own evidence level per the project contract.
 
+## The push, measured
+
+`advance` sends the whole army at one structure: the enemy economy structure
+nearest the first fighter in entity-storage order. Three attempts to make that
+rule smarter were run end to end on the pinned match and all three lost the
+attack the current rule wins at frame 25636, so all three were reverted:
+
+| Variant | Result |
+|---|---|
+| Current rule | won at 25636 (46 own entities, 2 enemy) |
+| Each unit aimed at the structure whose defenders its own `unit_role` weights answer best | timeout at 36000, 4 enemy entities left |
+| The fist aimed from the army's centre instead of its first fighter | timeout at 36000, 4 enemy entities left |
+| One target held until destroyed instead of re-reading the nearest each frame | timeout at 36000, 11 enemy entities left |
+
+Each order carries the target's cell, so a target that moves re-tasks units
+that are already on the road; that is the mechanism the second and third
+variants were meant to exploit and the first was meant to avoid, and the
+measurements say the current sequence is not something a plausible local
+change improves. Replacing it needs a model of why it wins — which target is
+chosen in which frames — rather than another ranking of the same candidates.
+
+The reference match on the other difficulty tier loses: `--difficulty hard` on
+the same map and seed ends `lost at 32019`, and has done so independently of
+this pass, which only adds read-only queries. That is the gap this measurement
+leaves open: the push is tuned by outcome on one tier, not by a model that
+would explain both.
+
 ## Open questions
 
 - Does the host belong in the app frame loop only, or also inside the headless runner as
@@ -454,5 +518,6 @@ The seam is in place, and the base-building half of the retail policy now occupi
 - Should `max_per_frame` be native-derived or a plain configurable cap? Unknown native
   equivalent; propose a plain cap and record the residual.
 - Does an agent-driven house need `is_human` left untouched? Assumed yes — the computer
-  AI gates on `is_controlled_by_human` (`src/sim/house_state.rs:2255`) and must stay off
-  for a player house, or two owners would drive one house.
+  AI gates on `HouseState::is_controlled_by_human` (`src/sim/house_state.rs`), and with
+  the measured result above the whole native team block stays off for a player house. If
+  that ever changed, two owners would drive one house.

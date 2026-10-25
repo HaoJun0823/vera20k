@@ -131,7 +131,10 @@ pub(super) fn squared_xy_distance(from: [i32; 2], to: [i32; 2]) -> i32 {
 impl TeamScriptState {
     /// The current action (`ScriptClass::Current @ 0x00691500`): -1 before
     /// the first.
-    pub(crate) fn current_action(&self, vm: &super::TeamScriptVm) -> i32 {
+    ///
+    /// Public so a run can report which action a live team is parked on: it is
+    /// a pure read of the script definition and the cursor.
+    pub fn current_action(&self, vm: &super::TeamScriptVm) -> i32 {
         script_action_at(vm.scripts.get(&self.script_id), self.cursor)
             .map_or(-1, |action| action.action_id)
     }
