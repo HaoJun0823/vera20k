@@ -43,6 +43,17 @@ impl AutoPlayHost {
         self.board.set_domains(domains);
     }
 
+    /// The objects the player has taken back, by stable id.
+    pub fn excluded(&self) -> &std::collections::BTreeSet<u64> {
+        self.board.excluded()
+    }
+
+    /// Replace the player's own set: a control group is a promise that the
+    /// unit stays where the player put it, so auto play orders none of these.
+    pub fn set_excluded(&mut self, excluded: std::collections::BTreeSet<u64>) {
+        self.board.set_excluded(excluded);
+    }
+
     /// The house every issued command is stamped with. Not necessarily the
     /// local player's: a computer house can be driven the same way.
     pub fn owner(&self) -> InternedId {

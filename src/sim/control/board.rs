@@ -24,6 +24,8 @@
 //! contract. The board writes no simulation state except through the owners it
 //! calls, and owns no gameplay rule.
 
+use std::collections::BTreeSet;
+
 use crate::rules::ruleset::RuleSet;
 use crate::sim::behavior::managed::{FallbackReason, MicroKind, MicroParams};
 use crate::sim::behavior::order::{ApplyOutcome, Funnel};
@@ -119,6 +121,11 @@ pub struct ControlBoard {
     domains: AutoPlayDomains,
     budget: Budget,
     micro: MicroTable,
+    /// Objects the player has taken back. One of these is the player's to
+    /// command: a control group is a promise that the unit will still be
+    /// where the player put it, so this board orders it nothing at all and
+    /// leaves any order it already had alone.
+    excluded: BTreeSet<u64>,
     /// Commands the gate dropped, and orders the funnel called not-ready.
     /// Diagnostics: the queue is the authority, not these counts.
     rejected: usize,
@@ -132,6 +139,7 @@ impl ControlBoard {
             owner,
             domains: AutoPlayDomains::ALL,
             budget: Budget::new(max_commands_per_frame),
+            excluded: BTreeSet::new(),
             micro: MicroTable::default(),
             rejected: 0,
             not_ready: 0,
@@ -153,6 +161,17 @@ impl ControlBoard {
     /// its own; what is already queued in the simulation keeps running.
     pub fn set_domains(&mut self, domains: AutoPlayDomains) {
         self.domains = domains;
+    }
+
+    /// The objects the player has taken back, by stable id.
+    pub fn excluded(&self) -> &BTreeSet<u64> {
+        &self.excluded
+    }
+
+    /// Replace the player's own set: a control group is a promise that the
+    /// unit stays where the player put it, so the board orders none of these.
+    pub fn set_excluded(&mut self, excluded: BTreeSet<u64>) {
+        self.excluded = excluded;
     }
 
     /// The brain driving the house, for diagnostics.
@@ -254,6 +273,20 @@ impl ControlBoard {
 
         // 4. One ingress, stamped for this frame.
         let execute_tick = sim.session().tick();
+        // One line every ten seconds in the log the client already writes:
+        // "the brain does nothing" and "the brain is refused" look the same
+        // from the screen, and only these four counts tell them apart.
+        if execute_tick % 600 == 0 {
+            log::info!(
+                "auto play: tick={execute_tick} owner={owner_name} production={} forces={} queued={} rejected={} not_ready={} excluded={}",
+                self.domains.production,
+                self.domains.forces,
+                pending.len(),
+                self.rejected,
+                self.not_ready,
+                self.excluded.len()
+            );
+        }
         let envelopes = pending
             .into_iter()
             .map(|command| CommandEnvelope::new(owner, execute_tick, command));
@@ -367,10 +400,19 @@ impl ControlBoard {
         pending: &mut Vec<Command>,
     ) -> bool {
         if !self.domains.admits(command) || !admits(sim, owner_name, command) {
+            log::debug!("auto play: refused by the gate {command:?}");
+            self.rejected += 1;
+            return false;
+        }
+        // The player's own objects: a unit in a control group stays under the
+        // player's hand, whatever half of the work is switched on.
+        if actor_of(command).is_some_and(|actor| self.excluded.contains(&actor)) {
+            log::debug!("auto play: refused, the player owns {command:?}");
             self.rejected += 1;
             return false;
         }
         if !self.budget.try_command() {
+            log::debug!("auto play: refused, the frame budget is spent {command:?}");
             self.rejected += 1;
             return false;
         }

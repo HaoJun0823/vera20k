@@ -945,7 +945,14 @@ fn advance_in_game_runtime_mode(
             // Factory while drawing, so the drawn state follows the simulation
             // even when no pass, input or flash window rebuilt the projection
             // this frame.
-            if recheck || flashing {
+            // Auto play issues the same commands a player's clicks issue, but it
+            // writes none of the app-side request words a click writes, and a
+            // cameo's membership, queue and readiness are only rebuilt by a
+            // full projection pass. Without this the sidebar shows nothing
+            // while the house builds, which reads as the house doing
+            // something it may not.
+            let auto_playing = state.match_state.auto_play.is_some();
+            if recheck || flashing || auto_playing {
                 // The rebuilt view takes the same drawn state.
                 crate::app::presentation::sidebar_render::refresh_sidebar_projection(state);
             } else {
@@ -1102,6 +1109,17 @@ fn advance_one_simulation_frame(
         let mut hud_messages = Vec::new();
         // Carried out of the sim borrow so the census can read `state` freely below.
         let mut census_tick: Option<u64> = None;
+        // The player's own units, gathered before the runtime borrow: a unit in
+        // one of the player's control groups is the player's, and auto play
+        // must leave it alone.
+        let player_owned: std::collections::BTreeSet<u64> = state
+            .match_state
+            .input
+            .control_groups
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
         if let Some(rt) = state.match_state.sim_runtime.as_mut() {
             let sim = &mut rt.simulation;
             let native_frame = sim.session().binary_frame();
@@ -1126,6 +1144,7 @@ fn advance_one_simulation_frame(
             if drains_this_frame
                 && let Some(host) = state.match_state.auto_play.as_mut()
             {
+                host.set_excluded(player_owned.clone());
                 host.step(sim, &rt.resources.rules);
             }
             let due_commands = if drains_this_frame {
