@@ -610,6 +610,8 @@ mod tests {
         let gi = sim
             .spawn_object("E1", "Americans", 10, 12, 64, &rules)
             .expect("a GI");
+        // Above `ConditionRed`: a bunker at red health admits nobody, the same
+        // rule the sim's own garrison ask enforces.
         let bunker = sim
             .spawn_object("NABNKR", "Americans", 12, 12, 64, &rules)
             .expect("a battle bunker");

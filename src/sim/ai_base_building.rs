@@ -1112,11 +1112,15 @@ pub(crate) fn suggested_product<'r>(
     owner: InternedId,
     category: ObjectCategory,
 ) -> Option<&'r ObjectType> {
+    // No producer in hand, so the ordinary slot: `producer_naval` is the
+    // producing building's own `Naval=`, and a caller that has not named one
+    // reads `+0x5650`, which is what an ordinary build reads.
     suggest_new_object(
         sim,
         rules,
         owner,
         FactoryType::for_category(category).production_rtti(),
+        false,
     )
 }
 

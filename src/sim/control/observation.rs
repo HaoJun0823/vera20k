@@ -412,8 +412,12 @@ impl<'a> Observation<'a> {
             if !ty.can_be_occupied {
                 return None;
             }
-            let cargo = entity.passenger_role.cargo()?;
-            let room = cargo.capacity().saturating_sub(cargo.count());
+            // A structure holds garrison occupants, not transport cargo:
+            // `passenger_role.cargo()` is the transport's `Passengers=` list and
+            // is absent on a building, which would leave every bunker off the
+            // list. The room here is `MaxOccupants=` minus who is inside.
+            let taken = u32::try_from(entity.passenger_role.occupants().count()).unwrap_or(u32::MAX);
+            let room = ty.max_number_occupants.saturating_sub(taken);
             if room == 0 {
                 return None;
             }
