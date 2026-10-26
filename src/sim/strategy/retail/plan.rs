@@ -144,6 +144,11 @@ pub(super) fn budget(
 /// One kind of structure the list asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Item {
+    /// Not an entry of [`STEPS`]: power is spliced in ahead of the list, the way
+    /// native `AI_Choose_Building` (`0x004FE6F6..0x004FE943`) does it, because a
+    /// brownout outranks every plan. It is a variant here so a spliced plant can
+    /// be named by the same answer type the list's own entries are.
+    Power,
     Refinery,
     Barracks,
     Weapons,
@@ -169,6 +174,11 @@ pub(super) enum Gate {
     /// The free wallet is past this. Throughput and tech are luxuries the base
     /// pays for out of a surplus, never out of the army's money.
     Free(i32),
+    /// The house is earning more than its lines can spend: a wallet that is big
+    /// once is luck ([`Gate::Free`]), an income the factories cannot turn into
+    /// army is a bottleneck, and a bottleneck is the honest reason to buy
+    /// throughput.
+    Surplus,
     /// The base can replace what a push spends: a barracks and a war factory
     /// both stand.
     CanReplace,
@@ -229,12 +239,12 @@ pub(super) const STEPS: &[Step] = &[
     Step {
         item: Item::Weapons,
         want: 3,
-        gate: Gate::Free(build::SURPLUS_CREDITS),
+        gate: Gate::Surplus,
     },
     Step {
         item: Item::Barracks,
         want: 2,
-        gate: Gate::Free(build::SURPLUS_CREDITS),
+        gate: Gate::Surplus,
     },
     // Tech: the plant an aircraft line needs, then the radar, then the lab.
     //
@@ -267,19 +277,70 @@ pub(super) const STEPS: &[Step] = &[
     },
 ];
 
-/// The structure the list wants now: the first entry whose gate is open and
-/// whose count is short, in list order.
-pub(super) fn next<'r>(
+/// The list's answer, and the entry of the list it came from.
+pub(super) struct Chosen<'r> {
+    /// The index of the step in [`STEPS`], which is what a hold names: an item
+    /// appears more than once (the first war factory is a `want` of one and the
+    /// second a `want` of three), and holding "a war factory" would hold the
+    /// wrong one. `None` for the spliced power plant, which is no step at all.
+    pub(super) step: Option<usize>,
+    pub(super) item: Item,
+    pub(super) ty: &'r ObjectType,
+    pub(super) type_id: InternedId,
+}
+
+/// The structure the list wants now, keeping the one it wanted before while
+/// `held` still stands.
+///
+/// A gate that opens on the wallet closes again as soon as the wallet is spent
+/// — [`Gate::Surplus`] is the obvious one — so a list that re-decides every
+/// frame answers a different entry on every dip: the surplus for a second
+/// factory became a defense the moment the wallet fell under the line, and the
+/// factory was never bought. A house does not do that. It decides and then
+/// saves for the thing it decided on, and that is what `held` is: the same
+/// entry, for as long as it is still short, whatever the wallet does in
+/// between.
+///
+/// Power is not held: it is spliced in ahead of this by the caller, because a
+/// brownout outranks every plan the house has.
+pub(super) fn answer<'r>(
     rules: &'r RuleSet,
     obs: &Observation<'_>,
     census: &Census,
     budget: &Budget,
-) -> Option<(&'r ObjectType, InternedId)> {
+    held: Option<usize>,
+) -> Option<Chosen<'r>> {
+    // A held entry that is no longer short, or that the house can no longer
+    // build, falls through to the list: the hold is a promise to save for
+    // something, not a promise to wait for something that is already there.
+    //
+    // The gate is deliberately not asked: the whole reason for the hold is
+    // that the gate has closed with the wallet that opened it.
+    if let Some(step) = held
+        && let Some(entry) = STEPS.get(step)
+        && owned(rules, obs, census, entry.item) < entry.want
+        && let Some((ty, type_id)) = pick(rules, obs, census, entry.item)
+    {
+        return Some(Chosen {
+            step: Some(step),
+            item: entry.item,
+            ty,
+            type_id,
+        });
+    }
     STEPS
         .iter()
-        .filter(|step| open(step.gate, rules, obs, census, budget))
-        .filter(|step| owned(rules, obs, census, step.item) < step.want)
-        .find_map(|step| pick(rules, obs, census, step.item))
+        .enumerate()
+        .filter(|(_, step)| open(step.gate, rules, obs, census, budget))
+        .filter(|(_, step)| owned(rules, obs, census, step.item) < step.want)
+        .find_map(|(step, entry)| {
+            pick(rules, obs, census, entry.item).map(|(ty, type_id)| Chosen {
+                step: Some(step),
+                item: entry.item,
+                ty,
+                type_id,
+            })
+        })
 }
 
 /// Whether the base needs another plant, counting the plants that are still
@@ -328,6 +389,12 @@ fn open(
             census.harvesters >= build::HARVESTERS_PER_REFINERY * census.refineries.max(1)
         }
         Gate::Free(credits) => budget.free >= credits,
+        Gate::Surplus => {
+            budget.free >= build::SURPLUS_CREDITS
+                || budget
+                    .income
+                    .is_some_and(|rate| rate >= build::SURPLUS_INCOME_PER_MINUTE)
+        }
         Gate::CanReplace => build::can_replace_units(rules, obs, census),
         Gate::Tech => {
             budget.free >= build::TECH_MIN_CREDITS && census.fighters >= build::ARMY_FOR_TECH
@@ -338,6 +405,9 @@ fn open(
 /// How many of `item` the house has.
 fn owned(rules: &RuleSet, obs: &Observation<'_>, census: &Census, item: Item) -> usize {
     match item {
+        // Never asked of the list: power is spliced in by the caller and is
+        // short whenever the base says so, not after a count.
+        Item::Power => 0,
         Item::Refinery => census.refineries,
         Item::Barracks => build::count_in(obs, rules, census, &rules.build_barracks_types),
         Item::Weapons => build::count_in(obs, rules, census, &rules.build_weapons_types),
@@ -363,6 +433,8 @@ fn pick<'r>(
     item: Item,
 ) -> Option<(&'r ObjectType, InternedId)> {
     match item {
+        // Never reached: [`answer`] only picks entries of [`STEPS`].
+        Item::Power => None,
         Item::Refinery => build::first_buildable(rules, obs, &rules.build_refinery_types),
         Item::Barracks => build::first_buildable(rules, obs, &rules.build_barracks_types),
         Item::Weapons => build::first_buildable(rules, obs, &rules.build_weapons_types),
@@ -438,5 +510,90 @@ mod tests {
         let budget = budget(&rules, &obs, &census, None);
         assert_eq!(budget.committed, obs.cost_of(&rules, ty));
         assert_eq!(budget.free, obs.credits().wrapping_sub(budget.committed));
+    }
+
+    fn ledger(rules: &RuleSet, sim: &Simulation, owner: InternedId) -> Census {
+        let mut census = Census::default();
+        census.refresh(
+            &crate::rules::unit_role::RoleTable::build(rules),
+            rules,
+            &Observation::new(sim, owner),
+        );
+        census
+    }
+
+    /// A base that has what the opening asks for and nothing spare: the second
+    /// war factory is not open to it, because the gate that buys throughput
+    /// answers a surplus and this house has none.
+    fn opening_base(seed: u64) -> Option<(Simulation, RuleSet, InternedId)> {
+        let (mut sim, rules) = arena(seed)?;
+        let owner = sim.interner.intern("Americans");
+        for (name, cell) in [
+            ("GACNST", (16u16, 16u16)),
+            ("GAPOWR", (12, 16)),
+            ("GAREFN", (20, 20)),
+            ("GAPILE", (24, 24)),
+            ("GAWEAP", (28, 28)),
+        ] {
+            sim.spawn_object(name, "Americans", cell.0, cell.1, 255, &rules)
+                .unwrap_or_else(|| panic!("{name}"));
+        }
+        sim.houses
+            .get_mut(&owner)
+            .expect("the house")
+            .economy_mut()
+            .set_credits_for_test(2_000);
+        Some((sim, rules, owner))
+    }
+
+    /// A gate that opens on the wallet closes again as soon as the wallet is
+    /// spent. The list is therefore not asked afresh every frame: the entry it
+    /// decided on is held, and answered even though its own gate has shut —
+    /// that is the house saving for what it chose instead of spending the
+    /// savings on whichever entry a flickering gate answers next.
+    /// The index in [`STEPS`] of the entry wanting `count` of `item`.
+    fn step_of(item: Item, count: usize) -> usize {
+        STEPS
+            .iter()
+            .position(|step| step.item == item && step.want == count)
+            .expect("the list has that entry")
+    }
+
+    #[test]
+    fn a_held_entry_answers_even_when_its_gate_has_closed() {
+        let Some((sim, rules, owner)) = opening_base(0xA17) else {
+            return;
+        };
+        let census = ledger(&rules, &sim, owner);
+        let obs = Observation::new(&sim, owner);
+        let budget = budget(&rules, &obs, &census, None);
+        assert!(
+            answer(&rules, &obs, &census, &budget, None)
+                .is_none_or(|chosen| chosen.item != Item::Weapons),
+            "a poor house with one war factory does not start another"
+        );
+        let second_factory = step_of(Item::Weapons, 3);
+        let held = answer(&rules, &obs, &census, &budget, Some(second_factory))
+            .expect("the hold answers the entry the house was saving for");
+        assert_eq!(held.step, Some(second_factory), "the second war factory");
+    }
+
+    /// And a hold is a promise to save for something, not a promise to wait for
+    /// something that already stands: an entry that is no longer short falls
+    /// through to the list.
+    #[test]
+    fn a_hold_on_something_that_now_stands_falls_through() {
+        let Some((sim, rules, owner)) = opening_base(0xA17) else {
+            return;
+        };
+        let census = ledger(&rules, &sim, owner);
+        let obs = Observation::new(&sim, owner);
+        let budget = budget(&rules, &obs, &census, None);
+        let first_barracks = step_of(Item::Barracks, 1);
+        assert!(
+            answer(&rules, &obs, &census, &budget, Some(first_barracks))
+                .is_none_or(|chosen| chosen.step != Some(first_barracks)),
+            "the barracks stands, and the house is done with it"
+        );
     }
 }

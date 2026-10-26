@@ -134,6 +134,11 @@ pub struct RetailBrain {
     /// cell, by type: a cell the gate admits but the receiver refuses must
     /// not be asked for again.
     pub(super) site_attempts: BTreeMap<InternedId, u32>,
+    /// The entry of the build list the house has decided on, as its index in
+    /// [`plan::STEPS`], and the frame the decision may be re-made: the house
+    /// saves for what it chose instead of spending the savings on whichever
+    /// entry a flickering gate answers next.
+    pub(super) plan_hold: Option<(usize, u64)>,
     /// What each type is for, read out of the warheads once and never
     /// changed. Built on the first frame, because the rules a scenario plays
     /// with are the ones the brain is handed there.
@@ -164,6 +169,7 @@ impl RetailBrain {
             tracked: Tracker::new(),
             squads: squads::Squads::new(),
             site_attempts: BTreeMap::new(),
+            plan_hold: None,
             roles: None,
             census: Census::default(),
             super_at: BTreeMap::new(),

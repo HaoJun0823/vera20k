@@ -39,7 +39,7 @@ use crate::sim::production::{CanBuild, ProductionCategory};
 
 use super::RetailBrain;
 use super::census::Census;
-use super::plan::{self, Budget};
+use super::plan::{self, Budget, Item};
 
 /// How many harvesters one refinery keeps busy. Two, not the rules'
 /// `HarvestersPerRefinery=`: the trip out and back is most of a harvester's
@@ -73,6 +73,25 @@ pub(super) const ARMY_FOR_TECH: usize = 8;
 /// another factory rather than another harvester.
 pub(super) const SURPLUS_CREDITS: i32 = 12_000;
 
+/// The income one production line can spend, in credits a minute, and so the
+/// income at which a second line is worth buying.
+///
+/// A line turns out a unit in its `Cost_Of` worth of frames: a 900-credit tank
+/// takes about forty-five seconds to build, which is 1 200 credits a minute.
+/// Two lines spend about 2 400. Past that the house is earning faster than its
+/// factories can turn it into army, and the wallet it cannot spend is the
+/// signal — not a round number the wallet happens to reach once.
+pub(super) const SURPLUS_INCOME_PER_MINUTE: i32 = 2_400;
+
+/// How long the build list's answer stands before it may answer a different
+/// entry, in frames: ten seconds.
+///
+/// Long enough to save for a structure the wallet cannot cover the frame it is
+/// chosen — a gate opens on a wallet that is then spent elsewhere — and short
+/// enough that a base which really has changed its mind (the defense it wanted
+/// now stands) is not held to a plan for a minute.
+pub(super) const BUILD_HOLD_FRAMES: u64 = 600;
+
 /// How many war factories and barracks a house with a surplus runs: an entry
 /// of [`super::plan::STEPS`], as the target counts above are.
 
@@ -87,7 +106,7 @@ pub(super) fn spend(
     out: &mut Outbox,
 ) {
     place_finished(brain, rules, obs, out);
-    build_next(rules, obs, &brain.census, budget, out);
+    build_next(brain, rules, obs, budget, out);
 }
 
 /// Place the structures the yard has finished: the click a player makes on
@@ -155,18 +174,38 @@ fn earns_its_keep(rules: &RuleSet, ty: &ObjectType) -> bool {
 
 /// Start the one structure the base needs most, while the yard is free.
 fn build_next(
+    brain: &mut RetailBrain,
     rules: &RuleSet,
     obs: &Observation<'_>,
-    census: &Census,
     budget: &Budget,
     out: &mut Outbox,
 ) {
-    if census.line(ProductionCategory::Building).product.is_some() {
+    if brain.census.line(ProductionCategory::Building).product.is_some() {
         return;
     }
-    let Some((ty, type_id)) = next_building(rules, obs, census, budget) else {
+    let tick = obs.tick();
+    let held = brain.plan_hold.filter(|(_, until)| tick < *until);
+    let Some(chosen) =
+        next_building(rules, obs, &brain.census, budget, held.map(|(step, _)| step))
+    else {
         return;
     };
+    // Power is spliced in ahead of the plan and held by nobody, so the entry
+    // the house was saving for still stands when the plant is paid for.
+    if let Some(step) = chosen.step {
+        // The hold is taken when the decision is made, not renewed while it
+        // stands: a hold that refreshed every frame would never expire, and
+        // the list would answer the same entry for the rest of the match.
+        brain.plan_hold = Some((
+            step,
+            match held {
+                Some((held_step, until)) if held_step == step => until,
+                _ => tick.saturating_add(BUILD_HOLD_FRAMES),
+            },
+        ));
+    }
+    let ty = chosen.ty;
+    let type_id = chosen.type_id;
     // A defense is made by the Defense factory, not the Buildings one, so the
     // guard above does not see it: a tower already on the line is queued again
     // on every frame of its build. Removing the repeats changes the match
@@ -186,7 +225,7 @@ fn build_next(
     // While the harvesters are still short, only what earns or powers waits
     // for nothing else: a radar bought before the second harvester is the
     // money the second harvester needed.
-    if !earns_its_keep(rules, ty) && harvester_reserve(rules, obs, census) > 0 {
+    if !earns_its_keep(rules, ty) && harvester_reserve(rules, obs, &brain.census) > 0 {
         return;
     }
     log::debug!(
@@ -194,7 +233,7 @@ fn build_next(
         ty.id,
         obs.credits(),
         obs.power_balance(),
-        census.fighters
+        brain.census.fighters
     );
     out.intent(Intent::QueueProduction { type_id });
 }
@@ -214,17 +253,23 @@ fn next_building<'r>(
     obs: &Observation<'_>,
     census: &Census,
     budget: &Budget,
-) -> Option<(&'r ObjectType, InternedId)> {
+    held: Option<usize>,
+) -> Option<plan::Chosen<'r>> {
     // A brownout is the one state that stops everything else: production
     // runs at a crawl and the defenses go offline. Whatever else the base
     // wants, a plant comes first, and it comes first even when nothing else
     // is left to build.
     if plan::power_short(rules, obs, census) {
-        if let Some(plant) = first_buildable(rules, obs, &rules.build_power_types) {
-            return Some(plant);
+        if let Some((ty, type_id)) = first_buildable(rules, obs, &rules.build_power_types) {
+            return Some(plan::Chosen {
+                step: None,
+                item: Item::Power,
+                ty,
+                type_id,
+            });
         }
     }
-    let (ty, type_id) = match plan::next(rules, obs, census, budget) {
+    let chosen = match plan::answer(rules, obs, census, budget, held) {
         Some(found) => found,
         // Nothing the base wants is buildable yet, and the house has no plant:
         // `Power=` plants are the prerequisite most structures hang off in the
@@ -232,20 +277,32 @@ fn next_building<'r>(
         // a plant. With a plant already standing there is nothing to add — the
         // house waits for whatever it is missing instead of building blindly.
         None if count_in(obs, rules, census, &rules.build_power_types) == 0 => {
-            first_buildable(rules, obs, &rules.build_power_types)?
+            let (ty, type_id) = first_buildable(rules, obs, &rules.build_power_types)?;
+            plan::Chosen {
+                step: None,
+                item: Item::Power,
+                ty,
+                type_id,
+            }
         }
         None => return None,
     };
     // `Power=` is the type's net contribution: negative is what it draws, and
     // the plant that would feed it is counted at the output it will have.
-    if plan::planned_output(rules, obs, census).wrapping_sub(obs.power_drain()) + ty.power.min(0)
+    if plan::planned_output(rules, obs, census).wrapping_sub(obs.power_drain())
+        + chosen.ty.power.min(0)
         < 0
     {
-        if let Some(plant) = first_buildable(rules, obs, &rules.build_power_types) {
-            return Some(plant);
+        if let Some((ty, type_id)) = first_buildable(rules, obs, &rules.build_power_types) {
+            return Some(plan::Chosen {
+                step: None,
+                item: Item::Power,
+                ty,
+                type_id,
+            });
         }
     }
-    Some((ty, type_id))
+    Some(chosen)
 }
 
 
@@ -473,8 +530,9 @@ mod tests {
         let census = ledger(&rules, &sim, owner);
         let obs = Observation::new(&sim, owner);
         let budget = plan::budget(&rules, &obs, &census, None);
-        let (ty, _) = plan::next(&rules, &obs, &census, &budget)
-            .expect("a base with nothing but a yard wants something");
+        let ty = plan::answer(&rules, &obs, &census, &budget, None)
+            .expect("a base with nothing but a yard wants something")
+            .ty;
         assert!(
             rules.build_refinery_types.iter().any(|name| name == &ty.id),
             "the first structure is the income: {}",
@@ -488,8 +546,9 @@ mod tests {
         let census = ledger(&rules, &sim, owner);
         let obs = Observation::new(&sim, owner);
         let budget = plan::budget(&rules, &obs, &census, None);
-        let (ty, _) = plan::next(&rules, &obs, &census, &budget)
-            .expect("a base with income wants the next thing");
+        let ty = plan::answer(&rules, &obs, &census, &budget, None)
+            .expect("a base with income wants the next thing")
+            .ty;
         assert!(
             rules.build_barracks_types.iter().any(|name| name == &ty.id),
             "the barracks comes before the war factory: {}",
@@ -558,8 +617,10 @@ mod tests {
         let obs = Observation::new(&sim, owner);
         let budget = plan::budget(&rules, &obs, &census, None);
         assert!(
-            plan::next(&rules, &obs, &census, &budget)
-                .is_none_or(|(ty, _)| !rules.build_refinery_types.iter().any(|name| name == &ty.id)),
+            plan::answer(&rules, &obs, &census, &budget, None).is_none_or(|chosen| !rules
+                .build_refinery_types
+                .iter()
+                .any(|name| name == &chosen.ty.id)),
             "a third refinery is not what the base builds next"
         );
     }
@@ -593,8 +654,10 @@ mod tests {
         let obs = Observation::new(&sim, owner);
         let budget = plan::budget(&rules, &obs, &census, None);
         assert!(
-            plan::next(&rules, &obs, &census, &budget)
-                .is_none_or(|(ty, _)| !rules.build_weapons_types.iter().any(|name| name == &ty.id)),
+            plan::answer(&rules, &obs, &census, &budget, None).is_none_or(|chosen| !rules
+                .build_weapons_types
+                .iter()
+                .any(|name| name == &chosen.ty.id)),
             "a poor house with one war factory does not start another"
         );
     }
