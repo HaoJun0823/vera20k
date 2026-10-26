@@ -141,6 +141,15 @@ pub(super) fn advance(
         if out.orders.iter().any(|order| order.actor == unit.entity_id) {
             continue;
         }
+        // The micro layer has this unit fighting something in reach, and the
+        // fight outranks the march. Its mission cannot say so yet — the order
+        // was issued this frame — so the intent table is what is asked.
+        if brain
+            .tracked
+            .stands(tick, unit.entity_id, &[super::tracked::TrackedKind::Engage])
+        {
+            continue;
+        }
         // Inside its own reach the unit shoots the structure from where it
         // stands; outside it, it walks. The goal is still the one target — this
         // is the same fist, ordered by what each unit can actually do.
@@ -186,7 +195,7 @@ pub(super) fn advance(
 
 /// The reach of a type's primary weapon in cells, rounded up; zero when it has
 /// none.
-fn weapon_range_cells(rules: &RuleSet, ty: &ObjectType) -> i32 {
+pub(super) fn weapon_range_cells(rules: &RuleSet, ty: &ObjectType) -> i32 {
     let Some(name) = ty.primary() else {
         return 0;
     };

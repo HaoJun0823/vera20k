@@ -41,6 +41,13 @@ pub(super) enum TrackedKind {
     Move,
     /// Attack one object.
     Attack,
+    /// What is in reach *this second*, decided by the micro layer.
+    ///
+    /// Separate from [`Self::Attack`] because it has to be able to override a
+    /// march and be overridden by one: its term is one micro cycle, so the
+    /// fight is re-decided every cycle and a unit that has finished fighting
+    /// is free again within one.
+    Engage,
     /// Attack-move to a cell: engage what is on the way, keep going.
     AttackMove,
     /// Hold the ground it stands on and answer what comes.
@@ -53,6 +60,11 @@ pub(super) enum TrackedKind {
     Deploy,
 }
 
+/// One micro cycle, in frames: a second at play cadence. The layer that
+/// decides what a unit shoots *now* re-decides on this term, so it can both
+/// override a march and hand the unit back to it quickly.
+pub(super) const MICRO_FRAMES: u64 = 15;
+
 impl TrackedKind {
     /// How long the intent stands before it may be issued again, in frames.
     ///
@@ -63,6 +75,7 @@ impl TrackedKind {
     fn term(self) -> u64 {
         match self {
             Self::Deploy => 45,
+            Self::Engage => MICRO_FRAMES,
             Self::Enter | Self::Capture => 300,
             Self::Move | Self::Attack | Self::AttackMove | Self::Guard => 450,
         }
@@ -154,12 +167,6 @@ impl Tracker {
                 until: now.saturating_add(kind.term()),
             },
         );
-    }
-
-    /// Forget what `unit` was told: it has been handed to a routine, or the
-    /// thing it was told about is gone.
-    pub(super) fn forget(&mut self, unit: u64) {
-        self.intents.remove(&unit);
     }
 
     /// Drop the units the house no longer has, so the table stays the size of

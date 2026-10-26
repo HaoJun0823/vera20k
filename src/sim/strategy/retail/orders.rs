@@ -537,28 +537,41 @@ const RETREAT_HEALTH_PERMILLE: u16 = 300;
 ///
 /// The post is the base's own anchor, so a unit that breaks off walks home
 /// rather than freezing where the fight left it.
-pub(super) fn managed(brain: &mut RetailBrain, out: &mut Outbox) {
+pub(super) fn managed(brain: &mut RetailBrain, tick: u64, out: &mut Outbox) {
     let post = brain.census.base_cell;
-    for unit in &brain.census.units {
-        if !unit.traits.combat || unit.hand || !unit.orderable {
-            continue;
-        }
-        if unit.health_permille > RETREAT_HEALTH_PERMILLE {
-            continue;
-        }
+    // Collected before anything is written: the routine takes the unit, and
+    // the ledger is borrowed while it is read.
+    let retreating: Vec<u64> = brain
+        .census
+        .units
+        .iter()
+        .filter(|unit| unit.traits.combat && !unit.hand && unit.orderable)
+        .filter(|unit| unit.health_permille <= RETREAT_HEALTH_PERMILLE)
+        .map(|unit| unit.entity_id)
+        .collect();
+    for entity_id in retreating {
         out.attach(
-            unit.entity_id,
+            entity_id,
             MicroKind::Retreat,
             MicroParams {
                 health_floor: RETREAT_HEALTH_PERMILLE,
                 standoff_cells: 4,
                 radius_cells: 10,
-                hold_frames: 15,
+                hold_frames: HOLD_FRAMES as u32,
             },
             post,
         );
+        // The routine owns the unit while it walks it out, so the layers above
+        // leave it alone rather than ordering it back into the fight.
+        brain
+            .tracked
+            .hold(entity_id, tick.saturating_add(HOLD_FRAMES));
     }
 }
+
+/// How long a routine keeps a unit it has taken, in frames: the retreat's own
+/// `hold_frames`.
+const HOLD_FRAMES: u64 = 15;
 
 /// How long a fired super waits before this brain tries it again, in frames.
 ///

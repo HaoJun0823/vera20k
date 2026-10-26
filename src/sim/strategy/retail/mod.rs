@@ -89,8 +89,10 @@ pub(super) mod build;
 pub(super) mod census;
 pub(super) mod composition;
 pub(super) mod expand;
+pub(super) mod micro;
 pub(super) mod orders;
 pub(super) mod plan;
+pub(super) mod squads;
 pub(super) mod tracked;
 
 use std::collections::BTreeMap;
@@ -124,6 +126,10 @@ pub struct RetailBrain {
     /// the reason a toggle cannot undo itself and a walk-in is not restarted
     /// every frame. One owner for "does it need telling", whatever asked.
     pub(super) tracked: Tracker,
+    /// The army's teams: what each unit is for, and what it is held to. The
+    /// layer between "push there" and "walk here" — rebuilt from the ledger on
+    /// its own term, so a dead unit simply is not in the next count.
+    pub(super) squads: squads::Squads,
     /// How far the placement sweep has moved for a structure waiting for a
     /// cell, by type: a cell the gate admits but the receiver refuses must
     /// not be asked for again.
@@ -156,6 +162,7 @@ impl RetailBrain {
         Self {
             rng: SimRng::new(seed),
             tracked: Tracker::new(),
+            squads: squads::Squads::new(),
             site_attempts: BTreeMap::new(),
             roles: None,
             census: Census::default(),
@@ -204,6 +211,9 @@ impl Brain for RetailBrain {
         // than walking the entity store again.
         self.income.sample(obs.tick(), obs.earned());
         self.rebuild_census(rules, obs);
+        // What each unit is *for*, before anything decides what it does: the
+        // membership is rebuilt on its own term, not every frame.
+        self.squads.regroup(obs.tick(), &self.census);
         // What the wallet can still spend, and what the house earns: the two
         // numbers every step below is gated on, so they are read once.
         let budget = plan::budget(rules, obs, &self.census, self.income.per_minute());
@@ -227,7 +237,7 @@ impl Brain for RetailBrain {
         // step's: the attach rides the same outbox as the orders below, and
         // the control layer drops this brain's order for an object a routine
         // has just taken.
-        orders::managed(self, out);
+        orders::managed(self, obs.tick(), out);
         // A charged power is worth more than any single order below: it is the
         // one decision here that can take a base apart, and the button it fires
         // through is the sidebar's, not a unit's.
@@ -238,6 +248,10 @@ impl Brain for RetailBrain {
         orders::bridges(self, rules, obs, out);
         orders::captures(self, rules, obs, out);
         orders::garrison(self, rules, obs, out);
+        // What each unit shoots *this second*, before the march is decided: a
+        // hostile in reach outranks a walk towards a target, and this is the
+        // only layer that asks.
+        micro::run(self, rules, obs, out);
         // A house that is pushing owns its whole army for the frame; one that
         // is not keeps holding its base.
         if !advance::advance(self, rules, obs, out) {
