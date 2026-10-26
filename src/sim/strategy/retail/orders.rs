@@ -240,9 +240,24 @@ pub(super) fn garrison(
     out: &mut Outbox,
 ) {
     let tick = obs.tick();
+    // Where the army stands counts as home for this. A soldier walking into a
+    // building on the way is how a push holds the ground it takes, and a
+    // garrison that only ever answers inside the base is a garrison that never
+    // leaves it — the base fills up and the army walks past every building it
+    // could have held the street from.
+    let anchors: Vec<(u16, u16)> = home_cells(brain)
+        .chain(
+            brain
+                .census
+                .units
+                .iter()
+                .filter(|unit| unit.traits.combat)
+                .map(|unit| unit.cell),
+        )
+        .collect();
     let billets: Vec<_> = obs
         .occupiable_buildings(rules)
-        .filter(|billet| within(home_cells(brain), billet.cell, HOME_REACH_CELLS))
+        .filter(|billet| within(anchors.iter().copied(), billet.cell, HOME_REACH_CELLS))
         .collect();
     if billets.is_empty() {
         return;
