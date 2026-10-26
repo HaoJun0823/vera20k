@@ -206,6 +206,31 @@ impl<'a> Observation<'a> {
             .is_some_and(|entity| entity.is_deployed())
     }
 
+    /// Whether `rx, ry` is no longer under the house's shroud: the cell has
+    /// been revealed to it, or to an ally it shares sight with
+    /// (`FogState::is_cell_revealed`, `src/sim/vision/mod.rs:1752`; the grid is
+    /// per-house, `mod.rs:686`).
+    ///
+    /// A scout is sent where the house has not been, and that is the shroud's
+    /// own answer. Kept here, next to the rest of the projection, so nothing
+    /// that wants to send one reaches into the fog itself.
+    pub fn is_cell_revealed(&self, rx: u16, ry: u16) -> bool {
+        self.sim.fog().is_cell_revealed(self.house, rx, ry)
+    }
+
+    /// Whether the house can see `rx, ry` *now*: revealed is forever, visible
+    /// is while something of the house's is looking at it
+    /// (`FogState::is_cell_visible`, `src/sim/vision/mod.rs:1745`).
+    pub fn is_cell_visible(&self, rx: u16, ry: u16) -> bool {
+        self.sim.fog().is_cell_visible(self.house, rx, ry)
+    }
+
+    /// The map's extent in cells, as the fog grid measures it: what a scan of
+    /// the map is bounded by.
+    pub fn map_extent(&self) -> (u16, u16) {
+        (self.sim.fog().width(), self.sim.fog().height())
+    }
+
     /// Power the house's buildings consume.
     pub fn power_drain(&self) -> i32 {
         self.power().map_or(0, |(_, drain)| drain)

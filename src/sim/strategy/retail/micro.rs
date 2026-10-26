@@ -117,8 +117,17 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
             }
             // A scout is sent to look, not to fight: a walk, so it does not
             // stop to bite every tank it passes on the way to the map.
+            //
+            // Where it is sent is the part that was missing — it was walked at
+            // the nearest *known* hostile, which is following the enemy around
+            // a map the house has already seen, not looking at the part it
+            // has not. The shroud's own grid is the target source now, and a
+            // known hostile is only the fallback once there is nothing left to
+            // find.
             Role::Scout => {
-                let Some((_, cell)) = nearest(&brain.census.enemies, item.cell) else {
+                let Some(cell) =
+                    nearest_unexplored(obs, item.cell).or_else(|| nearest(&brain.census.enemies, item.cell).map(|(_, cell)| cell))
+                else {
                     continue;
                 };
                 if !brain
@@ -194,6 +203,35 @@ fn in_reach(
         .filter(|enemy| squared_distance(enemy.cell, from) <= reach * reach)
         .min_by_key(|enemy| (squared_distance(enemy.cell, from), enemy.entity_id))
         .map(|enemy| (enemy.entity_id, enemy.cell))
+}
+
+/// How coarse a look the scout takes at the map, in cells.
+///
+/// A scout does not need every cell: it needs to be sent somewhere the house
+/// has not been, and six cells is close enough that nothing worth finding
+/// hides between two samples — and far enough apart that looking over a whole
+/// map costs a hundred asks rather than four thousand.
+const RECON_STEP_CELLS: u16 = 6;
+
+/// The nearest cell the house has not revealed, sampled on that grid.
+fn nearest_unexplored(obs: &Observation<'_>, from: (u16, u16)) -> Option<(u16, u16)> {
+    let (width, height) = obs.map_extent();
+    let mut best: Option<(i32, u16, u16)> = None;
+    let mut ry = 0;
+    while ry < height {
+        let mut rx = 0;
+        while rx < width {
+            if !obs.is_cell_revealed(rx, ry) {
+                let distance = squared_distance((rx, ry), from);
+                if best.is_none_or(|(closest, _, _)| distance < closest) {
+                    best = Some((distance, rx, ry));
+                }
+            }
+            rx = rx.saturating_add(RECON_STEP_CELLS);
+        }
+        ry = ry.saturating_add(RECON_STEP_CELLS);
+    }
+    best.map(|(_, rx, ry)| (rx, ry))
 }
 
 /// The nearest hostile of any kind, as `(id, cell)`; ties by id.
