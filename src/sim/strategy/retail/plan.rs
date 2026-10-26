@@ -236,13 +236,13 @@ pub(super) const STEPS: &[Step] = &[
         want: 2,
         gate: Gate::Free(build::SURPLUS_CREDITS),
     },
-    // The way back from a lost yard, bought while the yard still stands.
-    Step {
-        item: Item::Support,
-        want: 1,
-        gate: Gate::Free(build::SUPPORT_MIN_CREDITS),
-    },
     // Tech: the plant an aircraft line needs, then the radar, then the lab.
+    //
+    // Ahead of the support building, because the list answers with the first
+    // step that is short and open: both gates open on the same wallet, so with
+    // the support building first the house spent its surplus on a repair depot
+    // every time and never got as far as the plant its aircraft need — the tech
+    // stage that never came.
     Step {
         item: Item::Aircraft,
         want: 1,
@@ -257,6 +257,13 @@ pub(super) const STEPS: &[Step] = &[
         item: Item::Tech,
         want: 1,
         gate: Gate::Tech,
+    },
+    // The way back from a lost yard, bought while the yard still stands: last,
+    // because it is insurance against a loss the house has not had.
+    Step {
+        item: Item::Support,
+        want: 1,
+        gate: Gate::Free(build::SUPPORT_MIN_CREDITS),
     },
 ];
 

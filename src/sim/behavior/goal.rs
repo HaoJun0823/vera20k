@@ -93,11 +93,18 @@ impl Goal {
                 engineer_id: actor,
                 target_building_id: target,
             },
+            // Enter names a *destination*, not a target: `FootClass::ClickedAction`
+            // sends MEGAMISSION with no Target and the clicked object as its
+            // Destination (`0x004D74E0`, the Enter/Eaten click on a depot,
+            // refinery, bunker, transport or Grinder), and `MissionType::Enter`
+            // reads that destination to find what to walk into. Sent as a
+            // target it finds nothing to dock with and parks the unit — the
+            // garrison order that arrives and does nothing.
             Self::Enter { target } => Command::MegaMission {
                 entity_id: actor,
                 mission: MissionType::Enter,
-                target: Some(TargetKind::Entity(target)),
-                destination: None,
+                target: None,
+                destination: Some(TargetKind::Entity(target)),
             },
             Self::Harvest { cell } => Command::MegaMission {
                 entity_id: actor,

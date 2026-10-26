@@ -695,6 +695,18 @@ fn enemy_structure_cell(
     first
 }
 
+/// How many seats make a type a transport rather than a fighting unit, in the
+/// retail rules.
+///
+/// The night hawk (`[SHAD]`, `Passengers=5`, `ini/rulesmd.ini:10526`) and the
+/// hind (`[HIND]`, `Passengers=10`, `10825`) are the air transports, and both
+/// carry a cannon — so "has a Primary weapon" counts them as army. They are not
+/// army: they are how the army gets somewhere, and counting them inflated the
+/// house's fighting strength until the tech gates opened on a dozen seats and
+/// a machine gun. A seat or two is a fighting vehicle that happens to carry
+/// someone (the IFV's one seat, `1099`), which is why the bar is five.
+const TRANSPORT_SEATS: i32 = 5;
+
 /// Whether an object is one these orders step around: an infantry, vehicle or
 /// aircraft that is neither a gatherer nor a Construction Yard maker.
 /// Buildings and terrain are not.
@@ -706,6 +718,8 @@ pub(super) fn is_combat_unit(rules: &RuleSet, ty: &ObjectType) -> bool {
         && !ty.engineer
         && !ty.harvester
         && !ty.resource_gatherer
+        // A transport carries the army; it does not fight in it.
+        && ty.passengers < TRANSPORT_SEATS
         && !ty
             .deploys_into
             .as_deref()
@@ -742,6 +756,24 @@ mod tests {
         sim.intern_rule_type_ids(&rules);
         sim.resolve_type_handles(&rules);
         Some((sim, rules))
+    }
+
+    /// A transport carries the army; it does not fight in it. The night hawk
+    /// carries a cannon, so "has a primary weapon" counted it as army and the
+    /// house's fighting strength was measured in passenger seats.
+    #[test]
+    fn a_transport_is_not_counted_as_army() {
+        let Some((sim, rules)) = snapshot(0xA17) else {
+            return;
+        };
+        let _ = sim;
+        let night_hawk = rules.object("SHAD").expect("the night hawk");
+        assert!(
+            !is_combat_unit(&rules, night_hawk),
+            "a five-seat transport is not army"
+        );
+        let gi = rules.object("E1").expect("a GI");
+        assert!(is_combat_unit(&rules, gi), "a soldier is");
     }
 
     /// A `DeployFire=` soldier takes its deployed position when a hostile
