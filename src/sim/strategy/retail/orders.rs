@@ -428,6 +428,10 @@ const DEPLOY_RANGE_CELLS: i32 = 6;
 /// for the orders that move them.
 const DEPLOYS_PER_FRAME: usize = 4;
 
+/// How long a soldier is left alone after the D key, in frames: three seconds,
+/// the deploy animation and the command's round trip.
+const DEPLOY_SETTLE_FRAMES: u64 = 45;
+
 /// The D key on the soldiers that fight better deployed: `DeployFire=yes`.
 ///
 /// `[E1]` and `[GGI]` carry it with `Deployer=yes`, and what it buys is the
@@ -440,28 +444,55 @@ const DEPLOYS_PER_FRAME: usize = 4;
 /// already down stays down, and one that is standing stays up. Issuing it
 /// every frame would walk them in and out of the pose, and a deployed soldier
 /// that never stands up is a soldier that never takes ground.
-pub(super) fn deploy(brain: &RetailBrain, obs: &Observation<'_>, out: &mut Outbox) {
+pub(super) fn deploy(brain: &mut RetailBrain, obs: &Observation<'_>, out: &mut Outbox) {
+    let tick = obs.tick();
+    // Forget the soldiers the house no longer has, so a recycled id cannot
+    // inherit another soldier's pose.
+    let live: BTreeSet<u64> = brain.census.units.iter().map(|unit| unit.entity_id).collect();
+    brain.deploy_at.retain(|id, _| live.contains(id));
+    // Collected before anything is written: the toggle has to be recorded
+    // against the soldier, and the ledger is borrowed while it is read.
+    let wanted: Vec<(u64, bool)> = brain
+        .census
+        .units
+        .iter()
+        .filter(|unit| unit.traits.deployer && !unit.hand && unit.orderable)
+        .map(|unit| (unit.entity_id, engaged(&brain.census.enemies, unit.cell)))
+        .collect();
     let mut issued = 0;
-    for unit in &brain.census.units {
+    for (entity_id, engaged) in wanted {
         if issued >= DEPLOYS_PER_FRAME {
             break;
         }
-        if !unit.traits.deployer || unit.hand || !unit.orderable {
+        // The command starts an animation and `Is_Deployed` only follows it,
+        // so for those frames the soldier still reads as standing. Re-reading
+        // the state every frame toggles it straight back up — the soldier
+        // bobbing in and out of the pose.
+        if brain
+            .deploy_at
+            .get(&entity_id)
+            .is_some_and(|until| tick < *until)
+        {
             continue;
         }
-        let engaged = brain.census.enemies.iter().any(|enemy| {
-            let dx = i32::from(enemy.cell.0) - i32::from(unit.cell.0);
-            let dy = i32::from(enemy.cell.1) - i32::from(unit.cell.1);
-            dx * dx + dy * dy <= DEPLOY_RANGE_CELLS * DEPLOY_RANGE_CELLS
-        });
-        if engaged == obs.is_deployed(unit.entity_id) {
+        if engaged == obs.is_deployed(entity_id) {
             continue;
         }
-        out.command(Command::ToggleInfantryDeploy {
-            entity_id: unit.entity_id,
-        });
+        out.command(Command::ToggleInfantryDeploy { entity_id });
+        brain
+            .deploy_at
+            .insert(entity_id, tick.saturating_add(DEPLOY_SETTLE_FRAMES));
         issued += 1;
     }
+}
+
+/// Whether a hostile is close enough to `cell` to be the fight arriving.
+fn engaged(enemies: &[EnemyEntity], cell: (u16, u16)) -> bool {
+    enemies.iter().any(|enemy| {
+        let dx = i32::from(enemy.cell.0) - i32::from(cell.0);
+        let dy = i32::from(enemy.cell.1) - i32::from(cell.1);
+        dx * dx + dy * dy <= DEPLOY_RANGE_CELLS * DEPLOY_RANGE_CELLS
+    })
 }
 
 /// Whether the object's mission already holds the ground it stands on with the
@@ -733,7 +764,7 @@ mod tests {
 
         // Nothing in front of it: an empty field is not a fight.
         let mut out = Outbox::default();
-        deploy(&brain, &obs, &mut out);
+        deploy(&mut brain, &obs, &mut out);
         assert!(
             out.commands.is_empty(),
             "no hostile, no D key: {:?}",
@@ -747,7 +778,7 @@ mod tests {
             cell: (23, 20),
         });
         let mut out = Outbox::default();
-        deploy(&brain, &obs, &mut out);
+        deploy(&mut brain, &obs, &mut out);
         assert!(
             out.commands.iter().any(|command| matches!(
                 command,
@@ -755,6 +786,17 @@ mod tests {
             )),
             "the soldier takes the deployed position: {:?}",
             out.commands
+        );
+
+        // The pose is an animation and `Is_Deployed` only follows it, so the
+        // soldier still reads as standing. Asking again now would toggle it
+        // straight back up, every frame.
+        let mut again = Outbox::default();
+        deploy(&mut brain, &obs, &mut again);
+        assert!(
+            again.commands.is_empty(),
+            "one D key per soldier: {:?}",
+            again.commands
         );
     }
 

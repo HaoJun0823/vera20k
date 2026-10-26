@@ -141,6 +141,13 @@ pub struct RetailBrain {
     /// apart. Not a simulation stream and not the brain's generator — it is a
     /// reading of the house's own books, kept here because the brain is the
     /// only thing that asks how fast the house is earning.
+    /// When each soldier may be asked to take its pose again, by unit.
+    ///
+    /// The D key starts an animation and `Is_Deployed` only follows it, so the
+    /// state lags the command by those frames. Without this the step reads a
+    /// soldier that is going down as one that is still standing and toggles it
+    /// back up, every frame.
+    pub(super) deploy_at: BTreeMap<u64, u64>,
     income: plan::IncomeMeter,
 }
 
@@ -155,6 +162,7 @@ impl RetailBrain {
             roles: None,
             census: Census::default(),
             super_at: BTreeMap::new(),
+            deploy_at: BTreeMap::new(),
             income: plan::IncomeMeter::new(),
         }
     }
