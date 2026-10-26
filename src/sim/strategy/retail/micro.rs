@@ -115,6 +115,30 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
                 out.order(item.entity_id, Goal::Attack { target });
                 issued += 1;
             }
+            // Go at what pays for the enemy's army. An army too small to take
+            // a base is not an army that should be standing in its own yard:
+            // the ore is the one thing the enemy cannot replace quickly, and
+            // a harvester is worth the tank that was going to be bought with
+            // the load it is carrying.
+            Role::Harass => {
+                let Some((_, cell)) = enemy_economy(rules, obs, &brain.census, item.cell) else {
+                    continue;
+                };
+                // Attack-move, not attack: the walk is the point, and what
+                // stands in the way on the way is dealt with by the engage
+                // branch above.
+                if !brain
+                    .tracked
+                    .admits(tick, item.entity_id, TrackedKind::AttackMove, None, Some(cell))
+                {
+                    continue;
+                }
+                brain
+                    .tracked
+                    .record(tick, item.entity_id, TrackedKind::AttackMove, None, Some(cell));
+                out.order(item.entity_id, Goal::AttackMove { cell });
+                issued += 1;
+            }
             // A scout is sent to look, not to fight: a walk, so it does not
             // stop to bite every tank it passes on the way to the map.
             //
@@ -212,6 +236,37 @@ fn in_reach(
 /// hides between two samples — and far enough apart that looking over a whole
 /// map costs a hundred asks rather than four thousand.
 const RECON_STEP_CELLS: u16 = 6;
+
+/// What is worth raiding, nearest first: an ore carrier before the bay it
+/// unloads into, because the carrier is worth the load it is carrying and the
+/// bay is a building that can be rebuilt.
+fn enemy_economy(
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    census: &crate::sim::strategy::retail::census::Census,
+    from: (u16, u16),
+) -> Option<(u64, (u16, u16))> {
+    let mut best: Option<(u8, i32, u64, (u16, u16))> = None;
+    for enemy in &census.enemies {
+        let Some(ty) = obs.object_type(rules, enemy.type_id) else {
+            continue;
+        };
+        let rank = if ty.harvester {
+            0
+        } else if ty.resource_destination {
+            1
+        } else {
+            continue;
+        };
+        let distance = squared_distance(enemy.cell, from);
+        if best.is_none_or(|(best_rank, best_distance, _, _)| {
+            (rank, distance) < (best_rank, best_distance)
+        }) {
+            best = Some((rank, distance, enemy.entity_id, enemy.cell));
+        }
+    }
+    best.map(|(_, _, id, cell)| (id, cell))
+}
 
 /// The nearest cell the house has not revealed, sampled on that grid.
 fn nearest_unexplored(obs: &Observation<'_>, from: (u16, u16)) -> Option<(u16, u16)> {

@@ -40,12 +40,13 @@ use crate::sim::mission::{MissionId, MissionType};
 use super::census::{Census, Unit};
 use super::RetailBrain;
 
-/// How large the army has to be before it is worth pushing with.
+/// How large the army has to be before it is worth pushing with: the teams'
+/// own number ([`super::squads::ARMY_TO_ATTACK`]), because "how big is big
+/// enough" is one question with one owner.
 ///
-/// Below this the opening force is the whole army, and an opening force that
+/// Below it the opening force is the whole army, and an opening force that
 /// walks into the enemy's pre-placed garrison is a house that has traded its
-/// base for nothing.
-const ARMY_TO_ATTACK: usize = 10;
+/// base for nothing — which is why the surplus goes harassing instead.
 
 /// How many units one frame may re-task. The board's per-frame budget drops
 /// everything past its own limit, so a larger number here would only spend the
@@ -78,7 +79,7 @@ pub(super) fn advance(
         .combat_units()
         .filter(|unit| !unit.hand)
         .collect();
-    if fighters.len() < ARMY_TO_ATTACK
+    if fighters.len() < super::squads::ARMY_TO_ATTACK
         || !super::build::can_replace_units(rules, obs, &brain.census)
         || !super::build::base_defended(rules, obs, &brain.census)
         || base_under_threat(&brain.census)

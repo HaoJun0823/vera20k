@@ -52,6 +52,24 @@ const DEFEND_MAX: usize = 8;
 /// cells.
 const HOME_THREAT_CELLS: i32 = 8;
 
+/// How large the army has to be before the fist is the answer for all of it.
+///
+/// Below this the house cannot take a base yet — an opening force that walks
+/// into a defended one is a house that has traded its army for nothing — but
+/// it can still stop the base being paid for, and standing in its own yard
+/// doing neither is how a match is lost slowly. The surplus goes to
+/// [`Role::Harass`] instead.
+///
+/// This is the number the advance step gates on too, so it lives here: one
+/// owner for "how big is big enough".
+pub(super) const ARMY_TO_ATTACK: usize = 10;
+
+/// How many go harassing when the army is smaller than that.
+///
+/// A few, not the rest: a raid on the ore is worth a handful of units, and the
+/// house still needs something at home for the raid that answers it.
+const HARASS_MAX: usize = 4;
+
 /// What a team is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Role {
@@ -59,6 +77,9 @@ pub(super) enum Role {
     Defend,
     /// Look at the map: what the enemy is building, where his ore is going.
     Scout,
+    /// Go at what pays for the enemy's army: the ore, and the bays it is
+    /// carried to. What an army too small to take a base should be doing.
+    Harass,
     /// The fist: what is left goes to the advance step.
     Attack,
 }
@@ -168,6 +189,32 @@ impl Squads {
             });
         }
 
+        // Too small to take a base yet: the nearest few go at what pays for
+        // the enemy's army. Not the whole army — a raid is worth a handful,
+        // and the house still needs something at home.
+        if census.fighters < crate::sim::strategy::retail::squads::ARMY_TO_ATTACK {
+            let mut nearest: Vec<&Unit> = census
+                .units
+                .iter()
+                .filter(|unit| {
+                    unit.traits.combat && unit.orderable && !unit.hand && !taken.contains(&unit.entity_id)
+                })
+                .collect();
+            nearest.sort_by_key(|unit| (squared_distance(unit.cell, enemy_anchor(census)), unit.entity_id));
+            let members: BTreeSet<u64> = nearest
+                .into_iter()
+                .take(HARASS_MAX)
+                .map(|unit| unit.entity_id)
+                .collect();
+            taken.extend(members.iter().copied());
+            self.squads.push(Squad {
+                role: Role::Harass,
+                members,
+                target: None,
+                lock_until: tick.saturating_add(TARGET_LOCK_FRAMES),
+            });
+        }
+
         // What is left is the fist.
         let attack: BTreeSet<u64> = census
             .units
@@ -196,6 +243,16 @@ impl Squads {
 
 }
 
+/// Where the enemy's economy is, as far as the house knows: the cell the
+/// harassers are measured from. The ledger's enemies are what the house can
+/// see, and what it can see is what it can raid.
+fn enemy_anchor(census: &Census) -> (u16, u16) {
+    census
+        .enemies
+        .first()
+        .map_or_else(|| census.base_cell.unwrap_or((0, 0)), |enemy| enemy.cell)
+}
+
 /// The hostile inside the base, and where it stands: a raid, and the thing the
 /// defenders are for. Nearest to the base first, ties broken by id.
 fn home_threat(census: &Census) -> Option<(u64, (u16, u16))> {
@@ -220,6 +277,36 @@ fn squared_distance(a: (u16, u16), b: (u16, u16)) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One fighting unit of the ledger's, for the tests that only need to know
+    /// how many there are and where they stand.
+    fn unit(entity_id: u64, cell: (u16, u16)) -> Unit {
+        Unit {
+            entity_id,
+            type_id: crate::sim::intern::InternedId::default(),
+            cell,
+            health_permille: 1_000,
+            mission: crate::sim::mission::MissionId::from_known(
+                crate::sim::mission::MissionType::Guard,
+            ),
+            orderable: true,
+            hand: false,
+            slot: crate::sim::strategy::retail::census::Slot::Infantry,
+            tier: 0,
+            traits: crate::sim::strategy::retail::census::Traits {
+                combat: true,
+                harvester: false,
+                refinery: false,
+                yard: false,
+                yard_maker: false,
+                engineer: false,
+                infiltrator: false,
+                occupier: false,
+                deployer: false,
+                scout: false,
+            },
+        }
+    }
 
     /// A hostile in the base calls some of the army home — and only some,
     /// because pulling the whole army back is how the base is lost anyway.
@@ -257,6 +344,9 @@ mod tests {
                 },
             });
         }
+        // The ledger's own count of the fighting army, which the teams read to
+        // know whether the army is big enough to be a fist at all.
+        census.fighters = 12;
         let mut squads = Squads::new();
         squads.regroup(0, &census);
         let defend = squads.squad(Role::Defend).expect("a raid is met");
@@ -276,6 +366,29 @@ mod tests {
             attack.members.len(),
             12 - DEFEND_MAX,
             "the rest stay in the fist"
+        );
+    }
+
+    /// An army too small to take a base is not an army that should be standing
+    /// in its own yard: the nearest few go at what pays for the enemy's army.
+    #[test]
+    fn an_army_too_small_to_take_a_base_goes_harassing() {
+        let mut census = Census::default();
+        census.base_cell = Some((20, 20));
+        for id in 0..5u64 {
+            census.units.push(unit(id, (24, 24)));
+        }
+        census.fighters = 5;
+        let mut squads = Squads::new();
+        squads.regroup(0, &census);
+        let harass = squads
+            .squad(Role::Harass)
+            .expect("a small army does not stand in its yard");
+        assert_eq!(harass.members.len(), HARASS_MAX, "a handful, not the rest");
+        assert_eq!(
+            squads.squad(Role::Attack).map_or(0, |squad| squad.members.len()),
+            5 - HARASS_MAX,
+            "and the house keeps something at home"
         );
     }
 
