@@ -16,9 +16,26 @@
 
 use crate::rules::ruleset::RuleSet;
 use crate::sim::behavior::goal::Goal;
+use crate::sim::behavior::managed::{MicroKind, MicroParams};
 use crate::sim::command::Command;
 use crate::sim::control::intent::{Intent, Order};
 use crate::sim::control::observation::Observation;
+
+/// A request to hand one object to a managed routine.
+///
+/// A brain decides *what* an object should be doing; a routine in
+/// [`crate::sim::behavior::managed`] owns *how* it does it across frames (backing
+/// off a reload, waiting out a patrol). The table of attached objects is L2's,
+/// so a brain cannot attach one itself and asks through this box instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Attachment {
+    /// The object the routine takes over.
+    pub actor: u64,
+    pub kind: MicroKind,
+    pub params: MicroParams,
+    /// A cell the routine works from or towards, when one applies.
+    pub post: Option<(u16, u16)>,
+}
 
 /// Everything a brain asks for in one frame.
 #[derive(Debug, Default)]
@@ -34,12 +51,28 @@ pub struct Outbox {
     /// order gate apply exactly as they do to an order — so this is a shorter
     /// path to the same door, not a second one.
     pub commands: Vec<Command>,
+    /// Objects handed to a managed routine this frame. Consumed before the
+    /// orders below, so an object a routine just took owns no second issuer.
+    pub attachments: Vec<Attachment>,
 }
 
 impl Outbox {
     /// Ask for one object order.
     pub fn order(&mut self, actor: u64, goal: Goal) {
         self.orders.push(Order { actor, goal });
+    }
+
+    /// Ask L2 to hand `actor` to a managed routine. The routine becomes that
+    /// object's only issuer: the brain's own orders for it are dropped before
+    /// admission from this frame on, and its later hand-back is logged by the
+    /// control layer.
+    pub fn attach(&mut self, actor: u64, kind: MicroKind, params: MicroParams, post: Option<(u16, u16)>) {
+        self.attachments.push(Attachment {
+            actor,
+            kind,
+            params,
+            post,
+        });
     }
 
     /// Ask for one house-scoped request.
@@ -53,7 +86,10 @@ impl Outbox {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.orders.is_empty() && self.intents.is_empty() && self.commands.is_empty()
+        self.orders.is_empty()
+            && self.intents.is_empty()
+            && self.commands.is_empty()
+            && self.attachments.is_empty()
     }
 
     /// Drop every order naming `actor`, keeping the intents. The control layer

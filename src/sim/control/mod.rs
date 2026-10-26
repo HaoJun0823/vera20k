@@ -33,7 +33,7 @@ pub mod observation;
 pub mod placement;
 
 pub use board::{AutoPlayDomains, ControlBoard};
-pub use brain::{Brain, Outbox};
+pub use brain::{Attachment, Brain, Outbox};
 pub use budget::Budget;
 pub use intent::{Intent, Order};
 pub use micro::{Managed, MicroTable};
@@ -43,3 +43,9 @@ pub use observation::Observation;
 /// naming L1. A brain asks for a goal; the control layer turns it into a
 /// command.
 pub use crate::sim::behavior::goal::Goal;
+
+/// The managed routine vocabulary, re-exported for the same reason: a brain
+/// asks L2 to attach an object, and L2 holds the table and steps the routine.
+/// Naming the routines from L3 directly would point the dependency arrow
+/// backwards, which `architecture_guards.rs` fails on.
+pub use crate::sim::behavior::managed::{MicroKind, MicroParams};

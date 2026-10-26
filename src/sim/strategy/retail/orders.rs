@@ -36,8 +36,10 @@ use std::collections::BTreeSet;
 
 use crate::rules::object_type::{ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
-use crate::sim::control::Goal;
+use crate::rules::superweapon_type::SuperWeaponKind;
+use crate::sim::control::{Goal, MicroKind, MicroParams};
 use crate::sim::control::brain::Outbox;
+use crate::sim::control::intent::Intent;
 use crate::sim::control::observation::{EnemyEntity, Observation};
 use crate::sim::mission::{MissionId, MissionType};
 use crate::sim::strategy::retail::{ORDER_REFRESH_FRAMES, RetailBrain};
@@ -94,11 +96,12 @@ pub(super) fn captures(
     out: &mut Outbox,
 ) {
     let tick = obs.tick();
-    let own: Vec<_> = obs.own_entities().collect();
-    if !own.iter().any(|entity| {
-        obs.object_type(rules, entity.type_id)
-            .is_some_and(walks_into_buildings)
-    }) {
+    if !brain
+        .census
+        .units
+        .iter()
+        .any(|unit| walks_into_buildings_flags(&unit.traits))
+    {
         return;
     }
     let engineer_targets: Vec<EnemyEntity> = obs.capturable_buildings(rules).collect();
@@ -110,52 +113,47 @@ pub(super) fn captures(
         })
         .collect();
     let mut issued = 0;
-    for entity in &own {
+    for unit in &brain.census.units {
         if issued >= FORCE_ORDERS_PER_FRAME {
             break;
         }
-        if !entity.orderable || ordered_this_frame(out, entity.entity_id) {
+        if !unit.orderable || unit.hand || ordered_this_frame(out, unit.entity_id) {
             continue;
         }
-        let Some(ty) = obs.object_type(rules, entity.type_id) else {
+        let Some(ty) = obs.object_type(rules, unit.type_id) else {
             continue;
         };
         if !walks_into_buildings(ty) {
-            continue;
-        }
-        if obs.owned_by_hand(entity.entity_id) {
             continue;
         }
         // A spy takes what is worth most; anyone else takes what is nearest.
         let chosen = if ty.agent {
             spy_targets
                 .iter()
-                .max_by_key(|(target, value)| {
-                    (*value, -squared_distance(entity.cell, target.cell))
-                })
+                .max_by_key(|(target, value)| (*value, -squared_distance(unit.cell, target.cell)))
                 .map(|(target, _)| *target)
         } else {
-            nearest_enemy(&engineer_targets, entity.cell)
+            nearest_enemy(&engineer_targets, unit.cell)
         };
         let Some(target) = chosen else {
             continue;
         };
         let current = brain
             .orders
-            .get(&entity.entity_id)
+            .get(&unit.entity_id)
             .is_some_and(|sent| sent.target == Some(target.entity_id) && tick < sent.refresh);
         if current {
             continue;
         }
         brain.orders.insert(
-            entity.entity_id,
+            unit.entity_id,
             SentOrder {
                 target: Some(target.entity_id),
                 refresh: tick.saturating_add(ORDER_REFRESH_FRAMES),
             },
         );
         out.order(
-            entity.entity_id,
+            unit.entity_id,
             Goal::Capture {
                 target: target.entity_id,
             },
@@ -178,56 +176,51 @@ pub(super) fn bridges(
     out: &mut Outbox,
 ) {
     let tick = obs.tick();
-    let own: Vec<_> = obs.own_entities().collect();
-    if !own
-        .iter()
-        .any(|entity| obs.object_type(rules, entity.type_id).is_some_and(|ty| ty.engineer))
-    {
+    if !brain.census.units.iter().any(|unit| unit.traits.engineer) {
         return;
     }
-    let near: Vec<(u16, u16)> = home_buildings(rules, obs);
     let huts: Vec<(u64, (u16, u16))> = obs
         .bridge_repair_huts(rules)
-        .filter(|site| within(near.iter().copied(), site.cell, HOME_REACH_CELLS))
+        .filter(|site| within(home_cells(brain), site.cell, HOME_REACH_CELLS))
         .map(|site| (site.building_id, site.cell))
         .collect();
     if huts.is_empty() {
         return;
     }
     let mut issued = 0;
-    for entity in &own {
+    for unit in &brain.census.units {
         if issued >= FORCE_ORDERS_PER_FRAME {
             break;
         }
-        let Some(ty) = obs.object_type(rules, entity.type_id) else {
+        let Some(ty) = obs.object_type(rules, unit.type_id) else {
             continue;
         };
         if !ty.engineer
-            || !entity.orderable
-            || obs.owned_by_hand(entity.entity_id)
-            || ordered_this_frame(out, entity.entity_id)
-            || holds_or_fights(entity.mission)
+            || !unit.orderable
+            || unit.hand
+            || ordered_this_frame(out, unit.entity_id)
+            || holds_or_fights(unit.mission)
         {
             continue;
         }
-        let Some(target) = nearest_site(&huts, entity.cell) else {
+        let Some(target) = nearest_site(&huts, unit.cell) else {
             continue;
         };
         let current = brain
             .orders
-            .get(&entity.entity_id)
+            .get(&unit.entity_id)
             .is_some_and(|sent| sent.target == Some(target) && tick < sent.refresh);
         if current {
             continue;
         }
         brain.orders.insert(
-            entity.entity_id,
+            unit.entity_id,
             SentOrder {
                 target: Some(target),
                 refresh: tick.saturating_add(ORDER_REFRESH_FRAMES),
             },
         );
-        out.order(entity.entity_id, Goal::Capture { target });
+        out.order(unit.entity_id, Goal::Capture { target });
         issued += 1;
     }
 }
@@ -244,55 +237,50 @@ pub(super) fn garrison(
     out: &mut Outbox,
 ) {
     let tick = obs.tick();
-    let near: Vec<(u16, u16)> = home_buildings(rules, obs);
     let billets: Vec<_> = obs
         .occupiable_buildings(rules)
-        .filter(|billet| within(near.iter().copied(), billet.cell, HOME_REACH_CELLS))
+        .filter(|billet| within(home_cells(brain), billet.cell, HOME_REACH_CELLS))
         .collect();
     if billets.is_empty() {
         return;
     }
     let mut issued = 0;
-    for entity in obs.own_entities() {
+    for unit in &brain.census.units {
         if issued >= FORCE_ORDERS_PER_FRAME {
             break;
         }
-        let Some(ty) = obs.object_type(rules, entity.type_id) else {
-            continue;
-        };
-        if ty.category != ObjectCategory::Infantry
-            || !ty.occupier
-            || !entity.orderable
-            || obs.owned_by_hand(entity.entity_id)
-            || holds_or_fights(entity.mission)
-            || ordered_this_frame(out, entity.entity_id)
+        if !unit.traits.occupier
+            || !unit.orderable
+            || unit.hand
+            || holds_or_fights(unit.mission)
+            || ordered_this_frame(out, unit.entity_id)
         {
             continue;
         }
         let Some(billet) = billets
             .iter()
-            .filter(|billet| squared_distance(entity.cell, billet.cell) <= HOME_REACH_CELLS.pow(2))
-            .filter(|billet| obs.can_garrison(rules, entity.entity_id, billet.building_id))
-            .min_by_key(|billet| squared_distance(entity.cell, billet.cell))
+            .filter(|billet| squared_distance(unit.cell, billet.cell) <= HOME_REACH_CELLS.pow(2))
+            .filter(|billet| obs.can_garrison(rules, unit.entity_id, billet.building_id))
+            .min_by_key(|billet| squared_distance(unit.cell, billet.cell))
         else {
             continue;
         };
         let current = brain
             .orders
-            .get(&entity.entity_id)
+            .get(&unit.entity_id)
             .is_some_and(|sent| sent.target == Some(billet.building_id) && tick < sent.refresh);
         if current {
             continue;
         }
         brain.orders.insert(
-            entity.entity_id,
+            unit.entity_id,
             SentOrder {
                 target: Some(billet.building_id),
                 refresh: tick.saturating_add(ORDER_REFRESH_FRAMES),
             },
         );
         out.order(
-            entity.entity_id,
+            unit.entity_id,
             Goal::Enter {
                 target: billet.building_id,
             },
@@ -326,14 +314,14 @@ fn infiltration_value(rules: &RuleSet, ty: &ObjectType) -> u8 {
 
 /// The cells of the house's own buildings: the yard, the plants, the factories,
 /// the defenses. A bridge or a garrison is only worth a unit near one of them.
-fn home_buildings(rules: &RuleSet, obs: &Observation<'_>) -> Vec<(u16, u16)> {
-    obs.own_entities()
-        .filter(|entity| {
-            obs.object_type(rules, entity.type_id)
-                .is_some_and(|ty| ty.category == ObjectCategory::Building)
-        })
-        .map(|entity| entity.cell)
-        .collect()
+fn home_cells(brain: &RetailBrain) -> impl Iterator<Item = (u16, u16)> + '_ {
+    brain.census.home_cells.iter().copied()
+}
+
+/// Whether a unit's type is one the Capture click reaches: an engineer's by
+/// `Engineer=` and a spy's by `Infiltrate=`.
+fn walks_into_buildings_flags(traits: &super::census::Traits) -> bool {
+    traits.engineer || traits.infiltrator
 }
 
 /// Whether any of `cells` is within `reach` cells (Chebyshev-independent, all
@@ -370,67 +358,60 @@ fn ordered_this_frame(out: &Outbox, actor: u64) -> bool {
 /// Put every idle combat unit no team has taken on area guard where it stands.
 pub(super) fn forces(
     brain: &mut RetailBrain,
-    rules: &RuleSet,
+    _rules: &RuleSet,
     obs: &Observation<'_>,
     out: &mut Outbox,
 ) {
     let tick = obs.tick();
-    let own: Vec<_> = obs.own_entities().collect();
     // Forget the units the house no longer has, so the memory stays bounded by
     // the army and a recycled id cannot inherit an old order.
-    let ids: BTreeSet<u64> = own.iter().map(|entity| entity.entity_id).collect();
+    let ids: BTreeSet<u64> = brain.census.units.iter().map(|unit| unit.entity_id).collect();
     brain.orders.retain(|id, _| ids.contains(id));
-    if !own.iter().any(|entity| {
-        obs.object_type(rules, entity.type_id)
-            .is_some_and(|ty| is_combat_unit(rules, ty))
-    }) {
+    if !brain.census.units.iter().any(|unit| unit.traits.combat) {
         return;
     }
     let mut issued = 0;
-    for entity in &own {
+    for unit in &brain.census.units {
         if issued >= FORCE_ORDERS_PER_FRAME {
             break;
         }
-        let Some(ty) = obs.object_type(rules, entity.type_id) else {
-            continue;
-        };
-        if !is_combat_unit(rules, ty) {
+        if !unit.traits.combat {
             continue;
         }
         // A team's script or one of the player's control groups owns its
         // members; this step is for the units no hand has taken.
-        if obs.owned_by_hand(entity.entity_id) {
+        if unit.hand {
             continue;
         }
         // A unit that is already holding or fighting is doing exactly this, and
         // its mission owns it: a second Guard would cancel the fight.
-        if holds_or_fights(entity.mission) {
+        if holds_or_fights(unit.mission) {
             continue;
         }
         // The advance step owns a unit it is pushing: a guard here would pull
         // it back out of the push.
         if brain
             .orders
-            .get(&entity.entity_id)
+            .get(&unit.entity_id)
             .is_some_and(|sent| sent.target.is_some() && tick < sent.refresh)
         {
             continue;
         }
         let current = brain
             .orders
-            .get(&entity.entity_id)
+            .get(&unit.entity_id)
             .is_some_and(|sent| sent.target.is_none() && tick < sent.refresh);
         if current {
             continue;
         }
         brain.orders.insert(
-            entity.entity_id,
+            unit.entity_id,
             SentOrder {
                 target: None,
                 refresh: tick.saturating_add(ORDER_REFRESH_FRAMES),
             },
         );
-        out.order(entity.entity_id, Goal::Guard);
+        out.order(unit.entity_id, Goal::Guard);
         issued += 1;
     }
 }
@@ -460,6 +441,171 @@ fn holds_or_fights(mission: MissionId) -> bool {
 /// `InfantryTypeClass::ReadINI` `0x0052466E..0x0052469A`).
 pub(super) fn walks_into_buildings(ty: &ObjectType) -> bool {
     ty.engineer || ty.infiltrate
+}
+
+/// The health fraction at which a fighting unit belongs to the retreat routine
+/// rather than to the brain's own orders.
+///
+/// A unit the sim's own mission owns fights to the death, which is the wrong
+/// trade for a house that pays for every replacement: a third of its strength
+/// left is the point where a player walks it home. The routine hands the unit
+/// back as soon as it is healthy again, so the threshold is the whole rule.
+const RETREAT_HEALTH_PERMILLE: u16 = 300;
+
+/// Hand the house's hurt fighters to the L1 retreat routine.
+///
+/// This is the one place the brain uses a managed routine. It asks through
+/// `Outbox::attach` because the table of attached objects is L2's, and from
+/// then on the routine — not this brain — is that object's issuer. Asking
+/// again for a unit the table already holds is free: `MicroTable::attach`
+/// refuses a second attach, so no bookkeeping is kept here and a routine that
+/// hands an object back is picked up again the next frame its condition holds.
+///
+/// The post is the base's own anchor, so a unit that breaks off walks home
+/// rather than freezing where the fight left it.
+pub(super) fn managed(brain: &mut RetailBrain, out: &mut Outbox) {
+    let post = brain.census.base_cell;
+    for unit in &brain.census.units {
+        if !unit.traits.combat || unit.hand || !unit.orderable {
+            continue;
+        }
+        if unit.health_permille > RETREAT_HEALTH_PERMILLE {
+            continue;
+        }
+        out.attach(
+            unit.entity_id,
+            MicroKind::Retreat,
+            MicroParams {
+                health_floor: RETREAT_HEALTH_PERMILLE,
+                standoff_cells: 4,
+                radius_cells: 10,
+                hold_frames: 15,
+            },
+            post,
+        );
+    }
+}
+
+/// How long a fired super waits before this brain tries it again, in frames.
+///
+/// The charge itself is the real gate — a launched super is not ready until it
+/// recharges — so this only covers the refusal case, where the click did not
+/// take (no warhead for the type, the house's wallet for a paid launch) and the
+/// button stays lit. Ten seconds: long enough not to spend the frame budget on
+/// a refused command, short enough to catch a refusal that clears.
+const SUPER_RETRY_FRAMES: u64 = 600;
+
+/// Fire the house's charged supers at the enemy, the way a player clicks the
+/// button and then the target.
+///
+/// Native has this decision (`AI_TryFireSW @ 0x005098F0`) but gates it on the
+/// house not being human (`is_controlled_by_human`), and a brain-driven house
+/// is a human's: without this step it never fires one. The decision is the
+/// native one's in shape — for each charged super, in the rules' order, find a
+/// target — with the target read off the ledger instead of the native value
+/// table: the enemy's Construction Yard when one stands, otherwise the first
+/// enemy structure.
+///
+/// Only powers aimed at an enemy cell are fired. The Iron Curtain, the Force
+/// Shield and the Chrono pair are spent on the house's *own* units and
+/// buildings, and firing them at the enemy burns the charge for nothing; they
+/// belong to a defensive decision this brain does not make yet.
+pub(super) fn supers(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    out: &mut Outbox,
+) {
+    if !obs.super_weapons() {
+        return;
+    }
+    let ready = obs.ready_super_weapons(rules);
+    if ready.is_empty() {
+        return;
+    }
+    let Some(target) = enemy_structure_cell(brain, rules, obs) else {
+        return;
+    };
+    let tick = obs.tick();
+    for name in &rules.super_weapon_order {
+        let Some(type_id) = obs.type_id(name) else {
+            continue;
+        };
+        if !ready.contains(&type_id) {
+            continue;
+        }
+        if brain
+            .super_at
+            .get(&type_id)
+            .is_some_and(|at| tick < *at)
+        {
+            continue;
+        }
+        let Some(super_weapon) = rules.super_weapon(name) else {
+            continue;
+        };
+        if !spent_on_the_enemy(super_weapon.kind) {
+            continue;
+        }
+        log::info!("auto play: fire {name} at {target:?}");
+        brain
+            .super_at
+            .insert(type_id, tick.saturating_add(SUPER_RETRY_FRAMES));
+        out.intent(Intent::LaunchSuperWeapon {
+            sw_type_id: type_id,
+            cell: target,
+        });
+    }
+}
+
+/// Whether a power is aimed at an enemy cell rather than held for the house's
+/// own force.
+fn spent_on_the_enemy(kind: SuperWeaponKind) -> bool {
+    match kind {
+        SuperWeaponKind::MultiMissile
+        | SuperWeaponKind::LightningStorm
+        | SuperWeaponKind::ParaDrop
+        | SuperWeaponKind::AmerParaDrop
+        | SuperWeaponKind::SpyPlane
+        | SuperWeaponKind::PsychicReveal
+        | SuperWeaponKind::PsychicDominator
+        | SuperWeaponKind::GeneticConverter
+        | SuperWeaponKind::GenericWarhead
+        | SuperWeaponKind::UnitDelivery => true,
+        // Spent on the house's own units and buildings, or on nothing.
+        SuperWeaponKind::IronCurtain
+        | SuperWeaponKind::ChronoSphere
+        | SuperWeaponKind::ChronoWarp
+        | SuperWeaponKind::ForceShield
+        | SuperWeaponKind::NoEffect => false,
+    }
+}
+
+/// The cell a super is fired at: the enemy Construction Yard when one stands,
+/// otherwise the first enemy structure in storage order.
+///
+/// The yard is native's own most-valued target (`AI_FindBestRallyTarget`'s
+/// value table puts a Construction Yard at 100 against a power plant's 60 and a
+/// tank's 2), and it is the cell a single missile decides a match at.
+fn enemy_structure_cell(
+    brain: &RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+) -> Option<(u16, u16)> {
+    let mut first = None;
+    for enemy in &brain.census.enemies {
+        let Some(ty) = obs.object_type(rules, enemy.type_id) else {
+            continue;
+        };
+        if ty.category != ObjectCategory::Building {
+            continue;
+        }
+        if ty.build_const_eligible {
+            return Some(enemy.cell);
+        }
+        first.get_or_insert(enemy.cell);
+    }
+    first
 }
 
 /// Whether an object is one these orders step around: an infantry, vehicle or
@@ -502,7 +648,8 @@ mod tests {
     use crate::sim::world::Simulation;
 
     /// The retail rival arena, needed to field real object types. `None`
-    /// without `RA2_DIR`, as the rest of the suite does.
+    /// without `RA2_DIR`, as the rest of the suite does: these orders read the
+    /// scenario's own layering, which the unlayered snapshot does not carry.
     fn arena(seed: u64) -> Option<(Simulation, RuleSet)> {
         let retail = crate::rules::retail_ini_fixture::retail_battle_rules()?;
         let rules = retail.rules;
@@ -629,5 +776,85 @@ mod tests {
             "the rifleman takes the bunker: {:?}",
             out.orders
         );
+    }
+
+    /// A charged power is fired at the enemy's Construction Yard. Native has
+    /// this decision (`AI_TryFireSW`), but it is gated on the house not being
+    /// human — and a brain-driven house is a human's, so without this step the
+    /// button is never pressed.
+    #[test]
+    fn a_charged_super_is_fired_at_the_enemy_yard() {
+        use crate::sim::superweapon::SuperWeaponInstance;
+
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        sim.spawn_object("NACNST", "Russians", 24, 24, 255, &rules)
+            .expect("an enemy Construction Yard");
+        let Some(name) = rules
+            .super_weapon_order
+            .iter()
+            .find(|name| {
+                rules
+                    .super_weapon(name)
+                    .is_some_and(|sw| spent_on_the_enemy(sw.kind))
+            })
+            .cloned()
+        else {
+            return;
+        };
+        let type_id = sim.interner.intern(&name);
+        let mut instance = SuperWeaponInstance::new(type_id, owner, 0);
+        instance.set_is_active_for_test(true);
+        instance.set_is_ready_for_test(true);
+        instance.set_charge_start_tick_for_test(0);
+        instance.set_charge_duration_for_test(9_000);
+        sim.super_weapons_mut_for_test()
+            .entry(owner)
+            .or_default()
+            .insert(type_id, instance);
+
+        let obs = Observation::new(&sim, owner);
+        assert!(obs.super_weapons(), "the arena plays with powers on");
+        assert_eq!(
+            obs.ready_super_weapons(&rules),
+            vec![type_id],
+            "the charged power is the one live button"
+        );
+
+        let mut brain = RetailBrain::new(0xA17);
+        brain.census.refresh(
+            &crate::rules::unit_role::RoleTable::build(&rules),
+            &rules,
+            &obs,
+        );
+        let mut out = Outbox::default();
+        supers(&mut brain, &rules, &obs, &mut out);
+
+        assert_eq!(out.intents.len(), 1, "{:?}", out.intents);
+        match out.intents[0] {
+            Intent::LaunchSuperWeapon { sw_type_id, cell } => {
+                assert_eq!(sw_type_id, type_id);
+                assert_eq!(cell, (24, 24), "fired at the enemy yard");
+            }
+            ref other => panic!("a launch, not {other:?}"),
+        }
+        // The same frame again: the cooldown keeps a refused or recharging
+        // button from being clicked every frame.
+        let mut again = Outbox::default();
+        supers(&mut brain, &rules, &obs, &mut again);
+        assert!(again.intents.is_empty(), "{:?}", again.intents);
+    }
+
+    /// The Iron Curtain and the Force Shield are spent on the house's own
+    /// force. Firing them at the enemy burns the charge for nothing.
+    #[test]
+    fn a_power_held_for_our_own_force_is_not_fired_at_the_enemy() {
+        assert!(!spent_on_the_enemy(SuperWeaponKind::IronCurtain));
+        assert!(!spent_on_the_enemy(SuperWeaponKind::ForceShield));
+        assert!(!spent_on_the_enemy(SuperWeaponKind::ChronoSphere));
+        assert!(spent_on_the_enemy(SuperWeaponKind::MultiMissile));
+        assert!(spent_on_the_enemy(SuperWeaponKind::LightningStorm));
     }
 }

@@ -232,6 +232,31 @@ impl ControlBoard {
             let command = intent.command();
             self.admit(sim, &owner_name, &command, &mut pending);
         }
+        // Objects the brain hands to a managed routine. Consumed before the
+        // orders below, because a routine is its object's only issuer: the
+        // order the brain also asked for this frame is dropped by the
+        // `is_managed` guard rather than issued and then overwritten.
+        for request in out.attachments {
+            if self.excluded.contains(&request.actor) {
+                log::debug!(
+                    "auto play: refused, the player owns {} (attach {})",
+                    request.actor,
+                    request.kind.name()
+                );
+                self.rejected += 1;
+                continue;
+            }
+            if self
+                .micro
+                .attach(request.actor, request.kind, request.params, request.post)
+            {
+                log::debug!(
+                    "auto play: {} attached to {}",
+                    request.actor,
+                    request.kind.name()
+                );
+            }
+        }
         for command in &out.commands {
             self.admit(sim, &owner_name, command, &mut pending);
         }

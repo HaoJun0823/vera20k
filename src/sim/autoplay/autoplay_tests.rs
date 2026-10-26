@@ -1338,3 +1338,75 @@ fn a_policy_source_is_object_safe_and_carries_the_schema_version() {
     assert_eq!(answer.len(), 1);
     assert_eq!(answer[0].goal, Goal::Stop);
 }
+
+/// Asks for one object to be attached and, in the same frame, orders it
+/// somewhere else: the control layer's half of `Outbox::attach`.
+///
+/// A brain cannot reach the managed table — it is L2's state — so it asks
+/// through the outbox, and the object it hands over must not also receive the
+/// brain's own order for that frame. One object, one issuer.
+struct AttachAndMove {
+    actor: u64,
+}
+
+impl Brain for AttachAndMove {
+    fn name(&self) -> &'static str {
+        "test-attach"
+    }
+
+    fn think(&mut self, _rules: &RuleSet, _obs: &Observation<'_>, out: &mut Outbox) {
+        out.attach(
+            self.actor,
+            MicroKind::Retreat,
+            MicroParams {
+                health_floor: 900,
+                standoff_cells: 4,
+                radius_cells: 10,
+                hold_frames: 5,
+            },
+            None,
+        );
+        out.order(self.actor, Goal::Move { cell: (28, 28) });
+    }
+}
+
+/// The rules come from the repository's own `ini/` snapshot, so this runs
+/// without a retail install.
+fn running_arena(seed: u64) -> Option<(Simulation, RuleSet)> {
+    let rules = crate::rules::retail_ini_fixture::retail_unlayered_rules()?;
+    let mut sim = crate::sim::arena_fixture::rival_arena(&rules, seed);
+    sim.intern_rule_type_ids(&rules);
+    sim.resolve_type_handles(&rules);
+    Some((sim, rules))
+}
+
+#[test]
+fn an_attached_object_does_not_also_take_the_brains_order() {
+    let Some((mut sim, rules)) = running_arena(0xA17) else {
+        return;
+    };
+    let owner = american(&mut sim);
+    let e1 = sim
+        .spawn_object("E1", "Americans", 10, 10, 255, &rules)
+        .expect("a G.I.");
+
+    let mut host = AutoPlayHost::new(Box::new(AttachAndMove { actor: e1 }), owner, usize::MAX);
+    host.step(&mut sim, &rules);
+
+    // Nothing was refused and nothing was mid-transition, so the only thing
+    // that could have kept the move from being issued is the attach.
+    assert_eq!(host.rejected(), 0, "the attach was not refused");
+    assert_eq!(host.not_ready(), 0, "the unit was in no transition");
+    let obs = Observation::new(&sim, owner);
+    let mission = obs
+        .own_entities()
+        .find(|entity| entity.entity_id == e1)
+        .map(|entity| entity.mission);
+    assert_ne!(
+        mission,
+        Some(crate::sim::mission::MissionId::from_known(
+            crate::sim::mission::MissionType::Move
+        )),
+        "the routine is the object's only issuer: {mission:?}"
+    );
+}

@@ -56,13 +56,20 @@ L3 never needs to.
 | `control::observation` | L2 | the read-only projection a decision sees | borrowed |
 | `control::external` | L2 | reserved: `PolicySource`, versioned `ObservationBatch`, `ActionSlot` | none |
 | `strategy::brain` | L3 | re-export of the port, with the direction documented | none |
-| `strategy::retail` | L3 | the retail brain: plan, building choice, unit choice, teams, army orders, yard deployment | owned |
+| `strategy::retail` | L3 | the retail brain: frame order, army orders, yard deployment | owned |
+| `strategy::retail::census` | L3 | the house's ledger: counts by pool, key types, each line's occupancy, the jobs the enemy asks for, one walk per frame | owned, rebuilt every frame |
+| `strategy::retail::build` | L3 | what the base builds and in what order (income, barracks, one war factory, defense, throughput, tech) | owned |
+| `strategy::retail::composition` | L3 | what each idle production line starts next: gap closing, the infantry floor, the price bands | owned |
+| `strategy::retail::advance` / `orders` / `expand` | L3 | the push, the specialists and the yard | owned |
 | `autoplay` | facade | `AutoPlayHost`, `AutoPlayDomains`, `ScriptedPolicy`, the hotkey-facing surface | host |
 
 ## Data ownership and lifecycle
 
 - **One issuer per object.** A brain's order naming an object that is under a managed
-  routine is dropped before admission; the routine is that object's only issuer.
+  routine is dropped before admission; the routine is that object's only issuer. A brain
+  asks for that through `Outbox::attach`, because the table is L2's: the board consumes
+  the request before the orders of the same frame, so an object a routine just took gets
+  none of them.
 - **The managed table is not simulation state.** It never enters a snapshot, a
   checksum or a replay. Its routines are pure functions of `(object, threats, phase)`
   and its output is commands, so a replay reproduces it from the command stream. A test
@@ -73,6 +80,9 @@ L3 never needs to.
   target). The table is garbage-collected once per frame before stepping.
 - **Brain memory is the brain's.** The plan, the generator, the outstanding orders and
   the give-up counters live in `RetailBrain`, rebuilt on install, not serialized.
+- **The ledger is per frame.** `RetailBrain::census` is rebuilt at the top of every
+  `think` and is the only place a decision reads "how many of mine" from: six separate
+  walks of the entity store became one, and no count outlives the frame it was taken in.
 - **The projection is a borrow.** Nothing is copied or retained; a decision that needs a
   value across frames keeps the value.
 
@@ -130,7 +140,11 @@ read-only decision and an apply half before a brain may call it; none is stubbed
   and replanning under economic pressure.
 - `AI_ChooseNextProduction` (`0x00506EF0`): base defenses. It is a mutation that also
   draws the Scenario RNG, so it cannot be called read-only today.
-- The superweapon decision, the enemy-house search, the fire-sale and all-to-hunt
-  reactions, and the parachute/air-strike house powers.
+- The defensive half of the superweapon decision: a charged Iron Curtain, Force Shield
+  or Chrono pair is spent on the house's own force, and the brain fires only the powers
+  aimed at an enemy cell (`HouseClass::AI_TryFireSW` is itself gated on the house not
+  being human, so a driven house fires through `Intent::LaunchSuperWeapon` instead).
+- The enemy-house search, the fire-sale and all-to-hunt reactions, and the
+  parachute/air-strike house powers.
 - Base expansion beyond the first yard.
 - Fog honesty: the driven house sees the whole map, like the computer AI it borrows from.

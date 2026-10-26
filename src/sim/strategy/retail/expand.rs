@@ -29,6 +29,8 @@ use crate::sim::intern::InternedId;
 use crate::sim::production::CanBuild;
 use crate::sim::strategy::retail::RetailBrain;
 
+use super::census::Census;
+
 /// Whether `ty` is a Construction Yard maker: its `DeploysInto=` is the
 /// building the rules' `[AI] BuildConst=` list holds. `UnitType`'s
 /// `DeploysInto=` is the reader's own field, so a side whose maker is called
@@ -41,21 +43,15 @@ pub(super) fn makes_a_yard(rules: &RuleSet, ty: &ObjectType) -> bool {
 }
 
 /// Whether a yard stands: `BuildConst=` eligible is the rules' own mark for
-/// it.
-pub(super) fn yard_stands(rules: &RuleSet, obs: &Observation<'_>) -> bool {
-    obs.own_entities().any(|entity| {
-        obs.object_type(rules, entity.type_id)
-            .is_some_and(|ty| ty.build_const_eligible)
-    })
+/// it, and the ledger already counted them.
+pub(super) fn yard_stands(census: &Census) -> bool {
+    census.yards > 0
 }
 
 /// Whether the house holds a mobile yard maker: an MCV waiting to deploy, or
 /// one still driving out of its factory.
-pub(super) fn owns_yard_maker(rules: &RuleSet, obs: &Observation<'_>) -> bool {
-    obs.own_entities().any(|entity| {
-        obs.object_type(rules, entity.type_id)
-            .is_some_and(|ty| makes_a_yard(rules, ty))
-    })
+pub(super) fn owns_yard_maker(census: &Census) -> bool {
+    census.yard_makers > 0
 }
 
 /// Deploy the house's Construction Yard maker while it has no yard.
@@ -78,35 +74,40 @@ pub(super) fn deploy_yard_maker(
     // report of "the maker never deploys" has to be able to say whether the
     // brain ever saw one, and whether a yard was standing over it.
     if obs.tick() % 600 == 0 {
-        let maker = obs.own_entities().find(|entity| {
-            obs.object_type(rules, entity.type_id)
-                .is_some_and(|ty| makes_a_yard(rules, ty))
-        });
+        let maker = brain
+            .census
+            .units
+            .iter()
+            .find(|unit| unit.traits.yard_maker);
         log::info!(
             "auto play: yard={} maker={:?} credits={}",
-            yard_stands(rules, obs),
-            maker.map(|entity| (entity.entity_id, entity.cell)),
+            yard_stands(&brain.census),
+            maker.map(|unit| (unit.entity_id, unit.cell)),
             obs.credits()
         );
     }
     // A yard already stands, so there is nothing to deploy.
-    if yard_stands(rules, obs) {
+    if yard_stands(&brain.census) {
         return;
     }
-    let Some((mcv, yard)) = obs.own_entities().find_map(|entity| {
+    let Some((entity_id, cell, yard)) = brain
+        .census
+        .units
+        .iter()
+        .filter(|unit| unit.traits.yard_maker)
         // A maker the player has grouped is theirs to deploy, and one a team
         // script has recruited is the script's.
-        if obs.owned_by_hand(entity.entity_id) {
-            return None;
-        }
-        let ty = obs.object_type(rules, entity.type_id)?;
-        let yard = rules.object(ty.deploys_into.as_deref()?)?;
-        makes_a_yard(rules, ty).then_some((entity, yard))
-    }) else {
+        .filter(|unit| !unit.hand)
+        .find_map(|unit| {
+            let ty = obs.object_type(rules, unit.type_id)?;
+            let yard = rules.object(ty.deploys_into.as_deref()?)?;
+            makes_a_yard(rules, ty).then_some((unit.entity_id, unit.cell, yard))
+        })
+    else {
         return;
     };
-    if obs.deploy_site_admits(rules, mcv.entity_id, yard) {
-        out.order(mcv.entity_id, Goal::Deploy);
+    if obs.deploy_site_admits(rules, entity_id, yard) {
+        out.order(entity_id, Goal::Deploy);
         return;
     }
     let Some(yard_id) = obs.type_id(&yard.id) else {
@@ -118,7 +119,7 @@ pub(super) fn deploy_yard_maker(
     // structure uses.
     let attempt = brain.site_attempts.get(&yard_id).copied().unwrap_or(0);
     match Placement::new(obs, rules).cell_for(yard_id, attempt) {
-        Some(cell) if cell != mcv.cell => out.order(mcv.entity_id, Goal::Move { cell }),
+        Some(target) if target != cell => out.order(entity_id, Goal::Move { cell: target }),
         _ => {
             let next = (attempt + 1) % PLACEMENT_ATTEMPTS;
             brain.site_attempts.insert(yard_id, next);
@@ -154,10 +155,11 @@ pub(super) fn yard_maker<'r>(
 pub(super) fn yard_maker_support<'r>(
     rules: &'r RuleSet,
     obs: &Observation<'_>,
+    census: &Census,
 ) -> Option<(&'r ObjectType, InternedId)> {
     super::build::all_class_types(rules, obs, ObjectCategory::Vehicle)
         .filter(|(ty, _)| makes_a_yard(rules, ty))
-        .find_map(|(maker, _)| missing_prerequisite(rules, obs, maker))
+        .find_map(|(maker, _)| missing_prerequisite(rules, obs, census, maker))
 }
 
 /// The first `Prerequisite=` building of `maker` the house lacks and may
@@ -165,6 +167,7 @@ pub(super) fn yard_maker_support<'r>(
 fn missing_prerequisite<'r>(
     rules: &'r RuleSet,
     obs: &Observation<'_>,
+    census: &Census,
     maker: &ObjectType,
 ) -> Option<(&'r ObjectType, InternedId)> {
     maker.prerequisite.iter().find_map(|entry| {
@@ -172,14 +175,10 @@ fn missing_prerequisite<'r>(
             return None;
         };
         let want = rules.type_array_at(ObjectCategory::Building, index)?;
-        let owned = obs.own_entities().any(|entity| {
-            obs.object_type(rules, entity.type_id)
-                .is_some_and(|ty| ty.id == want.id)
-        });
-        if owned {
+        let type_id = obs.type_id(&want.id)?;
+        if census.type_count(type_id) > 0 {
             return None;
         }
-        let type_id = obs.type_id(&want.id)?;
         (obs.can_build(rules, want, true) != CanBuild::No).then_some((want, type_id))
     })
 }

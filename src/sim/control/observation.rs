@@ -98,6 +98,22 @@ pub(crate) struct EnemyEntity {
     pub cell: (u16, u16),
 }
 
+/// One production line's occupancy: what its factory holds, whether that build
+/// is suspended, and how many copies are queued behind it.
+///
+/// A decision that has a ledger of the house's assets reads a line's load here
+/// instead of asking the factory four times; the fields are the same ones
+/// [`Observation::factory_product`] and [`Observation::finished_product`] read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FactoryLine {
+    /// The type being built, if any.
+    pub product: Option<InternedId>,
+    /// Held by the player (`FactoryClass`'s suspension) rather than running.
+    pub suspended: bool,
+    /// Copies queued behind the product.
+    pub queued: usize,
+}
+
 /// A building that takes infantry and has room for more: the garrison click's
 /// target. `room` is the carrier-side count, not a rules number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,21 +288,23 @@ impl<'a> Observation<'a> {
             .map(|object| (object.type_id, factory.suspended))
     }
 
-    /// Whether the house's factory of `category` holds anything of its own: a
-    /// product being built, or a copy queued behind it.
-    pub(crate) fn factory_busy(&self, category: ProductionCategory) -> bool {
-        let Some(factory) = self.sim.production().factories().view(self.house, category) else {
-            return false;
-        };
-        factory.object.is_some() || !factory.queue.is_empty()
-    }
-
-    /// `find_factory`'s answer for this house: a live factory of the house can
-    /// make `ty` now. `CanBuild` alone does not imply one (`Owner=` matching is
-    /// the factory's own).
-    pub(crate) fn has_factory(&self, rules: &RuleSet, ty: &ObjectType) -> bool {
-        crate::sim::production::find_factory(self.sim, rules, self.house, ty, true, true, true)
-            .is_some()
+    /// What the house's factory of `category` holds right now, in one read.
+    ///
+    /// `None` when the house has no factory of that category. This is the
+    /// per-category form of [`Self::factory_product`] plus the queue length,
+    /// for a caller keeping a ledger of every line rather than asking about one
+    /// type: the answers are the factory's own fields, not a second rule.
+    pub fn factory_line(&self, category: ProductionCategory) -> Option<FactoryLine> {
+        let factory = self
+            .sim
+            .production()
+            .factories()
+            .view(self.house, category)?;
+        Some(FactoryLine {
+            product: factory.object.map(|object| object.type_id),
+            suspended: factory.suspended,
+            queued: factory.queue.len(),
+        })
     }
 
     /// Enemy objects an order may name as its target, in storage order.
@@ -631,6 +649,31 @@ impl<'a> Observation<'a> {
     /// `[GameOptions] SuperWeapons=`, which the native Recalc reads.
     pub fn super_weapons(&self) -> bool {
         self.sim.session().game_options().super_weapons
+    }
+
+    /// The house's own supers that may be fired now, in the rules'
+    /// `[SuperWeaponTypes]` order: the buttons a sidebar would light up.
+    ///
+    /// `HouseClass` holds one Super per entry from its constructor; a button is
+    /// live when it is granted and charged, which is
+    /// [`SuperWeaponInstance::ready_to_fire`] — the same pair `ClickFire` tests
+    /// before it launches. The list is the house's, not the rules': a type the
+    /// house was never granted is not in it.
+    pub fn ready_super_weapons(&self, rules: &RuleSet) -> Vec<InternedId> {
+        let Some(held) = self.sim.super_weapons().get(&self.house) else {
+            return Vec::new();
+        };
+        rules
+            .super_weapon_order
+            .iter()
+            .filter_map(|name| {
+                let super_weapon = rules.super_weapon(name)?;
+                let type_id = self.sim.interner().get(name)?;
+                held.get(&type_id)
+                    .filter(|instance| instance.ready_to_fire(super_weapon))
+                    .map(|_| type_id)
+            })
+            .collect()
     }
 
     /// The id the rules registered a type under, for a policy holding a name.

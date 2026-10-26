@@ -53,6 +53,14 @@ pub enum Intent {
     },
     /// Sell a standing building.
     SellBuilding { entity_id: u64 },
+    /// Fire a charged superweapon or house power at a cell: the click on the
+    /// sidebar's superweapon button followed by the target. `HouseClass::
+    /// Fire_SW` is the owner; a house with no charge, no grant or no warhead
+    /// for the type is refused there, not here.
+    LaunchSuperWeapon {
+        sw_type_id: InternedId,
+        cell: (u16, u16),
+    },
 }
 
 impl Intent {
@@ -71,6 +79,11 @@ impl Intent {
                 ry: cell.1,
             },
             Self::SellBuilding { entity_id } => Command::SellBuilding { entity_id },
+            Self::LaunchSuperWeapon { sw_type_id, cell } => Command::LaunchSuperWeapon {
+                sw_type_id,
+                target_rx: cell.0,
+                target_ry: cell.1,
+            },
         }
     }
 }

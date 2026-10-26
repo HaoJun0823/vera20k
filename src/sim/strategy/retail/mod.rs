@@ -50,7 +50,23 @@
 //!   instead of its first fighter (timeout, enemy 4), and one target held
 //!   until destroyed (timeout, enemy 11). The push is sensitive to the exact
 //!   target sequence, so a change here needs a better model of *why* the
-//!   current sequence works before it can be replaced.
+//!   current sequence works before it can be replaced. The **order** is the
+//!   part that was changed since: the fist keeps one target, and each unit is
+//!   told to attack it from where it stands when the structure is already
+//!   inside its own weapon's reach, and to attack-move otherwise. That is not
+//!   one of the three: the failure they shared was dispersion.
+//! - Only one managed routine is attached: `Retreat`, for a fighting unit
+//!   under a third of its strength. `AirSplit` and `SpyApproach` are not,
+//!   and the reason is the same for both — a routine that is its object's
+//!   only issuer would take an aircraft off the push and a spy off the
+//!   [`orders`] capture step, and the attach request carries no preference to
+//!   put in their place. Both need the request to carry a target before they
+//!   can be engaged without regressing the push.
+//! - The ledger ([`census`]) is rebuilt every frame rather than cached across
+//!   frames: a cached count that lags the entity store is a decision made on
+//!   a stale army. The vectors keep their capacity, so a steady army costs no
+//!   allocation; the cost is one walk of the entity store and one of each
+//!   house's factories per frame.
 //! - The army sees the whole map: fog honesty is still the open question
 //!   `docs/autoplay.md` records. So does the purchase: the enemy's composition
 //!   is read past the fog, and `unit_role` reads a type's warheads rather than
@@ -70,6 +86,8 @@
 
 pub(super) mod advance;
 pub(super) mod build;
+pub(super) mod census;
+pub(super) mod composition;
 pub(super) mod expand;
 pub(super) mod orders;
 
@@ -82,6 +100,7 @@ use crate::sim::control::observation::Observation;
 use crate::sim::intern::InternedId;
 use crate::sim::rng::SimRng;
 
+use census::Census;
 use orders::SentOrder;
 
 /// How long an order on a unit stands before the brain looks again, in frames.
@@ -104,9 +123,19 @@ pub struct RetailBrain {
     /// not be asked for again.
     pub(super) site_attempts: BTreeMap<InternedId, u32>,
     /// What each type is for, read out of the warheads once and never
-    /// changed. Built on the first spend, because the rules a scenario plays
+    /// changed. Built on the first frame, because the rules a scenario plays
     /// with are the ones the brain is handed there.
     pub(super) roles: Option<RoleTable>,
+    /// The house's own ledger: what it has, what its lines hold, and what the
+    /// enemy's field asks for. Rebuilt at the top of every `think`, and the one
+    /// place a decision reads "how many of mine" from. Kept inside the module
+    /// the ledger's own types are visible in, so a field cannot promise more
+    /// than its type can be read with.
+    census: Census,
+    /// When each fired super may be tried again, by type. The charge is the
+    /// real gate; this only keeps a refused launch from spending the frame
+    /// budget every frame it stays lit.
+    pub(super) super_at: BTreeMap<InternedId, u64>,
 }
 
 impl RetailBrain {
@@ -118,6 +147,8 @@ impl RetailBrain {
             orders: BTreeMap::new(),
             site_attempts: BTreeMap::new(),
             roles: None,
+            census: Census::default(),
+            super_at: BTreeMap::new(),
         }
     }
 
@@ -125,6 +156,22 @@ impl RetailBrain {
     /// be told what the army is short of rather than what is dearest.
     pub(super) fn roles(&mut self, rules: &RuleSet) -> &RoleTable {
         self.roles.get_or_insert_with(|| RoleTable::build(rules))
+    }
+
+    /// Rebuild this frame's ledger. The role table is built here on the first
+    /// frame, because the rules a scenario plays with are the ones the brain is
+    /// handed there.
+    fn rebuild_census(&mut self, rules: &RuleSet, obs: &Observation<'_>) {
+        if self.roles.is_none() {
+            self.roles = Some(RoleTable::build(rules));
+        }
+        // The two halves are separate fields, so the ledger can be written
+        // while the table it reads is borrowed.
+        let Self { census, roles, .. } = self;
+        let Some(roles) = roles.as_ref() else {
+            return;
+        };
+        census.refresh(roles, rules, obs);
     }
 
     /// This brain's own draw, for the native decisions it asks.
@@ -140,8 +187,31 @@ impl Brain for RetailBrain {
     }
 
     fn think(&mut self, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
+        // One pass over the house's objects and factories, before any decision
+        // asks a question about them. Every step below reads this ledger rather
+        // than walking the entity store again.
+        self.rebuild_census(rules, obs);
+        // One line every ten seconds, the same cadence the board and the yard
+        // deploy log on: "the AI builds nothing" has to be answerable from the
+        // log the client already writes.
+        if obs.tick() % 600 == 0 {
+            log::info!("auto play: {}", self.census.describe());
+        }
         expand::deploy_yard_maker(self, rules, obs, out);
         build::spend(self, rules, obs, out);
+        // Units after the structures: the yard's next choice decides what the
+        // house can make, and the lines fill once nothing is waiting to be
+        // placed.
+        composition::fill_lines(self, rules, obs, out);
+        // A hurt unit is the retreat routine's before it is any order
+        // step's: the attach rides the same outbox as the orders below, and
+        // the control layer drops this brain's order for an object a routine
+        // has just taken.
+        orders::managed(self, out);
+        // A charged power is worth more than any single order below: it is the
+        // one decision here that can take a base apart, and the button it fires
+        // through is the sidebar's, not a unit's.
+        orders::supers(self, rules, obs, out);
         // Specialists first, in the order a bridge at home, a spy's target and a
         // garrison matter more than another unit standing still; a unit takes
         // one order a frame, so whoever asks first keeps it.
