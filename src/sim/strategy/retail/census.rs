@@ -83,12 +83,12 @@ impl Slot {
 }
 
 /// The production lines, in the order [`Census::lines`] holds them.
-const LINE_BUILDING: usize = 0;
-const LINE_DEFENSE: usize = 1;
-const LINE_INFANTRY: usize = 2;
-const LINE_VEHICLE: usize = 3;
-const LINE_AIRCRAFT: usize = 4;
-const LINE_SHIP: usize = 5;
+pub(super) const LINE_BUILDING: usize = 0;
+pub(super) const LINE_DEFENSE: usize = 1;
+pub(super) const LINE_INFANTRY: usize = 2;
+pub(super) const LINE_VEHICLE: usize = 3;
+pub(super) const LINE_AIRCRAFT: usize = 4;
+pub(super) const LINE_SHIP: usize = 5;
 
 fn line_index(category: ProductionCategory) -> usize {
     match category {
@@ -234,6 +234,30 @@ pub(super) fn counter(ty: &ObjectType) -> Option<Role> {
 }
 
 impl Census {
+    /// What the lines have been promised and have not paid out yet: the
+    /// product on each line, plus the copies queued behind it.
+    ///
+    /// A build starts owing its `Cost_Of` and pays it down as it steps, so a
+    /// queue costs the wallet nothing today and a budget that reads the
+    /// balance alone spends the same credits twice. The queue holds
+    /// `QueueEntry` types the projection does not name, so a queued copy is
+    /// priced at the product it is queued behind — the answer is a floor, and
+    /// a floor is what a budget wants.
+    pub(super) fn committed(&self, rules: &RuleSet, obs: &Observation<'_>) -> i32 {
+        let mut total = 0i32;
+        for line in &self.lines {
+            let Some(type_id) = line.product else {
+                continue;
+            };
+            let Some(ty) = obs.object_type(rules, type_id) else {
+                continue;
+            };
+            let copies = i32::try_from(line.queued).unwrap_or(i32::MAX).saturating_add(1);
+            total = total.saturating_add(obs.cost_of(rules, ty).saturating_mul(copies));
+        }
+        total
+    }
+
     /// Rebuild the ledger from this frame's projection. Called once, at the
     /// top of the brain's `think`.
     pub(super) fn refresh(&mut self, roles: &RoleTable, rules: &RuleSet, obs: &Observation<'_>) {

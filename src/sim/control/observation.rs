@@ -169,6 +169,24 @@ impl<'a> Observation<'a> {
             .map_or(0, |house| house.economy().credits())
     }
 
+    /// Everything the house has taken in: the wallet plus everything
+    /// `Spend_Money` has taken out of it (`HouseClass::Spent_Credits`, House
+    /// `+0x2DC`).
+    ///
+    /// Production charges as it goes, so the wallet alone reads a house that
+    /// is building as a house that earns nothing. A decision that asks how
+    /// fast the house is earning reads this and takes two samples of it
+    /// instead — the difference is income, whatever was paid out meanwhile.
+    pub fn earned(&self) -> i32 {
+        self.sim
+            .houses()
+            .get(&self.house)
+            .map_or(0, |house| {
+                let economy = house.economy();
+                economy.credits().wrapping_add(economy.spent_credits())
+            })
+    }
+
     /// Power produced by the house's live, powered buildings.
     pub fn power_output(&self) -> i32 {
         self.power().map_or(0, |(output, _)| output)

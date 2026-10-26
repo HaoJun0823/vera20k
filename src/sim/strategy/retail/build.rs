@@ -38,56 +38,42 @@ use crate::sim::production::{CanBuild, ProductionCategory};
 
 use super::RetailBrain;
 use super::census::Census;
+use super::plan::{self, Budget};
 
 /// How many harvesters one refinery keeps busy. Two, not the rules'
 /// `HarvestersPerRefinery=`: the trip out and back is most of a harvester's
 /// life, and a third one mostly queues at the bay.
 pub(super) const HARVESTERS_PER_REFINERY: usize = 2;
 
-/// How many refineries the base is built around.
-///
-/// Two, not three: an unloading bay is the dearest structure in the opening
-/// and the second one only pays once the harvesters to fill it exist. Past
-/// this the ore within reach of the base is the limit, not the bays, and a
-/// house that keeps buying them is a house whose army never gets bought.
-const REFINERY_TARGET: usize = 2;
+/// How many refineries the base is built around, and when the second one is
+/// worth it: entries of [`super::plan::STEPS`], because the shape of the base
+/// is one list rather than a set of thresholds. Two, not three: an unloading
+/// bay is the dearest structure in the opening and the second one only pays
+/// once the harvesters to fill it exist.
 
-/// How many credit the wallet has to leave behind before a structure that only
+/// How many credit the free wallet has to hold before a structure that only
 /// unlocks better types is worth starting.
-const TECH_MIN_CREDITS: i32 = 4_000;
+pub(super) const TECH_MIN_CREDITS: i32 = 4_000;
 
-/// The wallet a building on the yard maker's `Prerequisite=` list has to
-/// leave behind: it buys the ability to rebuild a lost yard, which only pays
-/// off once the base can afford to lose one.
-const SUPPORT_MIN_CREDITS: i32 = 4_000;
+/// The free wallet a building on the yard maker's `Prerequisite=` list has to
+/// hold: it buys the ability to rebuild a lost yard, which only pays off once
+/// the base can afford to lose one.
+pub(super) const SUPPORT_MIN_CREDITS: i32 = 4_000;
 
 /// How many fighting units the house fields before it buys a radar.
-const ARMY_FOR_TECH: usize = 8;
+pub(super) const ARMY_FOR_TECH: usize = 8;
 
-/// How many war factories the house runs before it is rich.
-///
-/// One. A single factory makes the harvesters, the yard maker and the whole
-/// army; a second one doubles throughput the house cannot pay for yet, at the
-/// price of the army it could have bought instead. The second line is a
-/// surplus decision ([`SURPLUS_CREDITS`]), not an opening one.
-const WAR_FACTORY_TARGET: usize = 1;
+/// How many war factories the house runs before it is rich, and how many a
+/// rich house runs: the list in [`super::plan`] holds the numbers now, because
+/// they are entries of one order rather than thresholds of their own.
 
-/// The wallet a house has to be holding before it treats a factory as the
+/// The free wallet a house has to be holding before it treats a factory as the
 /// bottleneck: past this it cannot spend what it earns, so the answer is
 /// another factory rather than another harvester.
-const SURPLUS_CREDITS: i32 = 12_000;
+pub(super) const SURPLUS_CREDITS: i32 = 12_000;
 
-/// How many war factories and barracks a house with a surplus runs.
-const WAR_FACTORY_SURPLUS: usize = 3;
-const BARRACKS_SURPLUS: usize = 2;
-
-/// How many base defenses the house keeps standing.
-///
-/// The opponent pushes with numbers a player's opening army cannot match, and
-/// a base with no tower is a base whose production one raid stops for good:
-/// the yard goes dark, the factories follow, and the match is lost by
-/// logistics rather than by the fight.
-const DEFENSE_TARGET: usize = 2;
+/// How many war factories and barracks a house with a surplus runs: an entry
+/// of [`super::plan::STEPS`], as the target counts above are.
 
 /// One frame's base spending: take what is finished out of the yard and start
 /// the next structure. The production lines are
@@ -96,10 +82,11 @@ pub(super) fn spend(
     brain: &mut RetailBrain,
     rules: &RuleSet,
     obs: &Observation<'_>,
+    budget: &Budget,
     out: &mut Outbox,
 ) {
     place_finished(brain, rules, obs, out);
-    build_next(rules, obs, &brain.census, out);
+    build_next(rules, obs, &brain.census, budget, out);
 }
 
 /// Place the structures the yard has finished: the click a player makes on
@@ -166,11 +153,17 @@ fn earns_its_keep(rules: &RuleSet, ty: &ObjectType) -> bool {
 }
 
 /// Start the one structure the base needs most, while the yard is free.
-fn build_next(rules: &RuleSet, obs: &Observation<'_>, census: &Census, out: &mut Outbox) {
+fn build_next(
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    census: &Census,
+    budget: &Budget,
+    out: &mut Outbox,
+) {
     if census.line(ProductionCategory::Building).product.is_some() {
         return;
     }
-    let Some((ty, type_id)) = next_building(rules, obs, census) else {
+    let Some((ty, type_id)) = next_building(rules, obs, census, budget) else {
         return;
     };
     // A defense is made by the Defense factory, not the Buildings one, so the
@@ -183,7 +176,10 @@ fn build_next(rules: &RuleSet, obs: &Observation<'_>, census: &Census, out: &mut
         log::debug!("queued already holds {}", ty.id);
     }
     let price = obs.cost_of(rules, ty);
-    if obs.credits() < price {
+    // The budget, not the wallet: what a line has been promised is spent
+    // whether or not it has left the wallet yet, and a queue costs the wallet
+    // nothing until the build steps.
+    if budget.free < price {
         return;
     }
     // While the harvesters are still short, only what earns or powers waits
@@ -216,17 +212,18 @@ fn next_building<'r>(
     rules: &'r RuleSet,
     obs: &Observation<'_>,
     census: &Census,
+    budget: &Budget,
 ) -> Option<(&'r ObjectType, InternedId)> {
     // A brownout is the one state that stops everything else: production
     // runs at a crawl and the defenses go offline. Whatever else the base
     // wants, a plant comes first, and it comes first even when nothing else
     // is left to build.
-    if obs.power_balance() < 0 {
+    if plan::power_short(rules, obs, census) {
         if let Some(plant) = first_buildable(rules, obs, &rules.build_power_types) {
             return Some(plant);
         }
     }
-    let (ty, type_id) = match candidate(rules, obs, census) {
+    let (ty, type_id) = match plan::next(rules, obs, census, budget) {
         Some(found) => found,
         // Nothing the base wants is buildable yet, and the house has no plant:
         // `Power=` plants are the prerequisite most structures hang off in the
@@ -238,8 +235,11 @@ fn next_building<'r>(
         }
         None => return None,
     };
-    // `Power=` is the type's net contribution: negative is what it draws.
-    if obs.power_balance() + ty.power.min(0) < 0 {
+    // `Power=` is the type's net contribution: negative is what it draws, and
+    // the plant that would feed it is counted at the output it will have.
+    if plan::planned_output(rules, obs, census).wrapping_sub(obs.power_drain()) + ty.power.min(0)
+        < 0
+    {
         if let Some(plant) = first_buildable(rules, obs, &rules.build_power_types) {
             return Some(plant);
         }
@@ -247,97 +247,13 @@ fn next_building<'r>(
     Some((ty, type_id))
 }
 
-/// The structure the base is missing most, in the order a player builds one.
-fn candidate<'r>(
-    rules: &'r RuleSet,
-    obs: &Observation<'_>,
-    census: &Census,
-) -> Option<(&'r ObjectType, InternedId)> {
-    // 1. Income. The first bay is what an opening is made of; the second is
-    // worth it once the harvesters to fill it exist, which the count says.
-    if census.refineries < REFINERY_TARGET
-        && (census.refineries == 0 || census.harvesters >= census.refineries * 2)
-        && let Some(found) = first_buildable(rules, obs, &rules.build_refinery_types)
-    {
-        return Some(found);
-    }
-    // 2. The barracks, before the war factory: it is the cheaper structure and
-    // the infantry line is the cheapest army a house can field. A base that
-    // builds the factory first spends its opening wallet on one tank and has
-    // no soldiers to hold anything with.
-    if let Some(found) = wanted_once(rules, obs, census, &rules.build_barracks_types) {
-        return Some(found);
-    }
-    // 3. One war factory: the harvesters, the yard maker and the army all come
-    // out of it, and one is enough until the wallet cannot be spent.
-    if count_in(obs, rules, census, &rules.build_weapons_types) < WAR_FACTORY_TARGET {
-        if let Some(found) = first_buildable(rules, obs, &rules.build_weapons_types) {
-            return Some(found);
-        }
-    }
-    // 4. Something to hold the base with, before anything that only makes it
-    // grow: a radar is worth less than a base that survives the first raid.
-    if can_replace_units(rules, obs, census)
-        && count_in(obs, rules, census, base_defenses(rules, obs)) < DEFENSE_TARGET
-    {
-        if let Some(found) = first_buildable(rules, obs, base_defenses(rules, obs)) {
-            return Some(found);
-        }
-    }
-    // 5. Throughput, once the wallet says the factories cannot spend it: a
-    // wallet past this cannot be spent by one line, and a house that banks it
-    // has an army it could not build. Every extra factory shortens a build by
-    // `[General] MultipleFactory=` (the rules' own factor per extra factory,
-    // `Time_To_Build`'s `factory_count`).
-    if obs.credits() >= SURPLUS_CREDITS {
-        if count_in(obs, rules, census, &rules.build_weapons_types) < WAR_FACTORY_SURPLUS {
-            if let Some(found) = first_buildable(rules, obs, &rules.build_weapons_types) {
-                return Some(found);
-            }
-        }
-        if count_in(obs, rules, census, &rules.build_barracks_types) < BARRACKS_SURPLUS {
-            if let Some(found) = first_buildable(rules, obs, &rules.build_barracks_types) {
-                return Some(found);
-            }
-        }
-    }
-    // 6. The way back from a lost yard, bought while the yard still stands: the
-    // yard maker's own `Prerequisite=` list is the rules' answer to what has
-    // to be there to rebuild it, and nothing else in this order asks for the
-    // service depot retail's MCV wants. It waits for a wallet the army has
-    // already been paid out of — it is insurance, and insurance that starves
-    // the army is the raid it was bought against.
-    if obs.credits() >= SUPPORT_MIN_CREDITS {
-        if let Some(found) = super::expand::yard_maker_support(rules, obs, census) {
-            return Some(found);
-        }
-    }
-    // 7. The building a production line needs, taken from the rules rather
-    // than from a name list: `[GAAIRC]`/`[AMRADR]` carry `Factory=AircraftType`,
-    // and which of them this house may build is `CanBuild`'s answer — the
-    // Americans are refused `GAAIRC` by `ForbiddenHouses=` and allowed `AMRADR`
-    // by `RequiredHouses=`. `[AI] BuildRadar=` happens to name both, but it is
-    // a radar list: a house whose side has no aircraft factory (the Soviets in
-    // the retail rules have none at all — `NARADR` is a radar tower, not a
-    // plant) simply has no aircraft to build, and that is the honest answer.
-    if obs.credits() >= TECH_MIN_CREDITS && census.fighters >= ARMY_FOR_TECH {
-        if let Some(found) = line_factory(rules, obs, census, ProductionCategory::Aircraft) {
-            return Some(found);
-        }
-        if let Some(found) = wanted_once(rules, obs, census, &rules.build_radar_types) {
-            return Some(found);
-        }
-        return wanted_once(rules, obs, census, &rules.build_tech_types);
-    }
-    None
-}
 
 /// The type from `names` the house may build now, in list order.
 ///
 /// `can_build` is the production path's own test, so a type of another side,
 /// one whose prerequisite is missing or one beyond the house's tech level
 /// answers No here exactly as it would in the sidebar.
-fn first_buildable<'r>(
+pub(super) fn first_buildable<'r>(
     rules: &'r RuleSet,
     obs: &Observation<'_>,
     names: &[String],
@@ -349,20 +265,6 @@ fn first_buildable<'r>(
     })
 }
 
-/// The type from `names` the house does not own yet: a barracks, a radar or a
-/// war factory is worth building once, and a second one is worth building only
-/// after the army is fed.
-fn wanted_once<'r>(
-    rules: &'r RuleSet,
-    obs: &Observation<'_>,
-    census: &Census,
-    names: &[String],
-) -> Option<(&'r ObjectType, InternedId)> {
-    if count_in(obs, rules, census, names) > 0 {
-        return None;
-    }
-    first_buildable(rules, obs, names)
-}
 
 /// The house's own harvester: the first `ResourceGatherer=` Vehicle it may
 /// build. Ore delivered is the whole income, so this one is not a choice
@@ -404,7 +306,7 @@ pub(super) fn class_types<'r>(
 
 /// The `[AI]` base-defense list of the house's own side: what the native
 /// computer would answer a raid with, read for the same question here.
-fn base_defenses<'r>(rules: &'r RuleSet, obs: &Observation<'_>) -> &'r [String] {
+pub(super) fn base_defenses<'r>(rules: &'r RuleSet, obs: &Observation<'_>) -> &'r [String] {
     obs.side_index()
         .map_or(&[], |side| rules.base_defense_types(side))
 }
@@ -439,7 +341,7 @@ pub(super) fn can_replace_units(rules: &RuleSet, obs: &Observation<'_>, census: 
 /// `None` when the house already owns a factory of the category — the line
 /// runs and there is nothing to build — or when nothing of the category is
 /// buildable for it.
-fn line_factory<'r>(
+pub(super) fn line_factory<'r>(
     rules: &'r RuleSet,
     obs: &Observation<'_>,
     census: &Census,
@@ -531,7 +433,9 @@ mod tests {
             .set_credits_for_test(5_000);
 
         let census = ledger(&rules, &sim, owner);
-        let (ty, _) = candidate(&rules, &Observation::new(&sim, owner), &census)
+        let obs = Observation::new(&sim, owner);
+        let budget = plan::budget(&rules, &obs, &census, None);
+        let (ty, _) = plan::next(&rules, &obs, &census, &budget)
             .expect("a base with nothing but a yard wants something");
         assert!(
             rules.build_refinery_types.iter().any(|name| name == &ty.id),
@@ -544,7 +448,9 @@ mod tests {
         sim.spawn_object("GAREFN", "Americans", 20, 20, 255, &rules)
             .expect("a refinery");
         let census = ledger(&rules, &sim, owner);
-        let (ty, _) = candidate(&rules, &Observation::new(&sim, owner), &census)
+        let obs = Observation::new(&sim, owner);
+        let budget = plan::budget(&rules, &obs, &census, None);
+        let (ty, _) = plan::next(&rules, &obs, &census, &budget)
             .expect("a base with income wants the next thing");
         assert!(
             rules.build_barracks_types.iter().any(|name| name == &ty.id),
@@ -610,9 +516,11 @@ mod tests {
                 .expect("a refinery");
         }
         let census = ledger(&rules, &sim, owner);
-        assert_eq!(census.refineries, REFINERY_TARGET, "two bays stand");
+        assert_eq!(census.refineries, 2, "two bays stand");
+        let obs = Observation::new(&sim, owner);
+        let budget = plan::budget(&rules, &obs, &census, None);
         assert!(
-            candidate(&rules, &Observation::new(&sim, owner), &census)
+            plan::next(&rules, &obs, &census, &budget)
                 .is_none_or(|(ty, _)| !rules.build_refinery_types.iter().any(|name| name == &ty.id)),
             "a third refinery is not what the base builds next"
         );
@@ -644,10 +552,43 @@ mod tests {
             .set_credits_for_test(2_000);
 
         let census = ledger(&rules, &sim, owner);
+        let obs = Observation::new(&sim, owner);
+        let budget = plan::budget(&rules, &obs, &census, None);
         assert!(
-            candidate(&rules, &Observation::new(&sim, owner), &census)
+            plan::next(&rules, &obs, &census, &budget)
                 .is_none_or(|(ty, _)| !rules.build_weapons_types.iter().any(|name| name == &ty.id)),
             "a poor house with one war factory does not start another"
+        );
+    }
+
+    /// A plant that is still building supplies its `Power=` scaled by the
+    /// health it has built, so the balance reads a brownout for as long as the
+    /// plant is being built. The base used to answer that with a second plant:
+    /// the opening became two plants and one refinery, which is a base that
+    /// paid for power it did not need.
+    #[test]
+    fn a_plant_that_is_building_is_the_plant_the_base_was_short_of() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        sim.spawn_object("GACNST", "Americans", 16, 16, 255, &rules)
+            .expect("a yard");
+        sim.spawn_object("GAREFN", "Americans", 20, 20, 255, &rules)
+            .expect("a refinery");
+
+        let mut census = ledger(&rules, &sim, owner);
+        let plant = sim.interner().get("GAPOWR").expect("the plant's id");
+        census.lines[crate::sim::strategy::retail::census::LINE_BUILDING].product = Some(plant);
+        let obs = Observation::new(&sim, owner);
+        assert!(
+            obs.power_balance() < 0,
+            "the plant on the line supplies nothing yet: {}",
+            obs.power_balance()
+        );
+        assert!(
+            !plan::power_short(&rules, &obs, &census),
+            "the plant it is building is the plant it was short of"
         );
     }
 }

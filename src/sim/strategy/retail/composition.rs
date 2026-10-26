@@ -31,6 +31,7 @@ use crate::sim::production::ProductionCategory;
 use super::RetailBrain;
 use super::build::{self, HARVESTERS_PER_REFINERY};
 use super::census::{self, CHEAP_UNIT_CREDITS, Census, Slot, price_tier};
+use super::plan::Budget;
 
 /// The wallet the house wants in hand before it buys troops. Below it every
 /// credit buys another harvester or another bay, which is what makes the army
@@ -54,6 +55,15 @@ const RICH_CREDITS: i32 = 4_000;
 /// replace, which is what "still the IFV thing" describes from the outside.
 const INFANTRY_SHARE_PERCENT: usize = 40;
 
+/// The share of the fighting army infantry may *not* pass, in percent.
+///
+/// The floor above is what makes the barracks fire; this is what makes it
+/// stop. A soldier is a tenth of a tank, so a barracks that answers every
+/// frame buys infantry with every credit the house earns and the wallet never
+/// reaches the price of a vehicle — the army a play test reports as "only ever
+/// infantry". Past this the barracks waits for the vehicles to be paid for.
+const INFANTRY_CEILING_PERCENT: usize = 55;
+
 /// How much of one job's gap a single unit's weight can claim, in units. One
 /// bottomless gap — a wall of conscripts — must not decide the whole army's
 /// composition by itself.
@@ -64,12 +74,19 @@ pub(super) fn fill_lines(
     brain: &mut RetailBrain,
     rules: &RuleSet,
     obs: &Observation<'_>,
+    budget: &Budget,
     out: &mut Outbox,
 ) {
     // The infantry floor decides who gets the wallet first when it is thin: a
     // house below its share of infantry spends on the barracks before it
     // spends on the war factory.
     let infantry_short = infantry_below_floor(&brain.census);
+    // And the ceiling decides when it stops. A soldier costs a tenth of a tank,
+    // so a barracks left to itself spends every credit the house earns on
+    // infantry and the wallet never reaches the price of one — which is the
+    // "only ever infantry" army. Past the ceiling the barracks waits, unless
+    // the house is rich enough that the vehicles are not being starved.
+    let infantry_full = infantry_above_ceiling(&brain.census) && budget.free < RICH_CREDITS;
     let order = if infantry_short {
         [
             ProductionCategory::Infantry,
@@ -86,6 +103,11 @@ pub(super) fn fill_lines(
         ]
     };
     for category in order {
+        // An army that already holds its share of infantry stops buying it, so
+        // the wallet can reach a vehicle.
+        if infantry_full && category == ProductionCategory::Infantry {
+            continue;
+        }
         // A line holding a product, a queue or a finished object is working and
         // is not given another request; a line with nothing in it — including
         // one the house has not used yet — can be started. Whether the house
@@ -94,8 +116,8 @@ pub(super) fn fill_lines(
         if brain.census.line(category).busy() {
             continue;
         }
-        let wanted = product_for(brain, rules, obs, category, infantry_short);
-        queue_unit(rules, obs, out, wanted);
+        let wanted = product_for(brain, rules, obs, budget, category, infantry_short);
+        queue_unit(rules, obs, budget, out, wanted);
     }
 }
 
@@ -109,11 +131,22 @@ fn infantry_below_floor(census: &Census) -> bool {
     infantry * 100 < census.fighters.max(1) * INFANTRY_SHARE_PERCENT
 }
 
+/// Whether the army has all the infantry it needs, so the wallet can go to the
+/// vehicles instead ([`INFANTRY_CEILING_PERCENT`]).
+///
+/// The same reading the floor makes, of the same fighters: a house with no
+/// army is below the floor and below the ceiling, and the barracks fires.
+fn infantry_above_ceiling(census: &Census) -> bool {
+    let infantry: usize = census.tiers[Slot::Infantry.index()].iter().sum();
+    infantry * 100 > census.fighters.max(1) * INFANTRY_CEILING_PERCENT
+}
+
 /// What one idle line starts next.
 fn product_for<'r>(
     brain: &mut RetailBrain,
     rules: &'r RuleSet,
     obs: &Observation<'_>,
+    budget: &Budget,
     category: ProductionCategory,
     infantry_short: bool,
 ) -> Option<(&'r ObjectType, InternedId)> {
@@ -122,7 +155,7 @@ fn product_for<'r>(
     // that asks for an engineer or a spy is answered here — no ranking over
     // combat weights can ask for those at all. It is unchecked (§ the reader),
     // so the wallet is this caller's guard.
-    if let Some(found) = chosen_product(rules, obs, category, obs.credits()) {
+    if let Some(found) = chosen_product(rules, obs, category, budget.free) {
         return Some(found);
     }
 
@@ -145,7 +178,7 @@ fn product_for<'r>(
         {
             return Some(found);
         }
-        if obs.credits() < COMBAT_MIN_CREDITS {
+        if budget.free < COMBAT_MIN_CREDITS {
             return None;
         }
         // A naval type is a `Vehicle` in the rules, so the war factory has to
@@ -155,13 +188,14 @@ fn product_for<'r>(
             brain,
             rules,
             obs,
+            budget,
             ObjectCategory::Vehicle,
             Some(false),
             infantry_short,
         );
     }
 
-    if obs.credits() < INFANTRY_MIN_CREDITS {
+    if budget.free < INFANTRY_MIN_CREDITS {
         return None;
     }
     match category {
@@ -169,6 +203,7 @@ fn product_for<'r>(
             brain,
             rules,
             obs,
+            budget,
             ObjectCategory::Infantry,
             None,
             infantry_short,
@@ -176,20 +211,21 @@ fn product_for<'r>(
         ProductionCategory::Aircraft => {
             // An aircraft line is worth running at the same floor as the
             // vehicles: it is the dearest unit the house can buy.
-            if obs.credits() < COMBAT_MIN_CREDITS {
+            if budget.free < COMBAT_MIN_CREDITS {
                 return None;
             }
             fighter(
                 brain,
                 rules,
                 obs,
+                budget,
                 ObjectCategory::Aircraft,
                 None,
                 infantry_short,
             )
         }
         ProductionCategory::Ship => {
-            if obs.credits() < COMBAT_MIN_CREDITS {
+            if budget.free < COMBAT_MIN_CREDITS {
                 return None;
             }
             // Naval units are `Vehicle` types carrying `Naval=`: the rules'
@@ -198,6 +234,7 @@ fn product_for<'r>(
                 brain,
                 rules,
                 obs,
+                budget,
                 ObjectCategory::Vehicle,
                 Some(true),
                 infantry_short,
@@ -251,11 +288,12 @@ fn fighter<'r>(
     brain: &mut RetailBrain,
     rules: &'r RuleSet,
     obs: &Observation<'_>,
+    budget: &Budget,
     category: ObjectCategory,
     naval: Option<bool>,
     infantry_short: bool,
 ) -> Option<(&'r ObjectType, InternedId)> {
-    let ceiling = unit_ceiling(obs.credits());
+    let ceiling = unit_ceiling(budget.free);
     let affordable: Vec<(&ObjectType, InternedId, i32)> = build::class_types(rules, obs, category)
         .filter(|(ty, _)| naval.is_none_or(|wanted| ty.naval == wanted))
         .filter(|(ty, _)| super::orders::is_combat_unit(rules, ty))
@@ -365,20 +403,21 @@ fn unit_ceiling(credits: i32) -> i32 {
 fn queue_unit(
     rules: &RuleSet,
     obs: &Observation<'_>,
+    budget: &Budget,
     out: &mut Outbox,
     wanted: Option<(&ObjectType, InternedId)>,
 ) {
     let Some((ty, type_id)) = wanted else {
         return;
     };
-    if obs.credits() < obs.cost_of(rules, ty) {
+    if budget.free < obs.cost_of(rules, ty) {
         return;
     }
     log::debug!(
         "auto play: unit {} at {} (credits {})",
         ty.id,
         obs.cost_of(rules, ty),
-        obs.credits()
+        budget.free
     );
     out.intent(Intent::QueueProduction { type_id });
 }
@@ -435,7 +474,12 @@ mod tests {
         brain.census = ledger(&rules, &sim, owner);
         let obs = Observation::new(&sim, owner);
         let mut out = Outbox::default();
-        fill_lines(&mut brain, &rules, &obs, &mut out);
+        let budget = Budget {
+            committed: 0,
+            free: obs.credits(),
+            income: None,
+        };
+        fill_lines(&mut brain, &rules, &obs, &budget, &mut out);
 
         let queued: Vec<&str> = out
             .intents
@@ -477,7 +521,12 @@ mod tests {
         brain.census = ledger(&rules, &sim, owner);
         let obs = Observation::new(&sim, owner);
         let mut out = Outbox::default();
-        fill_lines(&mut brain, &rules, &obs, &mut out);
+        let budget = Budget {
+            committed: 0,
+            free: obs.credits(),
+            income: None,
+        };
+        fill_lines(&mut brain, &rules, &obs, &budget, &mut out);
 
         assert!(
             out.intents.is_empty(),
@@ -520,7 +569,12 @@ mod tests {
         brain.census = ledger(&rules, &sim, owner);
         let obs = Observation::new(&sim, owner);
         let mut out = Outbox::default();
-        fill_lines(&mut brain, &rules, &obs, &mut out);
+        let budget = Budget {
+            committed: 0,
+            free: obs.credits(),
+            income: None,
+        };
+        fill_lines(&mut brain, &rules, &obs, &budget, &mut out);
 
         let queued: Vec<&str> = out
             .intents
@@ -582,7 +636,12 @@ mod tests {
         brain.census = ledger(&rules, &sim, owner);
         let obs = Observation::new(&sim, owner);
         let mut out = Outbox::default();
-        fill_lines(&mut brain, &rules, &obs, &mut out);
+        let budget = Budget {
+            committed: 0,
+            free: obs.credits(),
+            income: None,
+        };
+        fill_lines(&mut brain, &rules, &obs, &budget, &mut out);
 
         let queued: Vec<&str> = out
             .intents
@@ -630,7 +689,12 @@ mod tests {
         brain.census = ledger(&rules, &sim, owner);
         let obs = Observation::new(&sim, owner);
         let mut out = Outbox::default();
-        fill_lines(&mut brain, &rules, &obs, &mut out);
+        let budget = Budget {
+            committed: 0,
+            free: obs.credits(),
+            income: None,
+        };
+        fill_lines(&mut brain, &rules, &obs, &budget, &mut out);
 
         let aircraft: Vec<&str> = out
             .intents
@@ -649,6 +713,78 @@ mod tests {
             1,
             "an idle air force command HQ starts an aircraft: {:?}",
             out.intents
+        );
+    }
+
+    /// An army that already holds its share of infantry stops buying it, so
+    /// the wallet can reach the price of a tank. A soldier is a tenth of a
+    /// tank, so a barracks left to itself spends every credit the house earns
+    /// on infantry and the war factory never gets to buy anything — the "only
+    /// ever infantry" army.
+    #[test]
+    fn an_army_past_its_infantry_share_buys_the_vehicle_instead() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        for (name, cell) in [
+            ("GACNST", (16u16, 16u16)),
+            ("GAPOWR", (12, 16)),
+            ("GAPILE", (20, 16)),
+            ("GAWEAP", (24, 16)),
+            // The bays have their harvesters, so the vehicle line is free to
+            // spend on the army rather than on income.
+            ("CMIN", (28, 16)),
+            ("CMIN", (30, 16)),
+        ] {
+            sim.spawn_object(name, "Americans", cell.0, cell.1, 255, &rules)
+                .unwrap_or_else(|| panic!("{name}"));
+        }
+        // Six soldiers and nothing else: past the ceiling, not past the floor.
+        for index in 0..6u16 {
+            sim.spawn_object("E1", "Americans", 20 + index, 24, 255, &rules)
+                .expect("a soldier");
+        }
+        sim.houses
+            .get_mut(&owner)
+            .expect("the house")
+            .economy_mut()
+            .set_credits_for_test(3_000);
+
+        let mut brain = RetailBrain::new(0xA17);
+        brain.census = ledger(&rules, &sim, owner);
+        let obs = Observation::new(&sim, owner);
+        let mut out = Outbox::default();
+        let budget = Budget {
+            committed: 0,
+            free: obs.credits(),
+            income: None,
+        };
+        fill_lines(&mut brain, &rules, &obs, &budget, &mut out);
+
+        let queued: Vec<&str> = out
+            .intents
+            .iter()
+            .filter_map(|intent| match intent {
+                Intent::QueueProduction { type_id } => Some(sim.interner().resolve(*type_id)),
+                _ => None,
+            })
+            .collect();
+        for name in &queued {
+            let ty = rules.object(name).expect("a rules type");
+            assert_ne!(
+                ty.category,
+                ObjectCategory::Infantry,
+                "the barracks stops past the ceiling: {name}"
+            );
+        }
+        assert!(
+            queued.iter().any(|name| rules
+                .object(name)
+                .expect("a rules type")
+                .category
+                == ObjectCategory::Vehicle),
+            "the wallet reaches the war factory: {queued:?}"
         );
     }
 }

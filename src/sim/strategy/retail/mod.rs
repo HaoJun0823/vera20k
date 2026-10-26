@@ -90,6 +90,7 @@ pub(super) mod census;
 pub(super) mod composition;
 pub(super) mod expand;
 pub(super) mod orders;
+pub(super) mod plan;
 
 use std::collections::BTreeMap;
 
@@ -136,6 +137,11 @@ pub struct RetailBrain {
     /// real gate; this only keeps a refused launch from spending the frame
     /// budget every frame it stays lit.
     pub(super) super_at: BTreeMap<InternedId, u64>,
+    /// The house's income, measured: samples of `Observation::earned` a window
+    /// apart. Not a simulation stream and not the brain's generator — it is a
+    /// reading of the house's own books, kept here because the brain is the
+    /// only thing that asks how fast the house is earning.
+    income: plan::IncomeMeter,
 }
 
 impl RetailBrain {
@@ -149,6 +155,7 @@ impl RetailBrain {
             roles: None,
             census: Census::default(),
             super_at: BTreeMap::new(),
+            income: plan::IncomeMeter::new(),
         }
     }
 
@@ -190,19 +197,27 @@ impl Brain for RetailBrain {
         // One pass over the house's objects and factories, before any decision
         // asks a question about them. Every step below reads this ledger rather
         // than walking the entity store again.
+        self.income.sample(obs.tick(), obs.earned());
         self.rebuild_census(rules, obs);
+        // What the wallet can still spend, and what the house earns: the two
+        // numbers every step below is gated on, so they are read once.
+        let budget = plan::budget(rules, obs, &self.census, self.income.per_minute());
         // One line every ten seconds, the same cadence the board and the yard
         // deploy log on: "the AI builds nothing" has to be answerable from the
         // log the client already writes.
         if obs.tick() % 600 == 0 {
-            log::info!("auto play: {}", self.census.describe());
+            log::info!(
+                "auto play: {} income={}/min",
+                self.census.describe(),
+                budget.income.map_or(-1, |rate| rate)
+            );
         }
         expand::deploy_yard_maker(self, rules, obs, out);
-        build::spend(self, rules, obs, out);
+        build::spend(self, rules, obs, &budget, out);
         // Units after the structures: the yard's next choice decides what the
         // house can make, and the lines fill once nothing is waiting to be
         // placed.
-        composition::fill_lines(self, rules, obs, out);
+        composition::fill_lines(self, rules, obs, &budget, out);
         // A hurt unit is the retreat routine's before it is any order
         // step's: the attach rides the same outbox as the orders below, and
         // the control layer drops this brain's order for an object a routine
