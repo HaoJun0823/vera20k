@@ -38,8 +38,7 @@ use crate::sim::control::observation::{EnemyEntity, Observation};
 use crate::sim::mission::{MissionId, MissionType};
 
 use super::census::{Census, Unit};
-use super::orders::SentOrder;
-use super::{ORDER_REFRESH_FRAMES, RetailBrain};
+use super::RetailBrain;
 
 /// How large the army has to be before it is worth pushing with.
 ///
@@ -142,32 +141,42 @@ pub(super) fn advance(
         if out.orders.iter().any(|order| order.actor == unit.entity_id) {
             continue;
         }
-        let current = brain
-            .orders
-            .get(&unit.entity_id)
-            .is_some_and(|sent| sent.target == Some(target.entity_id) && tick < sent.refresh);
-        if current {
-            continue;
-        }
         // Inside its own reach the unit shoots the structure from where it
         // stands; outside it, it walks. The goal is still the one target — this
         // is the same fist, ordered by what each unit can actually do.
         let reach = obs
             .object_type(rules, unit.type_id)
             .map_or(0, |ty| weapon_range_cells(rules, ty));
-        let goal = if reach > 0 && cell_distance(unit.cell, target.cell) <= reach {
-            Goal::Attack {
-                target: target.entity_id,
-            }
+        let (kind, goal) = if reach > 0 && cell_distance(unit.cell, target.cell) <= reach {
+            (
+                super::tracked::TrackedKind::Attack,
+                Goal::Attack {
+                    target: target.entity_id,
+                },
+            )
         } else {
-            Goal::AttackMove { cell: target.cell }
+            (
+                super::tracked::TrackedKind::AttackMove,
+                Goal::AttackMove { cell: target.cell },
+            )
         };
-        brain.orders.insert(
+        // L4: it has been sent at this target, the target has not walked away,
+        // and the order has not expired — so it is already doing this.
+        if !brain.tracked.admits(
+            tick,
             unit.entity_id,
-            SentOrder {
-                target: Some(target.entity_id),
-                refresh: tick.saturating_add(ORDER_REFRESH_FRAMES),
-            },
+            kind,
+            Some(target.entity_id),
+            Some(target.cell),
+        ) {
+            continue;
+        }
+        brain.tracked.record(
+            tick,
+            unit.entity_id,
+            kind,
+            Some(target.entity_id),
+            Some(target.cell),
         );
         out.order(unit.entity_id, goal);
         issued += 1;

@@ -91,6 +91,7 @@ pub(super) mod composition;
 pub(super) mod expand;
 pub(super) mod orders;
 pub(super) mod plan;
+pub(super) mod tracked;
 
 use std::collections::BTreeMap;
 
@@ -102,13 +103,13 @@ use crate::sim::intern::InternedId;
 use crate::sim::rng::SimRng;
 
 use census::Census;
-use orders::SentOrder;
+use tracked::Tracker;
 
-/// How long an order on a unit stands before the brain looks again, in frames.
-/// Fifteen seconds at play cadence: long enough that a unit is not re-tasked
-/// every frame, short enough that one that finished its attack and idled is
-/// sent on.
-pub(super) const ORDER_REFRESH_FRAMES: u64 = 450;
+/// How long an order on a unit stands before the brain looks again is
+/// [`tracked::TrackedKind::term`]'s answer now, and it differs per kind: a pose
+/// takes its animation, a walk across the map takes the walk. Fifteen seconds
+/// for the standing orders — long enough that a unit is not re-tasked every
+/// frame, short enough that one which finished its attack and idled is sent on.
 
 /// Plays one house the way a player would, through commands only.
 pub struct RetailBrain {
@@ -117,8 +118,12 @@ pub struct RetailBrain {
     /// the world's.
     #[allow(dead_code)]
     pub(super) rng: SimRng,
-    /// What each combat unit was sent at, and the frame that order goes stale.
-    pub(super) orders: BTreeMap<u64, SentOrder>,
+    /// What each unit has already been told, and when it may be told again.
+    ///
+    /// Every order the brain issues goes through it — this is the L4 layer, and
+    /// the reason a toggle cannot undo itself and a walk-in is not restarted
+    /// every frame. One owner for "does it need telling", whatever asked.
+    pub(super) tracked: Tracker,
     /// How far the placement sweep has moved for a structure waiting for a
     /// cell, by type: a cell the gate admits but the receiver refuses must
     /// not be asked for again.
@@ -141,13 +146,6 @@ pub struct RetailBrain {
     /// apart. Not a simulation stream and not the brain's generator — it is a
     /// reading of the house's own books, kept here because the brain is the
     /// only thing that asks how fast the house is earning.
-    /// When each soldier may be asked to take its pose again, by unit.
-    ///
-    /// The D key starts an animation and `Is_Deployed` only follows it, so the
-    /// state lags the command by those frames. Without this the step reads a
-    /// soldier that is going down as one that is still standing and toggles it
-    /// back up, every frame.
-    pub(super) deploy_at: BTreeMap<u64, u64>,
     income: plan::IncomeMeter,
 }
 
@@ -157,12 +155,11 @@ impl RetailBrain {
     pub fn new(seed: u64) -> Self {
         Self {
             rng: SimRng::new(seed),
-            orders: BTreeMap::new(),
+            tracked: Tracker::new(),
             site_attempts: BTreeMap::new(),
             roles: None,
             census: Census::default(),
             super_at: BTreeMap::new(),
-            deploy_at: BTreeMap::new(),
             income: plan::IncomeMeter::new(),
         }
     }

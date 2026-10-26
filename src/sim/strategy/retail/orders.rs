@@ -27,10 +27,12 @@
 //! enemy search that sets it runs in the house's own Strategy tick
 //! (`sim::house_strategy`), which the brain asks for.
 //!
-//! The brain remembers one order per unit and refreshes it after
-//! [`ORDER_REFRESH_FRAMES`] or when the order would change. Re-issuing every
-//! frame would spend the whole per-frame budget on one army, and re-issuing a
-//! unit that the gate refused would hide the refusal.
+//! Every order here passes through [`super::tracked`], which remembers what
+//! each unit has been told and refuses to say it again until the intent has
+//! expired, has changed, or its target has moved. That is what keeps a toggle
+//! from undoing itself and a walk-in from being restarted every frame — and
+//! what keeps the whole per-frame budget from going on one army's standing
+//! orders.
 
 use std::collections::BTreeSet;
 
@@ -43,7 +45,9 @@ use crate::sim::control::intent::Intent;
 use crate::sim::command::Command;
 use crate::sim::control::observation::{EnemyEntity, Observation};
 use crate::sim::mission::{MissionId, MissionType};
-use crate::sim::strategy::retail::{ORDER_REFRESH_FRAMES, RetailBrain};
+use crate::sim::strategy::retail::RetailBrain;
+
+use super::tracked::TrackedKind;
 
 /// How many new unit orders one frame may carry. The board drops everything
 /// past its own per-frame budget, so asking for more would only spend the frame
@@ -51,13 +55,9 @@ use crate::sim::strategy::retail::{ORDER_REFRESH_FRAMES, RetailBrain};
 /// units first, in storage order.
 const FORCE_ORDERS_PER_FRAME: usize = 8;
 
-/// One order the brain has issued, and when it looks at that unit again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SentOrder {
-    /// The hostile the unit was sent at, or `None` for the hold order.
-    pub(super) target: Option<u64>,
-    pub(super) refresh: u64,
-}
+/// The intents that mean a unit is already on its way somewhere: the advance
+/// step owns those, and a guard here would pull it back out of the push.
+const PUSHING: &[TrackedKind] = &[TrackedKind::Attack, TrackedKind::AttackMove, TrackedKind::Move];
 
 /// How near one of the house's own buildings a bridge or a garrison has to be
 /// for the policy to spend a unit on it, in cells. A garrison is only worth
@@ -139,19 +139,23 @@ pub(super) fn captures(
         let Some(target) = chosen else {
             continue;
         };
-        let current = brain
-            .orders
-            .get(&unit.entity_id)
-            .is_some_and(|sent| sent.target == Some(target.entity_id) && tick < sent.refresh);
-        if current {
+        // L4: it has been told to take this building, and the walk is not
+        // over, so it is not told again.
+        if !brain.tracked.admits(
+            tick,
+            unit.entity_id,
+            TrackedKind::Capture,
+            Some(target.entity_id),
+            Some(target.cell),
+        ) {
             continue;
         }
-        brain.orders.insert(
+        brain.tracked.record(
+            tick,
             unit.entity_id,
-            SentOrder {
-                target: Some(target.entity_id),
-                refresh: tick.saturating_add(ORDER_REFRESH_FRAMES),
-            },
+            TrackedKind::Capture,
+            Some(target.entity_id),
+            Some(target.cell),
         );
         out.order(
             unit.entity_id,
@@ -207,20 +211,18 @@ pub(super) fn bridges(
         let Some(target) = nearest_site(&huts, unit.cell) else {
             continue;
         };
-        let current = brain
-            .orders
-            .get(&unit.entity_id)
-            .is_some_and(|sent| sent.target == Some(target) && tick < sent.refresh);
-        if current {
+        if !brain.tracked.admits(
+            tick,
+            unit.entity_id,
+            TrackedKind::Capture,
+            Some(target),
+            None,
+        ) {
             continue;
         }
-        brain.orders.insert(
-            unit.entity_id,
-            SentOrder {
-                target: Some(target),
-                refresh: tick.saturating_add(ORDER_REFRESH_FRAMES),
-            },
-        );
+        brain
+            .tracked
+            .record(tick, unit.entity_id, TrackedKind::Capture, Some(target), None);
         out.order(unit.entity_id, Goal::Capture { target });
         issued += 1;
     }
@@ -266,19 +268,24 @@ pub(super) fn garrison(
         else {
             continue;
         };
-        let current = brain
-            .orders
-            .get(&unit.entity_id)
-            .is_some_and(|sent| sent.target == Some(billet.building_id) && tick < sent.refresh);
-        if current {
+        // The garrison is the one that had no memory at all: it was told to
+        // walk into the same building every frame, and a unit being told to
+        // enter what it is already entering is a unit that never arrives.
+        if !brain.tracked.admits(
+            tick,
+            unit.entity_id,
+            TrackedKind::Enter,
+            Some(billet.building_id),
+            Some(billet.cell),
+        ) {
             continue;
         }
-        brain.orders.insert(
+        brain.tracked.record(
+            tick,
             unit.entity_id,
-            SentOrder {
-                target: Some(billet.building_id),
-                refresh: tick.saturating_add(ORDER_REFRESH_FRAMES),
-            },
+            TrackedKind::Enter,
+            Some(billet.building_id),
+            Some(billet.cell),
         );
         out.order(
             unit.entity_id,
@@ -367,7 +374,7 @@ pub(super) fn forces(
     // Forget the units the house no longer has, so the memory stays bounded by
     // the army and a recycled id cannot inherit an old order.
     let ids: BTreeSet<u64> = brain.census.units.iter().map(|unit| unit.entity_id).collect();
-    brain.orders.retain(|id, _| ids.contains(id));
+    brain.tracked.retain(&ids);
     if !brain.census.units.iter().any(|unit| unit.traits.combat) {
         return;
     }
@@ -391,27 +398,18 @@ pub(super) fn forces(
         }
         // The advance step owns a unit it is pushing: a guard here would pull
         // it back out of the push.
-        if brain
-            .orders
-            .get(&unit.entity_id)
-            .is_some_and(|sent| sent.target.is_some() && tick < sent.refresh)
+        if brain.tracked.stands(tick, unit.entity_id, PUSHING) {
+            continue;
+        }
+        if !brain
+            .tracked
+            .admits(tick, unit.entity_id, TrackedKind::Guard, None, None)
         {
             continue;
         }
-        let current = brain
-            .orders
-            .get(&unit.entity_id)
-            .is_some_and(|sent| sent.target.is_none() && tick < sent.refresh);
-        if current {
-            continue;
-        }
-        brain.orders.insert(
-            unit.entity_id,
-            SentOrder {
-                target: None,
-                refresh: tick.saturating_add(ORDER_REFRESH_FRAMES),
-            },
-        );
+        brain
+            .tracked
+            .record(tick, unit.entity_id, TrackedKind::Guard, None, None);
         out.order(unit.entity_id, Goal::Guard);
         issued += 1;
     }
@@ -428,9 +426,8 @@ const DEPLOY_RANGE_CELLS: i32 = 6;
 /// for the orders that move them.
 const DEPLOYS_PER_FRAME: usize = 4;
 
-/// How long a soldier is left alone after the D key, in frames: three seconds,
-/// the deploy animation and the command's round trip.
-const DEPLOY_SETTLE_FRAMES: u64 = 45;
+/// How long a soldier is left alone after the D key is [`TrackedKind::term`]'s
+/// answer now: the deploy animation, and the command's round trip.
 
 /// The D key on the soldiers that fight better deployed: `DeployFire=yes`.
 ///
@@ -449,7 +446,7 @@ pub(super) fn deploy(brain: &mut RetailBrain, obs: &Observation<'_>, out: &mut O
     // Forget the soldiers the house no longer has, so a recycled id cannot
     // inherit another soldier's pose.
     let live: BTreeSet<u64> = brain.census.units.iter().map(|unit| unit.entity_id).collect();
-    brain.deploy_at.retain(|id, _| live.contains(id));
+    brain.tracked.retain(&live);
     // Collected before anything is written: the toggle has to be recorded
     // against the soldier, and the ledger is borrowed while it is read.
     let wanted: Vec<(u64, bool)> = brain
@@ -464,24 +461,22 @@ pub(super) fn deploy(brain: &mut RetailBrain, obs: &Observation<'_>, out: &mut O
         if issued >= DEPLOYS_PER_FRAME {
             break;
         }
-        // The command starts an animation and `Is_Deployed` only follows it,
-        // so for those frames the soldier still reads as standing. Re-reading
-        // the state every frame toggles it straight back up — the soldier
-        // bobbing in and out of the pose.
-        if brain
-            .deploy_at
-            .get(&entity_id)
-            .is_some_and(|until| tick < *until)
-        {
+        if engaged == obs.is_deployed(entity_id) {
             continue;
         }
-        if engaged == obs.is_deployed(entity_id) {
+        // The toggle's own term is the deploy animation, and `Is_Deployed`
+        // only follows it — so until then the soldier still reads as standing
+        // and would be toggled straight back up. L4 refuses the second press.
+        if !brain
+            .tracked
+            .admits(tick, entity_id, TrackedKind::Deploy, None, None)
+        {
             continue;
         }
         out.command(Command::ToggleInfantryDeploy { entity_id });
         brain
-            .deploy_at
-            .insert(entity_id, tick.saturating_add(DEPLOY_SETTLE_FRAMES));
+            .tracked
+            .record(tick, entity_id, TrackedKind::Deploy, None, None);
         issued += 1;
     }
 }
