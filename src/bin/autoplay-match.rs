@@ -636,6 +636,21 @@ fn main() -> Result<(), String> {
                     .map(|(name, count)| format!("{name} {count}"))
                     .collect();
                 println!("  own@{tick}: {}", line.join(", "));
+                // What the other side is fielding, by type: an army census
+                // that only counted its own units cannot answer "what beat
+                // us", and the types are the sim's own names for them.
+                let mut theirs: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for entity in Observation::new(sim, enemy).own_entities() {
+                    *theirs
+                        .entry(sim.interner().resolve(entity.type_id).to_owned())
+                        .or_default() += 1;
+                }
+                let line: Vec<String> = theirs
+                    .iter()
+                    .map(|(name, count)| format!("{name} {count}"))
+                    .collect();
+                println!("  enemy@{tick}: {}", line.join(", "));
                 let yard = obs
                     .building_in_production()
                     .map(|(type_id, suspended)| {

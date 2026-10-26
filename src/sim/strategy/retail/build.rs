@@ -573,6 +573,14 @@ fn shortfall(rules: &RuleSet, obs: &Observation<'_>, roles: &RoleTable) -> Optio
         if ty.category == ObjectCategory::Building {
             continue;
         }
+        // Nor is a spawn child. `[V3ROCKET] Spawned=yes` is a round already in
+        // the air, and reading it as an aircraft asked the army for anti-air:
+        // the measured match bought ten IFVs against two rockets while its
+        // base was overrun by the bunkers and Tesla coils the army had no
+        // answer for.
+        if ty.spawned {
+            continue;
+        }
         let Some(role) = counter(ty) else {
             continue;
         };
@@ -786,6 +794,35 @@ mod tests {
             counter(rules.object("APACHE").expect("an Apache")),
             Some(Role::AntiAir),
             "what answers an aircraft is what can reach it"
+        );
+    }
+
+    /// A round already in the air is not an aircraft. `[V3ROCKET]` sits in the
+    /// aircraft table with `Spawned=yes`, and reading it as air asked the army
+    /// for anti-air: the measured match answered two rockets with ten IFVs
+    /// while the bunkers and Tesla coils that took the base went unanswered.
+    #[test]
+    fn a_fired_rocket_does_not_ask_the_army_for_anti_air() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        for (name, cell) in [("V3ROCKET", (6u16, 6u16)), ("E2", (8, 8))] {
+            sim.spawn_object(name, "Russians", cell.0, cell.1, 64, &rules)
+                .unwrap_or_else(|| panic!("{name}"));
+        }
+        let obs = Observation::new(&sim, owner);
+        let need = shortfall(&rules, &obs, &RoleTable::build(&rules))
+            .expect("an army of nothing is short of it all");
+
+        assert!(
+            need.get(Role::AntiInfantry) > 0.0,
+            "the conscript is still a threat: {need:?}"
+        );
+        assert_eq!(
+            need.get(Role::AntiAir),
+            0.0,
+            "the rocket is ammunition, not air to answer: {need:?}"
         );
     }
 
