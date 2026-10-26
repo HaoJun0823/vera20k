@@ -7,8 +7,9 @@
 //! the house can only lose by attrition.
 //!
 //! This is the player's substitute, and deliberately two rules. The first is
-//! *when*: an army large enough to be worth spending, a base that can replace
-//! it, and nothing already at the yard. The second is *where*: one structure
+//! *when*: an army large enough to be worth spending, heavy enough to beat what
+//! is standing where it is going ([`super::squads::outguns`]), a base that can
+//! replace it, and nothing already at the yard. The second is *where*: one structure
 //! for the whole army — the enemy economy structure nearest the first fighter
 //! in entity-store order — because a fist takes a base, and units that walk
 //! at their own nearest building arrive one at a time and die one at a time.
@@ -121,6 +122,12 @@ pub(super) fn advance(
     let Some(target) = nearest_target(&targets, anchor) else {
         return false;
     };
+    // And a fist big enough to take it. The size gate above counts heads; this
+    // one weighs them against what is standing there, and an army that cannot
+    // win the fight stays home and grows instead of being spent.
+    if !super::squads::outguns(&brain.census, rules, obs, target.cell) {
+        return false;
+    }
 
     let tick = obs.tick();
     let mut issued = 0;

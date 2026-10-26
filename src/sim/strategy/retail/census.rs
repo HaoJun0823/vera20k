@@ -163,6 +163,11 @@ pub(super) struct Unit {
     pub(super) cell: (u16, u16),
     /// Health as permille of the type's full strength.
     pub(super) health_permille: u16,
+    /// What it is worth in a fight, in hit points: [`fight_points`] of its own
+    /// type at the health it has left, and zero for anything that does not
+    /// fight. Resolved while the ledger is built, because the ledger is the
+    /// only pass that has the type open.
+    pub(super) points: i32,
     pub(super) mission: MissionId,
     pub(super) orderable: bool,
     /// A team's script or one of the player's control groups owns it
@@ -212,6 +217,25 @@ pub(super) struct Census {
 /// rule set offers, so a quarter of it is a type that really does the job; a
 /// tank's trace of anti-air (it has none) stays out of the count.
 const ROLE_FLOOR: f64 = 0.25;
+
+/// What one object is worth in a fight, in hit points.
+///
+/// `Strength=` is the rules' own measure of what a type survives, and it is the
+/// only number both sides can be scored in: a Grizzly's 300 against a
+/// conscript's 100 is close to how many of the latter the former is worth.
+/// Health scales it, because a damaged tank is not a tank.
+///
+/// A type that cannot shoot back is worth nothing here whatever it survives —
+/// a refinery is ground the army stands on, not a threat it has to outfight —
+/// which is also what keeps the enemy's own economy out of the comparison.
+pub(super) fn fight_points(ty: &ObjectType, health_permille: u16) -> i32 {
+    if ty.primary().is_none() {
+        return 0;
+    }
+    let full = ty.strength.max(0);
+    let scaled = i64::from(full) * i64::from(health_permille.min(1_000)) / 1_000;
+    i32::try_from(scaled).unwrap_or(i32::MAX)
+}
 
 /// The price band a unit falls in: cheap, the line unit, or the heavy end. The
 /// cuts are retail's own steps — a soldier around 200, a line vehicle around
@@ -334,6 +358,11 @@ impl Census {
                 self.home_cells.push(entity.cell);
                 self.base_cell.get_or_insert(entity.cell);
             }
+            let points = if combat {
+                fight_points(ty, health_permille)
+            } else {
+                0
+            };
             if combat {
                 self.fighters += 1;
                 self.tiers[slot.index()][tier] += 1;
@@ -350,6 +379,7 @@ impl Census {
                 type_id: entity.type_id,
                 cell: entity.cell,
                 health_permille,
+                points,
                 mission: entity.mission,
                 orderable: entity.orderable,
                 hand: obs.owned_by_hand(entity.entity_id),
@@ -421,6 +451,41 @@ impl Census {
 
     pub(super) fn combat_units(&self) -> impl Iterator<Item = &Unit> {
         self.units.iter().filter(|unit| unit.traits.combat)
+    }
+
+    /// What the house has to fight with: one number, in hit points, so that a
+    /// decision that asks "is this enough" has something to compare against
+    /// rather than a count of things that are not alike.
+    pub(super) fn army_points(&self) -> i32 {
+        self.units
+            .iter()
+            .fold(0i32, |total, unit| total.saturating_add(unit.points))
+    }
+
+    /// What the enemy has within `radius` cells of `cell`, in hit points: the
+    /// force that will meet an army walking there.
+    ///
+    /// Types are opened here because this is the one pass that holds them; the
+    /// answer is what the house can see, and an enemy it has never seen is not
+    /// one it can weigh — the honest reading, and the reason the comparison
+    /// below is a floor and not a promise.
+    pub(super) fn enemy_points(
+        &self,
+        rules: &RuleSet,
+        obs: &Observation<'_>,
+        cell: (u16, u16),
+        radius: i32,
+    ) -> i32 {
+        let reach = radius.saturating_mul(radius);
+        self.enemies
+            .iter()
+            .filter(|enemy| {
+                let dx = i32::from(enemy.cell.0) - i32::from(cell.0);
+                let dy = i32::from(enemy.cell.1) - i32::from(cell.1);
+                dx * dx + dy * dy <= reach
+            })
+            .filter_map(|enemy| obs.object_type(rules, enemy.type_id))
+            .fold(0i32, |total, ty| total.saturating_add(fight_points(ty, 1_000)))
     }
 
     /// The job gaps: what the enemy's field asks for, less what this house can
@@ -534,6 +599,35 @@ mod tests {
         assert!(
             census.lines.iter().all(|line| !line.busy()),
             "no factory is making anything"
+        );
+    }
+
+    /// A fight is weighed in what the other side can shoot back with, so a
+    /// building with no gun is worth nothing in it — the enemy's refinery is
+    /// ground the army walks over, not a defender it has to outfight.
+    #[test]
+    fn a_type_that_cannot_shoot_back_is_worth_nothing_in_a_fight() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        let obs = Observation::new(&sim, owner);
+        let by_name = |name: &str| {
+            obs.type_id(name)
+                .and_then(|type_id| obs.object_type(&rules, type_id))
+                .unwrap_or_else(|| panic!("{name} is in the rules"))
+        };
+        assert_eq!(
+            fight_points(by_name("NAREFN"), 1_000),
+            0,
+            "a refinery has no gun"
+        );
+        let tank = fight_points(by_name("MTNK"), 1_000);
+        assert!(tank > 0, "a Grizzly does: {tank}");
+        assert_eq!(
+            fight_points(by_name("MTNK"), 500),
+            tank / 2,
+            "half health is half the tank"
         );
     }
 

@@ -27,6 +27,9 @@
 
 use std::collections::BTreeSet;
 
+use crate::rules::ruleset::RuleSet;
+use crate::sim::control::observation::Observation;
+
 use super::census::{Census, Unit};
 
 /// How often the membership is rebuilt, in frames: twenty seconds. Often
@@ -69,6 +72,46 @@ pub(super) const ARMY_TO_ATTACK: usize = 10;
 /// A few, not the rest: a raid on the ore is worth a handful of units, and the
 /// house still needs something at home for the raid that answers it.
 const HARASS_MAX: usize = 4;
+
+/// How much stronger than what stands at the target the army has to be before
+/// it walks there, in permille: a fifth again.
+///
+/// Equal strength is not a fight a player takes. The attacker pays for the walk
+/// — he arrives under the defender's guns, spread over the approach, while the
+/// defender shoots from where he already stands — so a house that pushes on
+/// parity trades its army for a base it then cannot hold. A fifth is a margin
+/// small enough to be reached by one more production cycle and large enough to
+/// survive the walk.
+///
+/// It is compared in hit points ([`Census::army_points`] against
+/// [`Census::enemy_points`]), not in heads: ten conscripts are not ten tanks,
+/// and an army counted in heads was how the house kept walking into a garrison
+/// it had no answer to.
+const PUSH_SUPERIORITY_PERMILLE: i32 = 1_200;
+
+/// How near the target a hostile has to stand to count as meeting the push
+/// there, in cells.
+const PUSH_MEET_CELLS: i32 = 18;
+
+/// Whether the army is strong enough to walk into what stands at `cell`.
+///
+/// What the house can see is what it can weigh: an enemy inside the fog is not
+/// counted, so this is a floor on the defence and not a promise about it. The
+/// answer for an empty field is `true`, which is the whole point — a base with
+/// nothing standing in front of it is one the army should walk into.
+pub(super) fn outguns(
+    census: &Census,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    cell: (u16, u16),
+) -> bool {
+    let theirs = census.enemy_points(rules, obs, cell, PUSH_MEET_CELLS);
+    if theirs == 0 {
+        return true;
+    }
+    let ours = census.army_points();
+    ours.saturating_mul(1_000) >= theirs.saturating_mul(PUSH_SUPERIORITY_PERMILLE)
+}
 
 /// What a team is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +329,7 @@ mod tests {
             type_id: crate::sim::intern::InternedId::default(),
             cell,
             health_permille: 1_000,
+            points: 100,
             mission: crate::sim::mission::MissionId::from_known(
                 crate::sim::mission::MissionType::Guard,
             ),
@@ -325,6 +369,7 @@ mod tests {
                 type_id: crate::sim::intern::InternedId::default(),
                 cell: (20 + u16::try_from(id).unwrap_or(0), 30),
                 health_permille: 1_000,
+                points: 100,
                 mission: crate::sim::mission::MissionId::from_known(crate::sim::mission::MissionType::Guard),
                 orderable: true,
                 hand: false,
@@ -389,6 +434,78 @@ mod tests {
             squads.squad(Role::Attack).map_or(0, |squad| squad.members.len()),
             5 - HARASS_MAX,
             "and the house keeps something at home"
+        );
+    }
+
+    /// A retail arena: two houses on open ground, needed to score real types.
+    /// The rules come from the repository's own `ini/` snapshot, so these run
+    /// without a retail install.
+    fn arena(seed: u64) -> Option<(crate::sim::world::Simulation, RuleSet)> {
+        let rules = crate::rules::retail_ini_fixture::retail_unlayered_rules()?;
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, seed);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        Some((sim, rules))
+    }
+
+    fn ledger(rules: &RuleSet, sim: &crate::sim::world::Simulation, owner: crate::sim::intern::InternedId) -> Census {
+        let mut census = Census::default();
+        census.refresh(
+            &crate::rules::unit_role::RoleTable::build(rules),
+            rules,
+            &Observation::new(sim, owner),
+        );
+        census
+    }
+
+    /// What stands at the target is weighed, not counted: two tanks are not an
+    /// army that can walk into ten, and an army counted in heads was how the
+    /// house kept trading itself for a base.
+    #[test]
+    fn an_army_that_cannot_outfight_the_garrison_is_not_sent() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        for cell in [(10u16, 10u16), (11, 10)] {
+            sim.spawn_object("MTNK", "Americans", cell.0, cell.1, 255, &rules)
+                .expect("a Grizzly of our own");
+        }
+        for cell in [(26u16, 26u16), (27, 26), (28, 26), (26, 27), (27, 27)] {
+            sim.spawn_object("MTNK", "Russians", cell.0, cell.1, 255, &rules)
+                .expect("a Soviet Grizzly");
+        }
+        let census = ledger(&rules, &sim, owner);
+        let obs = Observation::new(&sim, owner);
+        assert!(
+            census.army_points() > 0,
+            "the ledger scores the army it has: {}",
+            census.army_points()
+        );
+        assert!(
+            !outguns(&census, &rules, &obs, (26, 26)),
+            "two tanks do not outfight five: ours={} theirs={}",
+            census.army_points(),
+            census.enemy_points(&rules, &obs, (26, 26), PUSH_MEET_CELLS)
+        );
+    }
+
+    /// And a target with nothing standing in front of it is one the army walks
+    /// into, however small the army is: an empty base is not a garrison.
+    #[test]
+    fn an_undefended_target_is_one_the_army_walks_into() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        sim.spawn_object("MTNK", "Americans", 10, 10, 255, &rules)
+            .expect("a Grizzly of our own");
+        let census = ledger(&rules, &sim, owner);
+        let obs = Observation::new(&sim, owner);
+        assert!(
+            outguns(&census, &rules, &obs, (26, 26)),
+            "nothing stands there: theirs={}",
+            census.enemy_points(&rules, &obs, (26, 26), PUSH_MEET_CELLS)
         );
     }
 
