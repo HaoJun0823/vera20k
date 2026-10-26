@@ -238,5 +238,9 @@ impl Brain for RetailBrain {
         if !advance::advance(self, rules, obs, out) {
             orders::forces(self, rules, obs, out);
         }
+        // Last, because it is a pose and not a destination: a soldier takes its
+        // deployed position where the orders above have left it, and the toggle
+        // is issued on the edge only.
+        orders::deploy(self, obs, out);
     }
 }

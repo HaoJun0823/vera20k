@@ -146,6 +146,13 @@ pub(super) struct Traits {
     pub(super) engineer: bool,
     pub(super) infiltrator: bool,
     pub(super) occupier: bool,
+    /// `DeployFire=`: a soldier the D key turns into a position
+    /// (`[E1]` and `[GGI]` carry `Deployer=yes` with it).
+    pub(super) deployer: bool,
+    /// `NotHuman=yes` with `Natural=yes`, the retail attack dog's own pair: a
+    /// scanner with teeth, and the only type the rules mark as neither human
+    /// nor mechanical.
+    pub(super) scout: bool,
 }
 
 /// One object of the house, as the decisions see it.
@@ -304,6 +311,8 @@ impl Census {
                 engineer: ty.engineer,
                 infiltrator: ty.infiltrate,
                 occupier: ty.occupier,
+                deployer: ty.deploy_fire,
+                scout: ty.not_human && ty.natural,
             };
 
             self.counts[slot.index()] += 1;

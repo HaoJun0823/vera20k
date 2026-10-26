@@ -192,6 +192,20 @@ impl<'a> Observation<'a> {
         self.power().map_or(0, |(output, _)| output)
     }
 
+    /// Whether `entity_id` is deployed: the state the D key toggles
+    /// (`TechnoClass::Is_Deployed`; infantry `Doing` 27..30, which covers the
+    /// deploy animation and the deployed pose).
+    ///
+    /// A decision that tells a soldier to deploy has to know whether it
+    /// already has, because the command toggles: sent twice, it walks the
+    /// soldier back out of the position it just took.
+    pub fn is_deployed(&self, entity_id: u64) -> bool {
+        self.sim
+            .entities()
+            .get(entity_id)
+            .is_some_and(|entity| entity.is_deployed())
+    }
+
     /// Power the house's buildings consume.
     pub fn power_drain(&self) -> i32 {
         self.power().map_or(0, |(_, drain)| drain)

@@ -40,6 +40,7 @@ use crate::rules::superweapon_type::SuperWeaponKind;
 use crate::sim::control::{Goal, MicroKind, MicroParams};
 use crate::sim::control::brain::Outbox;
 use crate::sim::control::intent::Intent;
+use crate::sim::command::Command;
 use crate::sim::control::observation::{EnemyEntity, Observation};
 use crate::sim::mission::{MissionId, MissionType};
 use crate::sim::strategy::retail::{ORDER_REFRESH_FRAMES, RetailBrain};
@@ -416,6 +417,53 @@ pub(super) fn forces(
     }
 }
 
+/// How near a hostile has to be before a soldier takes its deployed position,
+/// in cells. Deploying is a weapon change and a movement stop — `DeployFire=`
+/// swaps the primary for the deployed one — so it is worth taking when the
+/// fight has arrived, not when it is a rumour across the map.
+const DEPLOY_RANGE_CELLS: i32 = 6;
+
+/// How many toggles one frame carries. The D key is a click like any other,
+/// and a frame that spends its budget on soldiers standing up has none left
+/// for the orders that move them.
+const DEPLOYS_PER_FRAME: usize = 4;
+
+/// The D key on the soldiers that fight better deployed: `DeployFire=yes`.
+///
+/// `[E1]` and `[GGI]` carry it with `Deployer=yes`, and what it buys is the
+/// deployed weapon — a GI's sandbag posture, a Guardian GI's missiles — at the
+/// price of not moving. A player presses D when the enemy is in front of the
+/// soldier, which is what the range above is.
+///
+/// The command toggles (`None → Deploying`, `Deployed → Undeploying`, and a
+/// no-op mid-transition), so it is only issued on the edge: a soldier that is
+/// already down stays down, and one that is standing stays up. Issuing it
+/// every frame would walk them in and out of the pose, and a deployed soldier
+/// that never stands up is a soldier that never takes ground.
+pub(super) fn deploy(brain: &RetailBrain, obs: &Observation<'_>, out: &mut Outbox) {
+    let mut issued = 0;
+    for unit in &brain.census.units {
+        if issued >= DEPLOYS_PER_FRAME {
+            break;
+        }
+        if !unit.traits.deployer || unit.hand || !unit.orderable {
+            continue;
+        }
+        let engaged = brain.census.enemies.iter().any(|enemy| {
+            let dx = i32::from(enemy.cell.0) - i32::from(unit.cell.0);
+            let dy = i32::from(enemy.cell.1) - i32::from(unit.cell.1);
+            dx * dx + dy * dy <= DEPLOY_RANGE_CELLS * DEPLOY_RANGE_CELLS
+        });
+        if engaged == obs.is_deployed(unit.entity_id) {
+            continue;
+        }
+        out.command(Command::ToggleInfantryDeploy {
+            entity_id: unit.entity_id,
+        });
+        issued += 1;
+    }
+}
+
 /// Whether the object's mission already holds the ground it stands on with the
 /// wider reach this step asks for, or has it fighting.
 ///
@@ -646,6 +694,69 @@ mod tests {
     use super::*;
 
     use crate::sim::world::Simulation;
+
+    /// A snapshot arena for the steps that do not read the scenario's own
+    /// layering: the repository's own `ini/`, so this holds without `RA2_DIR`.
+    fn snapshot(seed: u64) -> Option<(Simulation, RuleSet)> {
+        let rules = crate::rules::retail_ini_fixture::retail_unlayered_rules()?;
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, seed);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        Some((sim, rules))
+    }
+
+    /// A `DeployFire=` soldier takes its deployed position when a hostile
+    /// reaches it. The D key is a toggle, so the step only answers on the edge:
+    /// a soldier standing in an empty field is not sent down, and one that has
+    /// taken the pose is not walked back out of it.
+    #[test]
+    fn a_soldier_deploys_when_the_fight_reaches_it() {
+        let Some((mut sim, rules)) = snapshot(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        sim.spawn_object("E1", "Americans", 20, 20, 255, &rules)
+            .expect("a GI");
+        // Interned before the projection borrows the world: the ledger's
+        // enemies are named by id, and the interner is the world's.
+        let hostile = sim.interner.intern("E2");
+        let obs = Observation::new(&sim, owner);
+        let mut brain = RetailBrain::new(0xA17);
+        brain.census.refresh(
+            &crate::rules::unit_role::RoleTable::build(&rules),
+            &rules,
+            &obs,
+        );
+        let Some(gi) = brain.census.units.first().map(|unit| unit.entity_id) else {
+            return;
+        };
+
+        // Nothing in front of it: an empty field is not a fight.
+        let mut out = Outbox::default();
+        deploy(&brain, &obs, &mut out);
+        assert!(
+            out.commands.is_empty(),
+            "no hostile, no D key: {:?}",
+            out.commands
+        );
+
+        // A hostile three cells away is.
+        brain.census.enemies.push(EnemyEntity {
+            entity_id: gi.wrapping_add(1),
+            type_id: hostile,
+            cell: (23, 20),
+        });
+        let mut out = Outbox::default();
+        deploy(&brain, &obs, &mut out);
+        assert!(
+            out.commands.iter().any(|command| matches!(
+                command,
+                Command::ToggleInfantryDeploy { entity_id } if *entity_id == gi
+            )),
+            "the soldier takes the deployed position: {:?}",
+            out.commands
+        );
+    }
 
     /// The retail rival arena, needed to field real object types. `None`
     /// without `RA2_DIR`, as the rest of the suite does: these orders read the
