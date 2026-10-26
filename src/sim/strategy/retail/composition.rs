@@ -141,6 +141,53 @@ fn infantry_above_ceiling(census: &Census) -> bool {
     infantry * 100 > census.fighters.max(1) * INFANTRY_CEILING_PERCENT
 }
 
+/// How many engineers the house keeps, and how many spies.
+///
+/// Two and one. An engineer is spent the moment it walks into a building, so
+/// the house wants another behind it — a captured refinery is worth a dozen
+/// soldiers, and the second engineer is the one that takes it after the first
+/// is gone. A spy is a raid that walks for minutes and is worth exactly one at
+/// a time: it does its work in a single building and does not come out.
+const ENGINEER_WANT: usize = 2;
+const SPY_WANT: usize = 1;
+
+/// The tool this line should make, when the house has fewer than it wants and
+/// can pay for one.
+///
+/// Neither an engineer nor a spy is army, and neither was being made: the
+/// house's own choice (`chosen_product`) reads the AI's unit choices, which
+/// the simulation never fills for a house a human controls, and the army's own
+/// ranking refuses both. So the capture and infiltration steps have been
+/// running against an empty army — the engineer that was never built.
+fn tool<'r>(
+    rules: &'r RuleSet,
+    obs: &Observation<'_>,
+    census: &Census,
+    credits: i32,
+) -> Option<(&'r ObjectType, InternedId)> {
+    let engineers = census
+        .units
+        .iter()
+        .filter(|unit| unit.traits.engineer)
+        .count();
+    let spies = census
+        .units
+        .iter()
+        .filter(|unit| unit.traits.infiltrator)
+        .count();
+    if engineers >= ENGINEER_WANT && spies >= SPY_WANT {
+        return None;
+    }
+    build::class_types(rules, obs, ObjectCategory::Infantry)
+        .filter(|(ty, _)| {
+            (ty.engineer && engineers < ENGINEER_WANT) || (ty.agent && spies < SPY_WANT)
+        })
+        .filter(|(ty, _)| obs.cost_of(rules, ty) <= credits)
+        // The engineer first: a spy's work is a raid, an engineer's is the
+        // base's own growth. Then the cheaper, then the earlier rule.
+        .min_by_key(|(ty, id)| (u8::from(!ty.engineer), obs.cost_of(rules, ty), *id))
+}
+
 /// What one idle line starts next.
 fn product_for<'r>(
     brain: &mut RetailBrain,
@@ -193,6 +240,17 @@ fn product_for<'r>(
             Some(false),
             infantry_short,
         );
+    }
+
+    // A tool before an army: the buildings are taken with an engineer and a
+    // spy, and neither is made by the army's own line — `fighter` ranks by
+    // combat weight and asks `is_combat_unit`, which refuses an engineer
+    // outright and refuses a spy for carrying no weapon. Correctly: neither is
+    // what the fist is made of. So the want is stated here, in numbers.
+    if category == ProductionCategory::Infantry
+        && let Some(found) = tool(rules, obs, &brain.census, budget.free)
+    {
+        return Some(found);
     }
 
     if budget.free < INFANTRY_MIN_CREDITS {
@@ -785,6 +843,56 @@ mod tests {
                 .category
                 == ObjectCategory::Vehicle),
             "the wallet reaches the war factory: {queued:?}"
+        );
+    }
+
+    /// A house with no engineer makes one. The buildings are taken with them,
+    /// and the army's own ranking refuses an engineer outright and refuses a
+    /// spy for carrying no weapon — so the capture and infiltration steps have
+    /// been running against an empty army.
+    #[test]
+    fn a_barracks_makes_the_engineer_the_army_refuses() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        for (name, cell) in [
+            ("GACNST", (16u16, 16u16)),
+            ("GAPOWR", (12, 16)),
+            ("GAPILE", (20, 16)),
+        ] {
+            sim.spawn_object(name, "Americans", cell.0, cell.1, 255, &rules)
+                .unwrap_or_else(|| panic!("{name}"));
+        }
+        sim.houses
+            .get_mut(&owner)
+            .expect("the house")
+            .economy_mut()
+            .set_credits_for_test(3_000);
+
+        let mut brain = RetailBrain::new(0xA17);
+        brain.census = ledger(&rules, &sim, owner);
+        let obs = Observation::new(&sim, owner);
+        let budget = Budget {
+            committed: 0,
+            free: obs.credits(),
+            income: None,
+        };
+        let mut out = Outbox::default();
+        fill_lines(&mut brain, &rules, &obs, &budget, &mut out);
+
+        let made: Vec<&str> = out
+            .intents
+            .iter()
+            .filter_map(|intent| match intent {
+                Intent::QueueProduction { type_id } => Some(sim.interner().resolve(*type_id)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            made.iter()
+                .any(|name| rules.object(name).is_some_and(|ty| ty.engineer)),
+            "the engineer the army refuses: {made:?}"
         );
     }
 }
