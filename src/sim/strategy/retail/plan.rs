@@ -368,7 +368,8 @@ fn pick<'r>(
         Item::Weapons => build::first_buildable(rules, obs, &rules.build_weapons_types),
         Item::Defense => build::first_buildable(rules, obs, build::base_defenses(rules, obs)),
         Item::Radar => build::first_buildable(rules, obs, &rules.build_radar_types),
-        Item::Tech => build::first_buildable(rules, obs, &rules.build_tech_types),
+        // The lab that authorises a power the house will actually fire.
+        Item::Tech => build::tech_building(rules, obs),
         Item::Aircraft => build::line_factory(rules, obs, census, ProductionCategory::Aircraft),
         Item::Support => expand::yard_maker_support(rules, obs, census),
     }

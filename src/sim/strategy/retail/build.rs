@@ -29,6 +29,7 @@
 
 use crate::rules::object_type::{FactoryType, ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
+use crate::rules::superweapon_type::SuperWeaponKind;
 use crate::sim::control::brain::Outbox;
 use crate::sim::control::intent::Intent;
 use crate::sim::control::observation::Observation;
@@ -309,6 +310,43 @@ pub(super) fn class_types<'r>(
 pub(super) fn base_defenses<'r>(rules: &'r RuleSet, obs: &Observation<'_>) -> &'r [String] {
     obs.side_index()
         .map_or(&[], |side| rules.base_defense_types(side))
+}
+
+/// The lab, preferring the one that authorises a power the house can use.
+///
+/// A super weapon is not granted by the power existing: it is granted by the
+/// building that carries it (`SuperWeapon=` / `SuperWeapon2=`,
+/// `src/rules/object_type.rs:3610-3611`, read by
+/// `grant_provided_supers` in `src/sim/superweapon/mod.rs:1905`), and
+/// `[AI] BuildTech=` names more than one lab. Taking the first one is how a
+/// house spends a whole match holding a paradrop it was never authorised to
+/// fire — which is what "the support powers are never used" turns out to be.
+pub(super) fn tech_building<'r>(
+    rules: &'r RuleSet,
+    obs: &Observation<'_>,
+) -> Option<(&'r ObjectType, InternedId)> {
+    class_types(rules, obs, ObjectCategory::Building)
+        .filter(|(ty, _)| rules.build_tech_types.iter().any(|name| *name == ty.id))
+        .min_by_key(|(ty, id)| (u8::from(!grants_support(rules, ty)), *id))
+}
+
+/// Whether a building authorises one of the powers this brain aims at
+/// something other than its own force: a paradrop, a spy plane, a reveal.
+fn grants_support(rules: &RuleSet, ty: &ObjectType) -> bool {
+    [ty.super_weapon.as_deref(), ty.super_weapon2.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter_map(|name| rules.super_weapon(name))
+        .any(|power| {
+            matches!(
+                power.kind,
+                SuperWeaponKind::ParaDrop
+                    | SuperWeaponKind::AmerParaDrop
+                    | SuperWeaponKind::SpyPlane
+                    | SuperWeaponKind::PsychicReveal
+                    | SuperWeaponKind::UnitDelivery
+            )
+        })
 }
 
 /// Whether the base has anything standing between a raid and its yard.

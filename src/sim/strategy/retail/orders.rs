@@ -610,11 +610,12 @@ pub(super) fn supers(
     if ready.is_empty() {
         return;
     }
-    let Some(target) = enemy_structure_cell(brain, rules, obs) else {
-        return;
-    };
     let tick = obs.tick();
+    let mut fired = 0;
     for name in &rules.super_weapon_order {
+        if fired >= SUPERS_PER_FRAME {
+            break;
+        }
         let Some(type_id) = obs.type_id(name) else {
             continue;
         };
@@ -634,14 +635,77 @@ pub(super) fn supers(
         if !spent_on_the_enemy(super_weapon.kind) {
             continue;
         }
-        log::info!("auto play: fire {name} at {target:?}");
+        // Where it lands is the power's own answer, not one cell for all of
+        // them: a paradrop is soldiers, and soldiers dropped into the enemy's
+        // own base land inside everything that stands there.
+        let Some(cell) = landing_cell(brain, rules, obs, aim_of(super_weapon.kind)) else {
+            continue;
+        };
+        log::info!("auto play: fire {name} at {cell:?}");
         brain
             .super_at
             .insert(type_id, tick.saturating_add(SUPER_RETRY_FRAMES));
         out.intent(Intent::LaunchSuperWeapon {
             sw_type_id: type_id,
-            cell: target,
+            cell,
         });
+        fired += 1;
+    }
+}
+
+/// How many powers one frame fires.
+///
+/// One. Everything that is ready was being launched on the same frame, so a
+/// house that had charged a missile and a paradrop together spent both on the
+/// same second and had nothing when the fight it was saving them for arrived.
+const SUPERS_PER_FRAME: usize = 1;
+
+/// Where a power of this kind belongs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Aim {
+    /// Where the enemy's base is: a missile, a storm, a dominator.
+    Enemy,
+    /// Where the house's own army stands: a paradrop lands soldiers, and they
+    /// have to form up before they walk into anything.
+    Rally,
+    /// Where the house cannot see: a spy plane, a psychic reveal.
+    Recon,
+}
+
+/// What a power is for, by its kind: `Type=` in the rules.
+fn aim_of(kind: SuperWeaponKind) -> Aim {
+    match kind {
+        SuperWeaponKind::ParaDrop
+        | SuperWeaponKind::AmerParaDrop
+        | SuperWeaponKind::UnitDelivery => Aim::Rally,
+        SuperWeaponKind::SpyPlane | SuperWeaponKind::PsychicReveal => Aim::Recon,
+        _ => Aim::Enemy,
+    }
+}
+
+/// The cell an aim resolves to this frame.
+fn landing_cell(
+    brain: &RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    aim: Aim,
+) -> Option<(u16, u16)> {
+    match aim {
+        Aim::Enemy => enemy_structure_cell(brain, rules, obs),
+        // Dropped where the army is, so they arrive as a squad rather than as
+        // eight soldiers walking out of the enemy's own base one at a time.
+        // With no army yet, the base: they are defenders until there is one.
+        Aim::Rally => brain
+            .census
+            .units
+            .iter()
+            .find(|unit| unit.traits.combat)
+            .map(|unit| unit.cell)
+            .or(brain.census.base_cell),
+        // What the house cannot see. The shroud has no projection yet, so this
+        // is the enemy's base for now — the one place worth looking — and it
+        // belongs to the exploration layer when that has a target source.
+        Aim::Recon => enemy_structure_cell(brain, rules, obs),
     }
 }
 
@@ -774,6 +838,17 @@ mod tests {
         );
         let gi = rules.object("E1").expect("a GI");
         assert!(is_combat_unit(&rules, gi), "a soldier is");
+    }
+
+    /// A paradrop is soldiers, and soldiers dropped into the enemy's own base
+    /// land inside everything standing there. They land on the army. What the
+    /// house cannot see is what a spy plane is for.
+    #[test]
+    fn a_paradrop_lands_on_the_army_not_in_the_enemy_base() {
+        assert_eq!(aim_of(SuperWeaponKind::AmerParaDrop), Aim::Rally);
+        assert_eq!(aim_of(SuperWeaponKind::ParaDrop), Aim::Rally);
+        assert_eq!(aim_of(SuperWeaponKind::SpyPlane), Aim::Recon);
+        assert_eq!(aim_of(SuperWeaponKind::MultiMissile), Aim::Enemy);
     }
 
     /// A `DeployFire=` soldier takes its deployed position when a hostile
