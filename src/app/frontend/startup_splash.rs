@@ -4,8 +4,11 @@
 //! process initialization chrome, not selected-scenario loading presentation.
 //! Any window other than the two sizes gamemd's shell runs at shows it fitted
 //! like the menus, so it lines up with the menu that follows it.
+//!
+//! It also carries VERA20K's own legal notice, which gamemd's splash lacks; see
+//! [`LEGAL_NOTICE`].
 
-use std::time::{Duration, Instant};
+use crate::util::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -88,6 +91,16 @@ const TRADEMARK_TOP_FALLBACK: &str =
 const TRADEMARK_BOTTOM_KEY: &str = "GUI:TradeMarkBottom";
 const TRADEMARK_BOTTOM_FALLBACK: &str =
     "trademarks of Electronic Arts Inc. in the U.S. and/or other countries.";
+
+/// VERA20K's GPLv3 "Appropriate Legal Notices" (sections 0 and 5(d)): the
+/// copyright, the right to share under the license, no warranty, and where to
+/// read the license. Drawn top right, opposite "Loading...". Because the
+/// program shows them, modified versions must keep showing such a notice.
+const LEGAL_NOTICE: [&str; 3] = [
+    "VERA20K © 2026 Halvor Nikolai Rusten and contributors",
+    "You may share it under the GNU GPL v3. It has no warranty.",
+    "License and source: github.com/YuriPlanet/vera20k",
+];
 
 /// The minimum on-screen hold, anchored at the first successful present.
 ///
@@ -379,6 +392,17 @@ fn compose_startup_splash(
         10,
         10,
     );
+    for (row, line) in LEGAL_NOTICE.into_iter().enumerate() {
+        draw_text(
+            &mut canvas,
+            client_width,
+            client_height,
+            font,
+            line,
+            client_width as i32 - font.text_width(line) as i32 - 10,
+            10 + row as i32 * (3 + font.cell_height as i32),
+        );
+    }
     draw_text(
         &mut canvas,
         client_width,
@@ -489,6 +513,27 @@ fn draw_text(
 mod tests {
     use super::*;
     use crate::assets::asset_manager::MediaArchiveMode;
+
+    #[test]
+    fn legal_notice_is_drawn_right_aligned_opposite_loading() {
+        // An empty root has no splash art, so only text marks the canvas.
+        let root = crate::map::source::test_support::TestDirectory::new("splash-notice");
+        let assets = AssetManager::from_loose_root_for_test(root.path());
+        let font = FntFile::solid_for_test(2);
+        let (width, height) = (800, 600);
+        let composed = compose_startup_splash(&assets, None, &font, width, height, false)
+            .expect("compose the text-only splash");
+
+        for (row, line) in LEGAL_NOTICE.into_iter().enumerate() {
+            let y = 10 + row * (3 + font.cell_height as usize);
+            let white: Vec<usize> = (width / 2..width)
+                .filter(|x| composed[(y * width + x) * 4..][..4] == TEXT_COLOR)
+                .collect();
+            let line_width = font.text_width(line) as usize;
+            assert_eq!(white.first(), Some(&(width - 10 - line_width)), "{line}");
+            assert_eq!(white.last(), Some(&(width - 11)), "{line}");
+        }
+    }
 
     fn compare_composed_splash_to_retail_shape(
         assets: &AssetManager,

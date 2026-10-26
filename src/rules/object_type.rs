@@ -677,6 +677,12 @@ pub struct ObjectType {
     /// the start skips. Clearing a building choice leaves its base-plan node
     /// unsatisfied, so the planner can select the same capped type again.
     pub aibuild_limit: i32,
+    /// Phobos `ForbidParallelAIQueues=` (default false): while Ares'
+    /// `[GlobalControls] AllowParallelAIQueues=` is on, a computer house that
+    /// already has a factory building for this type's category does not start
+    /// another one for this type.
+    #[cfg(feature = "phobos")]
+    pub forbid_parallel_ai_queues: bool,
     /// `[BuildingTypes] AIPlanningCount=` — the NPSE count of plan nodes a
     /// computer house's base plan gives this building. The techno reader
     /// extension chain reads it with the current field as its default and
@@ -3444,6 +3450,8 @@ impl ObjectType {
             } else {
                 i32::MAX
             },
+            #[cfg(feature = "phobos")]
+            forbid_parallel_ai_queues: section.read_bool("ForbidParallelAIQueues", false),
             ai_planning_count: if crate::rules::NPATCH_ENABLED {
                 building_int(section, category, "AIPlanningCount") & 0xFF
             } else {

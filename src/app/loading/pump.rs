@@ -47,10 +47,10 @@ use crate::render::loading_screen_chrome::{
 };
 use crate::render::shell_surface_present::ShellSurfacePresenter;
 use crate::rules::color_scheme::{
-    ColorSchemeEntry, hsv_to_rgb, scheme_entry_by_name, scheme_entry_for_priority,
-    scheme_hsv_by_entry,
+    ColorSchemeEntry, hsv_to_rgb, scheme_entry_by_name, scheme_hsv_by_entry,
 };
 use crate::rules::house_colors::{HouseColorIndex, HouseColorRamps};
+use crate::rules::skirmish_colors::SkirmishColorMode;
 use crate::sim::scenario_bootstrap::StockOfflinePrefixProjection;
 use crate::skirmish_launch::{LaunchCountry, SkirmishLaunchSession};
 use crate::ui::game_screen::GameScreen;
@@ -294,6 +294,10 @@ pub(crate) struct LoadingRequest {
     /// Setup-generated preview retained only as a loading-composition fallback.
     /// It never supplies gameplay map data, RNG continuation, or constructors.
     random_map_preview: Option<crate::map::rmg::GeneratedMap>,
+    /// Phobos `[General] SkirmishUnlimitedColors=` for this load. The match
+    /// owner stamps it from the rules it just loaded; the constructors leave it
+    /// unset, which resolves to the vanilla priority table.
+    skirmish_colors: Option<SkirmishColorMode>,
 }
 
 impl LoadingRequest {
@@ -313,6 +317,7 @@ impl LoadingRequest {
             },
             accepted_rmg_start_staging: None,
             random_map_preview: None,
+            skirmish_colors: None,
         }
     }
 
@@ -321,6 +326,7 @@ impl LoadingRequest {
             startup: LoadingStartup::Campaign(startup),
             accepted_rmg_start_staging: None,
             random_map_preview: None,
+            skirmish_colors: None,
         }
     }
 
@@ -333,6 +339,7 @@ impl LoadingRequest {
             startup,
             accepted_rmg_start_staging: None,
             random_map_preview: None,
+            skirmish_colors: None,
         }
     }
 
@@ -341,6 +348,7 @@ impl LoadingRequest {
             startup: LoadingStartup::Accepted(startup),
             accepted_rmg_start_staging: None,
             random_map_preview: None,
+            skirmish_colors: None,
         }
     }
 
@@ -355,6 +363,7 @@ impl LoadingRequest {
             },
             accepted_rmg_start_staging: None,
             random_map_preview: None,
+            skirmish_colors: None,
         }
     }
 
@@ -366,11 +375,25 @@ impl LoadingRequest {
             },
             accepted_rmg_start_staging: None,
             random_map_preview: None,
+            skirmish_colors: None,
         }
     }
 
     pub(crate) fn selected_map_file(&self) -> &str {
         self.startup().selected_map_file()
+    }
+
+    /// The player-colour conversion this load resolves priorities with.
+    pub(crate) fn skirmish_colors(&self) -> Option<SkirmishColorMode> {
+        self.skirmish_colors
+    }
+
+    /// Stamp the loaded rules' Phobos `SkirmishUnlimitedColors` setting. Only
+    /// the match owner that just loaded rules calls this; the constructors
+    /// above leave the request on the vanilla conversion.
+    pub(crate) fn with_skirmish_colors(mut self, mode: Option<SkirmishColorMode>) -> Self {
+        self.skirmish_colors = mode;
+        self
     }
 
     /// Run the request's authoritative initial-map entry. The retained random
@@ -916,6 +939,9 @@ impl LoadingSession {
     }
 
     fn from_request(request: LoadingRequest) -> Self {
+        // Phobos SkirmishUnlimitedColors is a rules-owned conversion the caller
+        // stamps on the request; a test or a load without rules keeps vanilla.
+        let skirmish_colors = request.skirmish_colors().unwrap_or_default();
         let native = match request.skirmish_launch_session() {
             Some(skirmish_launch_session) => {
                 let variant = if skirmish_launch_session.local_player().is_observer() {
@@ -925,11 +951,13 @@ impl LoadingSession {
                         skirmish_launch_session.local_slot().country,
                     )
                 };
-                // `local.color_index` is the gamemd color priority; resolve to a
-                // `[Colors]` entry index (priority LUT + /2).
-                let color_index = HouseColorIndex(scheme_entry_for_priority(
-                    skirmish_launch_session.local_slot().color_index as i32,
-                ) as u8);
+                // `local.color_index` is the gamemd color priority; resolve it
+                // to a `[Colors]` entry index through the active mode.
+                let color_index = HouseColorIndex(
+                    skirmish_colors
+                        .entry_for_priority(skirmish_launch_session.local_slot().color_index as i32)
+                        as u8,
+                );
                 let progress_cadence = NativeLoadingProgressCadence::for_selected_map_file(
                     request.selected_map_file(),
                 );
@@ -937,7 +965,10 @@ impl LoadingSession {
                     variant,
                     -1, // Bound from the rules-owned HouseType Side before drawing.
                     color_index,
-                    LoadingProgressRowSnapshot::from_launch_session(skirmish_launch_session),
+                    LoadingProgressRowSnapshot::from_launch_session(
+                        skirmish_launch_session,
+                        skirmish_colors,
+                    ),
                     progress_cadence,
                 ))
             }
@@ -1268,6 +1299,11 @@ pub(crate) fn begin_loading(state: &mut AppState, request: LoadingRequest) {
     // The shell writes GameMode before the loading screen (`0x0052E10F`
     // Skirmish, `0x0052E175` campaign); the session owner is live from here.
     prepare_session_for_loading(&mut state.match_state.session, request.startup());
+    let request = request.with_skirmish_colors(
+        state
+            .rules()
+            .map(crate::rules::ruleset::RuleSet::skirmish_colors),
+    );
     let mut session = LoadingSession::from_request(request);
     session.job.ra2_dir = state
         .platform
@@ -2799,15 +2835,20 @@ pub(crate) fn ensure_native_loading_atlas(state: &mut AppState) -> anyhow::Resul
         .loading_session
         .as_ref()
         .and_then(|session| session.native.as_ref())
-        .and_then(|native| native.composition.as_ref())
+        .and_then(|native| {
+            native
+                .composition
+                .as_ref()
+                .map(|composition| (composition, native.progress_row.skirmish_colors))
+        })
         .zip(state.rules())
-        .map(|(composition, rules)| {
+        .map(|((composition, skirmish_colors), rules)| {
             composition
                 .markers
                 .iter()
                 .map(|marker| {
                     let color_key =
-                        scheme_entry_for_priority(i32::from(marker.color_priority)) as u8;
+                        skirmish_colors.entry_for_priority(i32::from(marker.color_priority)) as u8;
                     MmpbMarkerRemap {
                         color_key,
                         ramp: *rules.house_color_ramps.ramp(HouseColorIndex(color_key)),

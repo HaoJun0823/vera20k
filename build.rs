@@ -101,7 +101,8 @@ fn embed_windows_resources() {
         .set("OriginalFilename", "vera20k.exe")
         .set(
             "LegalCopyright",
-            "Free software under the GNU GPL version 3. \
+            "Copyright © 2026 Halvor Nikolai Rusten and VERA20k contributors. \
+             Free software under the GNU GPL version 3. \
              Not affiliated with or endorsed by Electronic Arts.",
         );
     // Only the game, like the stack size. It runs without them, so a missing

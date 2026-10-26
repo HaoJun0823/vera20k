@@ -47,6 +47,7 @@ Official downloads come only from
 https://github.com/YuriPlanet/vera20k/releases. To check that an installer was
 built there, run: gh attestation verify <installer> --repo YuriPlanet/vera20k
 
+Copyright 2026 Halvor Nikolai Rusten and VERA20k contributors.
 VERA20k is licensed under the GNU General Public License version 3
 (LICENSE-GPL). Source code: https://github.com/YuriPlanet/vera20k
 THIRD_PARTY_LICENSES.html lists the open-source libraries it includes and

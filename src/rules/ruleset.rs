@@ -4345,6 +4345,10 @@ pub struct RuleSet {
     #[cfg(feature = "phobos")]
     phobos_super_weapon_metadata:
         BTreeMap<String, crate::rules::superweapon_type::PhobosSuperWeaponAvailability>,
+    /// Phobos `[GlobalControls] AllowParallelAIQueues=` and the
+    /// `ForbidParallelAIQueues.*` category switches.
+    #[cfg(feature = "phobos")]
+    parallel_ai_queues: crate::rules::phobos_parallel_ai_queues::ParallelAiQueueRules,
     /// Rules-driven terrain land-type semantics keyed by TMP land byte.
     pub terrain_rules: TerrainRules,
     /// Native `[Tiberiums]` definitions in GameMD type order.
@@ -4402,6 +4406,10 @@ pub struct RuleSet {
     #[cfg(feature = "phobos")]
     pub(crate) placement_preview_globals:
         crate::rules::phobos_placement_preview::PlacementPreviewGlobals,
+    /// Phobos `[General] SkirmishUnlimitedColors=`: the player-colour
+    /// conversion every launcher and loading-screen consumer reads.
+    #[cfg(feature = "phobos")]
+    pub(crate) skirmish_color_mode: crate::rules::skirmish_colors::SkirmishColorMode,
     /// Radar event visual parameters (ping rectangles on minimap).
     pub radar_event_config: RadarEventConfig,
     /// All superweapon types indexed by ID (e.g., "LightningStormSpecial" → SuperWeaponType).
@@ -5581,6 +5589,8 @@ impl RuleSet {
         let placement_preview_globals =
             crate::rules::phobos_placement_preview::PlacementPreviewGlobals::from_ini(ini);
         #[cfg(feature = "phobos")]
+        let skirmish_color_mode = crate::rules::skirmish_colors::SkirmishColorMode::from_ini(ini);
+        #[cfg(feature = "phobos")]
         let radiation = {
             let mut radiation = radiation;
             radiation.radiation_types = processed.radiation_types().cloned().unwrap_or_default();
@@ -5945,6 +5955,9 @@ impl RuleSet {
             ares_super_weapon_metadata: BTreeMap::new(),
             #[cfg(feature = "phobos")]
             phobos_super_weapon_metadata: BTreeMap::new(),
+            #[cfg(feature = "phobos")]
+            parallel_ai_queues:
+                crate::rules::phobos_parallel_ai_queues::ParallelAiQueueRules::from_ini(ini),
             ares_prerequisite_alternates: HashSet::new(),
             terrain_rules,
             tiberium_types,
@@ -5968,6 +5981,8 @@ impl RuleSet {
             digital_display_globals,
             #[cfg(feature = "phobos")]
             placement_preview_globals,
+            #[cfg(feature = "phobos")]
+            skirmish_color_mode,
             radar_event_config,
             super_weapons,
             super_weapon_order,
@@ -6431,6 +6446,22 @@ impl RuleSet {
         &self.placement_preview_globals
     }
 
+    /// The player-colour conversion this rules load selects.
+    ///
+    /// A build without the `phobos` feature reads no
+    /// `[General] SkirmishUnlimitedColors=` and always answers the vanilla
+    /// eight-priority table, so callers need no `cfg`.
+    pub fn skirmish_colors(&self) -> crate::rules::skirmish_colors::SkirmishColorMode {
+        #[cfg(feature = "phobos")]
+        {
+            self.skirmish_color_mode
+        }
+        #[cfg(not(feature = "phobos"))]
+        {
+            crate::rules::skirmish_colors::SkirmishColorMode::VANILLA
+        }
+    }
+
     /// Look up a projectile by ID (case-insensitive, gamemd parity).
     pub fn projectile(&self, id: &str) -> Option<&ProjectileType> {
         Self::lookup_ci(&self.projectiles, id)
@@ -6571,12 +6602,19 @@ impl RuleSet {
         {
             b"phobos-super-availability-v1".hash(&mut hasher);
             self.phobos_super_weapon_metadata.hash(&mut hasher);
+            self.parallel_ai_queues.hash_into(&mut hasher);
         }
         #[cfg(feature = "ares")]
         {
             b"ares-side-sidebar-v1".hash(&mut hasher);
             b"ares-super-availability-v1".hash(&mut hasher);
             self.ares_super_weapon_metadata.hash(&mut hasher);
+            b"ares-weapon-ammo-v1".hash(&mut hasher);
+            self.weapons
+                .iter()
+                .map(|(id, weapon)| (id.to_ascii_uppercase(), weapon.ammo_cost()))
+                .collect::<BTreeMap<_, _>>()
+                .hash(&mut hasher);
             self.object_list
                 .iter()
                 .filter(|object| !object.additional_super_weapons().is_empty())
@@ -6627,6 +6665,8 @@ impl RuleSet {
             self.digital_display_globals.hash(&mut hasher);
             b"phobos-placement-preview-v1".hash(&mut hasher);
             self.placement_preview_globals.hash(&mut hasher);
+            b"phobos-skirmish-colors-v1".hash(&mut hasher);
+            self.skirmish_color_mode.hash(&mut hasher);
             self.object_list
                 .iter()
                 .map(|object| {
@@ -7978,6 +8018,14 @@ impl RuleSet {
     ) -> Option<&crate::rules::superweapon_type::PhobosSuperWeaponAvailability> {
         self.phobos_super_weapon_metadata
             .get(&id.to_ascii_uppercase())
+    }
+
+    /// The `[GlobalControls]` parallel AI queue switches (Phobos extension).
+    #[cfg(feature = "phobos")]
+    pub fn parallel_ai_queues(
+        &self,
+    ) -> &crate::rules::phobos_parallel_ai_queues::ParallelAiQueueRules {
+        &self.parallel_ai_queues
     }
 
     /// A superweapon type's `SuperWeaponTypeClass` array index (its
@@ -13721,6 +13769,40 @@ Projectile=Invisible
             (model.increment, model.increment_bonus, model.bonus_cap),
             (0, NativeF64Bits::ONE, NativeF64Bits::POSITIVE_ZERO)
         );
+    }
+
+    #[cfg(feature = "phobos")]
+    #[test]
+    fn parallel_ai_queue_switches_default_the_gate_on_and_read_global_controls() {
+        // Phobos RulesExt constructs AllowParallelAIQueues { true }.
+        let empty = RuleSet::from_ini(&IniFile::from_str("")).unwrap();
+        let controls = empty.parallel_ai_queues();
+        assert!(controls.allows_parallel());
+        assert!(!controls.forbids_category(ObjectCategory::Building, false));
+
+        let rules = RuleSet::from_ini(&IniFile::from_str(
+            "[GlobalControls]\nAllowParallelAIQueues=no\n\
+             ForbidParallelAIQueues.Infantry=yes\nForbidParallelAIQueues.Navy=yes\n",
+        ))
+        .unwrap();
+        let controls = rules.parallel_ai_queues();
+        assert!(!controls.allows_parallel());
+        assert!(controls.forbids_category(ObjectCategory::Infantry, false));
+        assert!(!controls.forbids_category(ObjectCategory::Vehicle, false));
+        assert!(controls.forbids_category(ObjectCategory::Vehicle, true));
+        assert!(!controls.forbids_category(ObjectCategory::Aircraft, false));
+        assert!(!controls.forbids_category(ObjectCategory::Building, false));
+    }
+
+    #[cfg(feature = "phobos")]
+    #[test]
+    fn techno_forbid_parallel_ai_queues_reads_per_type() {
+        let rules = RuleSet::from_ini(&IniFile::from_str(
+            "[InfantryTypes]\n0=BLOCK\n1=OPEN\n[BLOCK]\nForbidParallelAIQueues=yes\n[OPEN]\n",
+        ))
+        .unwrap();
+        assert!(rules.object("BLOCK").unwrap().forbid_parallel_ai_queues);
+        assert!(!rules.object("OPEN").unwrap().forbid_parallel_ai_queues);
     }
 }
 

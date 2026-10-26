@@ -38,6 +38,7 @@ Thumbs.db
 /docs/*
 !/docs/ai-layers.md
 !/docs/capabilities.md
+!/docs/wasm.md
 !/docs/ares.md
 !/docs/phobos.md
 !/docs/phobos-custom-radiation.md
@@ -50,6 +51,8 @@ Thumbs.db
 !/docs/phobos-sidebar-gdi.md
 !/docs/phobos-building-queue.md
 !/docs/phobos-ai-dehardcode.md
+!/docs/phobos-parallel-ai-queues.md
+!/docs/phobos-skirmish-unlimited-colors.md
 !/docs/npatch.md
 !/docs/verax.md
 !/docs/ares-generic-warhead.md
@@ -98,6 +101,7 @@ tools/vendor-eval/
 !/README.zh-CN.md
 !/README.ar.md
 !/README.es.md
+!/README.ja.md
 !/README.ru.md
 !/README.th.md
 !/README.tr.md
