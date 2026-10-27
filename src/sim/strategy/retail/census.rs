@@ -190,6 +190,18 @@ pub(super) struct Traits {
     /// open-topped carrier *becomes* is its passenger's `IFVMode=`, and that is
     /// runtime state — the tag says the body can do it, not what it is doing.
     pub(super) open_topped: bool,
+    /// `Spawned=yes` (`TechnoTypeClass+0xD54`): another object made it, so it is
+    /// not the player's to command — a paradrop's `PDPLANE`, a carrier's
+    /// Hornet, a V3's missile.
+    ///
+    /// The key says so in retail: `[PDPLANE]` carries `Spawned=yes ; Created by
+    /// another object and therefore not player controllable` and
+    /// `Selectable=no`. It also carries a dummy `Primary=`, so without this tag
+    /// it reads as army: the brain handed a cargo plane a combat order, the
+    /// plane's mission was rewritten mid-drop, and the paradrop never landed —
+    /// which is exactly what the log shows (`fire ParaDropSpecial` repeating
+    /// for the rest of the match).
+    pub(super) spawned: bool,
 }
 
 /// Seats at which a type is a transport rather than a fighting unit, in the
@@ -261,6 +273,7 @@ impl Traits {
             c4: ty.c4,
             explodes: ty.explodes,
             open_topped: ty.open_topped,
+            spawned: ty.spawned,
         }
     }
 }
