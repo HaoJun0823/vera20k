@@ -541,6 +541,43 @@ impl<'a> Observation<'a> {
 
     /// Whether `infantry_id` may garrison `building_id`:
     /// `BuildingClass::CanBeOccupiedBy`'s answer for this pair.
+    /// Whether `firer` may be sent at `target` at all:
+    /// `TechnoClass::GetFireError` (`src/sim/combat/fire_error.rs`), the one
+    /// native answer to "can this object do anything to that one".
+    ///
+    /// Public, and the only door to it, because the brain used to send every
+    /// combat unit at the army's one target: a terror drone was ordered to
+    /// attack a building its weapon has no answer to, the order was refused
+    /// every time, and the refusals ate the frame's whole command budget.
+    /// Reach is the caller's question — a unit out of reach walks — so it is
+    /// not part of this answer.
+    pub fn can_engage(&self, rules: &RuleSet, firer: u64, target: u64) -> bool {
+        !matches!(
+            crate::sim::combat::fire_error_world::fire_error(self.sim, rules, firer, target),
+            None
+                | Some(crate::sim::combat::fire_error::FireError::Illegal)
+                | Some(crate::sim::combat::fire_error::FireError::Cant)
+        )
+    }
+
+    /// Why `firer` may not fire at `target` right now, when it may not. `None`
+    /// when it may, or when either object is gone.
+    ///
+    /// The brain asks this where "not yet" and "never" are different answers:
+    /// an empty magazine means wait for the reload, an `Illegal` means pick
+    /// another target.
+    pub fn engage_error(
+        &self,
+        rules: &RuleSet,
+        firer: u64,
+        target: u64,
+    ) -> Option<crate::sim::combat::fire_error::FireError> {
+        match crate::sim::combat::fire_error_world::fire_error(self.sim, rules, firer, target) {
+            Some(crate::sim::combat::fire_error::FireError::Ok) => None,
+            other => other,
+        }
+    }
+
     pub fn can_garrison(&self, rules: &RuleSet, infantry_id: u64, building_id: u64) -> bool {
         crate::sim::passenger::building_can_be_occupied_by(self.sim, rules, building_id, infantry_id)
     }

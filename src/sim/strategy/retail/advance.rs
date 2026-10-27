@@ -167,10 +167,21 @@ pub(super) fn advance(
         // Inside its own reach the unit shoots the structure from where it
         // stands; outside it, it walks. The goal is still the one target — this
         // is the same fist, ordered by what each unit can actually do.
+        //
+        // "Inside its reach" is not "able to shoot it". GetFireError is the
+        // answer to whether this object has anything for this target, and a
+        // unit with no weapon for a building — a terror drone, whose jump has
+        // no business with concrete — used to be handed an Attack it was
+        // refused every single frame. Those refusals are the command budget:
+        // eight refusals a frame is eight orders the house never gave. A unit
+        // that cannot shoot the target still walks toward the fist.
         let reach = obs
             .object_type(rules, unit.type_id)
             .map_or(0, |ty| weapon_range_cells(rules, ty, obs.is_deployed(unit.entity_id)));
-        let (kind, goal) = if reach > 0 && cell_distance(unit.cell, target.cell) <= reach {
+        let (kind, goal) = if reach > 0
+            && cell_distance(unit.cell, target.cell) <= reach
+            && obs.can_engage(rules, unit.entity_id, target.entity_id)
+        {
             (
                 super::tracked::TrackedKind::Attack,
                 Goal::Attack {
@@ -301,6 +312,38 @@ mod tests {
         assert!(
             dug_in > standing,
             "the deployed one reaches further: {standing} vs {dug_in}"
+        );
+    }
+
+    /// The army's one target is a structure, and every combat unit used to be
+    /// handed an Attack on it regardless of whether its weapon has an answer.
+    /// `GetFireError` is the only thing that knows: an ore carrier has no
+    /// weapon at all, and an order it is refused every frame is the frame's
+    /// command budget spent on nothing — eight refusals is eight orders the
+    /// house never gave.
+    #[test]
+    fn a_unit_whose_weapon_cannot_answer_the_target_is_not_told_to_attack_it() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        let tank = sim
+            .spawn_object("MTNK", "Americans", 12, 10, 255, &rules)
+            .expect("the grizzly tank");
+        let carrier = sim
+            .spawn_object("CMIN", "Americans", 10, 10, 255, &rules)
+            .expect("the ore carrier");
+        let building = sim
+            .spawn_object("GAPOWR", "Russians", 11, 12, 255, &rules)
+            .expect("the enemy power plant");
+        let obs = Observation::new(&sim, owner);
+        assert!(
+            obs.can_engage(&rules, tank, building),
+            "the tank has a weapon for a building"
+        );
+        assert!(
+            !obs.can_engage(&rules, carrier, building),
+            "the carrier has no weapon at all"
         );
     }
 
