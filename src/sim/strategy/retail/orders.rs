@@ -106,6 +106,24 @@ pub(super) fn captures(
         return;
     }
     let engineer_targets: Vec<EnemyEntity> = obs.capturable_buildings(rules).collect();
+    // Which of those belong to an enemy, and where that enemy's units stand.
+    // `capturable_buildings` is every `Capturable=` building the house can see —
+    // the map's own oil derricks and hospitals included — and the nearest of
+    // them was how an engineer walked straight into a base: the derrick inside
+    // the enemy's yard is near, and the engineer that goes for it is a 500-credit
+    // gift. Buildings do not guard anything, so only units count as pressure.
+    let hostile: BTreeSet<u64> = obs
+        .enemy_entities()
+        .map(|entity| entity.entity_id)
+        .collect();
+    let guards: Vec<(u16, u16)> = obs
+        .enemy_entities()
+        .filter(|entity| {
+            obs.object_type(rules, entity.type_id)
+                .is_some_and(|ty| ty.category != ObjectCategory::Building)
+        })
+        .map(|entity| entity.cell)
+        .collect();
     let spy_targets: Vec<(EnemyEntity, u8)> = obs
         .spyable_buildings(rules)
         .filter_map(|target| {
@@ -134,7 +152,7 @@ pub(super) fn captures(
                 .max_by_key(|(target, value)| (*value, -squared_distance(unit.cell, target.cell)))
                 .map(|(target, _)| *target)
         } else {
-            nearest_enemy(&engineer_targets, unit.cell)
+            engineer_preference(&engineer_targets, &hostile, &guards, unit.cell)
         };
         let Some(target) = chosen else {
             continue;
@@ -353,6 +371,40 @@ fn within(cells: impl Iterator<Item = (u16, u16)>, cell: (u16, u16), reach: i32)
     cells
         .into_iter()
         .any(|other| squared_distance(cell, other) <= reach * reach)
+}
+
+/// How near an enemy unit has to stand to a capture target for the walk to look
+/// like a gift rather than a job, in cells: the range of the weapons that shoot
+/// infantry, near enough.
+const CAPTURE_CLEAR_CELLS: i32 = 6;
+
+/// Which building an engineer should walk into.
+///
+/// In the order a player weighs it: the map's own building before the enemy's
+/// (an oil derrick is income with no defence and no owner to answer), an
+/// unguarded one before a guarded one (a 500-credit engineer is not worth a
+/// derrick it dies before reaching), and the nearer before the further. Ties by
+/// id, so the answer does not depend on the order the entity store yields.
+fn engineer_preference(
+    targets: &[EnemyEntity],
+    hostile: &BTreeSet<u64>,
+    guards: &[(u16, u16)],
+    from: (u16, u16),
+) -> Option<EnemyEntity> {
+    let clear = CAPTURE_CLEAR_CELLS * CAPTURE_CLEAR_CELLS;
+    targets
+        .iter()
+        .map(|target| {
+            let owned = u8::from(hostile.contains(&target.entity_id));
+            let guarded =
+                u8::from(guards.iter().any(|cell| squared_distance(*cell, target.cell) <= clear));
+            (
+                (owned, guarded, squared_distance(from, target.cell), target.entity_id),
+                *target,
+            )
+        })
+        .min_by_key(|(key, _)| *key)
+        .map(|(_, target)| target)
 }
 
 /// The nearest of `(id, cell)` sites, ties broken by id so the answer does not
@@ -1140,6 +1192,30 @@ mod tests {
         assert!(!spent_on_the_enemy(SuperWeaponKind::ChronoSphere));
         assert!(spent_on_the_enemy(SuperWeaponKind::MultiMissile));
         assert!(spent_on_the_enemy(SuperWeaponKind::LightningStorm));
+    }
+
+    /// An engineer takes the map's own building before the enemy's, and an
+    /// unguarded one before a guarded one — the nearest capturable was how it
+    /// walked into a base and died for the derrick inside it.
+    #[test]
+    fn an_engineer_prefers_the_map_over_the_enemy_and_the_clear_over_the_guarded() {
+        let sighting = |id: u64, cell: (u16, u16)| crate::sim::control::observation::EnemyEntity {
+            entity_id: id,
+            type_id: crate::sim::intern::InternedId::default(),
+            cell,
+        };
+        let targets = [
+            sighting(1, (14, 14)), // enemy base, 2 cells away, guarded
+            sighting(2, (20, 10)), // the map's own derrick, 6 cells away, clear
+        ];
+        let hostile: std::collections::BTreeSet<u64> = [1].into_iter().collect();
+        let guards = [(15u16, 14u16)];
+        let chosen =
+            engineer_preference(&targets, &hostile, &guards, (16, 10)).expect("a target");
+        assert_eq!(
+            chosen.entity_id, 2,
+            "the derrick nobody is standing next to, not the one inside the base"
+        );
     }
 
     /// Every unit a scenario spawns for the player starts on area guard. The
