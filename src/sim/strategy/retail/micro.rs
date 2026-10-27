@@ -53,6 +53,9 @@ struct Work {
     reach: i32,
     /// What its team is aimed at, when the team is aimed at something.
     squad_target: Option<(u64, (u16, u16))>,
+    /// Whether it is dug in. A deployed soldier cannot walk, so every order
+    /// that is a walk is an order it cannot obey.
+    deployed: bool,
 }
 
 pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
@@ -85,6 +88,25 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
                 Some(enemy.1),
             );
             out.order(item.entity_id, Goal::Attack { target: enemy.0 });
+            issued += 1;
+            continue;
+        }
+        // Nothing in reach, and the unit cannot walk: every branch below is a
+        // walk. A deployed soldier given one stands exactly where it was
+        // deployed, with the order marker over its head and its gun silent —
+        // it holds the ground it was dug into, which is the whole point of
+        // digging in. Area guard is what a deployed position is.
+        if item.deployed {
+            if !brain
+                .tracked
+                .admits(tick, item.entity_id, TrackedKind::Guard, None, Some(item.cell))
+            {
+                continue;
+            }
+            brain
+                .tracked
+                .record(tick, item.entity_id, TrackedKind::Guard, None, Some(item.cell));
+            out.order(item.entity_id, Goal::Guard);
             issued += 1;
             continue;
         }
@@ -197,15 +219,17 @@ fn collect(brain: &RetailBrain, rules: &RuleSet, obs: &Observation<'_>, tick: u6
             if brain.tracked.held(tick, unit.entity_id) {
                 continue;
             }
-            let reach = obs
-                .object_type(rules, unit.type_id)
-                .map_or(0, |ty| super::advance::weapon_range_cells(rules, ty));
+            let deployed = obs.is_deployed(unit.entity_id);
+            let reach = obs.object_type(rules, unit.type_id).map_or(0, |ty| {
+                super::advance::weapon_range_cells(rules, ty, deployed)
+            });
             work.push(Work {
                 entity_id: unit.entity_id,
                 role: squad.role,
                 cell: unit.cell,
                 reach,
                 squad_target,
+                deployed,
             });
         }
     }

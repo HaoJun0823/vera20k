@@ -143,6 +143,12 @@ pub(super) fn advance(
         ) {
             continue;
         }
+        // A dug-in unit cannot walk, and the push is a walk: the micro layer
+        // holds it on area guard where it was deployed, which is where the
+        // ground it is holding is.
+        if obs.is_deployed(unit.entity_id) {
+            continue;
+        }
         // The step that owns a specialist order already spent this unit's frame:
         // a spy walking into a building and a rifleman boarding a carrier both
         // outrank the push.
@@ -163,7 +169,7 @@ pub(super) fn advance(
         // is the same fist, ordered by what each unit can actually do.
         let reach = obs
             .object_type(rules, unit.type_id)
-            .map_or(0, |ty| weapon_range_cells(rules, ty));
+            .map_or(0, |ty| weapon_range_cells(rules, ty, obs.is_deployed(unit.entity_id)));
         let (kind, goal) = if reach > 0 && cell_distance(unit.cell, target.cell) <= reach {
             (
                 super::tracked::TrackedKind::Attack,
@@ -201,10 +207,23 @@ pub(super) fn advance(
     true
 }
 
-/// The reach of a type's primary weapon in cells, rounded up; zero when it has
-/// none.
-pub(super) fn weapon_range_cells(rules: &RuleSet, ty: &ObjectType) -> i32 {
-    let Some(name) = ty.primary() else {
+/// The reach of the weapon the object would actually fire, in cells, rounded
+/// up; zero when it has none.
+///
+/// A dug-in soldier fires a different weapon from the one it stands up with.
+/// `[E1] DeployFire=yes` and `DeployFireWeapon=` — slot 1, the secondary, by
+/// default (`0x0052466E` reads it; `combat_weapon.rs` picks the slot from it) —
+/// and `[E1] Secondary=Para` reaches 5 cells where `Primary=M60` reaches 4. A
+/// brain that measures the standing weapon sends a deployed soldier at a target
+/// its gun cannot cover, and a soldier that cannot walk just stands there.
+pub(super) fn weapon_range_cells(rules: &RuleSet, ty: &ObjectType, deployed: bool) -> i32 {
+    let deployed_slot = (deployed && ty.deploy_fire)
+        .then(|| usize::try_from(ty.deploy_fire_weapon.max(0)).ok())
+        .flatten();
+    let name = deployed_slot
+        .and_then(|slot| ty.weapon_at(slot))
+        .or_else(|| ty.primary());
+    let Some(name) = name else {
         return 0;
     };
     let Some(weapon) = rules.weapon(name) else {
@@ -252,6 +271,32 @@ mod tests {
     use super::*;
     use crate::rules::unit_role::RoleTable;
     use crate::sim::world::Simulation;
+
+    /// A dug-in soldier reaches further than the same soldier standing up:
+    /// `[E1] Primary=M60 Range=4` against `Secondary=Para Range=5`, and
+    /// `DeployFire=yes` with `DeployFireWeapon=` defaulting to slot 1 is what
+    /// decides which one it fires. Measuring the standing weapon sent deployed
+    /// soldiers at targets their own gun could not cover, and a soldier that
+    /// cannot walk just stands there with the order marker on it.
+    #[test]
+    fn a_dug_in_soldier_reaches_as_far_as_the_weapon_it_fires() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        let obs = Observation::new(&sim, owner);
+        let gi = obs
+            .type_id("E1")
+            .and_then(|type_id| obs.object_type(&rules, type_id))
+            .expect("the G.I. is in the rules");
+        let standing = weapon_range_cells(&rules, gi, false);
+        let dug_in = weapon_range_cells(&rules, gi, true);
+        assert!(standing > 0, "the standing soldier reaches: {standing}");
+        assert!(
+            dug_in > standing,
+            "the deployed one reaches further: {standing} vs {dug_in}"
+        );
+    }
 
     /// A retail arena: two houses on 32x32 ground, needed to spawn real object
     /// types. The rules come from the repository's own `ini/` snapshot, so
