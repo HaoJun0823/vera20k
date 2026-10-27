@@ -234,8 +234,21 @@ fn build_next(
     // (measured 2026-10-24: timeout at 36000 instead of a win), because the
     // repeated queue is also what keeps the tower count up, so the two have to
     // be re-balanced together — `DEFENSE_TARGET` at 4 did not make up for it.
-    if obs.in_production(rules, type_id) {
-        log::debug!("queued already holds {}", ty.id);
+    // A structure the yard is already making is not made twice.
+    //
+    // The busy guard above asks the Building line, and it is not enough: the
+    // frame a plant is queued on, the line still reads idle, so the next frame
+    // buys the same plant again. That is the opening with two power plants —
+    // measured in a real match, both orders logged with `output=0 drain=0
+    // power_short=0`, so it was never the power arithmetic: it was the same
+    // entry chosen twice. `CanBuild`'s own view of what is already queued is
+    // the answer to that, and it does not need the count on the map to catch
+    // up.
+    //
+    // The Defense line is deliberately left out: its repeat is what keeps the
+    // tower count up (see below), and that is a separate balance.
+    if ty.category == ObjectCategory::Building && obs.in_production(rules, type_id) {
+        return;
     }
     let price = obs.cost_of(rules, ty);
     // What the yard has settled on is not the lines' money — but only the tree

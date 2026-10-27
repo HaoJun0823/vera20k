@@ -199,10 +199,19 @@ fn tool<'r>(
                 || (traits.scout && dogs < DOG_WANT)
         })
         .filter(|(ty, _, _)| obs.cost_of(rules, ty) <= credits)
-        // The engineer first: a spy's work is a raid, an engineer's is the
+        // The dog first. It is the cheapest pair of eyes the house has, it wins
+        // the engineer race against a house that opens without one, and it is
+        // the only early answer to an enemy engineer walking into the base —
+        // without one the house loses the capture race it never noticed it was
+        // in. The engineer second: a spy's work is a raid, an engineer's is the
         // base's own growth. Then the cheaper, then the earlier rule.
         .min_by_key(|(ty, id, traits)| {
-            (u8::from(!traits.engineer), obs.cost_of(rules, ty), *id)
+            (
+                u8::from(!traits.scout),
+                u8::from(!traits.engineer),
+                obs.cost_of(rules, ty),
+                *id,
+            )
         })
         .map(|(ty, id, _)| (ty, id))
 }
@@ -865,12 +874,15 @@ mod tests {
         );
     }
 
-    /// A house with no engineer makes one. The buildings are taken with them,
-    /// and the army's own ranking refuses an engineer outright and refuses a
-    /// spy for carrying no weapon — so the capture and infiltration steps have
-    /// been running against an empty army.
+    /// A house with no dog makes one, before it makes anything else.
+    ///
+    /// The dog is the cheapest pair of eyes the house has and the only early
+    /// answer to an enemy engineer walking into the base: a house that opens
+    /// with its own engineer instead loses the capture race without noticing it
+    /// was in one, and the engineer it paid for walks into a building the other
+    /// side already took.
     #[test]
-    fn a_barracks_makes_the_engineer_the_army_refuses() {
+    fn a_barracks_opens_with_the_dog() {
         let Some((mut sim, rules)) = arena(0xA17) else {
             return;
         };
@@ -910,8 +922,8 @@ mod tests {
             .collect();
         assert!(
             made.iter()
-                .any(|name| rules.object(name).is_some_and(|ty| ty.engineer)),
-            "the engineer the army refuses: {made:?}"
+                .any(|name| rules.object(name).is_some_and(|ty| ty.not_human && ty.natural)),
+            "the opening infantry is the dog: {made:?}"
         );
     }
 

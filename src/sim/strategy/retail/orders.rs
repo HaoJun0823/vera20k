@@ -730,7 +730,11 @@ const RETREAT_HEALTH_PERMILLE: u16 = 300;
 /// The post is the base's own anchor, so a unit that breaks off walks home
 /// rather than freezing where the fight left it.
 pub(super) fn managed(brain: &mut RetailBrain, tick: u64, out: &mut Outbox) {
-    let post = brain.census.base_cell;
+    // The depot when the house has one, the base's anchor otherwise. A vehicle
+    // that breaks off and walks to the yard stands there at half strength for
+    // the rest of the match: only a `UnitRepair=` shed puts it back together,
+    // and a house that has one has it for exactly this.
+    let post = brain.census.repair_cell.or(brain.census.base_cell);
     // Collected before anything is written: the routine takes the unit, and
     // the ledger is borrowed while it is read.
     let retreating: Vec<u64> = brain

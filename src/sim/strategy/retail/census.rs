@@ -202,6 +202,10 @@ pub(super) struct Traits {
     /// which is exactly what the log shows (`fire ParaDropSpecial` repeating
     /// for the rest of the match).
     pub(super) spawned: bool,
+    /// `UnitRepair=yes` (`[GADEPT]`, `ini/rulesmd.ini:11895`): a shed that puts a
+    /// vehicle back together. What a hurt vehicle walks to instead of walking
+    /// home.
+    pub(super) repairs_units: bool,
 }
 
 /// Seats at which a type is a transport rather than a fighting unit, in the
@@ -274,6 +278,7 @@ impl Traits {
             explodes: ty.explodes,
             open_topped: ty.open_topped,
             spawned: ty.spawned,
+            repairs_units: ty.unit_repair,
         }
     }
 }
@@ -318,6 +323,11 @@ pub(super) struct Census {
     /// The base's anchor: the yard when one stands, otherwise whatever building
     /// the house still has.
     pub(super) base_cell: Option<(u16, u16)>,
+    /// The cell of the house's `UnitRepair=` building, when one stands: where a
+    /// hurt vehicle goes back to. The post a retreat walks to, instead of the
+    /// yard — a unit that walks home from a fight and stands there is a unit the
+    /// house paid for and cannot use.
+    pub(super) repair_cell: Option<(u16, u16)>,
     pub(super) harvesters: usize,
     pub(super) refineries: usize,
     pub(super) yards: usize,
@@ -437,6 +447,7 @@ impl Census {
         self.units.clear();
         self.enemies.clear();
         self.home_cells.clear();
+        self.repair_cell = None;
         self.ready.clear();
         self.harvesters = 0;
         self.refineries = 0;
@@ -485,6 +496,9 @@ impl Census {
             if ty.category == ObjectCategory::Building {
                 self.home_cells.push(entity.cell);
                 self.base_cell.get_or_insert(entity.cell);
+                if traits.repairs_units {
+                    self.repair_cell.get_or_insert(entity.cell);
+                }
             }
             let points = if combat {
                 fight_points(ty, health_permille)

@@ -178,10 +178,7 @@ pub(super) fn advance(
         let reach = obs
             .object_type(rules, unit.type_id)
             .map_or(0, |ty| weapon_range_cells(rules, ty, obs.is_deployed(unit.entity_id)));
-        let (kind, goal) = if reach > 0
-            && cell_distance(unit.cell, target.cell) <= reach
-            && obs.can_engage(rules, unit.entity_id, target.entity_id)
-        {
+        let (kind, goal) = if reach > 0 && cell_distance(unit.cell, target.cell) <= reach {
             (
                 super::tracked::TrackedKind::Attack,
                 Goal::Attack {
