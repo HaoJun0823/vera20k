@@ -93,7 +93,8 @@ the native mission machine runs it to the end. No per-object memory exists.
 
 **Managed** attaches an object to a routine. Each frame the routine returns a goal, a
 wait, `Done` or `Fallback`; the board issues the goal through the same funnel and counts
-refusals. After `Managed::MAX_REFUSALS` consecutive not-ready answers the object is
+refusals. After `Managed::MAX_REFUSALS` consecutive answers that are not `Queued`
+— a refused command or a not-ready one — the object is
 handed back to the brain and the hand-back is logged — a routine that cannot act must
 not hold an object silently.
 

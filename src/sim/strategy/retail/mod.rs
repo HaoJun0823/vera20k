@@ -107,6 +107,19 @@ use crate::sim::rng::SimRng;
 use census::Census;
 use tracked::Tracker;
 
+/// Squared cell distance: comparisons only, so the square root is not needed.
+///
+/// One owner for the three identical copies `orders`, `micro` and `squads`
+/// used to carry. It orders candidates by how far away they are; it is not a
+/// reach test. Reach is Chebyshev, the metric the game's own adjacency uses
+/// (a unit neighbours all eight cells around it), so an "is it in range"
+/// question measures with that instead — see `advance`'s own helper.
+pub(super) fn squared_distance(a: (u16, u16), b: (u16, u16)) -> i32 {
+    let dx = i32::from(a.0) - i32::from(b.0);
+    let dy = i32::from(a.1) - i32::from(b.1);
+    dx * dx + dy * dy
+}
+
 /// How long an order on a unit stands before the brain looks again is
 /// [`tracked::TrackedKind::term`]'s answer now, and it differs per kind: a pose
 /// takes its animation, a walk across the map takes the walk. Fifteen seconds
@@ -240,9 +253,9 @@ impl Brain for RetailBrain {
         // What the wallet can still spend, and what the house earns: the two
         // numbers every step below is gated on, so they are read once.
         let budget = plan::budget(rules, obs, &self.census, self.income.per_minute());
-        // One line every ten seconds, the same cadence the board and the yard
-        // deploy log on: "the AI builds nothing" has to be answerable from the
-        // log the client already writes.
+        // One line every forty seconds (600 frames at 15 a second), the same
+        // cadence the board and the yard deploy log on: "the AI builds nothing"
+        // has to be answerable from the log the client already writes.
         if obs.tick() % 600 == 0 {
             log::info!(
                 "auto play: {} income={}/min",

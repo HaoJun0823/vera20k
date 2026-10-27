@@ -441,9 +441,7 @@ fn open(
 ) -> bool {
     match gate {
         Gate::Always => true,
-        Gate::HarvestersServed => {
-            census.harvesters >= build::HARVESTERS_PER_REFINERY * census.refineries.max(1)
-        }
+        Gate::HarvestersServed => census.harvesters_served(),
         Gate::Free(credits) => budget.free >= credits,
         Gate::Surplus => {
             budget.free >= build::SURPLUS_CREDITS

@@ -374,7 +374,7 @@ fn the_board_leaves_the_players_own_units_alone() {
         .spawn_object("MTNK", "Americans", 16, 16, 64, &rules)
         .expect("an American tank");
     let mut host = host(&mut sim, vec![(0, Command::Stop { entity_id: tank })]);
-    host.set_excluded([tank].into_iter().collect());
+    host.take_back([tank].into_iter().collect());
 
     host.step(&mut sim, &rules);
 

@@ -168,10 +168,13 @@ impl ControlBoard {
         &self.excluded
     }
 
-    /// Replace the player's own set: a control group is a promise that the
-    /// unit stays where the player put it, so the board orders none of these.
-    pub fn set_excluded(&mut self, excluded: BTreeSet<u64>) {
-        self.excluded = excluded;
+    /// The player takes these back: a control group is a promise that the unit
+    /// stays where the player put it, so the board orders none of these and
+    /// leaves any order it already had alone. The set is the player's whole
+    /// current one, not an addition — a group released this frame is the
+    /// board's to command again.
+    pub fn take_back(&mut self, taken: BTreeSet<u64>) {
+        self.excluded = taken;
     }
 
     /// The brain driving the house, for diagnostics.

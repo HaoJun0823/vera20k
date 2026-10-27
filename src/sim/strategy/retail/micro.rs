@@ -31,6 +31,7 @@ use crate::sim::mission::{MissionId, MissionType};
 
 use super::RetailBrain;
 use super::squads::Role;
+use super::squared_distance;
 use super::tracked::TrackedKind;
 use crate::sim::control::Goal;
 
@@ -312,9 +313,14 @@ fn enemy_economy(
         let Some(ty) = obs.object_type(rules, enemy.type_id) else {
             continue;
         };
-        let rank = if ty.harvester {
+        // The same tags the house's own ledger reads, not the two keys this
+        // used to test on its own: `Harvester=` and `ResourceGatherer=` are
+        // both a mod's way of saying the same thing, and `Traits` is where the
+        // brain decides which key it means.
+        let traits = super::census::Traits::of(rules, ty);
+        let rank = if traits.harvester {
             0
-        } else if ty.resource_destination {
+        } else if traits.refinery {
             1
         } else {
             continue;
@@ -359,12 +365,6 @@ fn nearest(
         .iter()
         .min_by_key(|enemy| (squared_distance(enemy.cell, from), enemy.entity_id))
         .map(|enemy| (enemy.entity_id, enemy.cell))
-}
-
-fn squared_distance(a: (u16, u16), b: (u16, u16)) -> i32 {
-    let dx = i32::from(a.0) - i32::from(b.0);
-    let dy = i32::from(a.1) - i32::from(b.1);
-    dx * dx + dy * dy
 }
 
 #[cfg(test)]

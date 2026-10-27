@@ -90,10 +90,6 @@ impl ObjectView {
         self.rearm_frames_left <= 0
     }
 
-    /// Chebyshev distance in cells between this object and a cell.
-    pub fn cells_to(&self, cell: (u16, u16)) -> i32 {
-        cell_distance(self.cell, cell)
-    }
 }
 
 /// The primary weapon's effective range in leptons and the frames its reload

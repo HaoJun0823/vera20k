@@ -6,6 +6,11 @@
 //! a snapshot: nothing is copied or retained, and a decision that needs a value
 //! across frames holds the value, not the view.
 //!
+//! The surface is `pub` and not crate-only because the layer above is the
+//! consumer these queries exist for: a `pub(crate)` hook is a hook only this
+//! crate's own shape keeps working, and every one of them is a read — none of
+//! them moves, writes or decides anything the simulation owns.
+//!
 //! Each field reads the state's authoritative owner, never a presentation
 //! cache. Specifically:
 //!
@@ -92,7 +97,7 @@ pub struct ReadyBuilding {
 /// An enemy object a policy may aim an order at: the id `Command::Attack`
 /// names as its target, and where it stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EnemyEntity {
+pub struct EnemyEntity {
     pub entity_id: u64,
     pub type_id: InternedId,
     pub cell: (u16, u16),
@@ -117,7 +122,7 @@ pub struct FactoryLine {
 /// A building that takes infantry and has room for more: the garrison click's
 /// target. `room` is the carrier-side count, not a rules number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Billet {
+pub struct Billet {
     pub building_id: u64,
     pub cell: (u16, u16),
     pub room: u32,
@@ -135,7 +140,11 @@ impl<'a> Observation<'a> {
     /// The same view, over a house whose player has taken some of its objects
     /// back. The board calls this with the control groups it was handed;
     /// without it the view is a headless one and nothing is kept.
-    pub(crate) fn with_player_groups(mut self, groups: &'a BTreeSet<u64>) -> Self {
+    ///
+    /// Public, like the rest of the view: the decision layer above reads the
+    /// same observation the board builds, and a `pub(crate)` hook is a hook
+    /// only the crate's own luck keeps working.
+    pub fn with_player_groups(mut self, groups: &'a BTreeSet<u64>) -> Self {
         self.player_kept = groups;
         self
     }
@@ -216,13 +225,6 @@ impl<'a> Observation<'a> {
     /// that wants to send one reaches into the fog itself.
     pub fn is_cell_revealed(&self, rx: u16, ry: u16) -> bool {
         self.sim.fog().is_cell_revealed(self.house, rx, ry)
-    }
-
-    /// Whether the house can see `rx, ry` *now*: revealed is forever, visible
-    /// is while something of the house's is looking at it
-    /// (`FogState::is_cell_visible`, `src/sim/vision/mod.rs:1745`).
-    pub fn is_cell_visible(&self, rx: u16, ry: u16) -> bool {
-        self.sim.fog().is_cell_visible(self.house, rx, ry)
     }
 
     /// The map's extent in cells, as the fog grid measures it: what a scan of
@@ -375,7 +377,7 @@ impl<'a> Observation<'a> {
     /// `MultiplayPassive` house — the neutral and civilian houses that own the
     /// map's tech buildings, garrisonable houses and parked cars, which the
     /// computer AI leaves alone and turns on only when they are made enemies.
-    pub(crate) fn enemy_entities(&self) -> impl Iterator<Item = EnemyEntity> + '_ {
+    pub fn enemy_entities(&self) -> impl Iterator<Item = EnemyEntity> + '_ {
         let house = self.house;
         let houses = self.sim.houses();
         let allied = crate::map::houses::ally_test(
@@ -402,7 +404,7 @@ impl<'a> Observation<'a> {
     /// Buildings any engineer may take: alive, not this house's, and
     /// `Capturable=`. Neutral tech buildings and civilian structures qualify,
     /// which is exactly the difference between capturing one and shooting it.
-    pub(crate) fn capturable_buildings<'r>(
+    pub fn capturable_buildings<'r>(
         &'r self,
         rules: &'r RuleSet,
     ) -> impl Iterator<Item = EnemyEntity> + 'r {
@@ -435,7 +437,7 @@ impl<'a> Observation<'a> {
     /// Enmity is [`Self::enemy_entities`]' own: an ally's building and a
     /// `MultiplayPassive` house's are both left out, because there is no
     /// treasury behind either to steal from.
-    pub(crate) fn spyable_buildings<'r>(
+    pub fn spyable_buildings<'r>(
         &'r self,
         rules: &'r RuleSet,
     ) -> impl Iterator<Item = EnemyEntity> + 'r {
@@ -472,7 +474,7 @@ impl<'a> Observation<'a> {
     /// question: `BuildingClass::CanBeOccupiedBy` owns it, and the policy asks
     /// it per candidate. Any owner is listed because that owner also refuses
     /// the ones a house may not enter.
-    pub(crate) fn occupiable_buildings<'r>(
+    pub fn occupiable_buildings<'r>(
         &'r self,
         rules: &'r RuleSet,
     ) -> impl Iterator<Item = Billet> + 'r {
@@ -511,7 +513,7 @@ impl<'a> Observation<'a> {
     /// appears in [`Self::capturable_buildings`] and no other command reaches
     /// it. The scan of the damaged span is `bridge_hut_can_repair`'s own;
     /// repeating it here would be a second answer to the same question.
-    pub(crate) fn bridge_repair_huts<'r>(
+    pub fn bridge_repair_huts<'r>(
         &'r self,
         rules: &'r RuleSet,
     ) -> impl Iterator<Item = Billet> + 'r {
@@ -539,19 +541,13 @@ impl<'a> Observation<'a> {
 
     /// Whether `infantry_id` may garrison `building_id`:
     /// `BuildingClass::CanBeOccupiedBy`'s answer for this pair.
-    pub(crate) fn can_garrison(&self, rules: &RuleSet, infantry_id: u64, building_id: u64) -> bool {
+    pub fn can_garrison(&self, rules: &RuleSet, infantry_id: u64, building_id: u64) -> bool {
         crate::sim::passenger::building_can_be_occupied_by(self.sim, rules, building_id, infantry_id)
-    }
-
-    /// The rules' name of a type, for messages: a policy that has to say what
-    /// it is waiting on names the type the way the rules do.
-    pub(crate) fn name_of(&self, type_id: InternedId) -> Option<&'a str> {
-        self.sim.interner().try_resolve(type_id)
     }
 
     /// The rules' type for `type_id`: a policy reads the type's own fields
     /// (foundation, `Adjacent=`, `DeploysInto=`, `BuildConst=` membership).
-    pub(crate) fn object_type<'r>(
+    pub fn object_type<'r>(
         &self,
         rules: &'r RuleSet,
         type_id: InternedId,
@@ -570,7 +566,7 @@ impl<'a> Observation<'a> {
     ///
     /// Unchecked, as the native reader is: the caller still owns `CanBuild`
     /// and the wallet.
-    pub(crate) fn chosen_product<'r>(
+    pub fn chosen_product<'r>(
         &self,
         rules: &'r RuleSet,
         category: ObjectCategory,
@@ -579,18 +575,6 @@ impl<'a> Observation<'a> {
             crate::sim::ai_base_building::suggested_product(self.sim, rules, self.house, category)?;
         let type_id = self.type_id(&ty.id)?;
         Some((ty, type_id))
-    }
-
-    /// `BaseClass @ 0x0042E780` for a node of the policy's own plan: the
-    /// node's building stands at its cell, so `Find_Node` no longer reports it
-    /// open. A wall node needs the overlay registry and so reads unsatisfied
-    /// here, which is right for a policy that does not drive walls.
-    pub(crate) fn base_plan_node_satisfied(
-        &self,
-        rules: &RuleSet,
-        node: &crate::sim::base_plan::BasePlanNode,
-    ) -> bool {
-        crate::sim::ai_base_building::node_satisfied(self.sim, rules, self.house, node, None)
     }
 
     /// Whether the unit `entity_id` could deploy into `yard` where it stands:
@@ -652,7 +636,7 @@ impl<'a> Observation<'a> {
     /// `ORDER_REFRESH_FRAMES`, so a grouped unit would quietly eat the army's
     /// orders and hold its own place in the push while doing neither. Every
     /// place the policy picks a unit to order asks this first.
-    pub(crate) fn owned_by_hand(&self, entity_id: u64) -> bool {
+    pub fn owned_by_hand(&self, entity_id: u64) -> bool {
         self.player_kept.contains(&entity_id) || self.team_has_member(entity_id)
     }
 
@@ -662,7 +646,7 @@ impl<'a> Observation<'a> {
     /// gate, so a policy-driven house's teams run like any other's — recruit
     /// the house's units and drive them. The policy does not order over a
     /// member, or two issuers would give the same unit its next step.
-    pub(crate) fn team_has_member(&self, entity_id: u64) -> bool {
+    pub fn team_has_member(&self, entity_id: u64) -> bool {
         self.sim
             .team_script_vm
             .team_for_member(entity_id)

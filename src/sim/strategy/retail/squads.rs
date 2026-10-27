@@ -31,6 +31,7 @@ use crate::rules::ruleset::RuleSet;
 use crate::sim::control::observation::Observation;
 
 use super::census::{Census, Unit};
+use super::squared_distance;
 
 /// How often the membership is rebuilt, in frames: twenty seconds. Often
 /// enough that a dead unit is not carried for long, rare enough that a team is
@@ -310,13 +311,6 @@ fn home_threat(census: &Census) -> Option<(u64, (u16, u16))> {
         .map(|enemy| (enemy.entity_id, enemy.cell))
 }
 
-/// Squared cell distance: integer comparisons only.
-fn squared_distance(a: (u16, u16), b: (u16, u16)) -> i32 {
-    let dx = i32::from(a.0) - i32::from(b.0);
-    let dy = i32::from(a.1) - i32::from(b.1);
-    dx * dx + dy * dy
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,19 +333,8 @@ mod tests {
             tier: 0,
             traits: crate::sim::strategy::retail::census::Traits {
                 combat: true,
-                harvester: false,
-                refinery: false,
-                yard: false,
-                yard_maker: false,
-                engineer: false,
-                infiltrator: false,
-                occupier: false,
-                deployer: false,
-                scout: false,
                 armed: true,
-                captures: false,
-                carries: false,
-                deploy_slot: None,
+                ..Default::default()
             },
         }
     }
@@ -381,19 +364,8 @@ mod tests {
                 tier: 0,
                 traits: crate::sim::strategy::retail::census::Traits {
                     combat: true,
-                    harvester: false,
-                    refinery: false,
-                    yard: false,
-                    yard_maker: false,
-                    engineer: false,
-                    infiltrator: false,
-                    occupier: false,
-                    deployer: false,
-                    scout: false,
                     armed: true,
-                    captures: false,
-                    carries: false,
-                    deploy_slot: None,
+                    ..Default::default()
                 },
             });
         }

@@ -88,15 +88,15 @@ Timing the agent must be written against:
 
 | Area | State |
 |---|---|
-| `src/sim/control/observation.rs` | Implemented: `Observation`, the L2 read-only projection — credits, power output/drain/balance, own entities, `max_health`, ready buildings, ground walkability and the `pub(crate)` queries the retail brain needs. Each field reads its authoritative owner. |
+| `src/sim/control/observation.rs` | Implemented: `Observation`, the L2 read-only projection — credits, power output/drain/balance, own entities, `max_health`, ready buildings, ground walkability and the `pub` queries the retail brain needs. Each field reads its authoritative owner. |
 | `src/sim/control/brain.rs` | Implemented: `Brain` and `Outbox`, the decision port. Declared on the L2 side so L2 never names a brain. See [the AI layers](ai-layers.md). |
-| `src/sim/control/board.rs` | Implemented: `ControlBoard::step` — state requests → decisions → managed stepping → gate → `queue_commands`, with the two domain switches and the per-frame budget. The gate reuses `Simulation::entity_owned_by_id` and `Simulation::order_actor_admits` rather than restating them, and refuses any command whose actor is one of the player's control groups. Its four counts are logged every ten seconds, because "the brain does nothing" and "the brain is refused" look the same from the screen. |
+| `src/sim/control/board.rs` | Implemented: `ControlBoard::step` — state requests → decisions → managed stepping → gate → `queue_commands`, with the two domain switches and the per-frame budget. The gate reuses `Simulation::entity_owned_by_id` and `Simulation::order_actor_admits` rather than restating them, and refuses any command whose actor is one of the player's control groups. Its four counts are logged every forty seconds (600 frames at 15 a second), because "the brain does nothing" and "the brain is refused" look the same from the screen. |
 | `src/sim/behavior/` | Implemented: the L1 execution layer — the `Goal` vocabulary, the single `Funnel` with its readiness gate, `ObjectView`/`ThreatView`, and the managed routine contract. |
-| `src/sim/strategy/retail/` | Implemented: `RetailBrain`, the retail decision layer. It generates the native BasePlan with `recalc_base_plan` from its own `BasePlanState` and `SimRng`, adopts a base that already stands, and answers in orders and intents: deploy the Construction Yard maker, queue the first open node's type, splice a power plant ahead of a node whose drain would black the house out, place the finished product, count the node satisfied, keep the harvesters `AI_Choose_Unit`'s branch asks for, ask its factories for combat units, send the army at the nearest enemy object. It raises no `TeamClass` of its own: the native team block is gated on the house not being human, so there is no team for this brain to raise (measured, see [the native team pipeline, measured](#the-native-team-pipeline-measured)). It also carries a way back from a lost yard: buy the maker the factories can still make, drive it to a cell that admits the yard before pressing D, and pay for the maker's own `Prerequisite=` while the wallet is rich. See [the retail policy chain](#the-retail-policy-chain). |
+| `src/sim/strategy/retail/` | Implemented: `RetailBrain`, the retail decision layer. It plans over the ledger it rebuilds every frame — a staged build list (`plan::STEPS`) whose gates read the wallet and the income the house measures — adopts a base that already stands, and answers in orders and intents: deploy the Construction Yard maker, queue the first open node's type, splice a power plant ahead of a node whose drain would black the house out, place the finished product, count the node satisfied, keep the harvesters `AI_Choose_Unit`'s branch asks for, ask its factories for combat units, send the army at the nearest enemy object. It raises no `TeamClass` of its own: the native team block is gated on the house not being human, so there is no team for this brain to raise (measured, see [the native team pipeline, measured](#the-native-team-pipeline-measured)). It also carries a way back from a lost yard: buy the maker the factories can still make, drive it to a cell that admits the yard before pressing D, and pay for the maker's own `Prerequisite=` while the wallet is rich. See [the retail policy chain](#the-retail-policy-chain). |
 | `src/rules/unit_role.rs` | Implemented: what each type is *for*, derived from the rules rather than from a table of names — the type's warheads' `Verses=` read into seven job weights (anti-infantry, anti-vehicle, anti-structure, anti-air, scout, artillery, support), with armour classes bracketed by what retail's warheads actually do. A type carries several weights at once, and `answer(need)` ranks the roster against one composition. A mod that retunes a warhead moves the weights; nothing here lists mod content. |
 | `src/sim/autoplay/scripted_policy.rs` | Implemented: `ScriptedPolicy`, a fixed `(frame, Command)` schedule — a test brain, not what the hotkey installs. |
 | `src/sim/autoplay/host.rs` | Implemented: `AutoPlayHost`, the facade the client holds. It forwards to `ControlBoard` and exposes the domain switch, the brain name, the rejection counts and the managed table. |
-| `src/sim/autoplay/autoplay_tests.rs` | Implemented: 33 tests over the envelope, the gate's three rejections, the per-frame cap, input lock, the release schedule, the observation, the retail chain (MCV → yard → the plan's first buildings → teams → army), the wallet's price bands, the yard recovery chain, the player's own units being left alone, the order funnel, managed mode and the external schema. Several run on synthetic rules so they hold without `RA2_DIR`; the rest need it to spawn real object types. |
+| `src/sim/autoplay/autoplay_tests.rs` | Implemented: 36 tests over the envelope, the gate's three rejections, the per-frame cap, input lock, the release schedule, the observation, the retail chain (MCV → yard → the plan's first buildings → army), the wallet's price bands, the yard recovery chain, the player's own units being left alone, the order funnel, managed mode and the external schema. Several run on synthetic rules so they hold without `RA2_DIR`; the rest need it to spawn real object types. |
 | `docs/ai-layers.md` | The three-layer contract: boundaries, module inventory, data ownership, the direct/managed split and the reserved external seam. |
 | `vera20k` hotkey category | Groundwork, delivered separately: `catalog::VERA_CATEGORY_KEY` is declared in the input layer and listed after every category the retail commands carry. |
 | AutoPlay hotkey | Implemented, three keys. `HotkeyCommand::ToggleAutoPlay` installs `RetailBrain` on the local house with both halves on, or removes the host; `HotkeyCommand::AutoPlayBuild` and `HotkeyCommand::ToggleAutoPlayForces` switch the production and the forces half on their own. All three sit in the `vera20k` category with **no default key** — `KEYBOARDMD.INI` has no entry for them, so the player assigns them. |
@@ -210,7 +210,7 @@ fifteen seconds. A unit takes one order a frame: the steps run in that priority
 order and the first answer keeps the unit. Switching `forces` off leaves the army
 where it stands and stops new orders of that kind; switching `production` off
 stops the base, the factories and the team raises while the army keeps its
-orders. Neither half issues a superweapon strike yet.
+orders. Superweapons fire: `orders` launches a charged one at an enemy cell through `Intent::LaunchSuperWeapon`, because `HouseClass::AI_TryFireSW` is itself gated on the house not being human. The defensive half — a charged Iron Curtain, Force Shield or Chrono pair spent on the house's own force — is not ported.
 
 There is no boarding step, and that is a measurement rather than an omission: an
 idle rifleman climbing into his own empty carrier is a correct Enter click, but
@@ -248,19 +248,18 @@ read as an AI house's would be, because a policy-driven house is played in the
 player's place and a human house's IQ stays 0, which would leave the house with
 no income at all.
 
-The army's unit choices are native now: the policy raises the teams the house's
-own selector picks (its timer expired, `HouseClass::Update`'s team block asked
-as a state intent and applied by the host through `sim::ai_team_creation`), and
-asks `AI_Choose_Unit`'s Unit, Infantry and Aircraft branches what those forming
-teams are short of. The team AI pass itself has no house gate, so a
-policy-driven house's teams run like any other house's: they recruit the house's
-units (`TeamClass::Recruit`) and drive them by their scripts, and the policy's
-own order step stands down for a recruited member rather than give the same unit
-a second order. What is still the policy's own is the *orders for the units no
-team has taken*: each combat unit is sent at the nearest enemy object and each
-engineer at the nearest capturable building — what a player's click on it means —
-with the whole map in view the way the computer AI has it. Superweapon strikes
-are the next chain; `AI_Manage_Build_Queue` the one after.
+The army's unit choices are native: a factory's own suggestion
+(`HouseClass::Suggest_New_Object 0x004FBD80`) is asked first, and the enemy's
+composition against the army's own job weights answers when it has none. This
+house raises no team, so no `TeamClass::Get_Needed_Types` ever fills that slot:
+`HouseClass::Update`'s team block is gated on the house not being human
+(measured, see [the native team pipeline, measured](#the-native-team-pipeline-measured)).
+The order step still stands down for a unit a team has recruited — nothing
+issues twice — but on this side no unit ever is, so every unit is the policy's
+to order: each combat unit is sent at the nearest enemy object and each engineer
+at the nearest capturable building — what a player's click on it means — with
+the whole map in view the way the computer AI has it. `AI_Manage_Build_Queue`
+is the next chain.
 
 ### What citing the retail AI buys, and what it does not
 

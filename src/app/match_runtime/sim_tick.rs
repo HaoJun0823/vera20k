@@ -1206,7 +1206,7 @@ fn advance_one_simulation_frame(
             if drains_this_frame
                 && let Some(host) = state.match_state.auto_play.as_mut()
             {
-                host.set_excluded(player_owned.clone());
+                host.take_back(player_owned.clone());
                 let issued = host.step(sim, &rt.resources.rules);
                 // A PRODUCE press writes the cameo's request1 and predicted
                 // clock before the frame executes the event

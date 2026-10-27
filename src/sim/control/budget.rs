@@ -52,10 +52,6 @@ impl Budget {
         true
     }
 
-    pub fn commands_used(&self) -> usize {
-        self.commands
-    }
-
     pub fn max_commands(&self) -> usize {
         self.max_commands
     }

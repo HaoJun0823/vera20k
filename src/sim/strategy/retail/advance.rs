@@ -212,8 +212,9 @@ pub(super) fn advance(
 ///
 /// A dug-in soldier fires a different weapon from the one it stands up with.
 /// `[E1] DeployFire=yes` and `DeployFireWeapon=` — slot 1, the secondary, by
-/// default (`0x0052466E` reads it; `combat_weapon.rs` picks the slot from it) —
-/// and `[E1] Secondary=Para` reaches 5 cells where `Primary=M60` reaches 4. A
+/// default (`InfantryTypeClass::ReadINI` `0x0052466E..0x0052469A` reads the
+/// key; `combat_weapon.rs` picks the slot from it) — and `[E1] Secondary=Para`
+/// reaches 5 cells where `Primary=M60` reaches 4. A
 /// brain that measures the standing weapon sends a deployed soldier at a target
 /// its gun cannot cover, and a soldier that cannot walk just stands there.
 pub(super) fn weapon_range_cells(rules: &RuleSet, ty: &ObjectType, deployed: bool) -> i32 {

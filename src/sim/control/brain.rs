@@ -92,11 +92,6 @@ impl Outbox {
             && self.attachments.is_empty()
     }
 
-    /// Drop every order naming `actor`, keeping the intents. The control layer
-    /// uses it so a managed object has one issuer: its routine.
-    pub fn drop_orders_for(&mut self, actor: u64) {
-        self.orders.retain(|order| order.actor != actor);
-    }
 }
 
 /// A decision source for one house.

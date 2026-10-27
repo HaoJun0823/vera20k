@@ -144,7 +144,15 @@ pub(super) struct Traits {
     /// `DeploysInto=` a yard: an MCV.
     pub(super) yard_maker: bool,
     pub(super) engineer: bool,
+    /// It walks into a building: `Infiltrate=`, which retail's ReadINI postpass
+    /// also grants to `C4=`, `Engineer=` and `Agent=`. So an engineer is an
+    /// infiltrator, and a want for spies is not a want for this field —
+    /// counting spies with it counts the engineers as spies and never builds
+    /// one. [`Self::spy`] is the spy's own tag.
     pub(super) infiltrator: bool,
+    /// `Agent=`: the infiltrator that enters `Spyable=` buildings, where every
+    /// other infiltrator enters `Capturable=` ones.
+    pub(super) spy: bool,
     pub(super) occupier: bool,
     /// `DeployFire=`: a soldier the D key turns into a position
     /// (`[E1]` and `[GGI]` carry `Deployer=yes` with it).
@@ -170,7 +178,16 @@ pub(super) struct Traits {
     pub(super) deploy_slot: Option<usize>,
 }
 
-/// Seats at which a type is a transport rather than a fighting unit.
+/// Seats at which a type is a transport rather than a fighting unit, in the
+/// retail rules.
+///
+/// The night hawk (`[SHAD]`, `Passengers=5`, `ini/rulesmd.ini:10526`) and the
+/// hind (`[HIND]`, `Passengers=10`, `10825`) are the air transports, and both
+/// carry a cannon — so "has a weapon" counts them as army. They are not army:
+/// they are how the army gets somewhere, and counting them inflated the house's
+/// fighting strength until the tech gates opened on a dozen seats and a machine
+/// gun. A seat or two is a fighting vehicle that happens to carry someone (the
+/// IFV's one seat, `1099`), which is why the bar is five.
 const TRANSPORT_SEATS: i32 = 5;
 
 impl Traits {
@@ -219,6 +236,7 @@ impl Traits {
             yard_maker: super::expand::makes_a_yard(rules, ty),
             engineer: ty.engineer,
             infiltrator: ty.infiltrate,
+            spy: ty.agent,
             occupier: ty.occupier,
             deployer: ty.deploy_fire,
             scout: ty.not_human && ty.natural,
@@ -287,6 +305,18 @@ pub(super) struct Census {
     pub(super) able: [u32; ROLES.len()],
 }
 
+impl Census {
+    /// Whether every bay has the harvesters it wants
+    /// ([`super::build::HARVESTERS_PER_REFINERY`]).
+    ///
+    /// One owner for the measure the reserve, the tree's gate and the vehicle
+    /// line all read: three copies of the comparison is three chances for the
+    /// house to call itself short in one place and served in another.
+    pub(super) fn harvesters_served(&self) -> bool {
+        self.harvesters >= super::build::HARVESTERS_PER_REFINERY * self.refineries.max(1)
+    }
+}
+
 /// The weight at which a type counts as able to do a job rather than merely
 /// carrying some of it. `RoleWeights` are scaled against the best answer the
 /// rule set offers, so a quarter of it is a type that really does the job; a
@@ -303,8 +333,12 @@ const ROLE_FLOOR: f64 = 0.25;
 /// A type that cannot shoot back is worth nothing here whatever it survives —
 /// a refinery is ground the army stands on, not a threat it has to outfight —
 /// which is also what keeps the enemy's own economy out of the comparison.
+///
+/// "Cannot shoot back" is a weapon in no slot, not an empty `Primary=`: a type
+/// a mod arms through `Secondary=` alone still fights, and scoring it at zero
+/// made the brain refuse to count it against the enemy or to spend it.
 pub(super) fn fight_points(ty: &ObjectType, health_permille: u16) -> i32 {
-    if ty.primary().is_none() {
+    if !(0..8).any(|slot| ty.weapon_at(slot).is_some()) {
         return 0;
     }
     let full = ty.strength.max(0);

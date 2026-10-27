@@ -70,9 +70,10 @@ pub(super) fn deploy_yard_maker(
     obs: &Observation<'_>,
     out: &mut Outbox,
 ) {
-    // One line every ten seconds, because this branch is silent by design: a
-    // report of "the maker never deploys" has to be able to say whether the
-    // brain ever saw one, and whether a yard was standing over it.
+    // One line every forty seconds (600 frames at 15 a second), because this
+    // branch is silent by design: a report of "the maker never deploys" has to
+    // be able to say whether the brain ever saw one, and whether a yard was
+    // standing over it.
     if obs.tick() % 600 == 0 {
         let maker = brain
             .census

@@ -47,6 +47,7 @@ use crate::sim::control::observation::{EnemyEntity, Observation};
 use crate::sim::mission::{MissionId, MissionType};
 use crate::sim::strategy::retail::RetailBrain;
 
+use super::squared_distance;
 use super::tracked::TrackedKind;
 
 /// How many new unit orders one frame may carry. The board drops everything
@@ -431,13 +432,6 @@ fn nearest_site(sites: &[(u64, (u16, u16))], from: (u16, u16)) -> Option<u64> {
         .map(|(id, _)| *id)
 }
 
-/// Squared cell distance: comparisons only, so the square root is not needed.
-fn squared_distance(a: (u16, u16), b: (u16, u16)) -> i32 {
-    let dx = i32::from(a.0) - i32::from(b.0);
-    let dy = i32::from(a.1) - i32::from(b.1);
-    dx * dx + dy * dy
-}
-
 /// Whether an earlier step already gave this unit an order this frame. The
 /// steps run in priority order — a bridge before a capture, a capture before a
 /// guard — and a unit is one unit: the first answer wins.
@@ -638,8 +632,8 @@ fn holds_or_fights(mission: MissionId) -> bool {
 const REPAIR_HEALTH_PERMILLE: i32 = 900;
 
 /// How long a building is left with the wrench the house has already switched
-/// on, in frames. A repair takes minutes; a click that never took is worth
-/// asking again after a quarter of one.
+/// on, in frames: a minute (900 frames at 15 a second). A repair takes minutes,
+/// so a click that never took is worth asking again after a quarter of one.
 const REPAIR_REARM_FRAMES: u64 = 900;
 
 /// Turn the wrench on the house's own damaged buildings.
@@ -776,8 +770,9 @@ const HOLD_FRAMES: u64 = 15;
 /// The charge itself is the real gate — a launched super is not ready until it
 /// recharges — so this only covers the refusal case, where the click did not
 /// take (no warhead for the type, the house's wallet for a paid launch) and the
-/// button stays lit. Ten seconds: long enough not to spend the frame budget on
-/// a refused command, short enough to catch a refusal that clears.
+/// button stays lit. Forty seconds (600 frames at 15 a second): long enough
+/// not to spend the frame budget on a refused command, short enough to catch a
+/// refusal that clears.
 const SUPER_RETRY_FRAMES: u64 = 600;
 
 /// Fire the house's charged supers at the enemy, the way a player clicks the
@@ -957,38 +952,11 @@ fn enemy_structure_cell(
     first
 }
 
-/// How many seats make a type a transport rather than a fighting unit, in the
-/// retail rules.
-///
-/// The night hawk (`[SHAD]`, `Passengers=5`, `ini/rulesmd.ini:10526`) and the
-/// hind (`[HIND]`, `Passengers=10`, `10825`) are the air transports, and both
-/// carry a cannon — so "has a Primary weapon" counts them as army. They are not
-/// army: they are how the army gets somewhere, and counting them inflated the
-/// house's fighting strength until the tech gates opened on a dozen seats and
-/// a machine gun. A seat or two is a fighting vehicle that happens to carry
-/// someone (the IFV's one seat, `1099`), which is why the bar is five.
-const TRANSPORT_SEATS: i32 = 5;
-
 /// Whether an object is one these orders step around: an infantry, vehicle or
 /// aircraft that is neither a gatherer nor a Construction Yard maker.
 /// Buildings and terrain are not.
 pub(super) fn is_combat_unit(rules: &RuleSet, ty: &ObjectType) -> bool {
     super::census::Traits::of(rules, ty).combat
-}
-
-/// The enemy object nearest `from`, ties going to the earlier one in storage
-/// order. Integer cells, so the choice is deterministic.
-fn nearest_enemy(enemies: &[EnemyEntity], from: (u16, u16)) -> Option<EnemyEntity> {
-    let mut best: Option<(i32, EnemyEntity)> = None;
-    for target in enemies {
-        let dx = i32::from(target.cell.0) - i32::from(from.0);
-        let dy = i32::from(target.cell.1) - i32::from(from.1);
-        let distance = dx * dx + dy * dy;
-        if best.is_none_or(|(closest, _)| distance < closest) {
-            best = Some((distance, *target));
-        }
-    }
-    best.map(|(_, target)| target)
 }
 
 #[cfg(test)]

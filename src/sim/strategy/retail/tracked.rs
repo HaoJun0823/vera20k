@@ -91,8 +91,6 @@ pub(super) struct Tracked {
     /// The cell the intent names, when it names one: the thing that can move
     /// out from under the order.
     pub(super) cell: Option<(u16, u16)>,
-    /// The frame the intent was issued on.
-    pub(super) issued: u64,
     /// The frame before which it is not issued again.
     pub(super) until: u64,
 }
@@ -208,7 +206,6 @@ impl Tracker {
                 kind,
                 target,
                 cell,
-                issued: now,
                 until: now.saturating_add(kind.term()),
             },
         );

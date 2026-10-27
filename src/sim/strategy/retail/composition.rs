@@ -29,7 +29,7 @@ use crate::sim::intern::InternedId;
 use crate::sim::production::ProductionCategory;
 
 use super::RetailBrain;
-use super::build::{self, HARVESTERS_PER_REFINERY};
+use super::build;
 use super::census::{self, CHEAP_UNIT_CREDITS, Census, Slot, price_tier};
 use super::plan::Budget;
 
@@ -181,7 +181,7 @@ fn tool<'r>(
     let spies = census
         .units
         .iter()
-        .filter(|unit| unit.traits.infiltrator)
+        .filter(|unit| unit.traits.spy)
         .count();
     // The attack dog: `NotHuman=yes` with `Natural=yes` is retail's only such
     // pair, and it is the unit the scan role is built on. Nothing else in the
@@ -192,15 +192,19 @@ fn tool<'r>(
         return None;
     }
     build::class_types(rules, obs, ObjectCategory::Infantry)
-        .filter(|(ty, _)| {
-            (ty.engineer && engineers < ENGINEER_WANT)
-                || (ty.agent && spies < SPY_WANT)
-                || (ty.not_human && ty.natural && dogs < DOG_WANT)
+        .map(|(ty, id)| (ty, id, census::Traits::of(rules, ty)))
+        .filter(|(_, _, traits)| {
+            (traits.engineer && engineers < ENGINEER_WANT)
+                || (traits.spy && spies < SPY_WANT)
+                || (traits.scout && dogs < DOG_WANT)
         })
-        .filter(|(ty, _)| obs.cost_of(rules, ty) <= credits)
+        .filter(|(ty, _, _)| obs.cost_of(rules, ty) <= credits)
         // The engineer first: a spy's work is a raid, an engineer's is the
         // base's own growth. Then the cheaper, then the earlier rule.
-        .min_by_key(|(ty, id)| (u8::from(!ty.engineer), obs.cost_of(rules, ty), *id))
+        .min_by_key(|(ty, id, traits)| {
+            (u8::from(!traits.engineer), obs.cost_of(rules, ty), *id)
+        })
+        .map(|(ty, id, _)| (ty, id))
 }
 
 /// What one idle line starts next.
@@ -235,7 +239,7 @@ fn product_for<'r>(
         // house can actually buy: a harvester that needs a bay the house has
         // not built (retail's `[CMIN] Prerequisite=GAWEAP,PROC`) must not hold
         // the line idle while the army waits for a tank.
-        if brain.census.harvesters < HARVESTERS_PER_REFINERY * brain.census.refineries.max(1)
+        if !brain.census.harvesters_served()
             && let Some(found) = build::harvester(rules, obs)
         {
             return Some(found);
@@ -909,5 +913,64 @@ mod tests {
                 .any(|name| rules.object(name).is_some_and(|ty| ty.engineer)),
             "the engineer the army refuses: {made:?}"
         );
+    }
+
+    /// A spy is not an engineer.
+    ///
+    /// `Infiltrate=` is forced on `Engineer=`, `C4=` and `Agent=` by retail's
+    /// own ReadINI postpass, so counting the house's spies with the
+    /// infiltrator tag counted its engineers as spies: with both engineers and
+    /// both dogs the house already read as holding a spy, the infantry line's
+    /// tool picker answered nothing at all, and not one spy was ever built.
+    #[test]
+    fn a_house_with_its_engineers_and_dogs_still_builds_a_spy() {
+        let Some((mut sim, rules)) = arena(0xB17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        for (name, cell) in [
+            ("GACNST", (16u16, 16u16)),
+            ("GAPOWR", (20, 16)),
+            ("GAPILE", (24, 16)),
+            ("GATECH", (28, 16)),
+        ] {
+            sim.spawn_object(name, "Americans", cell.0, cell.1, 255, &rules)
+                .unwrap_or_else(|| panic!("{name}"));
+        }
+        for (name, cell) in [
+            ("ENGINEER", (10u16, 24u16)),
+            ("ENGINEER", (11, 24)),
+            ("ADOG", (12, 24)),
+            ("ADOG", (13, 24)),
+        ] {
+            sim.spawn_object(name, "Americans", cell.0, cell.1, 255, &rules)
+                .unwrap_or_else(|| panic!("{name}"));
+        }
+
+        let census = ledger(&rules, &sim, owner);
+        assert_eq!(
+            census
+                .units
+                .iter()
+                .filter(|unit| unit.traits.engineer)
+                .count(),
+            ENGINEER_WANT,
+            "both engineers"
+        );
+        assert_eq!(
+            census.units.iter().filter(|unit| unit.traits.scout).count(),
+            DOG_WANT,
+            "both dogs"
+        );
+        assert_eq!(
+            census.units.iter().filter(|unit| unit.traits.spy).count(),
+            0,
+            "no spy yet"
+        );
+
+        let obs = Observation::new(&sim, owner);
+        let (ty, _) = tool(&rules, &obs, &census, 100_000)
+            .expect("the infantry line still has a tool to make");
+        assert!(ty.agent, "the tool is a spy, not {}", ty.id);
     }
 }

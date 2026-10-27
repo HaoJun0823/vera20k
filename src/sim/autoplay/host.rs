@@ -49,10 +49,10 @@ impl AutoPlayHost {
         self.board.excluded()
     }
 
-    /// Replace the player's own set: a control group is a promise that the
-    /// unit stays where the player put it, so auto play orders none of these.
-    pub fn set_excluded(&mut self, excluded: std::collections::BTreeSet<u64>) {
-        self.board.set_excluded(excluded);
+    /// The player takes these back: a control group is a promise that the unit
+    /// stays where the player put it, so auto play orders none of these.
+    pub fn take_back(&mut self, taken: std::collections::BTreeSet<u64>) {
+        self.board.take_back(taken);
     }
 
     /// The house every issued command is stamped with. Not necessarily the

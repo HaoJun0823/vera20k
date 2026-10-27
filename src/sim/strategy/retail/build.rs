@@ -85,7 +85,8 @@ pub(super) const SURPLUS_CREDITS: i32 = 12_000;
 pub(super) const SURPLUS_INCOME_PER_MINUTE: i32 = 2_400;
 
 /// How long the build list's answer stands before it may answer a different
-/// entry, in frames: ten seconds.
+/// entry, in frames: forty seconds (600 frames at the 15 a second the
+/// simulation steps).
 ///
 /// Long enough to save for a structure the wallet cannot cover the frame it is
 /// chosen — a gate opens on a wallet that is then spent elsewhere — and short
@@ -155,7 +156,7 @@ fn place_finished(
 /// is not power, income or the factory that makes harvesters waits until the
 /// harvesters are paid for.
 fn harvester_reserve(rules: &RuleSet, obs: &Observation<'_>, census: &Census) -> i32 {
-    if census.harvesters >= HARVESTERS_PER_REFINERY * census.refineries.max(1) {
+    if census.harvesters_served() {
         return 0;
     }
     harvester(rules, obs).map_or(0, |(ty, _)| obs.cost_of(rules, ty))
