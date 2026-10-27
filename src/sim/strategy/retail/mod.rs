@@ -78,6 +78,13 @@
 //! - A yard rebuilt from a bought MCV is not defended differently from the
 //!   first one, and the brain does not repair a damaged structure, so a raid
 //!   that reaches the base can take it a second time.
+//! - A hurt unit is walked to the post and **stays hurt there**. Repairing a
+//!   vehicle is a docking service — the unit enters a `UnitRepair=` bay and
+//!   pays to be healed — and the automatic seek that drives a computer house's
+//!   vehicle to one is gated on the house being a computer
+//!   (`sim::world::unit_repair_seek`). So the retreat takes the unit out of the
+//!   fight and never puts it back: standing on the depot's cell is not the same
+//!   as entering it. Portable as its own chain.
 //! - With no building left standing, `advance` has no base centre to measure,
 //!   and reads the house as not under threat, so the push runs: an army is the
 //!   only thing such a house has. What it does not do is rebuild — the maker
@@ -99,6 +106,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::rules::ruleset::RuleSet;
 use crate::rules::unit_role::RoleTable;
+use crate::sim::control::Goal;
 use crate::sim::control::brain::{Brain, Outbox};
 use crate::sim::control::observation::Observation;
 use crate::sim::intern::InternedId;
@@ -301,5 +309,82 @@ impl Brain for RetailBrain {
         // deployed position where the orders above have left it, and the toggle
         // is issued on the edge only.
         orders::deploy(self, obs, out);
+    }
+
+    fn orders_refused(&mut self, refused: &[(u64, Goal)]) {
+        for (actor, goal) in refused {
+            for kind in tracked::kinds_for(*goal) {
+                self.tracked.void(*actor, *kind);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::sim::control::Goal;
+
+    /// An order the gate dropped must not silence the unit for the intent's
+    /// term. The frame admits eight commands; an army of a hundred asks for more
+    /// than that every frame, and the orders it loses are the ones the tracker
+    /// has already promised — 450 frames of a unit standing still while its
+    /// brain believes it is marching.
+    #[test]
+    fn a_refused_order_frees_the_unit_to_be_told_again() {
+        let mut brain = RetailBrain::new(0xA17);
+        brain.tracked.record(
+            0,
+            7,
+            tracked::TrackedKind::Move,
+            None,
+            Some((20, 20)),
+        );
+        assert!(
+            !brain
+                .tracked
+                .admits(1, 7, tracked::TrackedKind::Move, None, Some((20, 20))),
+            "the march stands until its term"
+        );
+
+        brain.orders_refused(&[(7, Goal::Move { cell: (20, 20) })]);
+
+        assert!(
+            brain
+                .tracked
+                .admits(1, 7, tracked::TrackedKind::Move, None, Some((20, 20))),
+            "an order that never left leaves nothing to wait for"
+        );
+    }
+
+    /// The other half: a refusal names a goal, and only the intent that goal was
+    /// recorded as is dropped. `Goal::Attack` is both the micro layer's `Engage`
+    /// and the squad's `Attack`, so the refusal drops whichever one this unit
+    /// actually holds and leaves everything else alone.
+    #[test]
+    fn a_refused_attack_does_not_drop_an_unrelated_intent() {
+        let mut brain = RetailBrain::new(0xA17);
+        brain
+            .tracked
+            .record(0, 7, tracked::TrackedKind::Engage, Some(9), Some((5, 5)));
+        brain
+            .tracked
+            .record(0, 8, tracked::TrackedKind::Capture, Some(9), Some((5, 5)));
+
+        brain.orders_refused(&[(7, Goal::Attack { target: 9 })]);
+
+        assert!(
+            brain
+                .tracked
+                .admits(1, 7, tracked::TrackedKind::Engage, Some(9), Some((5, 5))),
+            "the engaged unit is free again"
+        );
+        assert!(
+            !brain
+                .tracked
+                .admits(1, 8, tracked::TrackedKind::Capture, Some(9), Some((5, 5))),
+            "another unit's capture walk is untouched"
+        );
     }
 }

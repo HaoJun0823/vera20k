@@ -107,4 +107,15 @@ pub trait Brain {
     /// unordered container. Randomness comes from a generator the brain seeds
     /// and owns, never from a simulation stream.
     fn think(&mut self, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox);
+
+    /// The object orders the gate would not admit, called once after
+    /// [`Self::think`] with the orders that never left.
+    ///
+    /// A brain that remembers what it has told each object needs this: the
+    /// frame's budget admits a bounded number of commands, and an order dropped
+    /// by it leaves no trace in the simulation. A brain that assumes its order
+    /// went out then waits out its own re-issue term — 450 frames for a march —
+    /// while the object stands still. The default does nothing, because a brain
+    /// that keeps no memory has nothing to forget.
+    fn orders_refused(&mut self, _refused: &[(u64, Goal)]) {}
 }

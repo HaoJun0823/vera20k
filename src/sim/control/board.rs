@@ -269,11 +269,20 @@ impl ControlBoard {
         for command in &out.commands {
             self.admit(sim, &owner_name, command, &mut pending);
         }
+        // The orders that never left. A brain keeps its own record of what it
+        // has told each object, and an order dropped here — by the per-frame
+        // budget, by a routine that owns the object, by the gate — leaves no
+        // trace in the simulation for that record to contradict, so the brain
+        // is told and forgets it. Without this a budget of eight against an
+        // army of a hundred is a hundred units each told once, refused, and
+        // held to it for the whole of the intent's term.
+        let mut refused: Vec<(u64, Goal)> = Vec::new();
         for order in &out.orders {
             if self.micro.is_managed(order.actor) {
+                refused.push((order.actor, order.goal));
                 continue;
             }
-            self.issue(
+            let outcome = self.issue(
                 sim,
                 rules,
                 &owner_name,
@@ -281,6 +290,12 @@ impl ControlBoard {
                 order.goal,
                 &mut pending,
             );
+            if !outcome.is_queued() {
+                refused.push((order.actor, order.goal));
+            }
+        }
+        if !refused.is_empty() {
+            self.brain.orders_refused(&refused);
         }
 
         // 2. Delivery: take what the factories have finished out of them. A
@@ -380,7 +395,7 @@ impl ControlBoard {
                 }
                 MicroStep::Goal(goal) => {
                     let outcome = self.issue(sim, rules, owner_name, entity, goal, pending);
-                    if let Some(reason) = self.micro.record_outcome(entity, outcome.is_queued()) {
+                    if let Some(reason) = self.micro.record_outcome(entity, outcome) {
                         self.fall_back(entity, reason);
                     }
                 }

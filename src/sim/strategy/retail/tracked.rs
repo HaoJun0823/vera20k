@@ -34,6 +34,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::sim::control::Goal;
+
 /// What a unit has been told to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TrackedKind {
@@ -239,6 +241,31 @@ impl Tracker {
     /// Whether a routine owns `unit` right now.
     pub(super) fn held(&self, now: u64, unit: u64) -> bool {
         self.held.get(&unit).is_some_and(|until| now < *until)
+    }
+}
+
+/// The intents a goal may have been recorded under.
+///
+/// One goal can be two kinds, because the same click is issued by two steps for
+/// two reasons: `Goal::Attack` is `Engage` from the micro layer — what this
+/// unit shoots *now* — and `Attack` from the defensive one, what its squad is
+/// aimed at. A refusal names only the goal, so the caller tries the set and
+/// [`Tracker::void`] drops the one that actually matches; a set is not a second
+/// rule, it is the ambiguity the vocabulary already has.
+pub(super) fn kinds_for(goal: Goal) -> &'static [TrackedKind] {
+    match goal {
+        Goal::Attack { .. } => &[TrackedKind::Engage, TrackedKind::Attack],
+        Goal::AttackMove { .. } => &[TrackedKind::AttackMove],
+        Goal::Move { .. } | Goal::MoveToObject { .. } => &[TrackedKind::Move],
+        Goal::Guard | Goal::GuardAt { .. } => &[TrackedKind::Guard],
+        Goal::Capture { .. } => &[TrackedKind::Capture],
+        Goal::Enter { .. } => &[TrackedKind::Enter],
+        Goal::Deploy => &[TrackedKind::Deploy],
+        Goal::AttackCell { .. }
+        | Goal::Harvest { .. }
+        | Goal::Stop
+        | Goal::Scatter
+        | Goal::Unload => &[],
     }
 }
 

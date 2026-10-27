@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 
 use crate::rules::ruleset::RuleSet;
 use crate::sim::behavior::managed::{FallbackReason, MicroKind, MicroParams, MicroStep, Phase};
+use crate::sim::behavior::order::ApplyOutcome;
 use crate::sim::behavior::view::{ObjectView, ThreatView};
 use crate::sim::intern::InternedId;
 use crate::sim::world::Simulation;
@@ -29,16 +30,36 @@ pub struct Managed {
     pub kind: MicroKind,
     pub params: MicroParams,
     pub phase: Phase,
-    /// Consecutive orders the funnel refused as not-ready. Past
-    /// [`Self::MAX_REFUSALS`] the entry falls back to the brain.
+    /// Consecutive goals the gate dropped (another house's object, a switched
+    /// off domain, no budget). Past [`Self::MAX_REFUSALS`] the entry falls back
+    /// to the brain: an order this table cannot deliver is not worth holding an
+    /// object for.
     pub refusals: u32,
+    /// Consecutive frames the funnel answered [`ApplyOutcome::NotReady`].
+    ///
+    /// **This is not a refusal.** `Ready_To_Commence` answers false while the
+    /// object is in the middle of a mission — for the whole walk a `Move` order
+    /// is executing, not for one awkward frame. Counting it as a failure made a
+    /// retreating unit flap: the routine asked for the walk it was already
+    /// walking, three refusals dropped the entry, the brain re-attached it the
+    /// same frame its condition still held, and the cycle ran for the rest of
+    /// the match (26 809 log lines in one 36 000-tick run). So it has its own
+    /// bound, long enough to outlast any order the routine itself issued.
+    pub waiting: u32,
 }
 
 impl Managed {
-    /// How many not-ready refusals in a row before the routine gives the object
-    /// back. Three frames is shorter than any mission transition the funnel can
-    /// see and long enough not to give up on a single awkward frame.
+    /// How many orders the gate may drop in a row before the routine gives the
+    /// object back.
     pub const MAX_REFUSALS: u32 = 3;
+
+    /// How long an object may stay mid-mission before the routine gives up on
+    /// it, in frames: a minute at the native 15 a second, the same window a
+    /// plan node gets before the plan gives up on *it*. Long enough to cover
+    /// the longest walk a routine issues (a retreat crosses a base, not a map)
+    /// and short enough that an object stuck in a mission the routine cannot
+    /// interrupt surfaces instead of being held silently.
+    pub const MAX_WAITING: u32 = 900;
 }
 
 /// Every managed object of one house.
@@ -82,6 +103,7 @@ impl MicroTable {
                     ..Phase::default()
                 },
                 refusals: 0,
+                waiting: 0,
             },
         );
         true
@@ -188,20 +210,135 @@ impl MicroTable {
 
     /// Record the outcome of issuing a routine's goal.
     ///
-    /// `queued` keeps the entry; a refusal counts up and, past
-    /// [`Managed::MAX_REFUSALS`], the entry is dropped so the brain takes the
-    /// object back — the silent-stall defence.
-    pub fn record_outcome(&mut self, entity: u64, queued: bool) -> Option<FallbackReason> {
+    /// The three answers mean three different things and are counted
+    /// separately, because a routine's object being busy is not the routine
+    /// failing:
+    ///
+    /// - [`ApplyOutcome::Queued`] — the order left. Both counters reset.
+    /// - [`ApplyOutcome::NotReady`] — nothing was written and the object is
+    ///   mid-mission, which is what walking home *is*. It keeps the entry, and
+    ///   only [`Managed::MAX_WAITING`] frames without a single order taking
+    ///   drops it.
+    /// - [`ApplyOutcome::Rejected`] — the gate dropped the order. Past
+    ///   [`Managed::MAX_REFUSALS`] in a row the entry is dropped so the brain
+    ///   takes the object back: the silent-stall defence.
+    ///
+    /// Either drop is reported so the caller can log it.
+    pub fn record_outcome(&mut self, entity: u64, outcome: ApplyOutcome) -> Option<FallbackReason> {
         let entry = self.entries.get_mut(&entity)?;
-        if queued {
-            entry.refusals = 0;
-            return None;
+        match outcome {
+            ApplyOutcome::Queued => {
+                entry.refusals = 0;
+                entry.waiting = 0;
+                None
+            }
+            ApplyOutcome::NotReady => {
+                entry.refusals = 0;
+                entry.waiting += 1;
+                if entry.waiting < Managed::MAX_WAITING {
+                    return None;
+                }
+                self.entries.remove(&entity);
+                Some(FallbackReason::RepeatedNotReady)
+            }
+            ApplyOutcome::Rejected => {
+                entry.waiting = 0;
+                entry.refusals += 1;
+                if entry.refusals < Managed::MAX_REFUSALS {
+                    return None;
+                }
+                self.entries.remove(&entity);
+                Some(FallbackReason::Refused)
+            }
         }
-        entry.refusals += 1;
-        if entry.refusals < Managed::MAX_REFUSALS {
-            return None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attached(entity: u64) -> MicroTable {
+        let mut table = MicroTable::default();
+        assert!(
+            table.attach(entity, MicroKind::Retreat, MicroParams::default(), None),
+            "the object starts unattached"
+        );
+        table
+    }
+
+    /// A unit walking home answers `NotReady` for the whole walk — that is what
+    /// `Ready_To_Commence` means while a mission is executing — and the routine
+    /// it belongs to must keep it. Counting those answers as failures made the
+    /// retreat flap: three frames, hand back, the brain re-attaches the same
+    /// frame its condition still holds, and the pair ran for the rest of the
+    /// match (26 809 log lines in one 36 000-tick run).
+    #[test]
+    fn a_walking_object_keeps_its_routine() {
+        let mut table = attached(7);
+        for frame in 0..30u32 {
+            assert_eq!(
+                table.record_outcome(7, ApplyOutcome::NotReady),
+                None,
+                "frame {frame} of a walk is not a failure"
+            );
         }
-        self.entries.remove(&entity);
-        Some(FallbackReason::RepeatedNotReady)
+        let entry = table.get(7).expect("still managed");
+        assert_eq!(entry.waiting, 30, "the walk is counted, not failed");
+        assert_eq!(entry.refusals, 0, "the gate dropped nothing");
+    }
+
+    /// The other half: an object that never takes an order must surface rather
+    /// than be held silently. A minute of continuous `NotReady` is the bound.
+    #[test]
+    fn an_object_mid_mission_for_a_minute_is_handed_back() {
+        let mut table = attached(7);
+        for _ in 1..Managed::MAX_WAITING {
+            assert_eq!(table.record_outcome(7, ApplyOutcome::NotReady), None);
+        }
+        assert_eq!(
+            table.record_outcome(7, ApplyOutcome::NotReady),
+            Some(FallbackReason::RepeatedNotReady)
+        );
+        assert!(table.get(7).is_none(), "the brain takes it back");
+    }
+
+    /// An order the object takes resets the wait: the walk it was waiting on
+    /// ended, and the next stretch is a new one.
+    #[test]
+    fn a_queued_goal_resets_the_wait() {
+        let mut table = attached(7);
+        for _ in 0..100 {
+            table.record_outcome(7, ApplyOutcome::NotReady);
+        }
+        assert_eq!(table.record_outcome(7, ApplyOutcome::Queued), None);
+        assert_eq!(table.get(7).expect("still managed").waiting, 0);
+    }
+
+    /// A gate rejection is a failure and keeps its own, much shorter bound: the
+    /// table cannot deliver this object's orders at all, so holding it only
+    /// costs the frame.
+    #[test]
+    fn three_gate_rejections_hand_the_object_back() {
+        let mut table = attached(7);
+        assert_eq!(table.record_outcome(7, ApplyOutcome::Rejected), None);
+        assert_eq!(table.record_outcome(7, ApplyOutcome::Rejected), None);
+        assert_eq!(
+            table.record_outcome(7, ApplyOutcome::Rejected),
+            Some(FallbackReason::Refused)
+        );
+        assert!(table.get(7).is_none());
+    }
+
+    /// The two counters do not stand in for each other: a rejected order in the
+    /// middle of a long wait is one failure, not a hand-back.
+    #[test]
+    fn a_rejection_between_waits_does_not_add_up_to_a_hand_back() {
+        let mut table = attached(7);
+        for _ in 0..10 {
+            table.record_outcome(7, ApplyOutcome::Rejected);
+            table.record_outcome(7, ApplyOutcome::NotReady);
+        }
+        assert!(table.get(7).is_some(), "the wait keeps resetting the streak");
     }
 }

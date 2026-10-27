@@ -79,7 +79,12 @@ L3 never needs to.
   over — a team's members already have an issuer (`TeamClass::Recruit` clears their
   target). The table is garbage-collected once per frame before stepping.
 - **Brain memory is the brain's.** The plan, the generator, the outstanding orders and
-  the give-up counters live in `RetailBrain`, rebuilt on install, not serialized.
+  the give-up counters live in `RetailBrain`, rebuilt on install, not serialized. What it
+  has *told* each object is memory too, so the gate reports back: `Brain::orders_refused`
+  hands the brain the orders a frame could not admit, and the brain forgets that
+  intent. The frame admits a bounded number of commands, and an order the budget
+  dropped otherwise stands for its whole term — 450 frames of a unit waiting for a
+  march that was never given.
 - **The ledger is per frame.** `RetailBrain::census` is rebuilt at the top of every
   `think` and is the only place a decision reads "how many of mine" from: six separate
   walks of the entity store became one, and no count outlives the frame it was taken in.
@@ -93,10 +98,13 @@ the native mission machine runs it to the end. No per-object memory exists.
 
 **Managed** attaches an object to a routine. Each frame the routine returns a goal, a
 wait, `Done` or `Fallback`; the board issues the goal through the same funnel and counts
-refusals. After `Managed::MAX_REFUSALS` consecutive answers that are not `Queued`
-— a refused command or a not-ready one — the object is
-handed back to the brain and the hand-back is logged — a routine that cannot act must
-not hold an object silently.
+refusals. The two non-queued answers are counted separately, because they are not the
+same event: `Rejected` (the gate dropped the order) hands the object back after
+`Managed::MAX_REFUSALS` in a row, while `NotReady` — the object is mid-mission, which
+is what a routine's own `Move` looks like for the whole walk — keeps it and only gives
+up after `Managed::MAX_WAITING` frames without a single order taking. Either hand-back is
+logged: a routine that cannot act must not hold an object silently, and a routine whose
+object is simply busy must not lose it.
 
 **Every routine in this build is non-parity.** Kiting, waiting out a patrol, splitting a
 flight's fire and breaking off a hurt unit are things a player does by hand;

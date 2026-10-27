@@ -728,7 +728,10 @@ const RETREAT_HEALTH_PERMILLE: u16 = 300;
 /// hands an object back is picked up again the next frame its condition holds.
 ///
 /// The post is the base's own anchor, so a unit that breaks off walks home
-/// rather than freezing where the fight left it.
+/// rather than freezing where the fight left it. A unit that has already
+/// arrived is not handed a routine again: it is still below the line, so the
+/// brain holds it out of the push, but a routine for a unit standing still can
+/// only answer `Done`, and that pair costs a table write a frame for nothing.
 pub(super) fn managed(brain: &mut RetailBrain, tick: u64, out: &mut Outbox) {
     // The depot when the house has one, the base's anchor otherwise. A vehicle
     // that breaks off and walks to the yard stands there at half strength for
@@ -737,15 +740,34 @@ pub(super) fn managed(brain: &mut RetailBrain, tick: u64, out: &mut Outbox) {
     let post = brain.census.repair_cell.or(brain.census.base_cell);
     // Collected before anything is written: the routine takes the unit, and
     // the ledger is borrowed while it is read.
-    let retreating: Vec<u64> = brain
+    let retreating: Vec<(u64, (u16, u16))> = brain
         .census
         .units
         .iter()
         .filter(|unit| unit.traits.combat && !unit.hand && unit.orderable)
         .filter(|unit| unit.health_permille <= RETREAT_HEALTH_PERMILLE)
-        .map(|unit| unit.entity_id)
+        .map(|unit| (unit.entity_id, unit.cell))
         .collect();
-    for entity_id in retreating {
+    for (entity_id, cell) in retreating {
+        // Standing on the post is the end of the walk. The army does not get the
+        // unit back yet — it is still under the line the retreat was called at —
+        // but it does not need a routine either: attaching one only to have it
+        // answer `Done` costs an attach and a hand-back every frame, which is
+        // how a hurt unit parked on the depot became the log's own subject. The
+        // hold is what keeps the push from spending it again.
+        //
+        // The depot's own heal is the other half, and it is not here: a unit is
+        // repaired by the docking service it enters, and a human house's
+        // vehicles do not drive themselves to a `UnitRepair=` bay the way a
+        // computer house's do (`sim::world::unit_repair_seek`). So a unit that
+        // reaches the post stays hurt until the repair chain is ported; the
+        // residual is recorded in the module docs.
+        if Some(cell) == post {
+            brain
+                .tracked
+                .hold(entity_id, tick.saturating_add(HOLD_FRAMES));
+            continue;
+        }
         out.attach(
             entity_id,
             MicroKind::Retreat,

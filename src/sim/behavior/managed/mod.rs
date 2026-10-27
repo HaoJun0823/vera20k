@@ -141,8 +141,11 @@ pub enum FallbackReason {
     NoTarget,
     /// No threat to work on.
     NothingToDo,
-    /// The order funnel kept refusing.
+    /// The object stayed mid-mission for the whole give-up window, so no order
+    /// of the routine's ever took (`Ready_To_Commence` answered false).
     RepeatedNotReady,
+    /// The gate kept dropping the routine's orders.
+    Refused,
     /// The object no longer exists.
     Gone,
 }
@@ -153,7 +156,8 @@ impl FallbackReason {
             Self::HealthBelowFloor => "health below the floor",
             Self::NoTarget => "no target or post",
             Self::NothingToDo => "nothing to do",
-            Self::RepeatedNotReady => "orders kept being refused",
+            Self::RepeatedNotReady => "mid-mission for the whole give-up window",
+            Self::Refused => "orders kept being refused",
             Self::Gone => "object gone",
         }
     }
