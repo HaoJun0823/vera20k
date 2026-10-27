@@ -155,6 +155,10 @@ fn infantry_above_ceiling(census: &Census) -> bool {
 const ENGINEER_WANT: usize = 2;
 const SPY_WANT: usize = 1;
 
+/// How many attack dogs the house keeps: one for the scan, a second behind it
+/// for the dog the enemy sends at the first.
+const DOG_WANT: usize = 2;
+
 /// The tool this line should make, when the house has fewer than it wants and
 /// can pay for one.
 ///
@@ -179,12 +183,19 @@ fn tool<'r>(
         .iter()
         .filter(|unit| unit.traits.infiltrator)
         .count();
-    if engineers >= ENGINEER_WANT && spies >= SPY_WANT {
+    // The attack dog: `NotHuman=yes` with `Natural=yes` is retail's only such
+    // pair, and it is the unit the scan role is built on. Nothing else in the
+    // infantry list can look at the map — a rifleman walks where it is put and
+    // sees only what its gun reaches.
+    let dogs = census.units.iter().filter(|unit| unit.traits.scout).count();
+    if engineers >= ENGINEER_WANT && spies >= SPY_WANT && dogs >= DOG_WANT {
         return None;
     }
     build::class_types(rules, obs, ObjectCategory::Infantry)
         .filter(|(ty, _)| {
-            (ty.engineer && engineers < ENGINEER_WANT) || (ty.agent && spies < SPY_WANT)
+            (ty.engineer && engineers < ENGINEER_WANT)
+                || (ty.agent && spies < SPY_WANT)
+                || (ty.not_human && ty.natural && dogs < DOG_WANT)
         })
         .filter(|(ty, _)| obs.cost_of(rules, ty) <= credits)
         // The engineer first: a spy's work is a raid, an engineer's is the

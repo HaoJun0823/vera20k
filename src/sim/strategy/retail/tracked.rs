@@ -148,6 +148,29 @@ impl Tracker {
         moved(tracked.cell, cell)
     }
 
+    /// Whether anyone at all still has a live `kind` intent on `target`.
+    ///
+    /// The reverse of `admits`, for the orders that are about a *place* rather
+    /// than about a unit: one building takes one engineer, and a second
+    /// engineer sent at the same one walks to a building that is already being
+    /// taken, arrives after it is taken, and stands there. Whoever asks is
+    /// holding the answer, so the claim is recorded like any other intent and
+    /// released by the same expiry.
+    pub(super) fn claimed_by_other(
+        &self,
+        now: u64,
+        kind: TrackedKind,
+        target: u64,
+        asker: u64,
+    ) -> bool {
+        self.intents.iter().any(|(owner, tracked)| {
+            *owner != asker
+                && tracked.kind == kind
+                && tracked.target == Some(target)
+                && now < tracked.until
+        })
+    }
+
     /// Record that `unit` has been told to do `kind` at `frame`.
     pub(super) fn record(
         &mut self,

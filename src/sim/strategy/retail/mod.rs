@@ -95,7 +95,7 @@ pub(super) mod plan;
 pub(super) mod squads;
 pub(super) mod tracked;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::rules::ruleset::RuleSet;
 use crate::rules::unit_role::RoleTable;
@@ -144,6 +144,14 @@ pub struct RetailBrain {
     /// spends the lab's money on one more soldier every frame is a house that
     /// never reaches the lab.
     pub(super) yard_reserve: i32,
+    /// The buildings whose wrench the house has switched on. The click is a
+    /// toggle, so a second one turns the repair off: a building is remembered
+    /// here until it is whole again.
+    pub(super) repairing: BTreeSet<u64>,
+    /// The buildings the house has seen standing whole. A structure still going
+    /// up is at a fraction of its strength by definition, and repairing it would
+    /// spend credits on a build that is already paid for.
+    pub(super) repaired: BTreeSet<u64>,
     /// What each type is for, read out of the warheads once and never
     /// changed. Built on the first frame, because the rules a scenario plays
     /// with are the ones the brain is handed there.
@@ -176,6 +184,8 @@ impl RetailBrain {
             site_attempts: BTreeMap::new(),
             plan_hold: None,
             yard_reserve: 0,
+            repairing: BTreeSet::new(),
+            repaired: BTreeSet::new(),
             roles: None,
             census: Census::default(),
             super_at: BTreeMap::new(),
@@ -250,6 +260,10 @@ impl Brain for RetailBrain {
         // the control layer drops this brain's order for an object a routine
         // has just taken.
         orders::managed(self, obs.tick(), out);
+        // A building under fire is worth less than the next one the yard makes,
+        // and the wrench is the only thing that keeps it: it is a house-scoped
+        // click, so it is asked before the units take their frame.
+        orders::repairs(self, rules, obs, out);
         // A charged power is worth more than any single order below: it is the
         // one decision here that can take a base apart, and the button it fires
         // through is the sidebar's, not a unit's.

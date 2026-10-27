@@ -152,7 +152,22 @@ pub(super) fn captures(
                 .max_by_key(|(target, value)| (*value, -squared_distance(unit.cell, target.cell)))
                 .map(|(target, _)| *target)
         } else {
-            engineer_preference(&engineer_targets, &hostile, &guards, unit.cell)
+            // One building takes one engineer. Without this both were sent at
+            // the same derrick, the first took it, and the second arrived at a
+            // building that was already ours and stood there.
+            let free: Vec<EnemyEntity> = engineer_targets
+                .iter()
+                .copied()
+                .filter(|target| {
+                    !brain.tracked.claimed_by_other(
+                        tick,
+                        TrackedKind::Capture,
+                        target.entity_id,
+                        unit.entity_id,
+                    )
+                })
+                .collect();
+            engineer_preference(&free, &hostile, &guards, unit.cell)
         };
         let Some(target) = chosen else {
             continue;
@@ -575,6 +590,69 @@ fn holds_or_fights(mission: MissionId) -> bool {
     [MissionType::Attack, MissionType::Move]
         .into_iter()
         .any(|kind| mission == MissionId::from_known(kind))
+}
+
+/// The health a building is worth the wrench at, in permille of its full
+/// strength.
+///
+/// Below nine tenths: a house that waits for a red bar repairs the building
+/// after it has already lost the fight it was holding, and a house that repairs
+/// a scratch spends credits it cannot spare. The repair costs the damage, so
+/// the threshold is where a scratch becomes a wound.
+const REPAIR_HEALTH_PERMILLE: i32 = 900;
+
+/// Turn the wrench on the house's own damaged buildings.
+///
+/// `Command::ToggleRepair` is the Display REPAIR15 click
+/// (`Display BandBox_LeftUp4AC0E7`): the building spends the house's credits to
+/// heal over time and switches itself off at full strength. It is a toggle, so
+/// asking twice turns a repair *off* — the brain therefore remembers the
+/// buildings it has already switched on, and forgets one only when it is whole
+/// again. Nothing about the click is per-frame, so nothing here is either.
+pub(super) fn repairs(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    out: &mut Outbox,
+) {
+    let mut issued = 0;
+    let mut whole: Vec<u64> = Vec::new();
+    let mut hurt: Vec<u64> = Vec::new();
+    for entity in obs.own_entities() {
+        let Some(ty) = obs.object_type(rules, entity.type_id) else {
+            continue;
+        };
+        if ty.category != ObjectCategory::Building {
+            continue;
+        }
+        let Some(full) = obs.max_health(rules, entity.type_id).filter(|full| *full > 0) else {
+            continue;
+        };
+        let permille = i32::try_from(i64::from(entity.health.max(0)) * 1_000 / i64::from(full))
+            .unwrap_or(0);
+        if permille >= 1_000 {
+            whole.push(entity.entity_id);
+        } else if permille < REPAIR_HEALTH_PERMILLE && brain.repaired.contains(&entity.entity_id) {
+            hurt.push(entity.entity_id);
+        }
+    }
+    // A building is worth the wrench once it has stood whole: a structure still
+    // going up is at a fraction of its strength by definition, and healing it
+    // would spend the house's credits on the build it has already paid for.
+    for entity_id in &whole {
+        brain.repaired.insert(*entity_id);
+        brain.repairing.remove(entity_id);
+    }
+    for entity_id in hurt {
+        if issued >= FORCE_ORDERS_PER_FRAME {
+            break;
+        }
+        if !brain.repairing.insert(entity_id) {
+            continue;
+        }
+        out.command(Command::ToggleRepair { entity_id });
+        issued += 1;
+    }
 }
 
 /// Whether a unit's click on an enemy building is a Capture click: the two
@@ -1192,6 +1270,56 @@ mod tests {
         assert!(!spent_on_the_enemy(SuperWeaponKind::ChronoSphere));
         assert!(spent_on_the_enemy(SuperWeaponKind::MultiMissile));
         assert!(spent_on_the_enemy(SuperWeaponKind::LightningStorm));
+    }
+
+    /// The wrench is a toggle, so the house clicks it once per wound: a second
+    /// click turns the repair off, and a house that asks every frame never heals
+    /// anything. A building still going up is not a wound either.
+    #[test]
+    fn the_wrench_is_clicked_once_per_wound() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        let hurt = sim
+            .spawn_object("GAPOWR", "Americans", 16, 16, 200, &rules)
+            .expect("a power plant");
+
+        let mut brain = RetailBrain::new(0xA17);
+        brain.census.refresh(
+            &crate::rules::unit_role::RoleTable::build(&rules),
+            &rules,
+            &Observation::new(&sim, owner),
+        );
+        let obs = Observation::new(&sim, owner);
+        // Nothing but a healthy building: nothing to click.
+        let mut out = Outbox::default();
+        repairs(&mut brain, &rules, &obs, &mut out);
+        assert!(
+            out.commands.is_empty(),
+            "a building that has never stood whole is not a wound: {:?}",
+            out.commands
+        );
+
+        brain.repaired.insert(hurt);
+        let mut out = Outbox::default();
+        repairs(&mut brain, &rules, &obs, &mut out);
+        assert_eq!(
+            out.commands
+                .iter()
+                .filter(|command| matches!(command, Command::ToggleRepair { .. }))
+                .count(),
+            1,
+            "one click for one wound, not one per frame: {:?}",
+            out.commands
+        );
+        let mut again = Outbox::default();
+        repairs(&mut brain, &rules, &obs, &mut again);
+        assert!(
+            again.commands.is_empty(),
+            "the wrench is already on: {:?}",
+            again.commands
+        );
     }
 
     /// An engineer takes the map's own building before the enemy's, and an
