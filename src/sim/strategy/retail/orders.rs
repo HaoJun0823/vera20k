@@ -505,23 +505,24 @@ fn engaged(enemies: &[EnemyEntity], cell: (u16, u16)) -> bool {
     })
 }
 
-/// Whether the object's mission already holds the ground it stands on with the
-/// wider reach this step asks for, or has it fighting.
+/// Whether the object is already walking or fighting, so re-tasking it would
+/// cancel something.
 ///
-/// `Move` is here for the same reason: a unit the house is still walking
-/// somewhere is not idle, and replacing that move with a guard would stop it
-/// half-way. `Guard` is *not*: that mission holds the cell the object stands on
-/// and returns fire, while `AreaGuard` also steps out to engage a hostile that
-/// comes near — the posture a unit no team has taken holds, and the one
-/// `[IQ] GuardArea` gates for a computer house.
+/// `Move` is here because a unit the house is still walking somewhere is not
+/// idle, and replacing that move with a guard would stop it half-way. `Attack`
+/// is here because a second order would cancel the fight.
+///
+/// `AreaGuard` is deliberately **not** here, and used to be. Every unit a
+/// scenario spawns for the player starts on area guard, and treating that as
+/// "busy" left the whole opening force standing in the yard for the whole
+/// match: the brain never gave it a job because the mission it was born with
+/// said it had one. A guard is the posture to *replace*, not a reason to leave
+/// a unit alone — the intent table ([`super::tracked`]) is what stops it being
+/// re-issued every frame.
 fn holds_or_fights(mission: MissionId) -> bool {
-    [
-        MissionType::Attack,
-        MissionType::Move,
-        MissionType::AreaGuard,
-    ]
-    .into_iter()
-    .any(|kind| mission == MissionId::from_known(kind))
+    [MissionType::Attack, MissionType::Move]
+        .into_iter()
+        .any(|kind| mission == MissionId::from_known(kind))
 }
 
 /// Whether a unit's click on an enemy building is a Capture click: the two
@@ -1139,5 +1140,25 @@ mod tests {
         assert!(!spent_on_the_enemy(SuperWeaponKind::ChronoSphere));
         assert!(spent_on_the_enemy(SuperWeaponKind::MultiMissile));
         assert!(spent_on_the_enemy(SuperWeaponKind::LightningStorm));
+    }
+
+    /// Every unit a scenario spawns for the player starts on area guard. The
+    /// brain used to read that as "this unit already has a job" and left the
+    /// whole opening force standing in the yard for the match; a guard is the
+    /// posture to replace, not a reason to leave a unit alone.
+    #[test]
+    fn an_area_guard_unit_is_not_a_unit_with_a_job() {
+        assert!(
+            !holds_or_fights(MissionId::from_known(MissionType::AreaGuard)),
+            "the posture it was born with is the posture to replace"
+        );
+        assert!(
+            holds_or_fights(MissionId::from_known(MissionType::Attack)),
+            "a unit in a fight is not to be re-tasked"
+        );
+        assert!(
+            holds_or_fights(MissionId::from_known(MissionType::Move)),
+            "a unit on its way somewhere is not idle"
+        );
     }
 }
