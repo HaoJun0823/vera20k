@@ -171,6 +171,28 @@ impl Tracker {
         })
     }
 
+    /// Drop an intent the world does not show.
+    ///
+    /// An order that was refused, that had no path, or that a later order
+    /// cancelled leaves no trace in the simulation, and the intent table used
+    /// to go on believing its own record for the intent's whole term: a Move
+    /// that never took held a scout in the yard for 450 frames. That is the
+    /// heart of the "it asks once and then assumes" behaviour — the brain had
+    /// no feedback at all.
+    ///
+    /// Callers ask for this when the object's own state contradicts the intent,
+    /// before [`Self::admits`], so a refused order is asked again next frame
+    /// instead of on the term.
+    pub(super) fn void(&mut self, unit: u64, kind: TrackedKind) {
+        if self
+            .intents
+            .get(&unit)
+            .is_some_and(|tracked| tracked.kind == kind)
+        {
+            self.intents.remove(&unit);
+        }
+    }
+
     /// Record that `unit` has been told to do `kind` at `frame`.
     pub(super) fn record(
         &mut self,

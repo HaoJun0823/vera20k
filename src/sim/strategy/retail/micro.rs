@@ -217,7 +217,7 @@ fn issue(out: &mut Outbox, entity_id: u64, goal: Goal, reach: i32, deployed: boo
 
 /// Every team member that may be told anything, with what the cycle needs to
 /// know about it.
-fn collect(brain: &RetailBrain, rules: &RuleSet, obs: &Observation<'_>, tick: u64) -> Vec<Work> {
+fn collect(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_>, tick: u64) -> Vec<Work> {
     let mut work = Vec::new();
     for squad in brain.squads.all() {
         let squad_target = squad.target.and_then(|target| {
@@ -241,6 +241,20 @@ fn collect(brain: &RetailBrain, rules: &RuleSet, obs: &Observation<'_>, tick: u6
             // it while it walks the unit out.
             if brain.tracked.held(tick, unit.entity_id) {
                 continue;
+            }
+            // An order the world does not show is an order that did not take.
+            // The table used to believe its own record for the whole term, so a
+            // walk that was refused, had no path, or was interrupted stood
+            // between the unit and any new order for 450 frames — the dog
+            // standing in the yard is exactly that, and so is a march that was
+            // never begun. Voided here, so the order is asked again now.
+            if !matches!(
+                unit.mission,
+                mission if mission == MissionId::from_known(MissionType::Move)
+                    || mission == MissionId::from_known(MissionType::Attack)
+            ) {
+                brain.tracked.void(unit.entity_id, TrackedKind::Move);
+                brain.tracked.void(unit.entity_id, TrackedKind::AttackMove);
             }
             let deployed = obs.is_deployed(unit.entity_id);
             let reach = obs.object_type(rules, unit.type_id).map_or(0, |ty| {

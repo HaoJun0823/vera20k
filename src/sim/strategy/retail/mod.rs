@@ -144,10 +144,11 @@ pub struct RetailBrain {
     /// spends the lab's money on one more soldier every frame is a house that
     /// never reaches the lab.
     pub(super) yard_reserve: i32,
-    /// The buildings whose wrench the house has switched on. The click is a
-    /// toggle, so a second one turns the repair off: a building is remembered
-    /// here until it is whole again.
-    pub(super) repairing: BTreeSet<u64>,
+    /// The buildings whose wrench the house has switched on, and the frame
+    /// before which it will not switch it again. The click is a toggle, so a
+    /// second one turns the repair off — and a click that was refused has to be
+    /// asked again, which a memory with no term could never do.
+    pub(super) repairing: BTreeMap<u64, u64>,
     /// The buildings the house has seen standing whole. A structure still going
     /// up is at a fraction of its strength by definition, and repairing it would
     /// spend credits on a build that is already paid for.
@@ -184,7 +185,7 @@ impl RetailBrain {
             site_attempts: BTreeMap::new(),
             plan_hold: None,
             yard_reserve: 0,
-            repairing: BTreeSet::new(),
+            repairing: BTreeMap::new(),
             repaired: BTreeSet::new(),
             roles: None,
             census: Census::default(),

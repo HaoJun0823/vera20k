@@ -637,6 +637,11 @@ fn holds_or_fights(mission: MissionId) -> bool {
 /// the threshold is where a scratch becomes a wound.
 const REPAIR_HEALTH_PERMILLE: i32 = 900;
 
+/// How long a building is left with the wrench the house has already switched
+/// on, in frames. A repair takes minutes; a click that never took is worth
+/// asking again after a quarter of one.
+const REPAIR_REARM_FRAMES: u64 = 900;
+
 /// Turn the wrench on the house's own damaged buildings.
 ///
 /// `Command::ToggleRepair` is the Display REPAIR15 click
@@ -683,9 +688,20 @@ pub(super) fn repairs(
         if issued >= FORCE_ORDERS_PER_FRAME {
             break;
         }
-        if !brain.repairing.insert(entity_id) {
+        // The memory has a term. A click that was refused — the budget, the
+        // domain, the gate — leaves nothing behind, and a house that remembers
+        // a repair it never started never asks again, which is why some
+        // buildings healed and others never did.
+        if brain
+            .repairing
+            .get(&entity_id)
+            .is_some_and(|until| obs.tick() < *until)
+        {
             continue;
         }
+        brain
+            .repairing
+            .insert(entity_id, obs.tick().saturating_add(REPAIR_REARM_FRAMES));
         out.command(Command::ToggleRepair { entity_id });
         issued += 1;
     }
