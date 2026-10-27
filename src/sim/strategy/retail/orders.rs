@@ -142,7 +142,7 @@ pub(super) fn captures(
         let Some(ty) = obs.object_type(rules, unit.type_id) else {
             continue;
         };
-        if !walks_into_buildings(ty) {
+        if !walks_into_buildings(rules, ty) {
             continue;
         }
         // A spy takes what is worth most; anyone else takes what is nearest.
@@ -659,8 +659,8 @@ pub(super) fn repairs(
 /// flags the per-cell handler branches on, an engineer's by `Engineer=` and a
 /// spy's by `Infiltrate=` (which `Engineer=` also implies, per
 /// `InfantryTypeClass::ReadINI` `0x0052466E..0x0052469A`).
-pub(super) fn walks_into_buildings(ty: &ObjectType) -> bool {
-    ty.engineer || ty.infiltrate
+pub(super) fn walks_into_buildings(rules: &RuleSet, ty: &ObjectType) -> bool {
+    super::census::Traits::of(rules, ty).captures
 }
 
 /// The health fraction at which a fighting unit belongs to the retreat routine
@@ -921,20 +921,7 @@ const TRANSPORT_SEATS: i32 = 5;
 /// aircraft that is neither a gatherer nor a Construction Yard maker.
 /// Buildings and terrain are not.
 pub(super) fn is_combat_unit(rules: &RuleSet, ty: &ObjectType) -> bool {
-    matches!(
-        ty.category,
-        ObjectCategory::Infantry | ObjectCategory::Vehicle | ObjectCategory::Aircraft
-    ) && ty.primary().is_some()
-        && !ty.engineer
-        && !ty.harvester
-        && !ty.resource_gatherer
-        // A transport carries the army; it does not fight in it.
-        && ty.passengers < TRANSPORT_SEATS
-        && !ty
-            .deploys_into
-            .as_deref()
-            .and_then(|name| rules.object(name))
-            .is_some_and(|yard| yard.build_const_eligible)
+    super::census::Traits::of(rules, ty).combat
 }
 
 /// The enemy object nearest `from`, ties going to the earlier one in storage
@@ -1101,15 +1088,15 @@ mod tests {
             out.orders
         );
         assert!(
-            walks_into_buildings(rules.object("SPY").expect("the spy")),
+            walks_into_buildings(&rules, rules.object("SPY").expect("the spy")),
             "Infiltrate= is a Capture click"
         );
         assert!(
-            walks_into_buildings(rules.object("ENGINEER").expect("the engineer")),
+            walks_into_buildings(&rules, rules.object("ENGINEER").expect("the engineer")),
             "and so is Engineer="
         );
         assert!(
-            !walks_into_buildings(rules.object("E1").expect("a GI")),
+            !walks_into_buildings(&rules, rules.object("E1").expect("a GI")),
             "a rifleman is not"
         );
     }

@@ -153,6 +153,81 @@ pub(super) struct Traits {
     /// scanner with teeth, and the only type the rules mark as neither human
     /// nor mechanical.
     pub(super) scout: bool,
+    /// It has a weapon in some slot, primary or not.
+    ///
+    /// `Primary=` alone was the test, which is a fact about retail's key
+    /// layout and not about the type: a unit a mod gives only a `Secondary=` is
+    /// armed, and the brain refused to treat it as army. What slot the weapon
+    /// sits in is [`Self::deploy_slot`]'s business.
+    pub(super) armed: bool,
+    /// It takes a building by walking into it: `Engineer=` or `Infiltrate=`.
+    pub(super) captures: bool,
+    /// It carries others: `Passengers=` at or above a transport's seats.
+    pub(super) carries: bool,
+    /// The weapon slot it fires while deployed, for a `DeployFire=` infantry:
+    /// `DeployFireWeapon=`, slot 1 (the secondary) by default. `None` when the
+    /// type has no such pose or the slot is empty.
+    pub(super) deploy_slot: Option<usize>,
+}
+
+/// Seats at which a type is a transport rather than a fighting unit.
+const TRANSPORT_SEATS: i32 = 5;
+
+impl Traits {
+    /// What a type can do, read from the keys the type itself declares.
+    ///
+    /// One owner for the question every decision asks — "is this thing army, a
+    /// tool, a carrier, a position" — and the answer is *the type's own keys*,
+    /// not its name and not the shape of retail's `Primary=`. The brain used to
+    /// answer it in five places with five hand-rolled tests over one or two
+    /// keys, which is correct for `[E1]` and `[ADOG]` and wrong for anything a
+    /// mod adds: an engineer with no `Primary=` was not army and not a tool, a
+    /// unit with only a `Secondary=` was not army at all, and a type whose
+    /// custom ability lives in a key nobody had looked at yet was invisible.
+    ///
+    /// Every field below is a key. A new key that describes what a type can do
+    /// belongs here first, and the decisions read it from here.
+    pub(super) fn of(rules: &RuleSet, ty: &ObjectType) -> Self {
+        let armed = (0..8).any(|slot| ty.weapon_at(slot).is_some());
+        let captures = ty.engineer || ty.infiltrate;
+        let carries = ty.passengers >= TRANSPORT_SEATS;
+        // `DeployFireWeapon=` names the slot, defaulting to the secondary: the
+        // G.I. stands up with `M60` (slot 0) and digs in with `Para` (slot 1).
+        let deploy_slot = ty
+            .deploy_fire
+            .then(|| usize::try_from(ty.deploy_fire_weapon.max(0)).ok())
+            .flatten()
+            .filter(|slot| ty.weapon_at(*slot).is_some());
+        Self {
+            combat: matches!(
+                ty.category,
+                ObjectCategory::Infantry | ObjectCategory::Vehicle | ObjectCategory::Aircraft
+            ) && armed
+                && !captures
+                && !ty.engineer
+                && !ty.harvester
+                && !ty.resource_gatherer
+                && !carries
+                && !ty
+                    .deploys_into
+                    .as_deref()
+                    .and_then(|name| rules.object(name))
+                    .is_some_and(|yard| yard.build_const_eligible),
+            harvester: ty.resource_gatherer,
+            refinery: ty.resource_destination,
+            yard: ty.build_const_eligible,
+            yard_maker: super::expand::makes_a_yard(rules, ty),
+            engineer: ty.engineer,
+            infiltrator: ty.infiltrate,
+            occupier: ty.occupier,
+            deployer: ty.deploy_fire,
+            scout: ty.not_human && ty.natural,
+            armed,
+            captures,
+            carries,
+            deploy_slot,
+        }
+    }
 }
 
 /// One object of the house, as the decisions see it.
@@ -313,7 +388,6 @@ impl Census {
                 continue;
             };
             let slot = Slot::of(category_for_object(ty));
-            let combat = super::orders::is_combat_unit(rules, ty);
             let max_health = ty.strength.max(0);
             let health_permille = if max_health > 0 {
                 let scaled = i64::from(entity.health.max(0)) * 1000 / i64::from(max_health);
@@ -321,22 +395,12 @@ impl Census {
             } else {
                 0
             };
+            let traits = Traits::of(rules, ty);
+            let combat = traits.combat;
             let tier = if combat {
                 price_tier(obs.cost_of(rules, ty))
             } else {
                 0
-            };
-            let traits = Traits {
-                combat,
-                harvester: ty.resource_gatherer,
-                refinery: ty.resource_destination,
-                yard: ty.build_const_eligible,
-                yard_maker: super::expand::makes_a_yard(rules, ty),
-                engineer: ty.engineer,
-                infiltrator: ty.infiltrate,
-                occupier: ty.occupier,
-                deployer: ty.deploy_fire,
-                scout: ty.not_human && ty.natural,
             };
 
             self.counts[slot.index()] += 1;
@@ -600,6 +664,40 @@ mod tests {
             census.lines.iter().all(|line| !line.busy()),
             "no factory is making anything"
         );
+    }
+
+    /// What a type is comes from the keys the type declares, and every decision
+    /// reads it from here. The point is the mod case: a unit that says
+    /// `Engineer=yes` is a tool and not army, one that says `Passengers=` is a
+    /// carrier and not army, and one whose weapon sits only in `Secondary=` is
+    /// armed — none of which the hand-rolled tests that used to live in five
+    /// decisions could tell.
+    #[test]
+    fn capabilities_are_read_from_the_types_own_keys() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        let obs = Observation::new(&sim, owner);
+        let of = |name: &str| {
+            let ty = obs
+                .type_id(name)
+                .and_then(|type_id| obs.object_type(&rules, type_id))
+                .unwrap_or_else(|| panic!("{name} is in the rules"));
+            (ty, Traits::of(&rules, ty))
+        };
+
+        let (_, engineer) = of("ENGINEER");
+        assert!(engineer.captures && !engineer.combat, "a tool, not army");
+        let (_, gi) = of("E1");
+        assert!(gi.combat && gi.armed, "a rifleman is army");
+        assert_eq!(gi.deploy_slot, Some(1), "and digs in with its second slot");
+        let (_, dog) = of("ADOG");
+        assert!(dog.scout && dog.armed, "the dog scans, and bites");
+        let (_, transport) = of("SHAD");
+        assert!(transport.carries && !transport.combat, "a carrier");
+        let (_, tank) = of("MTNK");
+        assert!(tank.combat && !tank.captures, "a tank");
     }
 
     /// A fight is weighed in what the other side can shoot back with, so a

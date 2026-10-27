@@ -217,12 +217,17 @@ pub(super) fn advance(
 /// brain that measures the standing weapon sends a deployed soldier at a target
 /// its gun cannot cover, and a soldier that cannot walk just stands there.
 pub(super) fn weapon_range_cells(rules: &RuleSet, ty: &ObjectType, deployed: bool) -> i32 {
-    let deployed_slot = (deployed && ty.deploy_fire)
-        .then(|| usize::try_from(ty.deploy_fire_weapon.max(0)).ok())
-        .flatten();
-    let name = deployed_slot
+    let slot = if deployed {
+        super::census::Traits::of(rules, ty).deploy_slot
+    } else {
+        None
+    };
+    // The slot the type would fire, or else the first slot it has one in: a
+    // type whose armed `Secondary=` and empty `Primary=` is army in the ledger,
+    // and army with no reach would never be sent at anything.
+    let name = slot
         .and_then(|slot| ty.weapon_at(slot))
-        .or_else(|| ty.primary());
+        .or_else(|| (0..8).find_map(|slot| ty.weapon_at(slot)));
     let Some(name) = name else {
         return 0;
     };

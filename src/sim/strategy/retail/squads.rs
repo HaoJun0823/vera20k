@@ -348,6 +348,10 @@ mod tests {
                 occupier: false,
                 deployer: false,
                 scout: false,
+                armed: true,
+                captures: false,
+                carries: false,
+                deploy_slot: None,
             },
         }
     }
@@ -386,6 +390,10 @@ mod tests {
                     occupier: false,
                     deployer: false,
                     scout: false,
+                    armed: true,
+                    captures: false,
+                    carries: false,
+                    deploy_slot: None,
                 },
             });
         }
