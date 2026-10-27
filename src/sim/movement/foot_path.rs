@@ -1010,11 +1010,25 @@ impl Simulation {
                 }
                 //0x4D3DD8..0x4D3E03: the FNPC result is set and searched without
                 //an invalid-cell test; only an FNPC failure over the whole map
-                //radius would search cell (0,0), which no test fixture produces.
-                let near = self.find_path_nearby_cell(id, target, rules)?.ok_or(
-                    "Find_Path code-7 redirect found no passable cell near the Building target",
-                )?;
-                Ok(Some(near))
+                //radius would search cell (0,0).
+                //
+                // A map can produce exactly that: a building whose neighbour
+                // cells are all taken by other buildings has no passable cell
+                // within the radius, and a house that packs its base does it on
+                // its own. Native has no defined answer there — it searches the
+                // invalid cell — so the frame keeps the target and lets the
+                // search fail the order, which is what a player's click on a
+                // walled-in building does. Ending the frame instead killed the
+                // match (tick 12816, an Enter on a clumped base).
+                match self.find_path_nearby_cell(id, target, rules)? {
+                    Some(near) => Ok(Some(near)),
+                    None => {
+                        log::debug!(
+                            "Find_Path code-7: no passable cell near the Building target, keeping it"
+                        );
+                        Ok(None)
+                    }
+                }
             }
             _ => Ok(None),
         }
