@@ -87,7 +87,7 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
                 Some(enemy.0),
                 Some(enemy.1),
             );
-            out.order(item.entity_id, Goal::Attack { target: enemy.0 });
+            issue(out, item.entity_id, Goal::Attack { target: enemy.0 }, item.reach, item.deployed);
             issued += 1;
             continue;
         }
@@ -106,7 +106,7 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
             brain
                 .tracked
                 .record(tick, item.entity_id, TrackedKind::Guard, None, Some(item.cell));
-            out.order(item.entity_id, Goal::Guard);
+            issue(out, item.entity_id, Goal::Guard, item.reach, item.deployed);
             issued += 1;
             continue;
         }
@@ -134,7 +134,7 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
                     Some(target),
                     Some(cell),
                 );
-                out.order(item.entity_id, Goal::Attack { target });
+                issue(out, item.entity_id, Goal::Attack { target }, item.reach, item.deployed);
                 issued += 1;
             }
             // Go at what pays for the enemy's army. An army too small to take
@@ -158,7 +158,7 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
                 brain
                     .tracked
                     .record(tick, item.entity_id, TrackedKind::AttackMove, None, Some(cell));
-                out.order(item.entity_id, Goal::AttackMove { cell });
+                issue(out, item.entity_id, Goal::AttackMove { cell }, item.reach, item.deployed);
                 issued += 1;
             }
             // A scout is sent to look, not to fight: a walk, so it does not
@@ -185,11 +185,34 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
                 brain
                     .tracked
                     .record(tick, item.entity_id, TrackedKind::Move, None, Some(cell));
-                out.order(item.entity_id, Goal::Move { cell });
+                issue(out, item.entity_id, Goal::Move { cell }, item.reach, item.deployed);
                 issued += 1;
             }
         }
     }
+}
+
+/// Issue one order and say so.
+///
+/// The brain is the only thing that can explain why a soldier did what it did,
+/// and "it sometimes shot and sometimes did not" is not a symptom anyone can
+/// chase from a screenshot: the order, the target and the reach it was measured
+/// with have to be on the record. One line per order at debug.
+fn issue(out: &mut Outbox, entity_id: u64, goal: Goal, reach: i32, deployed: bool) {
+    log::debug!(
+        "auto play: micro {} {}{} reach={}",
+        entity_id,
+        match goal {
+            Goal::Attack { target } => format!("attack {target}"),
+            Goal::AttackMove { cell } => format!("attack-move {:?}", cell),
+            Goal::Move { cell } => format!("move {:?}", cell),
+            Goal::Guard => "guard".to_owned(),
+            _ => format!("{goal:?}"),
+        },
+        if deployed { " deployed" } else { "" },
+        reach
+    );
+    out.order(entity_id, goal);
 }
 
 /// Every team member that may be told anything, with what the cycle needs to

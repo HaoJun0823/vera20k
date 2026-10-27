@@ -498,10 +498,22 @@ pub(super) fn forces(
 }
 
 /// How near a hostile has to be before a soldier takes its deployed position,
-/// in cells. Deploying is a weapon change and a movement stop — `DeployFire=`
-/// swaps the primary for the deployed one — so it is worth taking when the
-/// fight has arrived, not when it is a rumour across the map.
+/// and how far it has to be before it gives the position up, in cells.
+///
+/// Deploying is a weapon change and a movement stop — `DeployFire=` swaps the
+/// primary for the deployed one — so it is worth taking when the fight has
+/// arrived, not when it is a rumour across the map.
+///
+/// The two numbers are deliberately different. One radius for both made the
+/// soldier sit and stand at almost the same distance, and `6` sat right on top
+/// of the reach the deployed gun covers, so a hostile pacing between five and
+/// seven cells had it kneeling and rising forever — and a soldier mid-animation
+/// is a soldier with its gun silent, which is why a dug-in position sometimes
+/// shot and sometimes did not. The gap is the dead band: nothing inside
+/// [`DEPLOY_RANGE_CELLS`] changes the pose until it is outside
+/// [`UNDEPLOY_RANGE_CELLS`].
 const DEPLOY_RANGE_CELLS: i32 = 6;
+const UNDEPLOY_RANGE_CELLS: i32 = 10;
 
 /// How many toggles one frame carries. The D key is a click like any other,
 /// and a frame that spends its budget on soldiers standing up has none left
@@ -531,21 +543,28 @@ pub(super) fn deploy(brain: &mut RetailBrain, obs: &Observation<'_>, out: &mut O
     brain.tracked.retain(&live);
     // Collected before anything is written: the toggle has to be recorded
     // against the soldier, and the ledger is borrowed while it is read.
-    let wanted: Vec<(u64, bool)> = brain
+    let wanted: Vec<(u64, i32)> = brain
         .census
         .units
         .iter()
         .filter(|unit| unit.traits.deployer && !unit.hand && unit.orderable)
-        .map(|unit| (unit.entity_id, engaged(&brain.census.enemies, unit.cell)))
+        .map(|unit| (unit.entity_id, nearest_distance(&brain.census.enemies, unit.cell)))
         .collect();
     let mut issued = 0;
-    for (entity_id, engaged) in wanted {
+    for (entity_id, distance) in wanted {
         if issued >= DEPLOYS_PER_FRAME {
             break;
         }
-        if engaged == obs.is_deployed(entity_id) {
+        let deployed = obs.is_deployed(entity_id);
+        let Some(down) = pose_to_take(deployed, distance) else {
             continue;
-        }
+        };
+        log::debug!(
+            "auto play: deploy {} -> {} nearest={}",
+            entity_id,
+            if down { "dug in" } else { "standing" },
+            distance
+        );
         // The toggle's own term is the deploy animation, and `Is_Deployed`
         // only follows it — so until then the soldier still reads as standing
         // and would be toggled straight back up. L4 refuses the second press.
@@ -563,13 +582,30 @@ pub(super) fn deploy(brain: &mut RetailBrain, obs: &Observation<'_>, out: &mut O
     }
 }
 
-/// Whether a hostile is close enough to `cell` to be the fight arriving.
-fn engaged(enemies: &[EnemyEntity], cell: (u16, u16)) -> bool {
-    enemies.iter().any(|enemy| {
-        let dx = i32::from(enemy.cell.0) - i32::from(cell.0);
-        let dy = i32::from(enemy.cell.1) - i32::from(cell.1);
-        dx * dx + dy * dy <= DEPLOY_RANGE_CELLS * DEPLOY_RANGE_CELLS
-    })
+/// The pose the soldier should take, or `None` for "leave it as it is".
+///
+/// Down when the fight is here, up only once it is clearly gone, and nothing in
+/// between changes anything: that gap is the dead band. One radius for both
+/// made a hostile pacing between the two kneel and rise the soldier forever, and
+/// a soldier mid-animation is a soldier whose gun is silent.
+fn pose_to_take(deployed: bool, distance: i32) -> Option<bool> {
+    let down = distance <= DEPLOY_RANGE_CELLS * DEPLOY_RANGE_CELLS;
+    let up = distance > UNDEPLOY_RANGE_CELLS * UNDEPLOY_RANGE_CELLS;
+    match (deployed, down, up) {
+        (false, true, _) => Some(true),
+        (true, _, true) => Some(false),
+        _ => None,
+    }
+}
+
+/// How far the nearest hostile is from `cell`, as a squared cell distance so
+/// the square root is not needed; `i32::MAX` when there is none.
+fn nearest_distance(enemies: &[EnemyEntity], cell: (u16, u16)) -> i32 {
+    enemies
+        .iter()
+        .map(|enemy| squared_distance(enemy.cell, cell))
+        .min()
+        .unwrap_or(i32::MAX)
 }
 
 /// Whether the object is already walking or fighting, so re-tasking it would
@@ -1330,6 +1366,37 @@ mod tests {
         assert_eq!(
             chosen.entity_id, 2,
             "the derrick nobody is standing next to, not the one inside the base"
+        );
+    }
+
+    /// A hostile pacing across the old single radius had the soldier kneeling
+    /// and rising forever, and a soldier mid-animation cannot shoot — which is
+    /// what "sometimes it fires, sometimes it does not" looked like on the
+    /// screen. The pose now has a dead band, so nothing between the two radii
+    /// changes it.
+    #[test]
+    fn a_dug_in_soldier_keeps_its_pose_until_the_fight_is_gone() {
+        let squared = |cells: i32| cells * cells;
+        assert_eq!(pose_to_take(false, squared(5)), Some(true), "down it goes");
+        assert_eq!(
+            pose_to_take(true, squared(8)),
+            None,
+            "still kneeling: the fight has not left"
+        );
+        assert_eq!(
+            pose_to_take(true, squared(12)),
+            Some(false),
+            "the fight is gone, stand up"
+        );
+        assert_eq!(
+            pose_to_take(true, i32::MAX),
+            Some(false),
+            "nothing at all: stand up"
+        );
+        assert_eq!(
+            pose_to_take(false, squared(8)),
+            None,
+            "a standing soldier does not kneel for a distant one"
         );
     }
 
