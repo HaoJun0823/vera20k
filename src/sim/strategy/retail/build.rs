@@ -237,12 +237,20 @@ fn build_next(
         log::debug!("queued already holds {}", ty.id);
     }
     let price = obs.cost_of(rules, ty);
-    // What the yard has settled on is not the lines' money. A structure the
-    // list has decided to build is paid for as the wallet fills — that is what
-    // deciding means — so the part the house does not have yet is held back
-    // from the factories. Without this the barracks spent the lab's money on
-    // one more soldier every frame, and the tech stage never came.
-    brain.yard_reserve = price.saturating_sub(budget.free).max(0);
+    // What the yard has settled on is not the lines' money — but only the tree
+    // is worth starving them for. A structure the list has decided to build is
+    // paid for as the wallet fills, so the part the house does not have yet is
+    // held back from the factories; without it the barracks spent the lab's
+    // money on one more soldier every frame and the tech stage never came.
+    //
+    // Held back for everything, though, it is the barracks that stops: a
+    // thousand credits of reserve is thirty seconds of no infantry at all, and
+    // a house with no infantry loses the army while it is saving. Only the
+    // entries whose whole point is what they unlock are worth that price.
+    brain.yard_reserve = match chosen.item {
+        Item::Aircraft | Item::Radar | Item::Tech => price.saturating_sub(budget.free).max(0),
+        _ => 0,
+    };
     // The budget, not the wallet: what a line has been promised is spent
     // whether or not it has left the wallet yet, and a queue costs the wallet
     // nothing until the build steps.
