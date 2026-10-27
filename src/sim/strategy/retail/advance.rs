@@ -58,6 +58,11 @@ const ADVANCE_ORDERS_PER_FRAME: usize = 8;
 /// in cells. A raid inside this ring is what the army was bought for.
 const THREAT_RADIUS: i32 = 18;
 
+/// How few enemy objects are left before the strength gate stops asking. Below
+/// this the enemy is a clean-up job, not a fight: the army goes in and finishes
+/// it instead of waiting for a comparison it can only lose by arithmetic.
+const MOP_UP_OBJECTS: usize = 8;
+
 /// Send the army at the enemy's base when it is large enough. `false` when
 /// the house is not pushing this frame, so the caller keeps its own posture.
 pub(super) fn advance(
@@ -125,7 +130,17 @@ pub(super) fn advance(
     // And a fist big enough to take it. The size gate above counts heads; this
     // one weighs them against what is standing there, and an army that cannot
     // win the fight stays home and grows instead of being spent.
-    if !super::squads::outguns(&brain.census, rules, obs, target.cell) {
+    //
+    // Except when there is nothing left to weigh. A house down to a handful of
+    // objects is not a base to be beaten, it is what is left of one — and the
+    // gate that stops the house spending an army it cannot replace has no fight
+    // left to protect it from. Without this the match ends in a timeout with
+    // the army standing in front of two walls: measured, the enemy was down to
+    // 21 objects and the push never left, on every variant that changed what
+    // gets ordered. This is the reason those variants looked worse than they
+    // were.
+    let mopping_up = brain.census.enemies.len() <= MOP_UP_OBJECTS;
+    if !mopping_up && !super::squads::outguns(&brain.census, rules, obs, target.cell) {
         return false;
     }
 
