@@ -194,7 +194,14 @@ fn build_next(
     // left over from a decision that has since been paid for would starve the
     // factories of money nobody is saving.
     brain.yard_reserve = 0;
-    if brain.census.line(ProductionCategory::Building).product.is_some() {
+    // A structure the yard has finished and not yet put down is *owned*: it is
+    // waiting for a cell, not for a buyer. Starting another because the count
+    // on the map has not caught up is how an opening ended with two power
+    // plants — the second was queued in the frames the first spent waiting for
+    // its cell, and then the yard built both.
+    if brain.census.line(ProductionCategory::Building).busy()
+        || brain.census.line(ProductionCategory::Defense).ready.is_some()
+    {
         return;
     }
     let tick = obs.tick();
@@ -626,6 +633,43 @@ mod tests {
             .expect("the aircraft plant is what the tree asks for next");
         assert_eq!(chosen.item, plan::Item::Aircraft, "the tech stage");
         assert_eq!(chosen.ty.id, "AMRADR", "the Americans' aircraft plant");
+    }
+
+    /// A structure the yard has finished and not yet put down is a structure the
+    /// house owns. Counting the map was how an opening bought two power plants:
+    /// the second was queued in the frames the first spent waiting for its cell.
+    #[test]
+    fn a_structure_waiting_for_a_cell_is_not_bought_again() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        sim.spawn_object("GACNST", "Americans", 16, 16, 255, &rules)
+            .expect("an Allied Construction Yard");
+        sim.houses
+            .get_mut(&owner)
+            .expect("the house")
+            .economy_mut()
+            .set_credits_for_test(5_000);
+
+        let mut brain = RetailBrain::new(0xA17);
+        brain.census = ledger(&rules, &sim, owner);
+        // The plant is built and standing in the yard, waiting for its cell.
+        let plant = sim.interner().get("GAPOWR").expect("the power plant type");
+        brain.census.lines[crate::sim::strategy::retail::census::LINE_BUILDING].ready =
+            Some(plant);
+        let obs = Observation::new(&sim, owner);
+        let budget = plan::budget(&rules, &obs, &brain.census, None);
+        let mut out = Outbox::default();
+        spend(&mut brain, &rules, &obs, &budget, &mut out);
+
+        assert!(
+            !out.intents
+                .iter()
+                .any(|intent| matches!(intent, Intent::QueueProduction { .. })),
+            "the yard is holding a plant, not asking for a second: {:?}",
+            out.intents
+        );
     }
 
     /// The tech buildings are not what the harvester reserve is holding money
