@@ -209,13 +209,19 @@ impl ControlBoard {
     }
 
     /// One frame of auto play. Call it before the frame advances.
-    pub fn step(&mut self, sim: &mut Simulation, rules: &RuleSet) {
+    ///
+    /// Returns the commands it queued, in issue order. They are the client's
+    /// only view of what this hand did: a player's press writes its cameo's
+    /// `request1` and predicted clock as it clicks
+    /// (`Select6AB0C9..6AB94D`), so the client mirrors the same presentation
+    /// writes for these orders. The queue stays the authority for the frame.
+    pub fn step(&mut self, sim: &mut Simulation, rules: &RuleSet) -> Vec<Command> {
         if sim.session().input_locked() {
-            return;
+            return Vec::new();
         }
         let owner = self.owner;
         if !sim.houses().contains_key(&owner) {
-            return;
+            return Vec::new();
         }
         self.budget.begin_frame();
         let owner_name = sim.interner().resolve(owner).to_owned();
@@ -312,10 +318,13 @@ impl ControlBoard {
                 self.excluded.len()
             );
         }
-        let envelopes = pending
-            .into_iter()
-            .map(|command| CommandEnvelope::new(owner, execute_tick, command));
-        sim.queue_commands(envelopes);
+        sim.queue_commands(
+            pending
+                .iter()
+                .cloned()
+                .map(|command| CommandEnvelope::new(owner, execute_tick, command)),
+        );
+        pending
     }
 
     /// Step this frame's rotation of attached objects and issue what they ask.

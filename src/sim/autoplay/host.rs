@@ -14,6 +14,7 @@
 
 use crate::rules::ruleset::RuleSet;
 use crate::sim::behavior::managed::{MicroKind, MicroParams};
+use crate::sim::command::Command;
 use crate::sim::control::board::{AutoPlayDomains, ControlBoard};
 use crate::sim::control::brain::Brain;
 use crate::sim::control::micro::MicroTable;
@@ -78,8 +79,12 @@ impl AutoPlayHost {
     }
 
     /// One frame of auto play. Call it before the frame advances.
-    pub fn step(&mut self, sim: &mut Simulation, rules: &RuleSet) {
-        self.board.step(sim, rules);
+    ///
+    /// Returns what the frame queued, in issue order. The client uses it to
+    /// mirror the presentation writes a player's press makes for the same
+    /// order (the cameo's `request1` and predicted clock).
+    pub fn step(&mut self, sim: &mut Simulation, rules: &RuleSet) -> Vec<Command> {
+        self.board.step(sim, rules)
     }
 
     /// Put an object under a managed routine (non-parity micro, see

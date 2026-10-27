@@ -649,6 +649,48 @@ impl SidebarProjectionState {
         type_id: InternedId,
         click: crate::app::input::sidebar_eva::CameoClick,
     ) {
+        self.record_click(sim, rules, owner, type_id, click, true);
+    }
+
+    /// Auto play's PRODUCE, written the way the press above writes it.
+    ///
+    /// The agent answers a build option, not a drawn button: the House pass that
+    /// inserts the cameo (`AddCameo`) runs in the frame its order executes, one
+    /// projection pass after this write, so the request is admitted without
+    /// retention (see `CameoStrips::start_request_before_retention`). Everything
+    /// else is the press's: the House prediction-category gate, the money and
+    /// builder gates, and the predicted clock that carries the cameo until the
+    /// Factory link arrives.
+    pub(crate) fn record_auto_play_order(
+        &mut self,
+        sim: &crate::sim::world::Simulation,
+        rules: &crate::rules::ruleset::RuleSet,
+        owner: InternedId,
+        type_id: InternedId,
+    ) {
+        use crate::app::input::sidebar_eva::{CameoClick, CameoOrder};
+        self.record_click(
+            sim,
+            rules,
+            owner,
+            type_id,
+            CameoClick {
+                order: Some(CameoOrder::Produce),
+                ..CameoClick::default()
+            },
+            false,
+        );
+    }
+
+    fn record_click(
+        &mut self,
+        sim: &crate::sim::world::Simulation,
+        rules: &crate::rules::ruleset::RuleSet,
+        owner: InternedId,
+        type_id: InternedId,
+        click: crate::app::input::sidebar_eva::CameoClick,
+        retained_only: bool,
+    ) {
         use crate::app::input::sidebar_eva::CameoOrder;
         let Some((local, _)) = self.cameos.as_ref() else {
             return;
@@ -661,12 +703,13 @@ impl SidebarProjectionState {
         };
         let category = crate::sim::production::category_for_object(object);
         let id = CameoId::Object(type_id);
-        if !self
-            .cameo_strips()
-            .saved_identities()
-            .iter()
-            .flatten()
-            .any(|entry| *entry == id)
+        if retained_only
+            && !self
+                .cameo_strips()
+                .saved_identities()
+                .iter()
+                .flatten()
+                .any(|entry| *entry == id)
         {
             return;
         }
@@ -739,11 +782,12 @@ impl SidebarProjectionState {
                         None
                     }
                 };
-                self.cameos
-                    .as_mut()
-                    .unwrap()
-                    .1
-                    .start_request(id, frame, clock);
+                let strips = &mut self.cameos.as_mut().unwrap().1;
+                if retained_only {
+                    strips.start_request(id, frame, clock);
+                } else {
+                    strips.start_request_before_retention(id, frame, clock);
+                }
             }
             _ => {}
         }

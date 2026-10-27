@@ -1410,3 +1410,28 @@ fn an_attached_object_does_not_also_take_the_brains_order() {
         "the routine is the object's only issuer: {mission:?}"
     );
 }
+
+/// The client mirrors a press's presentation writes for what the frame queued,
+/// so the step reports those commands in issue order — the same list the queue
+/// hands the drain.
+#[test]
+fn a_step_reports_the_commands_it_queued() {
+    let (mut sim, rules) = synthetic_arena(0xA17);
+    let power_plant = sim.interner.intern("GAPOWR");
+    let power = Command::QueueProduction {
+        type_id: power_plant,
+    };
+    let mut host = host(&mut sim, vec![(0, power.clone())]);
+
+    let issued = host.step(&mut sim, &rules);
+
+    assert_eq!(issued, vec![power.clone()], "the hand reports what it issued");
+    assert_eq!(
+        sim.pending_command_snapshot()
+            .into_iter()
+            .map(|envelope| envelope.payload)
+            .collect::<Vec<_>>(),
+        vec![power],
+        "and the report is the queue the frame drains"
+    );
+}

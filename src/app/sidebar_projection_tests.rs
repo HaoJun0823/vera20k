@@ -1481,3 +1481,87 @@ fn superweapon_retained_cameo_keeps_identity_through_hold_and_recovery() {
         SuperWeaponClick::Refused
     );
 }
+
+/// One idle Allied barracks and the GI it offers, on synthetic rules so the
+/// case runs without retail data.
+fn agent_clock_world() -> (Simulation, RuleSet, InternedId) {
+    let rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
+        "[Countries]\n0=Americans\n[Sides]\nGDI=Americans\n[Americans]\nSide=GDI\n\
+         [InfantryTypes]\n0=E1\n[BuildingTypes]\n0=GAPILE\n\
+         [E1]\nName=GI\nOwner=Americans\nStrength=100\nCost=100\nTechLevel=1\n\
+         [GAPILE]\nName=Barracks\nOwner=Americans\nFactory=InfantryType\n\
+         Strength=1000\nTechLevel=-1\n",
+    ))
+    .unwrap();
+    let (sim, owner) = world(&rules, &["GAPILE"]);
+    (sim, rules, owner)
+}
+
+/// An agent answers a build option, not a drawn button. The House pass that
+/// inserts the cameo (`AddCameo`) runs in the frame its order executes, one
+/// projection pass after the write, and the Begin link lands before that insert
+/// — so the press's `request1` is what has to carry the cameo's clock.
+#[test]
+fn an_agent_order_placed_before_the_button_is_drawn_keeps_the_build_clock() {
+    let (sim, rules, owner) = agent_clock_world();
+    let e1 = sim.interner().get("E1").unwrap();
+    let options = all_build_options_for_owner(&sim, &rules, "Americans");
+    let candidates = cameo_candidates(&sim, &rules, None, owner, &options, &[], &[]);
+    let mut projection = SidebarProjectionState::default();
+    // The scenario's first projection, before any button exists.
+    projection.reconcile_cameos(owner, &[], 3, &[]);
+    assert!(projection.cameo_request(e1).is_none());
+
+    // One frame, in the app's order: the agent's order, the House pass's option,
+    // and the projection's insert at the end of that same frame.
+    projection.record_auto_play_order(&sim, &rules, owner, e1);
+    projection.apply_lifecycle_output(
+        &LifecycleOutput::SidebarConstructionOption { owner, type_id: e1 },
+        Some(owner),
+    );
+    projection.apply_lifecycle_output(&LifecycleOutput::SidebarRecalculated { owner }, Some(owner));
+    projection.reconcile_cameos(owner, &candidates, 3, &[]);
+
+    let tab = SidebarTab::for_category(crate::sim::production::category_for_object(
+        rules.object("E1").unwrap(),
+    ));
+    let mut view = view(&sim, &options, &projection, tab, 480.0);
+    projection.apply_cameo_draw_state(&mut view, &sim, &rules, owner, None);
+    let item = view
+        .items
+        .iter()
+        .find(|item| item.type_id == "E1")
+        .expect("the House pass inserted the GI");
+    assert!(
+        item.is_building_this_type,
+        "the pending request draws the build clock instead of the queue count"
+    );
+    assert!(!item.is_ready && !item.is_on_hold);
+}
+
+/// The press path keeps the native admission: `Select6AB0C9` searches the
+/// retained strip, and a mouse press can only land on a drawn button.
+#[test]
+fn a_press_on_a_cameo_the_strip_has_not_inserted_writes_no_request() {
+    use crate::app::input::sidebar_eva::{CameoClick, CameoOrder};
+    let (sim, rules, owner) = agent_clock_world();
+    let e1 = sim.interner().get("E1").unwrap();
+    let mut projection = SidebarProjectionState::default();
+    projection.reconcile_cameos(owner, &[], 3, &[]);
+
+    projection.record_cameo_click(
+        &sim,
+        &rules,
+        owner,
+        e1,
+        CameoClick {
+            order: Some(CameoOrder::Produce),
+            ..CameoClick::default()
+        },
+    );
+
+    assert!(
+        projection.cameo_request(e1).is_none(),
+        "an entry the strip does not hold takes no request"
+    );
+}

@@ -19,6 +19,7 @@ use crate::app::types::SIM_TICK_MS;
 use crate::map::terrain;
 use crate::render::sprite_atlas;
 use crate::render::unit_atlas;
+use crate::sim::command::Command;
 use crate::sim::production;
 use crate::sim::replay::ScenarioServiceInput;
 use crate::sim::trigger_runtime::TriggerEffect;
@@ -983,10 +984,11 @@ fn advance_in_game_runtime_mode(
             // Factory while drawing, so the drawn state follows the simulation
             // even when no pass, input or flash window rebuilt the projection
             // this frame.
-            // Auto play issues the same commands a player's clicks issue, but it
-            // writes none of the app-side request words a click writes, and a
-            // cameo's membership, queue and readiness are only rebuilt by a
-            // full projection pass. Without this the sidebar shows nothing
+            // Auto play issues the same commands a player's clicks issue and
+            // writes the same cameo request that a press writes, but a cameo's
+            // membership, queue and readiness are only rebuilt by a full
+            // projection pass (its request is admitted before the House pass
+            // inserts the button). Without this the sidebar shows nothing
             // while the house builds, which reads as the house doing
             // something it may not.
             let auto_playing = state.match_state.auto_play.is_some();
@@ -1205,7 +1207,26 @@ fn advance_one_simulation_frame(
                 && let Some(host) = state.match_state.auto_play.as_mut()
             {
                 host.set_excluded(player_owned.clone());
-                host.step(sim, &rt.resources.rules);
+                let issued = host.step(sim, &rt.resources.rules);
+                // A PRODUCE press writes the cameo's request1 and predicted
+                // clock before the frame executes the event
+                // (Select6AB0C9/6AB573..6AB8DA). Auto play is the same hand, so
+                // its build orders make the same write; without it a cameo shows
+                // no clock while its Factory builds (a unit even draws its queue
+                // count instead), because the Begin link is the only other
+                // source and the strip may not hold the entry yet.
+                let owner = host.owner();
+                let projection = &mut state.match_state.match_presentation.sidebar_projection;
+                for command in &issued {
+                    if let Command::QueueProduction { type_id } = *command {
+                        projection.record_auto_play_order(
+                            &*sim,
+                            &rt.resources.rules,
+                            owner,
+                            type_id,
+                        );
+                    }
+                }
             }
             let due_commands = if drains_this_frame {
                 sim.take_due_commands()
