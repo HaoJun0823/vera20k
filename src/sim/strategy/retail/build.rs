@@ -265,11 +265,14 @@ fn build_next(
         return;
     }
     log::debug!(
-        "auto play: build {} credits={} power={} fighters={}",
+        "auto play: build {} credits={} power={} fighters={} power_short={} output={} drain={}",
         ty.id,
         obs.credits(),
         obs.power_balance(),
-        brain.census.fighters
+        brain.census.fighters,
+        plan::power_deficit(rules, obs, &brain.census, 0),
+        obs.power_output(),
+        obs.power_drain()
     );
     out.intent(Intent::QueueProduction { type_id });
 }
@@ -324,11 +327,9 @@ fn next_building<'r>(
         None => return None,
     };
     // `Power=` is the type's net contribution: negative is what it draws, and
-    // the plant that would feed it is counted at the output it will have.
-    if plan::planned_output(rules, obs, census).wrapping_sub(obs.power_drain())
-        + chosen.ty.power.min(0)
-        < 0
-    {
+    // the plant that would feed it is counted at the output it will have. The
+    // lab's own `-100` is a plant the base needs before it starts the lab.
+    if plan::power_deficit(rules, obs, census, chosen.ty.power.min(0)) > 0 {
         if let Some((ty, type_id)) = first_buildable(rules, obs, &rules.build_power_types) {
             return Some(plan::Chosen {
                 step: None,

@@ -376,8 +376,33 @@ pub(super) fn answer<'r>(
 
 /// Whether the base needs another plant, counting the plants that are still
 /// building at the output they will have when they finish.
+/// How much power the base is short of, in `Power=` units; negative or zero
+/// means it has enough.
+///
+/// One number instead of the two tests the yard used to ask. What it adds is
+/// the draw the house is about to take on: a lab at `-100` is a plant the base
+/// needs *before* it starts the lab, not after it is dark. And what it takes
+/// away is the second plant — a plant already on a line, finished and waiting
+/// for a cell, or standing unfinished is output the base is already paying for,
+/// so the deficit it covers is covered, and the yard does not buy the same
+/// output twice.
+///
+/// The dead band is the number itself: buying one plant drops the deficit by
+/// that plant's `Power=` the same frame it is queued, so a house cannot queue a
+/// second one for the same shortage.
+pub(super) fn power_deficit(
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    census: &Census,
+    about_to_draw: i32,
+) -> i32 {
+    obs.power_drain()
+        .saturating_add(about_to_draw.abs().min(i32::MAX - 1))
+        .wrapping_sub(planned_output(rules, obs, census))
+}
+
 pub(super) fn power_short(rules: &RuleSet, obs: &Observation<'_>, census: &Census) -> bool {
-    planned_output(rules, obs, census).wrapping_sub(obs.power_drain()) < 0
+    power_deficit(rules, obs, census, 0) > 0
 }
 
 /// Output now, plus the output of every plant that is on a line, finished and
@@ -582,6 +607,33 @@ mod tests {
     /// decided on is held, and answered even though its own gate has shut —
     /// that is the house saving for what it chose instead of spending the
     /// savings on whichever entry a flickering gate answers next.
+    /// A plant the yard is already paying for is output the base has, so the
+    /// shortage it covers is covered: the deficit is what makes one plant one
+    /// plant.
+    #[test]
+    fn a_plant_on_the_way_is_the_output_the_base_already_has() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        let obs = Observation::new(&sim, owner);
+        let mut census = Census::default();
+        // A bare base: no output, no draw, nothing short.
+        assert_eq!(power_deficit(&rules, &obs, &census, 0), 0, "nothing to power");
+        // A lab about to be started: its own -100 is a plant the base needs now.
+        assert!(
+            power_deficit(&rules, &obs, &census, -100) > 0,
+            "the lab draws before it stands"
+        );
+        // And a plant finished and waiting for a cell is output it has.
+        let plant = sim.interner().get("GAPOWR").expect("the power plant type");
+        census.lines[crate::sim::strategy::retail::census::LINE_BUILDING].ready = Some(plant);
+        assert!(
+            power_deficit(&rules, &obs, &census, -100) <= 0,
+            "the waiting plant covers the lab"
+        );
+    }
+
     /// The index in [`STEPS`] of the entry wanting `count` of `item`.
     fn step_of(item: Item, count: usize) -> usize {
         STEPS
