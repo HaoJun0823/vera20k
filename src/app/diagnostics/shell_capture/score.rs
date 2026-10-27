@@ -125,6 +125,7 @@ fn synthetic_campaign_score_model() -> CampaignScoreScreenModel {
         enemies_destroyed: "17".into(),
         rank: "Captain".into(),
         commendation: "Mission completed ahead of schedule.".into(),
+        ..Default::default()
     }
 }
 
@@ -718,6 +719,7 @@ fn comparison_model(state: &AppState) -> Result<ScoreScreenModel> {
         game_number: 1,
         elapsed_seconds: 79,
         side: 0,
+        theme: None,
         rows: vec![
             ScoreRow {
                 name: computer,

@@ -915,7 +915,11 @@ fn spent_on_the_enemy(kind: SuperWeaponKind) -> bool {
         | SuperWeaponKind::PsychicDominator
         | SuperWeaponKind::GeneticConverter
         | SuperWeaponKind::GenericWarhead
-        | SuperWeaponKind::UnitDelivery => true,
+        | SuperWeaponKind::UnitDelivery
+        // Ares' seeker picks its own target among the enemy's
+        // (`AiTargetingMode::HunterSeeker`, `HouseMask::ENEMIES`), so a cell
+        // of theirs is still what it is fired at.
+        | SuperWeaponKind::HunterSeeker => true,
         // Spent on the house's own units and buildings, or on nothing.
         SuperWeaponKind::IronCurtain
         | SuperWeaponKind::ChronoSphere

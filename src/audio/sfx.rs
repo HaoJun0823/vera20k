@@ -30,8 +30,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZero;
 use std::sync::Arc;
 
+use rodio::Player;
 use rodio::buffer::SamplesBuffer;
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player};
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+use rodio::{DeviceSinkBuilder, MixerDeviceSink};
+
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+type SfxOutput = MixerDeviceSink;
+#[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+type SfxOutput = crate::audio::web_output::WebAudioSink;
 
 use crate::assets::asset_manager::AssetManager;
 use crate::assets::aud_file;
@@ -1228,7 +1235,7 @@ impl PlaybackService for PendingSampleService<'_> {
 /// plus the separate EVA streaming output.
 pub struct SfxPlayer {
     /// rodio mixer device sink — must be kept alive or all audio stops.
-    _device: MixerDeviceSink,
+    _device: SfxOutput,
     /// The decision half: channel pool, `Priority=`, `Limit=`, pre-delay,
     /// looping leash, ramps and the many-sounds limiter.
     arbiter: SoundArbiter,
@@ -1324,6 +1331,7 @@ const MAX_COORDINATE_REQUESTS: usize = 200;
 /// device ever rendered them. DirectSound starts a secondary buffer as it is
 /// played, so native ticks are audible. A period below the pump interval lets
 /// each cue reach the device first. Clamped to the device's supported range.
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
 fn sfx_buffer_frames(sample_rate: u32, supported: &rodio::cpal::SupportedBufferSize) -> u32 {
     let target = (sample_rate / 100).max(1).next_power_of_two();
     match *supported {
@@ -1334,7 +1342,8 @@ fn sfx_buffer_frames(sample_rate: u32, supported: &rodio::cpal::SupportedBufferS
 
 /// Open the default output with [`sfx_buffer_frames`], falling back to
 /// rodio's own default sink when the device refuses that period.
-fn open_sfx_sink() -> Result<MixerDeviceSink, rodio::DeviceSinkError> {
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+fn open_sfx_sink() -> Result<SfxOutput, rodio::DeviceSinkError> {
     use rodio::cpal::traits::{DeviceTrait, HostTrait};
 
     let low_latency = rodio::cpal::default_host()
@@ -1359,6 +1368,13 @@ fn open_sfx_sink() -> Result<MixerDeviceSink, rodio::DeviceSinkError> {
         Some(sink) => Ok(sink),
         None => DeviceSinkBuilder::open_default_sink(),
     }
+}
+
+/// The browser keeps short blocks with a deeper queue; see
+/// [`crate::audio::web_output`].
+#[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+fn open_sfx_sink() -> Result<SfxOutput, String> {
+    crate::audio::web_output::WebAudioSink::open().map_err(|error| format!("{error:?}"))
 }
 
 impl SfxPlayer {
@@ -1986,16 +2002,21 @@ impl SfxPlayer {
     /// the loose file first, then CCFile; a new taunt stops the last one.
     /// RESIDUAL: the suppress counter `[0x00B1D480]` is taken as 0; its
     /// writers `0x00753520`/`0x00753540` have no direct caller.
-    pub(crate) fn play_taunt(&mut self, byte: u8, assets: &AssetManager) {
+    pub(crate) fn play_taunt(&mut self, byte: u8, assets: &AssetManager, pattern: Option<&str>) {
         const COUNTRIES: [&str; 10] = ["am", "ko", "fr", "ge", "br", "li", "ir", "cu", "ru", "yu"];
         let number = byte & 0xF;
-        let Some(country) = COUNTRIES.get(usize::from(byte >> 4)) else {
-            return;
-        };
         if !(1..=8).contains(&number) {
             return;
         }
-        let name = format!("taunts\\tau{country}{number:02}.wav");
+        let name = match pattern {
+            Some(pattern) => taunt_filename(pattern, number),
+            None => {
+                let Some(country) = COUNTRIES.get(usize::from(byte >> 4)) else {
+                    return;
+                };
+                format!("taunts\\tau{country}{number:02}.wav")
+            }
+        };
         if let Some(output) = self.taunt_player.take() {
             output.player.stop();
         }
@@ -2993,6 +3014,17 @@ pub(crate) fn decode_wav(data: &[u8], filename: &str) -> Option<DecodedAudio> {
             wav.bits_per_sample / 8
         },
     })
+}
+
+/// Ares `File.Taunt=` uses the literal `~~` marker; the stock defaults use
+/// `%02i`. Either placeholder receives the two-digit taunt number.
+fn taunt_filename(pattern: &str, number: u8) -> String {
+    let number = format!("{number:02}");
+    if pattern.contains("~~") {
+        pattern.replace("~~", &number)
+    } else {
+        pattern.replace("%02i", &number)
+    }
 }
 
 #[cfg(test)]
@@ -4802,5 +4834,23 @@ mod tests {
             .map(|&f| (f * 32768.0) as i16)
             .collect();
         assert_eq!(got, want);
+    }
+}
+
+#[cfg(test)]
+mod country_taunt_tests {
+    use super::taunt_filename;
+
+    #[test]
+    fn ares_and_stock_taunt_placeholders_both_take_the_number() {
+        assert_eq!(
+            taunt_filename("Taunts\tauam~~.wav", 3),
+            "Taunts\tauam03.wav"
+        );
+        assert_eq!(
+            taunt_filename("taunts\tauam%02i.wav", 8),
+            "taunts\tauam08.wav"
+        );
+        assert_eq!(taunt_filename("taunts\\fixed.wav", 1), "taunts\\fixed.wav");
     }
 }

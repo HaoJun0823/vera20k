@@ -235,6 +235,14 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
             roots.insert(name.to_ascii_uppercase());
         }
     };
+    // Ares common Launch10033068..100330AA constructs SW.Animation through
+    // the same AnimClass owner as other effects, even when it is hidden.
+    #[cfg(feature = "ares")]
+    for sw in rules.super_weapons.values() {
+        if let Some(Some(animation)) = &sw.presentation.animation {
+            insert(animation);
+        }
+    }
     for warhead in rules.warheads_iter() {
         for name in &warhead.anim_list {
             insert(name);
@@ -359,6 +367,12 @@ pub fn anim_class_roots(rules: &RuleSet) -> Vec<String> {
     if crate::rules::NPATCH_ENABLED
         && let Some(name) = rules.general.vehicle_parachute.as_deref()
     {
+        insert(name);
+    }
+    // Ares `[Side] Parachute.Anim=`: an attached canopy type needs the same
+    // physical animation bounds before the simulator creates it.
+    #[cfg(feature = "ares")]
+    for name in rules.side_parachute_animations() {
         insert(name);
     }
     // Techno70F1D0 attaches [General] Behind= to an obscured object. Its

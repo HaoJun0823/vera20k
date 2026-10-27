@@ -415,6 +415,14 @@ pub struct CampaignScoreScreenModel {
     /// It selects the `0x72B` art window's 220- or 230-pixel height, the
     /// `0x00608500` x by one pixel, and the small/large asset tables.
     pub side: i32,
+    /// Whether the elapsed time exceeded the par time at `0x6C9231`, the same
+    /// comparison that selects the over-par rank strings and that
+    /// `ScoreDialog_Handle_ScoreThemeA` uses to pick the theme.
+    pub over_par: bool,
+    /// The theme dialog `0x103` starts on its `WM_INIT`: the side's
+    /// `CampaignScore.UnderParTheme` / `.OverParTheme` under Ares, `None` for
+    /// gamemd's literal `SCORE`.
+    pub theme: Option<String>,
     pub par_time: String,
     pub your_time: String,
     pub enemies_destroyed: String,
@@ -1242,6 +1250,7 @@ mod tests {
             enemies_destroyed: "17".into(),
             rank: "Major".into(),
             commendation: "Mission commendation".into(),
+            ..Default::default()
         };
         let texts = CampaignScoreTexts {
             title: "Mission Score".into(),

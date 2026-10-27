@@ -7,8 +7,8 @@
 //! allocated while the shell is active.
 //! Process-lifetime GPU objects live in `app::renderer_state::RendererState`.
 
-use std::collections::{BTreeMap, HashMap};
 use crate::util::time::Instant;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::map::houses::{HouseColorMap, HouseRoster};
 use crate::map::overlay::TerrainObject;
@@ -43,6 +43,11 @@ pub(crate) struct MatchPresentationState {
     pub(crate) bridge_atlas: Option<BridgeAtlas>,
     pub(crate) sidebar_cameo_atlas: Option<SidebarCameoAtlas>,
     pub(crate) sidebar_chrome: Option<SidebarChromeSet>,
+    /// This match's Ares `GraphicalText.Image/Palette` overlay art, rebuilt
+    /// with the incoming world like the sidebar chrome. `None` keeps the
+    /// process InitGame GRFXTXT art.
+    pub(crate) outcome_banner_side_art:
+        Option<crate::app::presentation::outcome_banner::OutcomeBannerArt>,
     pub(crate) software_cursor: Option<crate::app::presentation::render::SoftwareCursor>,
     pub(crate) terrain_grid: Option<TerrainGrid>,
     /// Overlay entries from map for per-frame instance generation.
@@ -106,10 +111,25 @@ pub(crate) struct MatchPresentationState {
     /// Phobos `[Phobos] ShowPlacementPreview` (source default true).
     #[cfg(feature = "phobos")]
     pub(crate) show_placement_preview: bool,
+    /// Phobos `[Phobos] ShowFlashOnSelecting` (source default false): gates
+    /// `[AudioVisual] SelectionFlashDuration` on each local selection.
+    #[cfg(feature = "phobos")]
+    pub(crate) show_flash_on_selecting: bool,
+    /// Phobos `uimd.ini [Sidebar] CenterPauseMenuBackground` (default no),
+    /// applied to the active-game shell's background rectangle.
+    #[cfg(feature = "phobos")]
+    pub(crate) center_pause_menu_background: bool,
     /// Phobos placement preview SHP cache for the current placing type.
     #[cfg(feature = "phobos")]
     pub(crate) placement_preview_art:
         std::cell::RefCell<super::placement_preview::PlacementPreviewArt>,
+    /// Phobos left superweapon sidebar: `uimd.ini` settings, toggle state,
+    /// filtered order and computed geometry.
+    #[cfg(feature = "phobos")]
+    pub(crate) sw_sidebar: super::sw_sidebar::SwSidebarState,
+    /// Loaded `[SIDE] SuperWeaponSidebar.*PCX` atlas for the current match.
+    #[cfg(feature = "phobos")]
+    pub(crate) sw_sidebar_art: Option<crate::render::sw_sidebar_art::SwSidebarArt>,
     /// PBEACON/RDRBEACN in each beacon row's House Convert, loaded with the
     /// world (`Init_BeaconArt 0x004309D0`).
     pub(crate) beacon_art: Option<crate::render::beacon_art::BeaconArt>,

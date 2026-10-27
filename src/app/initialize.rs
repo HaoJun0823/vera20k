@@ -919,7 +919,19 @@ impl App {
                     #[cfg(feature = "phobos")]
                     show_placement_preview: phobos_client.show_placement_preview,
                     #[cfg(feature = "phobos")]
+                    show_flash_on_selecting: phobos_client.show_flash_on_selecting,
+                    #[cfg(feature = "phobos")]
+                    center_pause_menu_background: false,
+                    #[cfg(feature = "phobos")]
                     placement_preview_art: Default::default(),
+                    #[cfg(feature = "phobos")]
+                    sw_sidebar: crate::app::presentation::sw_sidebar::SwSidebarState {
+                        required_significance: phobos_client
+                            .superweapon_sidebar_required_significance,
+                        ..Default::default()
+                    },
+                    #[cfg(feature = "phobos")]
+                    sw_sidebar_art: None,
                     beacon_art: None,
                     shroud_buffer: None,
                     theater_name: "TEMPERATE".to_string(),
@@ -942,6 +954,7 @@ impl App {
                     bridge_atlas: None,
                     sidebar_cameo_atlas: None,
                     sidebar_chrome: None,
+                    outcome_banner_side_art: None,
                     software_cursor: startup_software_cursor,
                 },
                 match_audio: Default::default(),
@@ -977,6 +990,7 @@ impl App {
                 ),
             },
             frontend: crate::app::frontend::state::FrontendState {
+                shell_dialog_background: None,
                 campaign_speed_control: startup_options.campaign_speed_control,
                 external_launch: false,
                 external_launch_error: None,
@@ -1076,6 +1090,7 @@ impl App {
                 depth_view,
                 shell_surface_presenter,
                 upscale_pass: None,
+                world_zoom_pass: None,
                 sidebar_surface: None,
                 in_game_shell_surface: None,
                 status_screen_fill,

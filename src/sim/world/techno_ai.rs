@@ -1065,6 +1065,20 @@ fn veterancy_promotion_step(
             rules.general.upgrade_veteran_sound.as_deref()
         }
     };
+    // Installed Ares promotion10046AF0: veteran10046BBA..10046BD6,
+    // elite10046C12..10046C2D choose the TypeExt NullableIdx<Voc> before
+    // the same ordered sound/EVA dispatch10046D2F..10046D56. Unset uses
+    // Rules+228/+22C; an explicit -1 suppresses sound, not the EVA.
+    #[cfg(feature = "ares")]
+    let sound = interner
+        .object_type_in_category(entity.type_ref(), entity.category().into(), rules)
+        .and_then(|object| {
+            object.promotion_sound_override(matches!(
+                promotion,
+                crate::sim::combat::veterancy::Promotion::Elite
+            ))
+        })
+        .unwrap_or(sound);
     let sound_id = sound.map(|name| interner.intern(name));
     sound_events.emit(super::SimSoundEvent::UnitPromoted {
         owner,
@@ -1456,6 +1470,10 @@ fn techno_common_steps(
     effects: FrameEffects<'_>,
     turret_rotate_sample: Option<bool>,
 ) -> bool {
+    // Ares TechnoClass_Update1004B348..1004B397 converts for the current
+    // surface before the same visit updates self-attached effects1004B434.
+    #[cfg(feature = "ares")]
+    sim.update_ares_surface_conversion(id, rules, effects);
     // Ares1004B434 updates attachments before1004B528 EMP recovery.
     #[cfg(feature = "ares")]
     sim.update_ares_attach_effects(id, rules);
@@ -5768,3 +5786,11 @@ mod mirage_disguise_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 use super::bridge_test_evidence;
+
+#[cfg(test)]
+#[path = "techno_ai/promotion_sound_tests.rs"]
+mod promotion_sound_tests;
+
+#[cfg(test)]
+#[path = "techno_ai/surface_conversion_tests.rs"]
+mod surface_conversion_tests;
