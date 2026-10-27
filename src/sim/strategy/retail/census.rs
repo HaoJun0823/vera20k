@@ -176,6 +176,20 @@ pub(super) struct Traits {
     /// `DeployFireWeapon=`, slot 1 (the secondary) by default. `None` when the
     /// type has no such pose or the slot is empty.
     pub(super) deploy_slot: Option<usize>,
+    /// `C4=yes`: it takes a building apart by walking into it
+    /// ([`ObjectType::c4`]). The engineer's cousin, and not the same job.
+    pub(super) c4: bool,
+    /// `Explodes=yes`: it takes itself apart, and `DeathWeapon=` goes off with
+    /// it (`[TERROR]`, `[DTRUCK]`). The tag that says "spend this one and it
+    /// spends itself", as opposed to `c4`'s "walk it in and keep it".
+    pub(super) explodes: bool,
+    /// `OpenTopped=yes`: its passengers fire out of it.
+    ///
+    /// With `Passengers=` this is the IFV, the battle fortress and every mod's
+    /// take on them, which is why the tag is the key and not the name. What an
+    /// open-topped carrier *becomes* is its passenger's `IFVMode=`, and that is
+    /// runtime state — the tag says the body can do it, not what it is doing.
+    pub(super) open_topped: bool,
 }
 
 /// Seats at which a type is a transport rather than a fighting unit, in the
@@ -244,6 +258,9 @@ impl Traits {
             captures,
             carries,
             deploy_slot,
+            c4: ty.c4,
+            explodes: ty.explodes,
+            open_topped: ty.open_topped,
         }
     }
 }
