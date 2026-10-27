@@ -139,6 +139,11 @@ pub struct RetailBrain {
     /// saves for what it chose instead of spending the savings on whichever
     /// entry a flickering gate answers next.
     pub(super) plan_hold: Option<(usize, u64)>,
+    /// The credits the yard is still short of for the structure it has settled
+    /// on. Held back from the factories: a house that decides on a lab and then
+    /// spends the lab's money on one more soldier every frame is a house that
+    /// never reaches the lab.
+    pub(super) yard_reserve: i32,
     /// What each type is for, read out of the warheads once and never
     /// changed. Built on the first frame, because the rules a scenario plays
     /// with are the ones the brain is handed there.
@@ -170,6 +175,7 @@ impl RetailBrain {
             squads: squads::Squads::new(),
             site_attempts: BTreeMap::new(),
             plan_hold: None,
+            yard_reserve: 0,
             roles: None,
             census: Census::default(),
             super_at: BTreeMap::new(),

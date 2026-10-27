@@ -52,17 +52,18 @@ pub(super) const HARVESTERS_PER_REFINERY: usize = 2;
 /// bay is the dearest structure in the opening and the second one only pays
 /// once the harvesters to fill it exist.
 
-/// How many credit the free wallet has to hold before a structure that only
-/// unlocks better types is worth starting.
-pub(super) const TECH_MIN_CREDITS: i32 = 4_000;
+/// The free wallet the tech stage needs before it answers: the price of the
+/// dearest thing it buys.
+///
+/// `[GATECH] Cost=2000`. A house does not start unlocking a tree it cannot
+/// finish, and every cheaper step of the stage (`[AMRADR] 1000`, the radar)
+/// costs less than this, so one number covers all three.
+pub(super) const TECH_MIN_CREDITS: i32 = 2_000;
 
 /// The free wallet a building on the yard maker's `Prerequisite=` list has to
 /// hold: it buys the ability to rebuild a lost yard, which only pays off once
 /// the base can afford to lose one.
 pub(super) const SUPPORT_MIN_CREDITS: i32 = 4_000;
-
-/// How many fighting units the house fields before it buys a radar.
-pub(super) const ARMY_FOR_TECH: usize = 8;
 
 /// How many war factories the house runs before it is rich, and how many a
 /// rich house runs: the list in [`super::plan`] holds the numbers now, because
@@ -160,13 +161,22 @@ fn harvester_reserve(rules: &RuleSet, obs: &Observation<'_>, census: &Census) ->
     harvester(rules, obs).map_or(0, |(ty, _)| obs.cost_of(rules, ty))
 }
 
-/// Whether the type earns its keep: power, income, or the factory the
-/// harvesters come out of.
+/// Whether the type earns its keep: power, income, the factory the harvesters
+/// come out of, or the tech the rest of the tree hangs off.
+///
+/// The tech entries are here for the same reason the refinery is: the oil
+/// derrick — the one income a captured building pays — has
+/// `[GAOREP] Prerequisite=GATECH,...`, so the lab is income one step removed.
+/// Without them the harvester reserve blocked the whole tree for as long as
+/// the house was short a harvester, which is how a house reached the end of a
+/// match with no lab and no aircraft it could build.
 fn earns_its_keep(rules: &RuleSet, ty: &ObjectType) -> bool {
     [
         &rules.build_power_types,
         &rules.build_refinery_types,
         &rules.build_weapons_types,
+        &rules.build_radar_types,
+        &rules.build_tech_types,
     ]
     .iter()
     .any(|names| names.iter().any(|name| name == &ty.id))
@@ -180,6 +190,10 @@ fn build_next(
     budget: &Budget,
     out: &mut Outbox,
 ) {
+    // Nothing is being saved for until this frame says what it is: a reserve
+    // left over from a decision that has since been paid for would starve the
+    // factories of money nobody is saving.
+    brain.yard_reserve = 0;
     if brain.census.line(ProductionCategory::Building).product.is_some() {
         return;
     }
@@ -216,12 +230,19 @@ fn build_next(
         log::debug!("queued already holds {}", ty.id);
     }
     let price = obs.cost_of(rules, ty);
+    // What the yard has settled on is not the lines' money. A structure the
+    // list has decided to build is paid for as the wallet fills — that is what
+    // deciding means — so the part the house does not have yet is held back
+    // from the factories. Without this the barracks spent the lab's money on
+    // one more soldier every frame, and the tech stage never came.
+    brain.yard_reserve = price.saturating_sub(budget.free).max(0);
     // The budget, not the wallet: what a line has been promised is spent
     // whether or not it has left the wallet yet, and a queue costs the wallet
     // nothing until the build steps.
     if budget.free < price {
         return;
     }
+    brain.yard_reserve = 0;
     // While the harvesters are still short, only what earns or powers waits
     // for nothing else: a radar bought before the second harvester is the
     // money the second harvester needed.
@@ -506,11 +527,13 @@ mod tests {
         census
     }
 
-    /// The opening is income, then the barracks, then one war factory. A house
-    /// that buys the factory first spends its opening wallet on one tank, and
-    /// the infantry line that would have held the base never opens.
+    /// The opening is the plant, then the barracks, then the income, then the
+    /// tech: power is what every other structure's `Prerequisite=` asks for, the
+    /// barracks is the cheaper production building and the one the engineer and
+    /// the dog come out of, and the tree is unlocked before a second line or a
+    /// second tower is bought.
     #[test]
-    fn the_opening_is_a_refinery_then_a_barracks_then_one_war_factory() {
+    fn the_opening_is_power_then_barracks_then_income_then_tech() {
         let Some((mut sim, rules)) = arena(0xA17) else {
             return;
         };
@@ -518,7 +541,22 @@ mod tests {
         sim.spawn_object("GACNST", "Americans", 16, 16, 255, &rules)
             .expect("an Allied Construction Yard");
         // `GAREFN` and `GAPILE` both want `Prerequisite=POWER,GACNST`
-        // (ini/rulesmd.ini:11731, :11692), so the plant is part of the opening.
+        // (ini/rulesmd.ini:11731, :11692), so the plant is the first thing the
+        // list can answer at all.
+        let ty = {
+            let census = ledger(&rules, &sim, owner);
+            let obs = Observation::new(&sim, owner);
+            let budget = plan::budget(&rules, &obs, &census, None);
+            plan::answer(&rules, &obs, &census, &budget, None)
+                .expect("a base with nothing but a yard wants something")
+                .ty
+        };
+        assert!(
+            rules.build_power_types.iter().any(|name| name == &ty.id),
+            "the first structure is the plant: {}",
+            ty.id
+        );
+
         sim.spawn_object("GAPOWR", "Americans", 20, 16, 255, &rules)
             .expect("a power plant");
         sim.houses
@@ -531,16 +569,16 @@ mod tests {
         let obs = Observation::new(&sim, owner);
         let budget = plan::budget(&rules, &obs, &census, None);
         let ty = plan::answer(&rules, &obs, &census, &budget, None)
-            .expect("a base with nothing but a yard wants something")
+            .expect("a base with power wants the next thing")
             .ty;
         assert!(
-            rules.build_refinery_types.iter().any(|name| name == &ty.id),
-            "the first structure is the income: {}",
+            rules.build_barracks_types.iter().any(|name| name == &ty.id),
+            "the first production building is the barracks: {}",
             ty.id
         );
 
-        // A refinery on the map: the next structure is the barracks, not the
-        // war factory.
+        // A refinery on the map: still the barracks, because the production
+        // building comes before the second bay.
         sim.spawn_object("GAREFN", "Americans", 20, 20, 255, &rules)
             .expect("a refinery");
         let census = ledger(&rules, &sim, owner);
@@ -554,6 +592,67 @@ mod tests {
             "the barracks comes before the war factory: {}",
             ty.id
         );
+
+        // With the opening in place and money in the wallet, the list answers
+        // the tech chain and not a tower: the war factory first, because the
+        // lab's own `Prerequisite=GAWEAP,RADAR,GACNST`, and then the aircraft
+        // plant that stands in for the radar.
+        sim.spawn_object("GAPILE", "Americans", 24, 24, 255, &rules)
+            .expect("a barracks");
+        let census = ledger(&rules, &sim, owner);
+        let obs = Observation::new(&sim, owner);
+        let budget = plan::budget(&rules, &obs, &census, None);
+        let chosen = plan::answer(&rules, &obs, &census, &budget, None)
+            .expect("an open tree is what the house buys next");
+        assert_eq!(
+            chosen.item,
+            plan::Item::Weapons,
+            "the war factory is the lab's own prerequisite"
+        );
+        assert!(
+            !base_defenses(&rules, &obs)
+                .iter()
+                .any(|name| name == &chosen.ty.id),
+            "not a tower: {}",
+            chosen.ty.id
+        );
+
+        sim.spawn_object("GAWEAP", "Americans", 28, 24, 255, &rules)
+            .expect("a war factory");
+        let census = ledger(&rules, &sim, owner);
+        let obs = Observation::new(&sim, owner);
+        let budget = plan::budget(&rules, &obs, &census, None);
+        let chosen = plan::answer(&rules, &obs, &census, &budget, None)
+            .expect("the aircraft plant is what the tree asks for next");
+        assert_eq!(chosen.item, plan::Item::Aircraft, "the tech stage");
+        assert_eq!(chosen.ty.id, "AMRADR", "the Americans' aircraft plant");
+    }
+
+    /// The tech buildings are not what the harvester reserve is holding money
+    /// back for.
+    ///
+    /// `earns_its_keep` knew only about power, income and the war factory, so a
+    /// house short of a harvester refused to buy the lab — and a house that
+    /// never buys the lab never gets the rest of the tree, which is how a match
+    /// ended with no lab and no aircraft either. The lab is income one step
+    /// removed: `[GAOREP] Prerequisite=GATECH,PROC,GACNST` is the oil derrick.
+    #[test]
+    fn the_tech_buildings_are_not_what_the_harvester_reserve_holds_money_for() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        let obs = Observation::new(&sim, owner);
+        for name in ["GATECH", "AMRADR"] {
+            let ty = obs
+                .type_id(name)
+                .and_then(|type_id| obs.object_type(&rules, type_id))
+                .unwrap_or_else(|| panic!("{name} is in the rules"));
+            assert!(
+                earns_its_keep(&rules, ty),
+                "{name} is not paid for out of the harvester reserve"
+            );
+        }
     }
 
     /// The aircraft plant comes from the rules, not from a name list: the only

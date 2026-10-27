@@ -77,6 +77,10 @@ pub(super) fn fill_lines(
     budget: &Budget,
     out: &mut Outbox,
 ) {
+    // What the yard is saving for is not the lines' money: it decided on a
+    // structure, and paying for it is what "decided" means. Taken here, once,
+    // so no line below can spend it.
+    let budget = budget.reserving(brain.yard_reserve);
     // The infantry floor decides who gets the wallet first when it is thin: a
     // house below its share of infantry spends on the barracks before it
     // spends on the war factory.
@@ -116,8 +120,8 @@ pub(super) fn fill_lines(
         if brain.census.line(category).busy() {
             continue;
         }
-        let wanted = product_for(brain, rules, obs, budget, category, infantry_short);
-        queue_unit(rules, obs, budget, out, wanted);
+        let wanted = product_for(brain, rules, obs, &budget, category, infantry_short);
+        queue_unit(rules, obs, &budget, out, wanted);
     }
 }
 

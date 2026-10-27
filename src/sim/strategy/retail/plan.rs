@@ -126,6 +126,22 @@ pub(super) struct Budget {
     pub(super) income: Option<i32>,
 }
 
+impl Budget {
+    /// The same budget with `credits` held back.
+    ///
+    /// The yard reserves what it is saving for ([`super::build`]), and a
+    /// factory that spends it is a house that never finishes the structure it
+    /// decided on. One owner for "how much may the lines spend", so a caller
+    /// cannot reserve money one place and spend it in another.
+    pub(super) fn reserving(&self, credits: i32) -> Self {
+        Self {
+            committed: self.committed,
+            free: self.free.saturating_sub(credits.max(0)),
+            income: self.income,
+        }
+    }
+}
+
 /// Read the budget: the ledger's own commitment, and the wallet beside it.
 pub(super) fn budget(
     rules: &RuleSet,
@@ -200,35 +216,65 @@ pub(super) struct Step {
 /// ([`power_short`]), the way a player does it, because a plant is not a step
 /// towards anything — it is what lets the other steps run.
 pub(super) const STEPS: &[Step] = &[
+    // Power first, as a step rather than only as the splice below. The retail
+    // prerequisites say the same thing: `[GAPOWR]` needs nothing but the yard,
+    // and every structure after it has `POWER` in its list — `[GAREFN]` most
+    // explicitly. Naming it is also what makes the opening one plant: a plant
+    // that is only spliced in when something else would brown the base is a
+    // plant the base buys twice.
+    Step {
+        item: Item::Power,
+        want: 1,
+        gate: Gate::Always,
+    },
+    // The first production building, before the income: it is the cheaper of
+    // the two, and it is what an engineer come out of — a captured oil derrick
+    // is the one income that costs no harvester — and what a dog comes out of.
+    Step {
+        item: Item::Barracks,
+        want: 1,
+        gate: Gate::Always,
+    },
     // Income. The first bay is what an opening is made of.
     Step {
         item: Item::Refinery,
         want: 1,
         gate: Gate::Always,
     },
-    // The second waits for the harvesters that fill it: past this the ore
-    // within reach of the base is the limit, not the bays.
-    Step {
-        item: Item::Refinery,
-        want: 2,
-        gate: Gate::HarvestersServed,
-    },
-    // The barracks before the war factory: it is the cheaper structure and
-    // infantry is the cheapest army a house can hold ground with.
-    Step {
-        item: Item::Barracks,
-        want: 1,
-        gate: Gate::Always,
-    },
-    // One war factory: the harvesters, the yard maker and the army all come
-    // out of it.
+    // The war factory is part of the tech chain, not a throughput luxury: the
+    // lab's own `Prerequisite=GAWEAP,RADAR,GACNST`, and the harvester the
+    // second bay needs comes out of it.
     Step {
         item: Item::Weapons,
         want: 1,
         gate: Gate::Always,
     },
-    // Something to hold the base with, before anything that only makes it
-    // grow: a radar is worth less than a base that survives the first raid.
+    // Then tech, as fast as the wallet allows: the plant an aircraft line
+    // needs (which is also the Americans' radar — `[AMRADR]
+    // Factory=AircraftType,Radar=yes`), the radar, and the lab the rest of the
+    // tree hangs off (`[GAOREP] Prerequisite=GATECH,...`).
+    //
+    // Ahead of the defenses and of every second line, because the list answers
+    // with the first step that is short and open: with a tower ahead of them
+    // the house bought towers out of the money the lab needed, and the tech
+    // stage never came.
+    Step {
+        item: Item::Aircraft,
+        want: 1,
+        gate: Gate::Tech,
+    },
+    Step {
+        item: Item::Radar,
+        want: 1,
+        gate: Gate::Tech,
+    },
+    Step {
+        item: Item::Tech,
+        want: 1,
+        gate: Gate::Tech,
+    },
+    // Ground to stand on, once the tree is open: before that the same money
+    // unlocks the rest of the tree, which is worth more than a second tower.
     Step {
         item: Item::Defense,
         want: 2,
@@ -246,27 +292,12 @@ pub(super) const STEPS: &[Step] = &[
         want: 2,
         gate: Gate::Surplus,
     },
-    // Tech: the plant an aircraft line needs, then the radar, then the lab.
-    //
-    // Ahead of the support building, because the list answers with the first
-    // step that is short and open: both gates open on the same wallet, so with
-    // the support building first the house spent its surplus on a repair depot
-    // every time and never got as far as the plant its aircraft need — the tech
-    // stage that never came.
+    // The second and third bays wait for the harvesters that fill them: past
+    // this the ore within reach of the base is the limit, not the bays.
     Step {
-        item: Item::Aircraft,
-        want: 1,
-        gate: Gate::Tech,
-    },
-    Step {
-        item: Item::Radar,
-        want: 1,
-        gate: Gate::Tech,
-    },
-    Step {
-        item: Item::Tech,
-        want: 1,
-        gate: Gate::Tech,
+        item: Item::Refinery,
+        want: 3,
+        gate: Gate::HarvestersServed,
     },
     // The way back from a lost yard, bought while the yard still stands: last,
     // because it is insurance against a loss the house has not had.
@@ -361,16 +392,16 @@ pub(super) fn power_short(rules: &RuleSet, obs: &Observation<'_>, census: &Censu
 /// for.
 pub(super) fn planned_output(rules: &RuleSet, obs: &Observation<'_>, census: &Census) -> i32 {
     let mut output = obs.power_output();
+    // The lines' own fields, and only those: `census.ready` is the same two
+    // objects (`Observation::ready_buildings` reads the same `complete_object`
+    // the Building and Defense lines report), so counting both added a plant
+    // that is finished and waiting for a cell twice — once as +400 for a
+    // +200 plant.
     for line in &census.lines {
         for type_id in [line.product, line.ready].into_iter().flatten() {
             if let Some(ty) = obs.object_type(rules, type_id) {
                 output = output.wrapping_add(ty.power.max(0));
             }
-        }
-    }
-    for type_id in &census.ready {
-        if let Some(ty) = obs.object_type(rules, *type_id) {
-            output = output.wrapping_add(ty.power.max(0));
         }
     }
     output
@@ -396,18 +427,19 @@ fn open(
                     .is_some_and(|rate| rate >= build::SURPLUS_INCOME_PER_MINUTE)
         }
         Gate::CanReplace => build::can_replace_units(rules, obs, census),
-        Gate::Tech => {
-            budget.free >= build::TECH_MIN_CREDITS && census.fighters >= build::ARMY_FOR_TECH
-        }
+        // The wallet, and only the wallet: a house that waits to have an army
+        // before it unlocks the tree is a house that pays for the whole army
+        // with the opening's tech level. `build_next` already refuses a
+        // structure the wallet cannot cover, and the threshold here is the
+        // dearest thing the stage buys ([`build::TECH_MIN_CREDITS`]).
+        Gate::Tech => budget.free >= build::TECH_MIN_CREDITS,
     }
 }
 
 /// How many of `item` the house has.
 fn owned(rules: &RuleSet, obs: &Observation<'_>, census: &Census, item: Item) -> usize {
     match item {
-        // Never asked of the list: power is spliced in by the caller and is
-        // short whenever the base says so, not after a count.
-        Item::Power => 0,
+        Item::Power => build::count_in(obs, rules, census, &rules.build_power_types),
         Item::Refinery => census.refineries,
         Item::Barracks => build::count_in(obs, rules, census, &rules.build_barracks_types),
         Item::Weapons => build::count_in(obs, rules, census, &rules.build_weapons_types),
@@ -433,8 +465,7 @@ fn pick<'r>(
     item: Item,
 ) -> Option<(&'r ObjectType, InternedId)> {
     match item {
-        // Never reached: [`answer`] only picks entries of [`STEPS`].
-        Item::Power => None,
+        Item::Power => build::first_buildable(rules, obs, &rules.build_power_types),
         Item::Refinery => build::first_buildable(rules, obs, &rules.build_refinery_types),
         Item::Barracks => build::first_buildable(rules, obs, &rules.build_barracks_types),
         Item::Weapons => build::first_buildable(rules, obs, &rules.build_weapons_types),
