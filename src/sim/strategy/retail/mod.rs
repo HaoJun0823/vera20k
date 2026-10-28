@@ -103,6 +103,7 @@ pub(super) mod orders;
 pub(super) mod plan;
 pub(super) mod squads;
 pub(super) mod tracked;
+pub(super) mod walls;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -162,6 +163,10 @@ pub struct RetailBrain {
     /// saves for what it chose instead of spending the savings on whichever
     /// entry a flickering gate answers next.
     pub(super) plan_hold: Option<(usize, u64)>,
+    /// The house's `Wall=yes` BuildingType, resolved once from the rules and
+    /// the house's own buildability (`[GAWALL] Prerequisite=GAPILE`). Cached
+    /// because the rules hold thousands of types and the answer cannot change.
+    pub(super) wall_type: Option<InternedId>,
     /// The credits the yard is still short of for the structure it has settled
     /// on. Held back from the factories: a house that decides on a lab and then
     /// spends the lab's money on one more soldier every frame is a house that
@@ -207,6 +212,7 @@ impl RetailBrain {
             squads: squads::Squads::new(),
             site_attempts: BTreeMap::new(),
             plan_hold: None,
+            wall_type: None,
             yard_reserve: 0,
             repairing: BTreeMap::new(),
             repaired: BTreeSet::new(),

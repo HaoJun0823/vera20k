@@ -130,8 +130,18 @@ fn place_finished(
             continue;
         }
         let attempt = brain.site_attempts.get(&type_id).copied().unwrap_or(0);
-        let Some(cell) = Placement::new(obs, rules).cell_for(type_id, attempt) else {
-            log::debug!(
+        // A wall segment goes where the wall plan says, not where the outward
+        // sweep would put it: the cell is the whole decision, and a sweep that
+        // answered it would fill the first gap it found instead of closing the
+        // arc that faces the enemy.
+        let planned = obs
+            .object_type(rules, type_id)
+            .filter(|ty| ty.wall)
+            .and_then(|_| super::walls::next_segment(brain, rules, obs))
+            .map(|segment| segment.cell);
+        let Some(cell) = planned.or_else(|| Placement::new(obs, rules).cell_for(type_id, attempt))
+        else {
+            log::info!(
                 "auto play: no cell for {} (attempt {attempt})",
                 obs.object_type(rules, type_id).map_or("?", |ty| ty.id.as_str())
             );
@@ -195,6 +205,13 @@ fn build_next(
     // left over from a decision that has since been paid for would starve the
     // factories of money nobody is saving.
     brain.yard_reserve = 0;
+    // A wall segment first, and before the yard's own guard: it is the Defense
+    // line's work, so it delays no structure and the plan is not held back by
+    // it. The gates inside are the wallet's (a wall is worth a production slot
+    // only while the house has money), the line's own, and the base's size.
+    if super::walls::queue_segment(brain, rules, obs, budget.free, out) {
+        return;
+    }
     // A structure the yard has finished and not yet put down is *owned*: it is
     // waiting for a cell, not for a buyer. Starting another because the count
     // on the map has not caught up is how an opening ended with two power

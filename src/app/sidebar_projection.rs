@@ -54,6 +54,14 @@ pub(crate) struct SidebarProjectionState {
     /// of each entry's retained request. Begin clears this before FindFactory,
     /// including refusal. These are presentation gates, never Factory state.
     prediction_categories: HashSet<ProductionCategory>,
+    /// Auto play's build options the House pass has not drawn yet.
+    ///
+    /// An agent answers a type, not a button: the pass that inserts the cameo
+    /// (`AddCameo`) runs in the frame its order executes, one projection pass
+    /// after the order. The option waits here until that pass has run, and is
+    /// then answered through the press path, so an agent's build draws the
+    /// same clock as a player's.
+    auto_play_orders: Vec<InternedId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +105,7 @@ impl SidebarProjectionState {
             self.pending_cameo_additions.clear();
             self.factory_links.clear();
             self.prediction_categories.clear();
+            self.auto_play_orders.clear();
         }
         self.current_view = view;
     }
@@ -112,6 +121,7 @@ impl SidebarProjectionState {
         self.pending_cameo_additions.clear();
         self.factory_links.clear();
         self.prediction_categories.clear();
+        self.auto_play_orders.clear();
     }
 
     /// AddCameo 6A6406 speaks NewConstructionOptions for an accepted
@@ -666,15 +676,23 @@ impl SidebarProjectionState {
         self.record_click(sim, rules, owner, type_id, click, true);
     }
 
-    /// Auto play's PRODUCE, written the way the press above writes it.
+    /// Auto play's PRODUCE, through the press above.
     ///
     /// The agent answers a build option, not a drawn button: the House pass that
     /// inserts the cameo (`AddCameo`) runs in the frame its order executes, one
-    /// projection pass after this write, so the request is admitted without
-    /// retention (see `CameoStrips::start_request_before_retention`). Everything
-    /// else is the press's: the House prediction-category gate, the money and
-    /// builder gates, and the predicted clock that carries the cameo until the
-    /// Factory link arrives.
+    /// projection pass after this write. So the option is answered by the press
+    /// when the button already stands, and otherwise waits for
+    /// [`Self::apply_auto_play_orders`] to answer it once it does.
+    ///
+    /// Writing the request before retention was the alternative, and it is what
+    /// drew a wrong countdown: with no Factory link the strip reads
+    /// `pending_production_smoothed_stage(0, predicted)`, which is half the
+    /// real progress, and nothing clears it when the build ends. An agent's
+    /// hand is not a different hand from a player's — only earlier.
+    ///
+    /// The agent asks again on every frame the plan wants the item, so a
+    /// request that already stands is the answer and is left alone: restarting
+    /// it is a clock that never finishes.
     pub(crate) fn record_auto_play_order(
         &mut self,
         sim: &crate::sim::world::Simulation,
@@ -683,6 +701,9 @@ impl SidebarProjectionState {
         type_id: InternedId,
     ) {
         use crate::app::input::sidebar_eva::{CameoClick, CameoOrder};
+        if self.cameo_request(type_id).is_some() {
+            return;
+        }
         self.record_click(
             sim,
             rules,
@@ -692,8 +713,46 @@ impl SidebarProjectionState {
                 order: Some(CameoOrder::Produce),
                 ..CameoClick::default()
             },
-            false,
+            true,
         );
+        if self.cameo_request(type_id).is_none() && !self.auto_play_orders.contains(&type_id) {
+            self.auto_play_orders.push(type_id);
+        }
+    }
+
+    /// Answer the options auto play asked for before their buttons were drawn,
+    /// now that the House pass has run. Called once per frame, after the strip
+    /// and the Factory links are reconciled.
+    pub(crate) fn apply_auto_play_orders(
+        &mut self,
+        sim: &crate::sim::world::Simulation,
+        rules: &crate::rules::ruleset::RuleSet,
+        owner: InternedId,
+    ) {
+        use crate::app::input::sidebar_eva::{CameoClick, CameoOrder};
+        let pending = std::mem::take(&mut self.auto_play_orders);
+        for type_id in pending {
+            if self.cameo_request(type_id).is_some() {
+                continue;
+            }
+            self.record_click(
+                sim,
+                rules,
+                owner,
+                type_id,
+                CameoClick {
+                    order: Some(CameoOrder::Produce),
+                    ..CameoClick::default()
+                },
+                true,
+            );
+            // Tried once, and dropped whether or not it landed: the agent asks
+            // again on every frame it still wants the item, so keeping the
+            // option around only lets it be answered long after its build is
+            // over. A request written then has no Factory behind it, draws half
+            // the real progress, and nothing ever clears it — the ghost clock
+            // that sits at 55% and never refreshes.
+        }
     }
 
     fn record_click(

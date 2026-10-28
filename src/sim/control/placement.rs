@@ -21,6 +21,7 @@ use std::collections::BTreeSet;
 use crate::rules::object_type::{ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
 use crate::sim::ai_base_site::{SiteKey, find_base_building_site};
+use crate::sim::behavior::view::cell_distance;
 use crate::sim::control::observation::Observation;
 use crate::sim::intern::InternedId;
 
@@ -42,6 +43,48 @@ const PLACEMENT_WINDOW_RINGS: i32 = 2;
 /// How many admitted cells the sweep counts before starting over: a cell the
 /// gate admits but the receiver refuses must not be asked for forever.
 pub const PLACEMENT_ATTEMPTS: u32 = 64;
+
+/// The sectors the base grows into around its first anchor: eight, so a house
+/// that has built east does not keep building east.
+const SECTORS: usize = 8;
+
+/// Which of the eight sectors around `origin` a cell lies in: east first, then
+/// clockwise. A sector is cardinal when one offset is at least twice the other,
+/// so a broad wedge counts as the side it points at and only the rest is a
+/// diagonal.
+///
+/// Integer throughout: a decision that picks where a building goes has no
+/// float in it.
+fn sector_of(origin: Option<(u16, u16)>, cell: (u16, u16)) -> usize {
+    let Some(origin) = origin else {
+        return 0;
+    };
+    let (dx, dy) = (
+        i32::from(cell.0) - i32::from(origin.0),
+        i32::from(cell.1) - i32::from(origin.1),
+    );
+    let (ax, ay) = (dx.abs(), dy.abs());
+    match (dx >= 0, dy >= 0, ax >= 2 * ay, ay >= 2 * ax) {
+        (true, _, true, _) => 0,  // east
+        (false, _, true, _) => 4, // west
+        (_, false, _, true) => 2, // north
+        (_, true, _, true) => 6,  // south
+        (true, false, ..) => 1,   // north-east
+        (false, false, ..) => 3,  // north-west
+        (false, true, ..) => 5,   // south-west
+        (true, true, ..) => 7,    // south-east
+    }
+}
+
+/// How many of the house's buildings already stand in each sector around
+/// `origin`: the crowding the sweep spreads away from.
+fn sector_counts(origin: Option<(u16, u16)>, anchors: &[(u16, u16)]) -> [i32; SECTORS] {
+    let mut counts = [0_i32; SECTORS];
+    for cell in anchors {
+        counts[sector_of(origin, *cell)] += 1;
+    }
+    counts
+}
 
 /// One house's placement answers, for one frame.
 pub struct Placement<'a, 'b> {
@@ -109,13 +152,20 @@ impl<'a, 'b> Placement<'a, 'b> {
     /// choice, like the sweep itself: a human places by eye, and an eye keeps a
     /// gap without crossing the map for it.
     ///
+    /// A building retail marks `ProtectWithWall=yes` is then kept on the side
+    /// no attack comes from ([`Self::keep_safe_side`]).
+    ///
     /// Deterministic: the anchor order, the ring order and the sort keys are
     /// all fixed, and no collection with a random iteration order is involved.
     fn sweep(&self, ty: &ObjectType, attempt: u32) -> Option<(u16, u16)> {
         let blocked = self.occupied_cells();
+        let anchors = self.anchors();
         let mut seen: BTreeSet<(u16, u16)> = BTreeSet::new();
-        let mut admitted: Vec<(i32, i32, u16, u16)> = Vec::new();
-        for anchor in self.anchors() {
+        let mut admitted: Vec<(i32, i32, i32, u16, u16)> = Vec::new();
+        // How much of the base already stands in each sector around the first
+        // anchor: the yard, which is what everything else is built out from.
+        let crowded = sector_counts(anchors.first().copied(), &anchors);
+        for anchor in &anchors {
             for ring in 1..=PLACEMENT_SCAN_RADIUS {
                 for dy in -ring..=ring {
                     for dx in -ring..=ring {
@@ -133,7 +183,9 @@ impl<'a, 'b> Placement<'a, 'b> {
                         {
                             continue;
                         }
+                        let sector = sector_of(anchors.first().copied(), (rx, ry));
                         admitted.push((
+                            crowded[sector],
                             self.openness(rx, ry, &blocked),
                             ring,
                             ry,
@@ -152,15 +204,92 @@ impl<'a, 'b> Placement<'a, 'b> {
             return None;
         };
         let window = nearest + PLACEMENT_WINDOW_RINGS;
-        admitted.retain(|(_, ring, ..)| *ring <= window);
+        admitted.retain(|(_, _, ring, ..)| *ring <= window);
+        if ty.protect_with_wall {
+            self.keep_safe_side(&mut admitted, &anchors);
+        }
+        // Nearest the yard first, then the emptiest sector at that distance,
+        // then the roomiest cell in it. The distance is what keeps the base a
+        // base: a sweep that asks for the emptiest sector wherever it lies
+        // walks the base off the map, one uncrowded ring at a time. The sector
+        // is what stops it stacking on the side it started on, and the
+        // openness is what keeps a lane between what it has already built.
+        let yard = anchors.first().copied();
+        let distance = |candidate: &(i32, i32, i32, u16, u16)| {
+            yard.map_or(0, |yard| cell_distance((candidate.4, candidate.3), yard))
+        };
         admitted.sort_by(|a, b| {
-            b.0.cmp(&a.0)
-                .then(a.1.cmp(&b.1))
+            distance(a)
+                .cmp(&distance(b))
+                .then(a.0.cmp(&b.0))
+                .then(b.1.cmp(&a.1))
                 .then(a.2.cmp(&b.2))
                 .then(a.3.cmp(&b.3))
+                .then(a.4.cmp(&b.4))
         });
         let index = usize::try_from(attempt).ok()?;
-        admitted.get(index).map(|(_, _, y, x)| (*x, *y))
+        admitted.get(index).map(|(_, _, _, y, x)| (*x, *y))
+    }
+
+    /// Keep the cells on the side no attack comes from, when there are any.
+    ///
+    /// `ProtectWithWall=yes` is retail's own list of what a house cannot afford
+    /// to lose — the Construction Yard, the tech lab, the superweapons — the
+    /// same list [`crate::sim::strategy::retail::walls`] closes a wall around.
+    /// Putting one of those on the enemy's side of the base is putting the tree
+    /// it unlocks in front of the first tank that gets through; the sweep's
+    /// openness ranking alone does not care which way the base faces.
+    ///
+    /// The direction is the one measured from the base's own buildings to the
+    /// nearest hostile object, so "the back" follows the same enemy the walls
+    /// face. A house that has seen no enemy has no front, and keeps every cell.
+    fn keep_safe_side(&self, admitted: &mut Vec<(i32, i32, i32, u16, u16)>, anchors: &[(u16, u16)]) {
+        let Some((centre, direction)) = self.enemy_side(anchors) else {
+            return;
+        };
+        let safe: Vec<(i32, i32, i32, u16, u16)> = admitted
+            .iter()
+            .copied()
+            .filter(|(_, _, _, y, x)| {
+                let dx = i32::from(*x) - i32::from(centre.0);
+                let dy = i32::from(*y) - i32::from(centre.1);
+                dx * direction.0 + dy * direction.1 <= 0
+            })
+            .collect();
+        if !safe.is_empty() {
+            *admitted = safe;
+        }
+    }
+
+    /// The centre of the house's own buildings and the direction, in cells, its
+    /// nearest hostile object lies in. `None` with nothing to anchor on and
+    /// nothing coming.
+    fn enemy_side(&self, anchors: &[(u16, u16)]) -> Option<((u16, u16), (i32, i32))> {
+        let (mut sx, mut sy, mut count) = (0_i64, 0_i64, 0_i64);
+        for cell in anchors {
+            sx += i64::from(cell.0);
+            sy += i64::from(cell.1);
+            count += 1;
+        }
+        if count == 0 {
+            return None;
+        }
+        let centre = (
+            u16::try_from(sx / count).ok()?,
+            u16::try_from(sy / count).ok()?,
+        );
+        let enemy = self
+            .obs
+            .enemy_entities()
+            .map(|entity| entity.cell)
+            .min_by_key(|cell| cell_distance(*cell, centre))?;
+        Some((
+            centre,
+            (
+                i32::from(enemy.0) - i32::from(centre.0),
+                i32::from(enemy.1) - i32::from(centre.1),
+            ),
+        ))
     }
 
     /// How much open ground surrounds a cell: walkable cells within

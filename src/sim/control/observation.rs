@@ -944,6 +944,25 @@ impl<'a> Observation<'a> {
             .path_grid()
             .is_some_and(|grid| grid.is_walkable(rx, ry))
     }
+
+    /// The owner of the wall standing on a cell, if one stands there.
+    ///
+    /// A wall is not an object the house owns. `[GAWALL] Wall=yes` leaves its
+    /// overlay on the cell and uninitializes the transient Building
+    /// (`sim::world::world_spawn::wall_unlimbo`), so [`Self::own_entities`]
+    /// cannot answer "is this cell already walled" — the grid can, and it is
+    /// also where a wall's owner is authoritative.
+    ///
+    /// The grid keeps the last owner of a cell whose wall was removed, for its
+    /// retained neighbour counts, so the owner is only an answer together with
+    /// the overlay: a sold cell reads `None`.
+    pub fn wall_owner_at(&self, rx: u16, ry: u16) -> Option<InternedId> {
+        let cell = self.sim.overlay_grid.as_ref()?.cell(rx, ry);
+        if cell.overlay_id.is_none() {
+            return None;
+        }
+        cell.wall_owner
+    }
 }
 
 /// Integer square root of a non-negative lepton distance.

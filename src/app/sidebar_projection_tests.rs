@@ -1514,7 +1514,8 @@ fn an_agent_order_placed_before_the_button_is_drawn_keeps_the_build_clock() {
     assert!(projection.cameo_request(e1).is_none());
 
     // One frame, in the app's order: the agent's order, the House pass's option,
-    // and the projection's insert at the end of that same frame.
+    // the projection's insert, and the answer to the order at the end of that
+    // same frame — the button is drawn by then, so the press path takes it.
     projection.record_auto_play_order(&sim, &rules, owner, e1);
     projection.apply_lifecycle_output(
         &LifecycleOutput::SidebarConstructionOption { owner, type_id: e1 },
@@ -1522,6 +1523,7 @@ fn an_agent_order_placed_before_the_button_is_drawn_keeps_the_build_clock() {
     );
     projection.apply_lifecycle_output(&LifecycleOutput::SidebarRecalculated { owner }, Some(owner));
     projection.reconcile_cameos(owner, &candidates, 3, &[]);
+    projection.apply_auto_play_orders(&sim, &rules, owner);
 
     let tab = SidebarTab::for_category(crate::sim::production::category_for_object(
         rules.object("E1").unwrap(),
@@ -1538,6 +1540,42 @@ fn an_agent_order_placed_before_the_button_is_drawn_keeps_the_build_clock() {
         "the pending request draws the build clock instead of the queue count"
     );
     assert!(!item.is_ready && !item.is_on_hold);
+}
+
+/// Auto play answers a build option, not a drawn button, so its order can land
+/// before the House pass inserts the cameo. It must wait for that pass and be
+/// answered by the press: writing the request into a strip that has no entry
+/// for it leaves a clock with no Factory behind it, and the strip then reads
+/// `pending_production_smoothed_stage(0, predicted)` — half the real progress,
+/// frozen where it stopped when the build ends.
+#[test]
+fn an_agent_order_without_a_button_waits_for_the_press_path() {
+    let (sim, rules, owner) = agent_clock_world();
+    let e1 = sim.interner().get("E1").unwrap();
+    let options = all_build_options_for_owner(&sim, &rules, "Americans");
+    let candidates = cameo_candidates(&sim, &rules, None, owner, &options, &[], &[]);
+    let mut projection = SidebarProjectionState::default();
+    projection.reconcile_cameos(owner, &[], 3, &[]);
+
+    projection.record_auto_play_order(&sim, &rules, owner, e1);
+    assert!(
+        projection.cameo_request(e1).is_none(),
+        "an order with no button yet writes no clock of its own"
+    );
+
+    // The House pass inserts the button; the projection answers the order.
+    projection.apply_lifecycle_output(
+        &LifecycleOutput::SidebarConstructionOption { owner, type_id: e1 },
+        Some(owner),
+    );
+    projection.apply_lifecycle_output(&LifecycleOutput::SidebarRecalculated { owner }, Some(owner));
+    projection.reconcile_cameos(owner, &candidates, 3, &[]);
+    projection.apply_auto_play_orders(&sim, &rules, owner);
+    assert_eq!(
+        projection.cameo_request(e1),
+        Some(crate::ui::sidebar::cameo_order::CameoRequestState::Started),
+        "the press path wrote the request once the button stood"
+    );
 }
 
 /// The press path keeps the native admission: `Select6AB0C9` searches the

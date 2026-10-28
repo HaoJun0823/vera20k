@@ -252,6 +252,20 @@ pub(crate) fn refresh_sidebar_projection(state: &mut AppState) {
         .match_presentation
         .sidebar_projection
         .reconcile_factory_links(sim, owner);
+    // Auto play's options are answered here, where the buttons and the Factory
+    // links they press against are both current.
+    let rules = &state
+        .match_state
+        .sim_runtime
+        .as_ref()
+        .expect("sidebar runtime")
+        .resources
+        .rules;
+    state
+        .match_state
+        .match_presentation
+        .sidebar_projection
+        .apply_auto_play_orders(sim, rules, owner);
     state
         .match_state
         .match_presentation
