@@ -405,23 +405,38 @@ pub(super) fn power_short(rules: &RuleSet, obs: &Observation<'_>, census: &Censu
     power_deficit(rules, obs, census, 0) > 0
 }
 
-/// Output now, plus the output of every plant that is on a line, finished and
-/// waiting for a cell, or standing unfinished.
+/// The output the base has once everything it is already paying for is built.
 ///
 /// A plant under construction supplies `Power=` scaled by the health it has
-/// built (`sim::power_system`), and a plant that has finished but has not been
-/// placed supplies nothing at all. Both are counted here at what they will
-/// supply, because the question is not "is the base dark this frame" — the
+/// built (`sim::power_system`), a plant that has finished but has not been
+/// placed supplies nothing yet, and one still on the yard's line supplies
+/// nothing either. All three are counted here at what they *will* supply,
+/// because the question is not "is the base dark this frame" — the
 /// simulation's own answer to that is the brownout — but "does the base need
 /// another plant", which is a question about the plant it is already paying
 /// for.
+///
+/// The sum is taken from the buildings themselves rather than from
+/// [`Observation::power_output`], because the running figure is the scaled one:
+/// a plant at a tenth of its health reads as a tenth of its output, which is
+/// exactly the deficit that answered "build a second plant" while the first was
+/// still going up. That was the opening with two plants and one refinery, and
+/// it survived the earlier fixes because the plant was no longer on a line by
+/// the time it was counted.
 pub(super) fn planned_output(rules: &RuleSet, obs: &Observation<'_>, census: &Census) -> i32 {
-    let mut output = obs.power_output();
-    // The lines' own fields, and only those: `census.ready` is the same two
-    // objects (`Observation::ready_buildings` reads the same `complete_object`
-    // the Building and Defense lines report), so counting both added a plant
-    // that is finished and waiting for a cell twice — once as +400 for a
-    // +200 plant.
+    let mut output: i32 = 0;
+    for entity in obs.own_entities() {
+        let Some(ty) = obs.object_type(rules, entity.type_id) else {
+            continue;
+        };
+        if ty.category != crate::rules::object_type::ObjectCategory::Building {
+            continue;
+        }
+        output = output.wrapping_add(ty.power.max(0));
+    }
+    // What the yard holds and has not put down yet: it is on the map as far as
+    // this question is concerned, and on no line, so the loop above cannot see
+    // it.
     for line in &census.lines {
         for type_id in [line.product, line.ready].into_iter().flatten() {
             if let Some(ty) = obs.object_type(rules, type_id) {

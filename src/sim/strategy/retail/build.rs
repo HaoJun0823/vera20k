@@ -278,15 +278,20 @@ fn build_next(
     if !earns_its_keep(rules, ty) && harvester_reserve(rules, obs, &brain.census) > 0 {
         return;
     }
-    log::debug!(
-        "auto play: build {} credits={} power={} fighters={} power_short={} output={} drain={}",
+    // Info, not debug: one line per structure is a handful a match, and it is
+    // the only record of *why* the yard started what it did — the opening's
+    // two-plant mystery was invisible until these numbers were read.
+    log::info!(
+        "auto play: build {} at tick {} credits={} power={} fighters={} power_short={} output={} drain={} planned={}",
         ty.id,
+        obs.tick(),
         obs.credits(),
         obs.power_balance(),
         brain.census.fighters,
         plan::power_deficit(rules, obs, &brain.census, 0),
         obs.power_output(),
-        obs.power_drain()
+        obs.power_drain(),
+        plan::planned_output(rules, obs, &brain.census)
     );
     out.intent(Intent::QueueProduction { type_id });
 }
