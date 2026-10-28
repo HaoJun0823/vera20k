@@ -22,7 +22,7 @@ join, options, roster, readiness and GO, then transfers the same socket pair int
 the running match. For online play, choose Internet → Custom Match, enter a
 username and press OK. Names use 1–24 ASCII letters, digits, underscores or hyphens;
 each active player needs a different name. No password or account creation is
-required. Players enter German Bunker, then create or join a game. A host can
+required. Players then create or join a game. A host can
 select Easy, Normal or Hard AI from an open player slot in Battle or Free For All.
 The HTTPS service supplies match-specific relay credentials before the same loading
 and command handoff. Both paths transfer selected authored maps or generated
@@ -49,14 +49,20 @@ after other players leave. AI players never acquire network identities.
 Online matches with two or more human sources use a lobby-certified fixed clock
 and one immutable relay command stream. All originally admitted clients must agree
 to the initial world before it starts. At each deadline, missing input is empty;
-late commands are assigned a future frame. The sender also waits for that commit.
+a command joins the next unsealed frame. The sender also waits for that commit.
+Each new command batch goes out twice, so one lost uplink datagram does not hold
+it and every later batch for the 100 ms retry.
 Frames use the existing Event codec and simulation queues, with a fresh compression
 cache per self-contained encrypted batch. The relay never receives payload keys.
 
 Clients negotiate server-pushed updates from that same retained history. Healthy
 clients send cumulative receive watermarks instead of continually requesting new
-frames; gaps use the existing replay reader. Older relays fall back to polling,
-and older clients can still pull from an upgraded relay.
+frames; gaps use the existing replay reader. The relay pushes each
+unacknowledged entry once more about 8 ms after the first copy, so one lost
+datagram costs about that delay rather than a repair round trip. Repeats use
+only capacity fresh entries leave, under their own relay budget, so heavy load
+drops repeats before it delays a fresh entry. Older relays fall back to
+polling, and older clients can still pull from an upgraded relay.
 
 When every active player and the relay support synchronized pause, any player
 can use the Pause key or Options' **Pause All Players** / **Resume All Players**
@@ -71,9 +77,10 @@ This feature requires updated clients and relay;
 it is unavailable in a mixed-version room or a direct LAN match.
 
 Pushed clients use a local adaptive playout schedule based on socket receipt
-timestamps. It starts with no added buffer and can reserve at most20ms or one
-frame, whichever is smaller, to absorb jitter. Stable delivery gradually reduces
-the reserve. The relay still owns the fixed clock; local pacing never changes
+timestamps. It starts with no added buffer and can reserve at most 20 ms or one
+frame, whichever is smaller, to absorb jitter. An early receipt moves the
+schedule earlier, so no hold exceeds that reserve. Stable delivery gradually
+reduces the reserve. The relay still owns the fixed clock; local pacing never changes
 commands, simulation order or another player's progress. A stalled or slow client
 catches up through at most eight ordinary simulation transactions or eight
 milliseconds per service wake, then yields to input/rendering. It never skips

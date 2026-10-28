@@ -1925,7 +1925,9 @@ fn finalized_target_pruning_retains_the_empty_token_and_its_house_charge() {
         "the retired target remains registered until actual destruction"
     );
     let frame = sim.session.binary_frame();
-    assert!(sim.commit_frame_tail(&rules, None, 33, sim.session.tick() + 1, Default::default()));
+    let inputs =
+        crate::sim::world::master_frame::FrameInputs::new(&rules, None, 33, Default::default());
+    assert!(sim.commit_frame_tail(inputs, sim.session.tick() + 1));
     assert_eq!(sim.session.binary_frame(), frame.wrapping_add(1));
     assert!(!sim.substrate.entities.contains(3));
     assert!(!sim.planning_has_remaining_nodes(1));

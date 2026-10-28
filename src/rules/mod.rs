@@ -132,6 +132,8 @@ pub mod phobos_pause_menu;
 #[cfg(feature = "phobos")]
 pub mod phobos_placement_preview;
 #[cfg(feature = "phobos")]
+pub mod phobos_power_plant_enhancer;
+#[cfg(feature = "phobos")]
 pub mod phobos_selection_flash;
 #[cfg(feature = "phobos")]
 pub mod phobos_sw_sidebar;
@@ -149,6 +151,7 @@ pub const VERAX_ENABLED: bool = cfg!(feature = "verax");
 pub(crate) mod ares_prerequisites;
 pub(crate) mod ares_armor;
 pub(crate) mod ares_emp;
+pub(crate) mod ares_abilities;
 #[cfg(feature = "ares")]
 pub(crate) mod ares_country_paradrop;
 #[cfg(feature = "ares")]
@@ -158,11 +161,19 @@ pub(crate) mod ares_side_extension;
 pub(crate) mod ares_warhead;
 #[cfg(feature = "ares")]
 pub(crate) mod ares_spotlight;
+#[cfg(feature = "ares")]
+pub(crate) mod ares_driver;
+#[cfg(feature = "ares")]
+pub(crate) mod ares_crew;
+#[cfg(feature = "ares")]
+pub(crate) mod ares_bounty;
 pub mod armor;
 pub mod alpha_image_assets;
 pub mod country_loading;
 #[cfg(test)]
 mod ares_manual_control_tests;
+#[cfg(test)]
+mod ares_type_selection_tests;
 pub mod compatibility;
 pub mod animation_sequence;
 pub mod art_data;
@@ -193,6 +204,7 @@ pub mod gunner_turrets;
 pub mod house_colors;
 pub mod infantry_sequence;
 pub mod ini_parser;
+pub(crate) mod weapon_offsets;
 // The readers are a child of the raw store, so only they see raw value text.
 pub use ini_parser::ini_value;
 pub mod audio_sources;
@@ -226,6 +238,7 @@ pub mod shp_vehicle_sequence;
 pub mod skirmish_colors;
 pub mod smudge_type;
 pub mod sound_ini;
+pub mod theme_ini;
 #[cfg(feature = "ares")]
 pub(crate) mod superweapon_influence;
 pub mod superweapon_targeting;

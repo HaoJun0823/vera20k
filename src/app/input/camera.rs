@@ -1458,12 +1458,10 @@ const ZOOM_SNAP: f32 = 0.002;
 /// Records the world point under the cursor so `animate_zoom` can keep it
 /// pinned at that screen position during the smooth ease.
 ///
-/// **Currently unbound.** Stock YR has no world zoom at all, and the wheel — the
-/// only input that used to reach this — is the sidebar strip scroll in gamemd.
-/// The zoom machinery is kept intact (`animate_zoom` still runs, and every
-/// camera path still divides by `zoom_level`) so a future non-wheel binding or a
-/// spectator/debug view can drive it, but nothing calls this today.
-#[allow(dead_code)]
+/// Only replay playback binds this: its presentation-only input routes the
+/// mouse wheel here (`handler.rs`). Stock YR has no world zoom, and in a live
+/// match the wheel is the sidebar strip scroll, as in gamemd. `animate_zoom`
+/// runs every frame and every camera path divides by `zoom_level`.
 pub(crate) fn apply_zoom(state: &mut AppState, delta_lines: f32) {
     let old_target = state.match_state.input.zoom_target;
     let factor = ZOOM_STEP.powf(delta_lines);

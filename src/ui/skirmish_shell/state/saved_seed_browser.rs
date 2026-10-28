@@ -217,18 +217,12 @@ impl SavedSeedDescriptionEdit {
     }
 
     pub fn description(&self) -> SeedDescription {
-        // Save driver727D60 trims wide units <=0x20 after reading at most79.
-        let start = self
-            .units
-            .iter()
-            .position(|u| *u > 0x20)
-            .unwrap_or(self.units.len());
-        let end = self
-            .units
-            .iter()
-            .rposition(|u| *u > 0x20)
-            .map_or(start, |i| i + 1);
-        SeedDescription::from_units(self.units[start..end].iter().copied())
+        // The save driver trims with wcstrim 727D60 after reading at most 79.
+        SeedDescription::from_units(
+            crate::util::native_string::wcstrim(&self.units)
+                .iter()
+                .copied(),
+        )
     }
 
     pub fn display_text(&self) -> String {
@@ -325,6 +319,25 @@ impl SavedSeedBrowserState<NativeFileName> {
             new_slot_time,
             visible_rows,
         )
+    }
+}
+
+impl<I> SavedSeedBrowserState<I> {
+    /// Raise a message box over the browser. It takes the edit focus and ends
+    /// any held press or scroll repeat; its buttons own input until answered.
+    pub fn show_prompt(&mut self, prompt: SavedSeedPrompt<I>) {
+        self.description_edit.focused = false;
+        self.pressed_control = None;
+        self.scroll_repeat_at = None;
+        self.prompt = Some(prompt);
+    }
+
+    /// Window focus loss: the release that would end the held press, the
+    /// scroll repeat and the double-click pair never arrives.
+    pub fn reset_interaction(&mut self) {
+        self.pressed_control = None;
+        self.scroll_repeat_at = None;
+        self.last_list_press = None;
     }
 }
 

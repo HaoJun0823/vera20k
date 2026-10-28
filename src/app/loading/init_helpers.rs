@@ -29,8 +29,6 @@ use crate::rules::ruleset::RuleSet;
 
 use crate::sim::world::Simulation;
 
-use crate::app::frontend::skirmish::deployable_building_types;
-
 pub(crate) fn build_sidebar_cameo_atlas(
     gpu: &GpuContext,
     batch: &BatchRenderer,
@@ -95,6 +93,17 @@ pub(crate) fn load_sidebar_cameo_palette(asset_manager: &AssetManager) -> Option
     }
     log::warn!("Sidebar cameo palette not found");
     None
+}
+
+/// `RA2_DEBUG_SPAWN_UNITS` owner: the scenario's current House (`A83D4C`), so
+/// every run spawns for the local player. A world without one has no player to
+/// own the spawn, and the spawn is skipped.
+pub(crate) fn debug_spawn_owner(sim: &Simulation) -> Option<String> {
+    let owner = crate::app::match_runtime::state::scenario_local_owner(sim).map(str::to_owned);
+    if owner.is_none() {
+        log::warn!("RA2_DEBUG_SPAWN_UNITS ignored: the scenario has no current House");
+    }
+    owner
 }
 
 /// `RA2_DEBUG_SPAWN_UNITS` stress spawn list: `TYPE` places one, `TYPE:COUNT`
@@ -530,21 +539,14 @@ pub(crate) fn prepare_presentation_manifest(
             Some(sim.interner()),
         )
     });
-    // Pre-load building types that can be spawned at runtime (e.g., ConYards from MCV deploy).
-    let extra_buildings: Vec<&str> = deployable_building_types(rules);
-    let mut anim_remap_keys = sprite_atlas::collect_anim_remap_base_keys(sim, house_colors);
+    // Mid-match growth collects the same coverage; only the scenario-start
+    // crate remaps are load-only.
+    let mut coverage = sprite_atlas::EntityAtlasCoverage::collect(sim, rules, house_colors);
     if let Some(rules) = rules {
-        anim_remap_keys.extend(startup_crate_anim_remap_keys(rules, overlay_registry));
+        coverage
+            .anim_remap_keys
+            .extend(startup_crate_anim_remap_keys(rules, overlay_registry));
     }
-    let cell_drawer_type_ids: HashSet<String> = sim
-        .resolved_terrain()
-        .into_iter()
-        .flat_map(|terrain| terrain.tile_animations())
-        .map(|anim| anim.anim_name.to_ascii_uppercase())
-        .collect();
-    let frozen_keys = rules.map_or_else(HashSet::new, |rules| {
-        sprite_atlas::collect_fogged_sprite_keys(sim, rules, house_colors)
-    });
     let sprite_work = palette.map(|pal| {
         sprite_atlas::prepare_sprite_atlas(
             gpu.device.limits().max_texture_dimension_2d,
@@ -556,10 +558,10 @@ pub(crate) fn prepare_presentation_manifest(
             rules,
             art,
             house_colors,
-            &extra_buildings,
-            &anim_remap_keys,
-            &cell_drawer_type_ids,
-            &frozen_keys,
+            &coverage.extra_buildings,
+            &coverage.anim_remap_keys,
+            &coverage.cell_drawer_type_ids,
+            &coverage.frozen_keys,
             theater_iso_palette,
             None, // initial build — no existing cache
             Some(sim.interner()),

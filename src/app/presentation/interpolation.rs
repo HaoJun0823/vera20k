@@ -1103,6 +1103,7 @@ mod tests {
         let source = PresentedWorld {
             sim: &sim,
             interpolation: &cache,
+            translucent_viewer: None,
         };
         assert_eq!(
             source.screen_position(sim.entities().get(7).unwrap()),

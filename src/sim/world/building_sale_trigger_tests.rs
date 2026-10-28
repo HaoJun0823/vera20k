@@ -115,6 +115,7 @@ fn campaign_scene(map_name: &str, remove_home: bool) -> HeadlessScenario {
         &teams,
         Some(audio.eva()),
         Some(audio.sounds().as_ref()),
+        None,
     );
     let (mut fill_rng, main_rng) = sim.terrain_load_draws();
     let mut fill_draw = |lo, hi| fill_rng.next_range_u32_inclusive(lo, hi);

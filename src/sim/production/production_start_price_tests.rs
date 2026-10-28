@@ -115,7 +115,7 @@ fn create_distinct_plants(runtime: &mut SimRuntime, owner: InternedId) {
     let map = crate::map::map_file::MapFile::from_bytes(text.as_bytes()).unwrap();
     let sim = &mut runtime.simulation;
     sim.session.install_waypoints(&map.waypoints);
-    sim.initialize_trigger_definitions(&map, &Default::default(), None, None);
+    sim.initialize_trigger_definitions(&map, &Default::default(), None, None, None);
     sim.classify_map_triggers(&runtime.resources.rules);
     frame(runtime, owner);
     // Removing the first one-shot Tag compacts the forward live walk. Let the

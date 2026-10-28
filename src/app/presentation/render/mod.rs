@@ -454,7 +454,12 @@ pub(crate) fn render_game(
         state.match_state.input.selection_order_pending,
     );
     let armed_super_weapon = state.armed_super_weapon_type().map(str::to_owned);
-    let cursor_cell = armed_super_weapon.as_ref().map(|_| {
+    // Phobos's enhancer rings (`0x6DBEA3`) draw while a building is placed.
+    #[cfg(feature = "phobos")]
+    let armed_building = state.armed_building_type().map(str::to_owned);
+    #[cfg(not(feature = "phobos"))]
+    let armed_building: Option<String> = None;
+    let cursor_cell = (armed_super_weapon.is_some() || armed_building.is_some()).then(|| {
         crate::app::match_runtime::sim_tick::screen_point_to_world_cell(
             state,
             state.match_state.input.cursor_x,
@@ -466,13 +471,29 @@ pub(crate) fn render_game(
     let rules = sim_runtime
         .map(|runtime| &runtime.resources.rules)
         .or(state.frontend.frontend_rules.as_ref());
+    let show_power_plant_enhancer_range = {
+        #[cfg(feature = "phobos")]
+        {
+            rules.is_some_and(|rules| rules.power_plant_enhancer.show_range)
+                && state
+                    .match_state
+                    .match_presentation
+                    .show_power_plant_enhancer_range
+        }
+        #[cfg(not(feature = "phobos"))]
+        {
+            false
+        }
+    };
     let match_presentation = &mut state.match_state.match_presentation;
     let radials = crate::app::presentation::radial_indicators::build(
         simulation,
         rules,
         &radial_selection,
         armed_super_weapon.as_deref(),
+        armed_building.as_deref(),
         cursor_cell,
+        show_power_plant_enhancer_range,
         &mut match_presentation.superweapon_range_pulse,
         &match_presentation.house_color_map,
         viewport,
@@ -805,6 +826,22 @@ fn upload_to_gpu(
     let (build_text_fill, build_text_text) =
         crate::app::presentation::build_text::build_instances(state);
 
+    #[cfg(feature = "ares")]
+    let bounty_text = {
+        let presentation = &state.match_state.match_presentation;
+        if presentation.chrono_screen.overrides_tactical_draw() {
+            Vec::new()
+        } else {
+            let (width, height) = crate::app::input::camera::tactical_viewport_size(state);
+            presentation.flying_credits.borrow_mut().build_instances(
+                &state.renderer.bit_font,
+                [state.match_state.input.camera_x, state.match_state.input.camera_y],
+                state.match_state.input.zoom_level,
+                [width, height],
+            )
+        }
+    };
+
     let pool: &mut InstanceBufferPool = &mut state.renderer.instance_pool;
 
     // Debug overlays
@@ -858,6 +895,8 @@ fn upload_to_gpu(
     pool.upload(&state.renderer.gpu, "super_timer_text", &super_timer_text);
     pool.upload(&state.renderer.gpu, "build_text_fill", &build_text_fill);
     pool.upload(&state.renderer.gpu, "build_text_text", &build_text_text);
+    #[cfg(feature = "ares")]
+    pool.upload(&state.renderer.gpu, "bounty_text", &bounty_text);
 
     // UI overlays
     for (house, beacons) in ui.beacons.iter().enumerate() {

@@ -149,6 +149,9 @@ pub enum WolTarget {
     MismatchOk,
     /// `0x113` Options: WOL Options `0x2BC` settled, help under Pages.
     OptionsSteady,
+    /// The modern lobby's Options over the test service: `0x2BC` settled
+    /// with Play Music alone, help under it.
+    ModernOptions,
     /// `0x2BC` Play Music unchecked: the preview queues -3, nothing saved.
     OptionsMusicOff,
     /// Pages and Buddies toggled, then Cancel: the lobby again, applied
@@ -477,6 +480,7 @@ impl WolTarget {
                 self,
                 Self::TestServiceLobby
                     | Self::ModernLobby
+                    | Self::ModernOptions
                     | Self::TestServiceCreate
                     | Self::TestServiceJoin
                     | Self::GuestChoices
@@ -658,6 +662,7 @@ pub(crate) const WOL_CHECKPOINTS: &[(&str, WolTarget)] = &[
     ("wol-0x130-scenarios-mismatch", WolTarget::ScenariosMismatch),
     ("wol-0x130-mismatch-ok", WolTarget::MismatchOk),
     ("wol-0x2bc-steady", WolTarget::OptionsSteady),
+    ("wol-modern-options", WolTarget::ModernOptions),
     ("wol-0x2bc-music-off", WolTarget::OptionsMusicOff),
     ("wol-0x2bc-cancel", WolTarget::OptionsCancel),
     ("wol-0x2bc-ok", WolTarget::OptionsOk),
@@ -1574,6 +1579,18 @@ impl WolCapture {
                         ],
                     })),
                 );
+                // The joined channel's user list asks the unranked users'
+                // ladder and high scores (0x007A7110, 0x007A77CB).
+                let listed: Vec<String> = vec!["alpha".into(), NICKNAME.to_ascii_lowercase()];
+                let requests = self.requests(state, frame)?;
+                ensure!(
+                    requests
+                        == [
+                            WolServiceRequest::LadderRecords(listed.clone()),
+                            WolServiceRequest::HighScores(listed),
+                        ],
+                    "the joined channel's users were not looked up: {requests:?}"
+                );
                 self.event(frame, "controlled game join accepted");
                 self.phase = WolPhase::Setup;
             }
@@ -1588,7 +1605,23 @@ impl WolCapture {
                 } else {
                     vec![member(NICKNAME, MEMBER_OPERATOR, "")]
                 };
+                // The created channel's user list (sink 0x007A7110) asks the
+                // ladder and high scores of every unranked user, the host
+                // included (0x007A77CB).
+                let listed: Vec<String> = members
+                    .iter()
+                    .map(|member| member.name.to_ascii_lowercase())
+                    .collect();
                 service_event(state, WolServiceEvent::Created(Ok(members)));
+                let requests = self.requests(state, frame)?;
+                ensure!(
+                    requests
+                        == [
+                            WolServiceRequest::LadderRecords(listed.clone()),
+                            WolServiceRequest::HighScores(listed),
+                        ],
+                    "the created channel's users were not looked up: {requests:?}"
+                );
                 ensure!(
                     state.frontend.shell_exit.is_some(),
                     "the create did not slide 0x113 out"
@@ -1946,7 +1979,10 @@ impl WolCapture {
                 ensure!(
                     lobby.shown
                         && lobby.ui.lobby_rows.len()
-                            == if self.target == WolTarget::ModernLobby {
+                            == if matches!(
+                                self.target,
+                                WolTarget::ModernLobby | WolTarget::ModernOptions
+                            ) {
                                 1
                             } else {
                                 3
@@ -1956,6 +1992,33 @@ impl WolCapture {
                     "the test service did not fill 0x113"
                 );
                 self.event(frame, "0x113 settled from the test service");
+                if lobby.ui.is_modern() {
+                    // The one chat lobby is named nowhere: no list, no join line.
+                    let joined = crate::assets::csf_file::format_csf(
+                        &App::csf_label(state, "TXT_JOINED_S", "TXT_JOINED_S"),
+                        &[crate::assets::csf_file::CsfArg::Str("")],
+                    );
+                    let layout = crate::app::shell_wol::lobby::layout(state);
+                    ensure!(
+                        layout.control_rect(lobby_ui::LOBBIES).is_none()
+                            && !lobby.ui.enabled(lobby_ui::LOBBIES)
+                            && !lobby.ui.chat.lines.iter().any(|line| {
+                                String::from_utf16_lossy(&line.text).starts_with(&joined)
+                            }),
+                        "the modern 0x113 names its chat lobby"
+                    );
+                }
+                if self.target == WolTarget::ModernOptions {
+                    let layout = crate::app::shell_wol::lobby::layout(state);
+                    lobby_button(state, &layout, lobby_ui::OPTIONS)?;
+                    ensure!(
+                        state.frontend.shell_exit.is_some(),
+                        "Options did not slide 0x113 out"
+                    );
+                    self.event(frame, "0x113 Options");
+                    self.phase = WolPhase::OptionsOpening;
+                    return Ok(());
+                }
                 if self.target == WolTarget::BuddyFromLobby && !self.rejoined {
                     let layout = crate::app::shell_wol::lobby::layout(state);
                     lobby_button(state, &layout, lobby_ui::BUDDY)?;
@@ -3671,7 +3734,7 @@ impl WolCapture {
     /// `0x2BC` shown and settled over the hidden lobby.
     fn options_settled(&mut self, state: &mut AppState, frame: u32) -> Result<()> {
         use crate::ui::wol_options::{
-            BUDDIES, CANCEL, MUSIC, OK, PAGES, SOUND_OPTIONS, WolOptionsState,
+            BUDDIES, CANCEL, CHECKBOXES, MUSIC, OK, PAGES, SOUND_OPTIONS, WolOptionsState,
         };
         let live = state.frontend.wol_preferences;
         let page = Self::options_page(state)?;
@@ -3698,6 +3761,24 @@ impl WolCapture {
                 ensure!(
                     crate::app::shell_wol::options::status_key(state) == Some("STT:WOLOptionsPage"),
                     "Pages has no help"
+                );
+                self.settle();
+            }
+            WolTarget::ModernOptions => {
+                let layout = crate::app::shell_wol::options::layout(state);
+                ensure!(
+                    CHECKBOXES.iter().all(|checkbox| {
+                        layout.checkbox_rect(checkbox.id).is_some() == (checkbox.id == MUSIC)
+                    }),
+                    "the modern 0x2BC shows a box other than Play Music"
+                );
+                let rect = layout.checkbox_rect(MUSIC).context("Play Music")?;
+                set_window_pointer_to_rect_center(state, rect);
+                App::handle_wol_mouse_move(state);
+                ensure!(
+                    crate::app::shell_wol::options::status_key(state)
+                        == Some("STT:WOLOptionsMusic"),
+                    "Play Music has no help"
                 );
                 self.settle();
             }

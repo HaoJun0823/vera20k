@@ -50,6 +50,9 @@ Supported extensions:
 - [Superweapon sidebar](phobos-superweapon-sidebar.md) (left-edge superweapon cameos, toggle and positional hotkeys)
 - [Prone movement speed](phobos-prone-speed.md) (`ProneSpeed` for crawling and non-crawling prone infantry)
 - [Type select for buildings](phobos-building-type-selectable.md) (`BuildingTypeSelectable` for every building type)
+- [Timer blink colour](phobos-timer-blink-color.md) (`[AudioVisual] TimerBlinkColorScheme=` names a `[Colors]` entry)
+- [Missing cameo](phobos-missing-cameo.md) (`[AudioVisual] MissingCameo=` for types with no cameo art)
+- [Power plant enhancers](phobos-power-plant-enhancer.md) (`PowerPlantEnhancer.*` output boosts, `PowerPlant.DamageFactor` and placement range rings)
 
 ## Original project and authors
 
@@ -78,6 +81,12 @@ originate with:
 - Infantry auto deploy - **TaranDahl**.
 - Fly wobble switch (`FlyNoWobbles`) - **Noble_Fish**.
 - Centred pause-menu background - **Starkku**.
+- Unhardcoded timer blinking colour scheme - **Starkku**.
+- Semantic locomotor aliases (`Locomotor=Drive` and the like) - **Belonit**.
+- Missing cameo - **Uranusian**.
+- Power plant enhancers - **secsome**, **NetsuNegi** (range), **Ollerus**
+  (`MaxCount`), **Trsdy** (EMP).
+- Power plant damage factor - **Otamaa**, **Ollerus**.
 - Building production queue - **CrimRecya**.
 - INI `$Include` / `$Inherits` - **Morton**.
 - Skirmish AI dehardcoding (last-legs sale/hunt, MCV deploy regroup) -

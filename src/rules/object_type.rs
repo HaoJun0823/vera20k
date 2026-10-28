@@ -848,6 +848,8 @@ pub struct ObjectType {
     /// Unset, explicit silence and a resolved Voc ID remain distinct.
     #[cfg(feature = "ares")]
     promotion_sounds: [Option<Option<String>>; 2],
+    #[cfg(feature = "ares")]
+    vehicle_thief_sounds: [Option<String>; 2],
     /// Ordered MoveSound vector, TechnoType+4F4. Constructor710E7B..710EAC
     /// creates an empty list; ReadINI713459..7134D9 uses ReadSoundList525430.
     /// The fixed SOUNDMD binder resolves each token, retaining duplicates.
@@ -1054,6 +1056,15 @@ pub struct ObjectType {
     turret_rot_override: Option<i32>,
     #[cfg(feature = "ares")]
     spotlight: crate::rules::ares_spotlight::SpotlightTypeRules,
+    #[cfg(feature = "ares")]
+    driver: crate::rules::ares_driver::DriverTypeRules,
+    /// Ares TypeExt+250, projected from the retained rules reader.
+    #[cfg(feature = "ares")]
+    selection_group: String,
+    #[cfg(feature = "ares")]
+    bounty: crate::rules::ares_bounty::BountyTypeRules,
+    #[cfg(feature = "ares")]
+    crew: crate::rules::ares_crew::CrewTypeRules,
     /// Immutable projection of the retained TechnoTypeExt+308/+314/+320/+321
     /// reader. Country identities bind during Process, never from merged INI.
     #[cfg(feature = "ares")]
@@ -1376,6 +1387,10 @@ pub struct ObjectType {
     /// instead of vanishing (`UnitClass::ReceiveDamage 0x00738457`), and only
     /// such a type answers its Jumpjet's impact notice (`0x0074619D`).
     pub crashable: bool,
+    /// Ares TypeExt+323/+324: the optional Aircraft Crashable override,
+    /// independent of original Unit TechnoType+D95 (10048CB5..10048CDB).
+    #[cfg(feature = "ares")]
+    aircraft_crashable: Option<bool>,
     /// `TiltCrashJumpjet=` (`TechnoTypeClass+0xD22`, constructor false at
     /// `0x007114CA`, `TechnoTypeClass::ReadINI 0x00713377..0x00713391`, key
     /// string `0x00844118`): the Jumpjet Draw_Matrix tilts the body by its
@@ -1525,6 +1540,8 @@ pub struct ObjectType {
     /// Nullifies damage from an exact same-type, same-owner source object.
     pub type_immune: bool,
     emp: Option<crate::rules::ares_emp::EmpTypeRules>,
+    #[cfg(feature = "ares")]
+    promotion_abilities: Option<crate::rules::ares_abilities::PromotionAbilities>,
     #[cfg(feature = "ares")]
     self_attach_effect: Option<crate::rules::ares_warhead::AttachEffectRules>,
     #[cfg(feature = "ares")]
@@ -1887,6 +1904,9 @@ pub struct ObjectType {
     /// Same shape and same storage relationship: slot 0 is
     /// [`Self::elite_primary`], slot 1 is [`Self::elite_secondary`].
     pub elite_weapon_list: Vec<Option<String>>,
+    /// Retained WeaponStruct and transport-port coordinates, projected from
+    /// the ordered type reader rather than reconstructed from the final Image.
+    weapon_offsets: crate::rules::weapon_offsets::WeaponOffsets,
 
     /// `WeaponCount=` (`TechnoTypeClass+0x80C`, ReadINI `0x00712873`). Bounds
     /// the `Weapon%d`/`EliteWeapon%d` loop; slots at or past it keep their
@@ -2363,6 +2383,33 @@ pub struct ObjectType {
     pub cloak_radius_in_cells: i8,
     /// `CloakGenerator=` — cloak field provider flag used by GetSensorRange.
     pub cloak_generator: bool,
+    /// Phobos `PowerPlantEnhancer.PowerPlants=`: BuildingType IDs this
+    /// building enhances (`ValueableVector<BuildingTypeClass*>`: a present
+    /// value replaces the list, split on `,` without trimming). VERA keeps the
+    /// tokens and matches them case-insensitively, as `BuildingTypeClass::Find`
+    /// does; an unknown name matches nothing.
+    #[cfg(feature = "phobos")]
+    power_plant_enhancer_power_plants: Vec<String>,
+    /// Phobos `PowerPlantEnhancer.Range=` (`Valueable<Leptons>`): cells read
+    /// by `INI_EX::ReadDouble`, then `F2I(cells * 256)`; default 0.
+    #[cfg(feature = "phobos")]
+    power_plant_enhancer_range: i32,
+    /// Phobos `PowerPlantEnhancer.Amount=` (`Valueable<int>`): default 0.
+    #[cfg(feature = "phobos")]
+    power_plant_enhancer_amount: i32,
+    /// Phobos `PowerPlantEnhancer.Factor=` (`Nullable<float>`, constructed
+    /// 1.0): `<default>`, `none` and `<none>` reset it to 0.
+    #[cfg(feature = "phobos")]
+    power_plant_enhancer_factor: f32,
+    /// Phobos `PowerPlantEnhancer.MaxCount=` (`Valueable<int>`): default -1
+    /// (no limit).
+    #[cfg(feature = "phobos")]
+    power_plant_enhancer_max_count: i32,
+    /// Phobos `PowerPlant.DamageFactor=` (`Valueable<double>`): the
+    /// health-scaling factor for a power plant's output, default 1.0 (the
+    /// stock curve).
+    #[cfg(feature = "phobos")]
+    power_plant_damage_factor: f64,
 }
 
 fn native_minutes_to_ticks(value: f64) -> u32 {
@@ -2377,6 +2424,23 @@ fn native_minutes_to_ticks(value: f64) -> u32 {
 }
 
 impl ObjectType {
+    pub(crate) fn bind_weapon_offsets(
+        &mut self,
+        offsets: &crate::rules::weapon_offsets::WeaponOffsets,
+    ) {
+        self.weapon_offsets = offsets.clone();
+    }
+
+    /// GetFLH6F3B28 after GetWeapon has qualified the base or elite record.
+    pub fn weapon_flh(&self, index: i32, use_elite: bool) -> crate::rules::flh::Flh {
+        self.weapon_offsets.weapon(index, use_elite)
+    }
+
+    /// GetFLH6F3AF5: an open transport lends its zero-based cargo port.
+    pub fn alternate_fire_flh(&self, port: usize) -> crate::rules::flh::Flh {
+        self.weapon_offsets.alternate(port)
+    }
+
     /// Native TechnoType `PitchSpeed` double used by the normal Fly draw gate.
     pub fn fly_pitch_speed(&self) -> f64 {
         f64::from_bits(self.pitch_speed.bits())
@@ -2444,6 +2508,18 @@ impl ObjectType {
     pub(crate) fn emp_rules(&self) -> Option<&crate::rules::ares_emp::EmpTypeRules> {
         self.emp.as_ref()
     }
+    pub(crate) fn promotion_abilities(
+        &self,
+    ) -> Option<&crate::rules::ares_abilities::PromotionAbilities> {
+        #[cfg(feature = "ares")]
+        {
+            self.promotion_abilities.as_ref()
+        }
+        #[cfg(not(feature = "ares"))]
+        {
+            None
+        }
+    }
     pub(crate) fn self_attach_effect(
         &self,
     ) -> Option<&crate::rules::ares_warhead::AttachEffectRules> {
@@ -2481,22 +2557,89 @@ impl ObjectType {
         self.spotlight
     }
 
+    #[cfg(feature = "ares")]
+    pub(crate) fn driver_rules(&self) -> &crate::rules::ares_driver::DriverTypeRules {
+        &self.driver
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn bounty_rules(&self) -> &crate::rules::ares_bounty::BountyTypeRules {
+        &self.bounty
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn bind_bounty_rules(
+        &mut self,
+        bounty: &crate::rules::ares_bounty::BountyTypeRules,
+    ) {
+        self.bounty = bounty.clone();
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn aircraft_crashable_override(&self) -> Option<bool> {
+        self.aircraft_crashable
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn crew_rules(&self) -> &crate::rules::ares_crew::CrewTypeRules {
+        &self.crew
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn bind_crew_rules(&mut self, crew: &crate::rules::ares_crew::CrewTypeRules) {
+        self.crew = crew.clone();
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn bind_driver_rules(
+        &mut self,
+        driver: &crate::rules::ares_driver::DriverTypeRules,
+    ) {
+        self.driver = driver.clone();
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn bind_selection_group(&mut self, group: &str) {
+        group.clone_into(&mut self.selection_group);
+    }
+
+    /// Installed Ares GetSelectionGroupID1003DB30: an empty override uses
+    /// the type's stored ID, not its localized name or another type's group.
+    #[cfg(feature = "ares")]
+    pub(crate) fn type_selection_key(&self) -> &str {
+        if self.selection_group.is_empty() {
+            &self.id
+        } else {
+            &self.selection_group
+        }
+    }
+
     pub(crate) fn bind_ares_techno_rules(
         &mut self,
         emp: Option<&crate::rules::ares_emp::EmpTypeRules>,
+        abilities: Option<&crate::rules::ares_abilities::PromotionAbilities>,
         attachment: Option<&crate::rules::ares_warhead::AttachEffectRules>,
         cloak_allowed: bool,
         turret_rot_override: Option<i32>,
+        aircraft_crashable: Option<bool>,
     ) {
         self.emp = emp.cloned();
         #[cfg(feature = "ares")]
         {
+            self.promotion_abilities = abilities.cloned();
             self.self_attach_effect = attachment.cloned();
             self.cloak_allowed = cloak_allowed;
             self.turret_rot_override = turret_rot_override;
+            self.aircraft_crashable = aircraft_crashable;
         }
         #[cfg(not(feature = "ares"))]
-        let _ = (attachment, cloak_allowed, turret_rot_override);
+        let _ = (
+            abilities,
+            attachment,
+            cloak_allowed,
+            turret_rot_override,
+            aircraft_crashable,
+        );
     }
 
     #[cfg(feature = "ares")]
@@ -2854,6 +2997,56 @@ impl ObjectType {
         self.concentric_radial_indicator
     }
 
+    /// Phobos registers a building as a power plant enhancer only when its
+    /// `PowerPlantEnhancer.PowerPlants` list is non-empty and its `Amount` or
+    /// `Factor` actually changes the output (`src/Ext/Building/Hooks.cpp`:
+    /// Unlimbo `0x441553`, SetOwningHouse `0x449197`).
+    #[cfg(feature = "phobos")]
+    pub fn is_power_plant_enhancer(&self) -> bool {
+        !self.power_plant_enhancer_power_plants.is_empty()
+            && (self.power_plant_enhancer_amount != 0 || self.power_plant_enhancer_factor != 1.0)
+    }
+
+    /// Whether this enhancer's `PowerPlantEnhancer.PowerPlants` list names
+    /// `building_type` (case-insensitive, like `BuildingTypeClass::Find`).
+    #[cfg(feature = "phobos")]
+    pub fn power_plant_enhancer_enhances(&self, building_type: &str) -> bool {
+        self.power_plant_enhancer_power_plants
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(building_type))
+    }
+
+    /// `PowerPlantEnhancer.Range` in leptons (`Valueable<Leptons>`); 0
+    /// disables the ring.
+    #[cfg(feature = "phobos")]
+    pub const fn power_plant_enhancer_range(&self) -> i32 {
+        self.power_plant_enhancer_range
+    }
+
+    #[cfg(feature = "phobos")]
+    pub(crate) const fn power_plant_enhancer_amount(&self) -> i32 {
+        self.power_plant_enhancer_amount
+    }
+
+    #[cfg(feature = "phobos")]
+    pub(crate) const fn power_plant_enhancer_factor(&self) -> f32 {
+        self.power_plant_enhancer_factor
+    }
+
+    /// Signed `PowerPlantEnhancer.MaxCount`; a non-positive value means no
+    /// per-type limit.
+    #[cfg(feature = "phobos")]
+    pub(crate) const fn power_plant_enhancer_max_count(&self) -> i32 {
+        self.power_plant_enhancer_max_count
+    }
+
+    /// `PowerPlant.DamageFactor`, the multiplier on the health-driven output
+    /// loss; 1.0 is the stock curve.
+    #[cfg(feature = "phobos")]
+    pub(crate) const fn power_plant_damage_factor(&self) -> f64 {
+        self.power_plant_damage_factor
+    }
+
     /// Building GetSensorRange4566B0. The caller supplies retained+268 and
     /// GetCurrentWeapon70E1A0's resolved range; Option already represents the
     /// null WeaponStruct/WeaponType test70E240. No General.GapRadius fallback.
@@ -3121,6 +3314,17 @@ impl ObjectType {
             self.promotion_sounds[slot] =
                 section.and_then(|section| sounds.read_ares_reference(section, key));
         }
+        #[cfg(feature = "ares")]
+        for (slot, key) in ["VehicleThief.EnterSound", "VehicleThief.LeaveSound"]
+            .into_iter()
+            .enumerate()
+        {
+            // Nonnullable Voc reader1003FA80 at1003E72D/1003E743 uses the
+            // same 2048-byte lookup/none rules; unset and -1 both mean silence.
+            self.vehicle_thief_sounds[slot] = section
+                .and_then(|section| sounds.read_ares_reference(section, key))
+                .flatten();
+        }
     }
 
     #[cfg(feature = "ares")]
@@ -3128,6 +3332,21 @@ impl ObjectType {
         self.promotion_sounds[usize::from(elite)]
             .as_ref()
             .map(|cue| cue.as_deref())
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn vehicle_thief_sound(&self, leaving: bool) -> Option<&str> {
+        self.vehicle_thief_sounds[usize::from(leaving)].as_deref()
+    }
+
+    /// Storage reached by GetWeapon7177C0/7177E0; Ares1003DBC0 adds
+    /// extension records while the original build keeps its fixed bound.
+    pub fn weapon_record_count(&self) -> usize {
+        if cfg!(feature = "ares") {
+            self.weapon_list.len()
+        } else {
+            WEAPON_SLOT_COUNT
+        }
     }
 
     /// `Weapon[index]` (`TechnoTypeClass+0x898 + index*0x1C`): the weapon in
@@ -3716,6 +3935,8 @@ impl ObjectType {
             damage_sound: None,
             #[cfg(feature = "ares")]
             promotion_sounds: [None, None],
+            #[cfg(feature = "ares")]
+            vehicle_thief_sounds: [None, None],
             move_sound: Vec::new(),
             crashing_sound: section.read_name("CrashingSound", 0x80).map(str::to_owned),
             voice_crashing: section.read_name("VoiceCrashing", 0x80).map(str::to_owned),
@@ -3801,6 +4022,14 @@ impl ObjectType {
             turret_rot_override: None,
             #[cfg(feature = "ares")]
             spotlight: Default::default(),
+            #[cfg(feature = "ares")]
+            driver: Default::default(),
+            #[cfg(feature = "ares")]
+            selection_group: String::new(),
+            #[cfg(feature = "ares")]
+            bounty: Default::default(),
+            #[cfg(feature = "ares")]
+            crew: Default::default(),
             #[cfg(feature = "ares")]
             factory_owners: Default::default(),
             #[cfg(feature = "ares")]
@@ -3958,6 +4187,8 @@ impl ObjectType {
             zfudge_bridge: section.read_int("ZFudgeBridge", 0),
             too_big_to_fit_under_bridge: section.read_bool("TooBigToFitUnderBridge", false),
             crashable: section.read_bool("Crashable", false),
+            #[cfg(feature = "ares")]
+            aircraft_crashable: None,
             teleporter: section.read_bool("Teleporter", false),
             move_to_shroud: section.read_bool("MoveToShroud", category != ObjectCategory::Aircraft),
             hover_attack: section.read_bool("HoverAttack", false),
@@ -4013,6 +4244,8 @@ impl ObjectType {
             immune: section.read_bool("Immune", false),
             type_immune: section.read_bool("TypeImmune", false),
             emp: None,
+            #[cfg(feature = "ares")]
+            promotion_abilities: None,
             #[cfg(feature = "ares")]
             self_attach_effect: None,
             #[cfg(feature = "ares")]
@@ -4108,7 +4341,7 @@ impl ObjectType {
             size: section.read_double("Size", 1.0),
             size_limit: section.read_double("SizeLimit", 0.0),
             open_topped: section.read_bool("OpenTopped", false),
-            gunner: section.read_bool("Gunner", false),
+            gunner: false, // Constructor byte; retained reader binds GunnerTurrets::is_gunner.
             ifv_mode: section.read_int("IFVMode", 0),
             // Constructor table; only the ordered Process owner reads it.
             gunner_turrets: crate::rules::gunner_turrets::GunnerTurrets::default(),
@@ -4155,6 +4388,7 @@ impl ObjectType {
             // per-pass weapon block and RuleSet publishes its arrays.
             weapon_list: vec![None; WEAPON_SLOT_COUNT],
             elite_weapon_list: vec![None; WEAPON_SLOT_COUNT],
+            weapon_offsets: Default::default(),
             weapon_count: 0,
             naval_targeting: section.read_int("NavalTargeting", 0),
             land_targeting: section.read_int("LandTargeting", 0),
@@ -4327,6 +4561,29 @@ impl ObjectType {
             cloak_stop: section.read_bool("CloakStop", false),
             cloak_radius_in_cells: section.read_int("CloakRadiusInCells", 20) as i8,
             cloak_generator: section.read_bool("CloakGenerator", false),
+            // Phobos `BuildingTypeExt::ExtData::LoadFromINIFile` reads these
+            // through INI_EX and its 2048-byte buffer.
+            #[cfg(feature = "phobos")]
+            power_plant_enhancer_power_plants: section
+                .read_list("PowerPlantEnhancer.PowerPlants", 0x800)
+                .map(|tokens| tokens.into_iter().map(str::to_owned).collect())
+                .unwrap_or_default(),
+            #[cfg(feature = "phobos")]
+            power_plant_enhancer_range: (section
+                .read_phobos_double("PowerPlantEnhancer.Range", 0.0)
+                * crate::util::lepton::LEPTONS_PER_CELL_I32 as f64)
+                as i32,
+            #[cfg(feature = "phobos")]
+            power_plant_enhancer_amount: section.read_ares_int("PowerPlantEnhancer.Amount", 0),
+            #[cfg(feature = "phobos")]
+            power_plant_enhancer_factor: section
+                .read_phobos_nullable_double("PowerPlantEnhancer.Factor", Some(1.0))
+                .map_or(0.0, |factor| factor as f32),
+            #[cfg(feature = "phobos")]
+            power_plant_enhancer_max_count: section
+                .read_ares_int("PowerPlantEnhancer.MaxCount", -1),
+            #[cfg(feature = "phobos")]
+            power_plant_damage_factor: section.read_phobos_double("PowerPlant.DamageFactor", 1.0),
         }
     }
 }

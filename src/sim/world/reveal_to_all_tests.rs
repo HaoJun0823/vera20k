@@ -522,7 +522,7 @@ fn whole_map_reentry_skips_a_later_site_limboed_by_discovery() {
           [Tags]\nSHROUD_TAG=0,Reshroud,SHROUD\nSEEN_TAG=0,Seen,SEEN\n",
     )
     .unwrap();
-    sim.initialize_trigger_definitions(&map, &Default::default(), None, None);
+    sim.initialize_trigger_definitions(&map, &Default::default(), None, None, None);
     sim.classify_map_triggers(&rules);
     let mut sites = Vec::new();
     for (owner, cell) in [("Russians", SITE), ("Confederation", (75, 45))] {

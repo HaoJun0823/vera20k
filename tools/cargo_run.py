@@ -20,16 +20,26 @@ import time
 
 
 def invoke(args: list[str], *, cwd: Path, env_extra: dict[str, str] | None = None,
-           isolated_ci: bool = False) -> int:
+           isolated_ci: bool = False, on_line=None) -> int:
     """Launch a tool's Cargo command through this owner unless CI is isolated.
 
     Hosted CI jobs have no cooperating worktrees. Callers must opt into that
     case; local tools retain the shared build lock and owned artifact records.
+    With ON_LINE, each line of the command's stdout (test output included) goes
+    to it instead of the terminal; stderr still reaches the terminal.
     """
     prefix = ['cargo'] if isolated_ci else [sys.executable, '-m', 'tools.cargo_run', '--']
     command = [*prefix, *args]
     print(f"+ {' '.join(command)}", flush=True)
-    return subprocess.call(command, cwd=cwd, env={**os.environ, **(env_extra or {})})
+    env = {**os.environ, **(env_extra or {})}
+    if on_line is None:
+        return subprocess.call(command, cwd=cwd, env=env)
+    with subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                          text=True, encoding='utf-8', errors='replace') as child:
+        assert child.stdout is not None
+        for line in child.stdout:
+            on_line(line)
+        return child.wait()
 
 
 def git(root: Path, *args: str) -> str:

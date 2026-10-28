@@ -554,10 +554,12 @@ pub(super) enum ControlPaint {
     /// A trackbar window with its thumb's window-relative left edge
     /// ([`crate::ui::shell::trackbar::thumb_left`]). `plaque` is off where
     /// the owner sends `0x4AC` with 0 (Options Detail/Difficulty/Scroll, BBB).
+    /// `disabled` is the window's `WS_DISABLED` style (`0x0061E0B0`).
     Trackbar {
         rect: RectPx,
         thumb_left: i32,
         plaque: bool,
+        disabled: bool,
     },
     Combo {
         rect: RectPx,
@@ -601,6 +603,7 @@ pub(super) fn paint_control(
             rect,
             thumb_left,
             plaque,
+            disabled,
         } => {
             // The paint blits the plaque and the thumb, then draws two
             // adjacent border-2 frames; the frame entry includes their
@@ -623,6 +626,12 @@ pub(super) fn paint_control(
                     scale.factor(),
                     SHELL_CONTROL_DEPTH - 0.00002,
                 );
+                // A disabled window darkens the thumb rect with the overlay
+                // alpha (`0x0061E0B0..0x0061E0D4`). RESIDUAL: native also
+                // darkens the backdrop under TRAKGRIP's transparent texels.
+                if disabled && let Some(sprite) = out.last_mut() {
+                    sprite.tint = [DISABLED_OVERLAY_KEEP; 3];
+                }
             }
             let base = scale.base_rect(rect);
             if let Some(frame) = chrome.trackbar_frame(plaque, base.w, base.h) {
@@ -789,6 +798,7 @@ pub(super) fn push_trackbar_instances(
                 rect,
                 thumb_left,
                 plaque: true,
+                disabled: false,
             },
             layout.scale,
         );
@@ -1215,6 +1225,7 @@ mod tests {
                     rect,
                     thumb_left,
                     plaque: true,
+                    disabled: false,
                 },
                 ShellScale::RETAIL,
             );
@@ -1249,6 +1260,7 @@ mod tests {
                 rect: RectPx::new(236, 98, 263, 21),
                 thumb_left: 1,
                 plaque: false,
+                disabled: false,
             },
             ShellScale::RETAIL,
         );
@@ -1264,10 +1276,38 @@ mod tests {
                 rect,
                 thumb_left: 1,
                 plaque: true,
+                disabled: false,
             },
             ShellScale::RETAIL,
         );
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn a_disabled_trackbar_darkens_only_its_thumb() {
+        let chrome = ControlChrome {
+            trackbar_plaque_mid_trofm: Some(entry(0.1, 114.0, 24.0)),
+            trackbar_thumb_trakgrip: Some(entry(0.4, 12.0, 22.0)),
+            ..Default::default()
+        };
+        let paint = |disabled| {
+            let mut out = Vec::new();
+            paint_control(
+                &mut out,
+                &chrome,
+                ControlPaint::Trackbar {
+                    rect: RectPx::new(404, 314, 129, 22),
+                    thumb_left: 34,
+                    plaque: true,
+                    disabled,
+                },
+                ShellScale::RETAIL,
+            );
+            out.iter().map(|sprite| sprite.tint).collect::<Vec<_>>()
+        };
+        assert_eq!(paint(false), [[1.0; 3]; 2]);
+        // 0x60 overlay: (255 - 0x60) / 256 of each channel.
+        assert_eq!(paint(true), [[1.0; 3], [159.0 / 256.0; 3]]);
     }
 
     #[test]
@@ -1289,6 +1329,7 @@ mod tests {
                     rect: RectPx::new(236, 98, width, height),
                     thumb_left: 1,
                     plaque: reserve > 0,
+                    disabled: false,
                 },
                 ShellScale::RETAIL,
             );
@@ -1809,11 +1850,15 @@ mod tests {
     }
 }
 
+/// A disabled owner-draw control's `AlphaBlendRect` colour 0 at the overlay
+/// alpha `[0xAC4898]` = 0x60 (`0x0060FAB9`) keeps `(255 - 0x60) / 256` of each
+/// channel. As a tint it skips the RGB565 truncation (at most one unit per
+/// channel).
+const DISABLED_OVERLAY_KEEP: f32 = (255 - 0x60) as f32 / 256.0;
+
 /// Owner-draw checkbox 0x006163A0's WM_PAINT: the face PCX for its check
 /// and dual-state flags at the control's origin, then for a disabled window
-/// `AlphaBlendRect` colour 0 at the overlay alpha 0x60 (`0x0060FAB9`), which
-/// keeps `(255 - 0x60) / 256` of each channel. The tint applies that factor
-/// to the face without the RGB565 truncation (at most one unit per channel).
+/// the overlay ([`DISABLED_OVERLAY_KEEP`]).
 fn paint_checkbox_face(
     out: &mut Vec<SpriteInstance>,
     chrome: &ControlChrome,
@@ -1834,8 +1879,13 @@ fn paint_checkbox_face(
     };
     let icon = checkbox_icon_rect(rect, scale);
     if disabled {
-        const DISABLED_KEEP: f32 = (255 - 0x60) as f32 / 256.0;
-        push_tinted_entry(out, entry, icon, [DISABLED_KEEP; 3], SHELL_CONTROL_DEPTH);
+        push_tinted_entry(
+            out,
+            entry,
+            icon,
+            [DISABLED_OVERLAY_KEEP; 3],
+            SHELL_CONTROL_DEPTH,
+        );
     } else {
         push_entry(out, entry, icon, SHELL_CONTROL_DEPTH);
     }

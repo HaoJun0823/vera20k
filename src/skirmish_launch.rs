@@ -10,6 +10,9 @@ use crate::sim::game_options::GameOptions;
 use crate::sim::rng::SimRng;
 use crate::skirmish_modes::SkirmishGameMode;
 
+/// `MPModesMD.ini` `[Battle] 1=`, the mode every fixed developer and capture
+/// launch selects.
+pub const BATTLE_MODE_ID: i32 = 1;
 pub const SKIRMISH_PLAYER_SLOT_COUNT: usize = 8;
 pub const SKIRMISH_AI_SLOT_COUNT: usize = SKIRMISH_PLAYER_SLOT_COUNT - 1;
 /// VERA network rooms extend the retail eight-row setup without changing the
@@ -154,28 +157,18 @@ struct SkirmishLaunchModeInput {
 impl TryFrom<SkirmishLaunchModeInput> for SkirmishLaunchMode {
     type Error = String;
     fn try_from(input: SkirmishLaunchModeInput) -> Result<Self, Self::Error> {
-        use crate::skirmish_modes::MpModeClass;
         // Compatibility only: original MPModesMD catalog identities read by5D7CE0.
         // Production catalog conversion always supplies class explicitly.
         let class = input
             .class
             .or_else(|| {
-                let (file, class) = match input.id {
-                    1 => ("MPBattleMD.ini", MpModeClass::Battle),
-                    2 => ("MPFreeForAllMD.ini", MpModeClass::FreeForAll),
-                    3 => ("MPCoopMD.ini", MpModeClass::Cooperative),
-                    4 => ("MPUnholyMD.ini", MpModeClass::Unholy),
-                    5 => ("MPMWMD.ini", MpModeClass::ManBattle),
-                    6 => ("MPDuelMD.ini", MpModeClass::ManBattle),
-                    7 => ("MPMeatMD.ini", MpModeClass::ManBattle),
-                    8 => ("MPNavalMD.ini", MpModeClass::ManBattle),
-                    9 => ("MPTeamMD.ini", MpModeClass::Battle),
-                    _ => return None,
-                };
-                input
-                    .override_file
-                    .eq_ignore_ascii_case(file)
-                    .then_some(class)
+                Self::stock(input.id)
+                    .filter(|stock| {
+                        stock
+                            .override_file
+                            .eq_ignore_ascii_case(&input.override_file)
+                    })
+                    .map(|stock| stock.class)
             })
             .ok_or_else(|| "legacy custom launch mode requires an explicit class".to_owned())?;
         Ok(Self {
@@ -205,6 +198,58 @@ impl SkirmishLaunchMode {
             allies_allowed: mode.allies_allowed,
             must_ally: mode.must_ally,
         }
+    }
+
+    /// Stock YR `MPModesMD.ini` row `id` after its override INI, the one
+    /// versioned copy of the retail rows. Fixed launches (headless, CnCNet
+    /// spawn) take their row here, and the pre-Fill owner accepts a session
+    /// only through [`Self::matching_stock`]. A test pins every row to the
+    /// retail roster.
+    pub fn stock(id: i32) -> Option<Self> {
+        use crate::skirmish_modes::MpModeClass::{
+            Battle, Cooperative, FreeForAll, ManBattle, Unholy,
+        };
+        #[rustfmt::skip]
+        let (class, name, override_file, map_filter, random_maps, allies, must_ally) = match id {
+            1 => (Battle, "Battle", "MPBattleMD.ini", "standard", true, true, false),
+            2 => (FreeForAll, "FreeForAll", "MPFreeForAllMD.ini", "standard", true, false, false),
+            3 => (Cooperative, "Cooperative", "MPCoopMD.ini", "cooperative", false, false, false),
+            4 => (Unholy, "UnholyAlliance", "MPUnholyMD.ini", "standard", false, true, false),
+            5 => (ManBattle, "Megawealth", "MPMWMD.ini", "megawealth", false, true, false),
+            6 => (ManBattle, "Duel", "MPDuelMD.ini", "duel", false, true, false),
+            7 => (ManBattle, "MeatGrind", "MPMeatMD.ini", "meatgrind", false, true, false),
+            8 => (ManBattle, "NavalWar", "MPNavalMD.ini", "navalwar", false, true, false),
+            9 => (Battle, "TeamGame", "MPTeamMD.ini", "teamgame", false, true, true),
+            _ => return None,
+        };
+        Some(Self {
+            class,
+            id,
+            ui_name_key: format!("GUI:{name}"),
+            tooltip_key: format!("STT:Mode{name}"),
+            override_file: override_file.to_owned(),
+            map_filter: map_filter.to_owned(),
+            random_maps_allowed: random_maps,
+            allies_allowed: allies,
+            must_ally,
+        })
+    }
+
+    /// The stock row of this id when every consumed field matches it, keys
+    /// and file names compared ASCII case-insensitively. The class is not
+    /// compared; the stock row supplies it.
+    pub fn matching_stock(&self) -> Option<Self> {
+        Self::stock(self.id).filter(|stock| {
+            self.ui_name_key.eq_ignore_ascii_case(&stock.ui_name_key)
+                && self.tooltip_key.eq_ignore_ascii_case(&stock.tooltip_key)
+                && self
+                    .override_file
+                    .eq_ignore_ascii_case(&stock.override_file)
+                && self.map_filter.eq_ignore_ascii_case(&stock.map_filter)
+                && self.random_maps_allowed == stock.random_maps_allowed
+                && self.allies_allowed == stock.allies_allowed
+                && self.must_ally == stock.must_ally
+        })
     }
 }
 

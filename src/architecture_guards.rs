@@ -28,7 +28,8 @@ const LAYER_RULES: &[(&str, &[&str])] = &[
     ("rules", &["sim", "map"]),
     ("map", &["sim", "render", "app"]),
     ("render", &["app"]),
-    ("ui", &["app", "skirmish_scenarios"]),
+    // render draws ui view models; ui stays render-agnostic.
+    ("ui", &["app", "render", "skirmish_scenarios"]),
     ("sim", &["render", "ui", "audio", "net"]),
 ];
 
@@ -71,8 +72,9 @@ fn production_dependency_edges_match_frozen_ledger_inventory() {
 
 /// F09: `Simulation::advance_master_frame` and `advance_app_frame` accept
 /// swappable rules/map/path resources, so their production call sites are
-/// pinned — the master frame is reached only inside `sim/world/mod.rs`, the
-/// app frame only there and in `SimRuntime::advance_frame`. Every other
+/// pinned — the master frame is reached only inside
+/// `sim/world/master_frame.rs`, the app frame only there and in
+/// `SimRuntime::advance_frame`. Every other
 /// caller must be `#[cfg(test)]` (the `advance_tick` fixture adapter and the
 /// replay `run_fixture*` runners are compile-time gated already); production
 /// and tooling advance exclusively through the bound-resource runtime.
@@ -80,8 +82,11 @@ fn production_dependency_edges_match_frozen_ledger_inventory() {
 fn master_frame_adapters_have_pinned_production_callers() {
     let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let allowed: &[(&str, &[&str])] = &[
-        ("advance_master_frame", &["sim/world/mod.rs"]),
-        ("advance_app_frame", &["sim/world/mod.rs", "sim/runtime.rs"]),
+        ("advance_master_frame", &["sim/world/master_frame.rs"]),
+        (
+            "advance_app_frame",
+            &["sim/world/master_frame.rs", "sim/runtime.rs"],
+        ),
     ];
     let mut violations: Vec<String> = Vec::new();
     for file in source_files(&src_root) {
@@ -1224,7 +1229,6 @@ fn mutable_handouts_and_setters_are_owner_operations() {
             "install_receipt",
             "the map read builds the tube receipt in place once; binding takes it once",
         ),
-        ("net/lockstep.rs", "payload_mut", PAYLOAD),
         (
             "net/udp.rs",
             "deref_mut",
@@ -1333,6 +1337,11 @@ fn mutable_handouts_and_setters_are_owner_operations() {
             "sim/ammo.rs",
             "set_dock",
             "the +0x6CC writers and PointerExpired's clear",
+        ),
+        (
+            "sim/building_entry.rs",
+            "set_nearest_occupiable_seek",
+            "Ares writes the +0x691 seek latch with its scan's answer (0x10046A8B/0x10046ACC)",
         ),
         (
             "sim/combat/attack_target.rs",
@@ -1515,6 +1524,18 @@ fn mutable_handouts_and_setters_are_owner_operations() {
             "sim/superweapon/mod.rs",
             "set_recharge_time",
             "SuperClass::SetRechargeTime (0x006CC280, TAction 132) changes only Super+24",
+        ),
+        (
+            "sim/vehicle_theft.rs",
+            "set_killed_from_owner",
+            "Ares copies the new owner's MultiplayPassive into the driver-killed flag \
+             (0x100456E8..0x100456F5)",
+        ),
+        (
+            "sim/vehicle_theft.rs",
+            "set_vehicle_seek",
+            "the Ares vehicle-seek latch (Ext+0xB0), written by its scan and by script actions \
+             64/67 (dispatcher 0x1003A110)",
         ),
         (
             "sim/world/mod.rs",

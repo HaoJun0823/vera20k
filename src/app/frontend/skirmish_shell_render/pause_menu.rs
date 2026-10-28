@@ -224,6 +224,7 @@ pub(crate) fn render_pause_menu_shell(
                         .range()
                         .thumb_left_in(value, rect, ShellScale::RETAIL),
                     plaque: true,
+                    disabled: false,
                 },
                 ShellScale::RETAIL,
             );

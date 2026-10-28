@@ -1101,6 +1101,66 @@ fn object_pairs<'a>(
     placed.chain(deploy_targets)
 }
 
+/// The world-derived inputs, beyond the live objects, that decide which SHP
+/// sprites the entity atlas must hold. Map load and mid-match growth both
+/// collect them here, so the two builds cannot cover different keys. Map load
+/// alone adds the scenario-start crate CellAnim remaps
+/// (`startup_crate_anim_remap_keys`), whose AnimObjects do not exist yet.
+pub(crate) struct EntityAtlasCoverage<'r> {
+    /// Deploy targets, pre-loaded in every house colour.
+    pub(crate) extra_buildings: Vec<&'r str>,
+    /// Live AnimClass palette variants.
+    pub(crate) anim_remap_keys: HashSet<AnimRemapKey>,
+    /// Terrain tile animations, drawn from the theater ISO palette.
+    pub(crate) cell_drawer_type_ids: HashSet<String>,
+    /// FoggedObject frames that outlive their source.
+    pub(crate) frozen_keys: HashSet<ShpSpriteKey>,
+}
+
+impl<'r> EntityAtlasCoverage<'r> {
+    pub(crate) fn collect(
+        sim: &crate::sim::world::Simulation,
+        rules: Option<&'r RuleSet>,
+        house_colors: &HouseColorMap,
+    ) -> Self {
+        Self {
+            extra_buildings: deployable_building_types(rules),
+            anim_remap_keys: collect_anim_remap_base_keys(sim, house_colors),
+            cell_drawer_type_ids: sim
+                .resolved_terrain()
+                .into_iter()
+                .flat_map(|terrain| terrain.tile_animations())
+                .map(|anim| anim.anim_name.to_ascii_uppercase())
+                .collect(),
+            frozen_keys: rules.map_or_else(HashSet::new, |rules| {
+                collect_fogged_sprite_keys(sim, rules, house_colors)
+            }),
+        }
+    }
+}
+
+/// Building types reachable through `DeploysInto=` (e.g. AMCV→GACNST). Units
+/// with DeploysInto can appear through production or scripted events without
+/// being on the map yet, so the atlas pre-loads every deploy target in the
+/// rules; no MCV/ConYard pair is hard-coded.
+pub(crate) fn deployable_building_types(rules: Option<&RuleSet>) -> Vec<&str> {
+    let Some(rules) = rules else {
+        return Vec::new();
+    };
+    let mut result: Vec<&str> = Vec::new();
+    for obj in rules.all_objects() {
+        if let Some(target_id) = &obj.deploys_into
+            && let Some(target_obj) = rules.object(target_id)
+            && !result
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(&target_obj.id))
+        {
+            result.push(&target_obj.id);
+        }
+    }
+    result
+}
+
 /// Live AnimClass palette variants that must exist in the atlas. Producers
 /// install these after construction (notably OverlayClass CellAnim over a
 /// Tiberium cell and Unit deploy animations), so the attached object's live
@@ -3347,88 +3407,31 @@ struct ShpAtlasPackPlan {
 
 fn plan_shp_pages(sprites: Vec<RenderedShpSprite>, max_texture_dim: u32) -> ShpAtlasPackPlan {
     let (sprites, aliases) = separate_physical_frames(sprites, &HashMap::new());
-    // Sort by height descending for shelf packing efficiency.
-    let mut indices: Vec<usize> = (0..sprites.len()).collect();
-    indices.sort_by(|&a, &b| sprites[b].height.cmp(&sprites[a].height));
-
-    // Estimate atlas width from total pixel area.
-    let total_area: u64 = sprites
+    let sizes: Vec<[u32; 2]> = sprites
         .iter()
-        .map(|s| {
-            (s.width as u64 + SPRITE_PADDING as u64) * (s.height as u64 + SPRITE_PADDING as u64)
-        })
-        .sum();
-    let estimated_side: u32 = (total_area as f64).sqrt().ceil() as u32;
-    let mut atlas_width: u32 = estimated_side.clamp(64, max_texture_dim);
-
-    // Try widening atlas to fit everything in a single page.
-    loop {
-        let trial_height: u32 = simulate_shelf_height(&indices, &sprites, atlas_width);
-        if trial_height <= max_texture_dim || atlas_width >= max_texture_dim {
-            break;
-        }
-        atlas_width = (atlas_width.saturating_mul(2)).min(max_texture_dim);
-    }
-
-    // Shelf-pack with page splitting when height exceeds GPU limit.
-    struct Placement {
-        idx: usize,
-        page: u8,
-        px: u32,
-        py: u32,
-    }
-    let mut placements: Vec<Placement> = Vec::with_capacity(sprites.len());
-    let mut cursor_x: u32 = 0;
-    let mut cursor_y: u32 = 0;
-    let mut shelf_height: u32 = 0;
-    let mut current_page: u8 = 0;
-
-    for &idx in &indices {
-        let w: u32 = sprites[idx].width;
-        let h: u32 = sprites[idx].height;
-        if cursor_x + w > atlas_width {
-            let new_y: u32 = cursor_y + shelf_height + SPRITE_PADDING;
-            if new_y + h > max_texture_dim {
-                // Current page is full — start a new page.
-                current_page += 1;
-                cursor_x = 0;
-                cursor_y = 0;
-                shelf_height = 0;
-            } else {
-                cursor_y = new_y;
-                cursor_x = 0;
-                shelf_height = 0;
-            }
-        }
-        placements.push(Placement {
-            idx,
-            page: current_page,
-            px: cursor_x,
-            py: cursor_y,
-        });
-        cursor_x += w + SPRITE_PADDING;
-        shelf_height = shelf_height.max(h);
-    }
-
-    let num_pages: usize = current_page as usize + 1;
-    let pages = (0..num_pages as u8)
-        .map(|page_idx| {
-            let placed: Vec<_> = placements
-                .iter()
-                .filter(|p| p.page == page_idx)
-                .map(|p| (p.idx, [p.px, p.py]))
-                .collect();
-            let height = placed
-                .iter()
-                .map(|&(idx, [_, y])| y + sprites[idx].height)
-                .max()
-                .unwrap_or(1);
-            ShpPagePlan {
-                size: [atlas_width, height],
-                placed,
-            }
+        .map(|sprite| [sprite.width, sprite.height])
+        .collect();
+    let plan = atlas_growth::plan_initial_shelves(
+        &sizes,
+        atlas_growth::InitialShelfPolicy {
+            padding: SPRITE_PADDING,
+            max_dim: max_texture_dim,
+            split_pages: true,
+        },
+    );
+    let mut pages: Vec<ShpPagePlan> = plan
+        .page_heights
+        .iter()
+        .map(|&height| ShpPagePlan {
+            size: [plan.width, height],
+            placed: Vec::new(),
         })
         .collect();
+    for placed in &plan.placements {
+        pages[placed.page]
+            .placed
+            .push((placed.index, placed.origin));
+    }
     ShpAtlasPackPlan {
         sprites: sprites.into(),
         aliases,
@@ -3552,29 +3555,6 @@ fn gather_sprite_band<'s>(
         .map(|&(origin, sprite)| (origin, [sprite.width, sprite.height]))
         .collect();
     atlas_growth::gather_band(&rects, 1, |i| sprites[i].1.indices())
-}
-
-/// Simulate shelf-packing to determine total height without allocating buffers.
-fn simulate_shelf_height(
-    indices: &[usize],
-    sprites: &[RenderedShpSprite],
-    atlas_width: u32,
-) -> u32 {
-    let mut cursor_x: u32 = 0;
-    let mut cursor_y: u32 = 0;
-    let mut shelf_height: u32 = 0;
-    for &idx in indices {
-        let w: u32 = sprites[idx].width;
-        let h: u32 = sprites[idx].height;
-        if cursor_x + w > atlas_width {
-            cursor_y += shelf_height + SPRITE_PADDING;
-            cursor_x = 0;
-            shelf_height = 0;
-        }
-        cursor_x += w + SPRITE_PADDING;
-        shelf_height = shelf_height.max(h);
-    }
-    cursor_y + shelf_height
 }
 
 #[cfg(test)]

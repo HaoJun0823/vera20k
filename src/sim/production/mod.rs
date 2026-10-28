@@ -44,15 +44,14 @@ pub use self::factory_lifecycle::{
 };
 pub(crate) use self::production_placement::place_production_with_overlays;
 pub use self::production_placement::{
-    active_producer_for_owner_category, cycle_active_producer_for_owner_category,
-    is_within_build_area, placement_preview_for_owner_with_overlays,
+    cycle_active_producer_for_owner_category, is_within_build_area,
+    placement_preview_for_owner_with_overlays,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub(in crate::sim) use self::production_queue::house_for_test;
 pub use self::production_queue::{
-    build_options_for_owner, credits_for_owner, has_build_option_for_owner,
-    power_balance_for_owner, publish_production_changes, queue_view_for_owner,
-    ready_buildings_for_owner,
+    build_options_for_owner, credits_for_owner, power_balance_for_owner,
+    publish_production_changes, queue_view_for_owner, ready_buildings_for_owner,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use self::production_queue::{

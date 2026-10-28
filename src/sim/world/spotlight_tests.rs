@@ -210,6 +210,7 @@ fn init(sim: &mut Simulation, map: &crate::map::map_file::MapFile) {
         &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
         None,
         None,
+        None,
     );
     sim.classify_map_triggers(crate::rules::ruleset::RuleSet::empty_for_test());
     sim.session.publish_started();

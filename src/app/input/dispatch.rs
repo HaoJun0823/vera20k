@@ -17,9 +17,8 @@ use winit::keyboard::KeyCode;
 
 use crate::app::AppState;
 use crate::app::input::commands::{
-    cancel_build_by_type, cycle_active_producer, cycle_local_owner, place_ready_building_at_cell,
-    place_starter_base_for_local_owner, preferred_local_owner, preferred_local_owner_name,
-    queue_build_by_type, queue_house_cheer, schedule_command, spawn_test_units_for_local_owner,
+    cancel_build_by_type, place_ready_building_at_cell, preferred_local_owner,
+    preferred_local_owner_name, queue_build_by_type, queue_house_cheer, schedule_command,
     suspend_build,
 };
 use crate::app::input::context_order::{ContextOrderTarget, try_queue_context_order};
@@ -31,6 +30,7 @@ use crate::app::input::entity_pick::{
     map_entity_creation_order, pick_entity_at_point,
 };
 use crate::app::input::hotkeys::{HotkeyCommand, HotkeyFallback, HotkeyResolution};
+use crate::app::input::precedence::{ModalPage, modal_page};
 use crate::app::input::sidebar_eva;
 use crate::app::presentation::sidebar_render::current_sidebar_view;
 use crate::app::types::OrderMode;
@@ -67,7 +67,9 @@ pub(crate) fn handle_mouse_input(
     button: MouseButton,
     btn_state: ElementState,
 ) {
-    if crate::app::match_runtime::network_failure::pending(state) {
+    // The window path routes these pages in its own handler from the same
+    // decision (`input::precedence`); captures enter here directly.
+    if modal_page(state) == Some(ModalPage::NetworkFailure) {
         crate::app::match_runtime::network_failure::mouse(state, button, btn_state.is_pressed());
         return;
     }
@@ -83,22 +85,27 @@ fn handle_mouse_input_inner(state: &mut AppState, button: MouseButton, btn_state
         .input
         .tactical_mouse
         .record_physical_button(button, pressed);
-    if state.frontend.keyboard_dialog.is_some() {
-        crate::app::input::keyboard::mouse(state, button, pressed);
-        return;
-    }
-    // 0xEA is pushed over the game and any open page.
-    if state.match_state.network_wait.dialog_open() {
-        if !pressed {
-            state.match_state.input.cancel_tactical_drag();
-            state
-                .match_state
-                .match_presentation
-                .in_game_gadgets
-                .cancel_pointer_capture();
+    match modal_page(state) {
+        // 0xEA is pushed over the game and any open page.
+        Some(ModalPage::NetworkWait) => {
+            if !pressed {
+                state.match_state.input.cancel_tactical_drag();
+                state
+                    .match_state
+                    .match_presentation
+                    .in_game_gadgets
+                    .cancel_pointer_capture();
+            }
+            crate::app::input::connection::mouse(state, button, pressed);
+            return;
         }
-        crate::app::input::connection::mouse(state, button, pressed);
-        return;
+        Some(ModalPage::Keyboard) => {
+            crate::app::input::keyboard::mouse(state, button, pressed);
+            return;
+        }
+        // The shell error card is main-menu only.
+        Some(ModalPage::ShellError | ModalPage::NetworkFailure | ModalPage::NetworkOptions)
+        | None => {}
     }
     // Paused in-game Options overlay owns the mouse: route press/release/checkbox/
     // Back here and CONSUME the click so it never reaches the tactical viewport or
@@ -830,17 +837,20 @@ fn clamp_tactical_drag_endpoint(
 }
 
 pub(crate) fn handle_cursor_moved_in_game(state: &mut AppState) {
-    if crate::app::match_runtime::network_failure::pending(state) {
-        crate::app::match_runtime::network_failure::cursor_moved(state);
-        return;
-    }
-    if state.frontend.keyboard_dialog.is_some() {
-        crate::app::input::keyboard::cursor_moved(state);
-        return;
-    }
-    if state.match_state.network_wait.dialog_open() {
-        crate::app::input::connection::cursor_moved(state);
-        return;
+    match modal_page(state) {
+        Some(ModalPage::NetworkFailure) => {
+            crate::app::match_runtime::network_failure::cursor_moved(state);
+            return;
+        }
+        Some(ModalPage::NetworkWait) => {
+            crate::app::input::connection::cursor_moved(state);
+            return;
+        }
+        Some(ModalPage::Keyboard) => {
+            crate::app::input::keyboard::cursor_moved(state);
+            return;
+        }
+        Some(ModalPage::ShellError | ModalPage::NetworkOptions) | None => {}
     }
     // Paused in-game Options overlay: drive a live slider drag (visual/stored only —
     // cadence applies on close, KD-8) and swallow the move so it can't begin a
@@ -1283,18 +1293,6 @@ fn apply_sidebar_action_inner(state: &mut AppState, action: SidebarAction) {
         }
         SidebarAction::SuperWeaponPress { section, right } => {
             press_super_weapon(state, &section, right, true);
-        }
-        SidebarAction::CycleProducer(category) => {
-            cycle_active_producer(state, category);
-        }
-        SidebarAction::CycleOwner => {
-            cycle_local_owner(state);
-        }
-        SidebarAction::PlaceStarterBase => {
-            place_starter_base_for_local_owner(state);
-        }
-        SidebarAction::SpawnTestUnits => {
-            spawn_test_units_for_local_owner(state);
         }
         SidebarAction::ToggleRepairMode | SidebarAction::ToggleSellMode => {
             use crate::ui::sidebar::gadget_flash::SelectionMode;
@@ -2666,7 +2664,9 @@ fn apply_selection_mutation(
     }
     state.match_state.input.selection_order = ordered.clone();
     state.match_state.input.selection_order_pending = true;
-    let owner: String = preferred_local_owner(state).unwrap_or_else(|| "Americans".to_string());
+    let Some(owner) = preferred_local_owner(state) else {
+        return true;
+    };
     schedule_command(
         state,
         &owner,
@@ -3754,8 +3754,10 @@ fn queue_deploy_undeploy_for_selected(state: &mut AppState) {
     if selected_ids.is_empty() {
         return;
     }
-    let owner: String = preferred_local_owner(state).unwrap_or_else(|| "Americans".to_string());
     // Collect commands first to avoid borrow conflict with schedule_command.
+    let Some(owner) = preferred_local_owner(state) else {
+        return;
+    };
     let local_owner = sim.interner().get(&owner);
     let commands = deploy_key_commands(sim, state.rules(), &selected_ids, local_owner);
     // Selection730AF0 sends DEPLOY9 through Techno6FFE00. During

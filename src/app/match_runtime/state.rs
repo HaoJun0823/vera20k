@@ -82,10 +82,6 @@ pub(crate) struct MatchState {
     pub(crate) scenario_elapsed_clock: crate::app::match_runtime::frame_pacer::ScenarioElapsedClock,
     /// Config-sourced input delay — copied to each new Simulation instance at game start.
     pub(crate) configured_input_delay_ticks: u64,
-    /// Explicit development HUD/command preference. Only consulted when the
-    /// live scenario has no current House; ordinary matches derive their
-    /// identity from serialized `Simulation.session.current_house`.
-    pub(crate) local_owner_override: Option<String>,
     /// Seeded empty-map sandbox keeps full map visibility while still locking control.
     pub(crate) sandbox_full_visibility: bool,
     /// The debug pause (`J` hotkey): the simulation is frozen

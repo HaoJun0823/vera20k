@@ -61,6 +61,11 @@ pub(super) enum Request {
         attempt: u64,
         nickname: String,
     },
+    /// An external launch's bearer for its match API (docs/spawn.md), in
+    /// place of `/v1/sessions`. Polling starts with the first event.
+    AdoptSession {
+        token: String,
+    },
     Channels(u32),
     /// `GET /v1/stats`; a failure is dropped and the next poll asks again.
     Stats,
@@ -118,8 +123,16 @@ pub(super) enum Response {
         attempt: u64,
         code: u32,
     },
+    /// HTTP 426 to a sign-in: the lobby no longer admits this version.
+    /// `message` is the lobby's own reason when it gave a plain one.
     UpgradeRequired {
         attempt: u64,
+        message: Option<String>,
+    },
+    /// HTTP 426 to a signed-in request: the lobby was upgraded during this
+    /// session. Only the refused request failed.
+    Outdated {
+        message: Option<String>,
     },
     Channels(ChannelList),
     Stats(crate::ui::wol_shell::WolLobbyStats),
@@ -156,13 +169,21 @@ const MAX_BODY_BYTES: u64 = 1024 * 1024;
 // The server retains1024 events and returns at most256 at a time. Permit
 // concurrent arrivals too, but never release cleanup on a partial history.
 const MAX_CLEANUP_DRAIN_BATCHES: usize = 8;
+// About three lines of the 0xD0 box body, which also holds the download link.
+const MAX_UPGRADE_MESSAGE_CHARS: usize = 160;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RequestFailure {
     Status(u16),
     LostCursor,
-    ChannelRejected { status: u16, code: u32 },
+    ChannelRejected {
+        status: u16,
+        code: u32,
+    },
     AlreadyFinished,
+    /// 426 `upgrade_required` (services/lobby/protocol.md), with the lobby's
+    /// message when it is one short line of plain text.
+    UpgradeRequired(Option<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,23 +223,36 @@ impl RequestFailure {
                 code: 0x8004_0070,
             },
             Some("unknown_match") if status == 409 => Self::AlreadyFinished,
+            _ if status == 426 => Self::UpgradeRequired(
+                value
+                    .as_ref()
+                    .and_then(|value| value["error"]["message"].as_str())
+                    .map(str::trim)
+                    .filter(|message| {
+                        !message.is_empty()
+                            && message.chars().count() <= MAX_UPGRADE_MESSAGE_CHARS
+                            && !message.chars().any(char::is_control)
+                    })
+                    .map(str::to_owned),
+            ),
             _ => Self::Status(status),
         }
     }
 
-    fn command_failure(self, operation: &str) -> CommandFailure {
+    fn command_failure(&self, operation: &str) -> CommandFailure {
         match self {
             Self::AlreadyFinished if operation == "finish" => CommandFailure::AlreadyFinished,
-            Self::ChannelRejected { code, .. } => CommandFailure::Rejected(code),
+            Self::ChannelRejected { code, .. } => CommandFailure::Rejected(*code),
             _ if matches!(self.status(), 0 | 429 | 500..=599) => CommandFailure::Retryable,
             _ => CommandFailure::Rejected(0x8000_4005),
         }
     }
 
-    fn status(self) -> u16 {
+    fn status(&self) -> u16 {
         match self {
-            Self::Status(status) | Self::ChannelRejected { status, .. } => status,
+            Self::Status(status) | Self::ChannelRejected { status, .. } => *status,
             Self::LostCursor | Self::AlreadyFinished => 409,
+            Self::UpgradeRequired(_) => 426,
         }
     }
 }
@@ -330,6 +364,10 @@ impl Client {
                 "User-Agent",
                 concat!("VERA20k/", env!("CARGO_PKG_VERSION"), " multiplayer-client"),
             );
+            if path == "/v1/sessions" {
+                // Its relay CONFIRM carries a federation roster; see services/lobby.
+                request = request.header("Vera-Relay-Federation", "1");
+            }
             if let Some(token) = &self.token {
                 request = request.header("Authorization", format!("Bearer {token}"));
             }
@@ -417,8 +455,9 @@ pub(super) fn run(
     output: Sender<Response>,
     stopping: Arc<AtomicBool>,
 ) {
+    // Only an external launch's validated loopback origin is plain HTTP.
     let config = ureq::Agent::config_builder()
-        .https_only(true)
+        .https_only(base.starts_with("https://"))
         .max_redirects(0)
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(12)))
@@ -455,6 +494,12 @@ macro_rules! serial_driver {
     ($($asynchronous:tt)?) => {
         impl Client {
     $($asynchronous)? fn session_failed(&mut self, error: RequestFailure, output: &Sender<Response>) -> bool {
+        if let RequestFailure::UpgradeRequired(message) = error {
+            // The lobby keeps serving an outdated session's events, finish,
+            // leave and logout (services/lobby/service.js), so it stays.
+            let _ = output.send(Response::Outdated { message });
+            return false;
+        }
         if error == RequestFailure::LostCursor
             && let Some(match_id) = self.active_match.clone()
         {
@@ -511,7 +556,7 @@ macro_rules! serial_driver {
                 *failed_polls = 0;
                 Duration::from_secs(1)
             }
-            Err(error) if platform_await!(self.session_failed(error, output)) => Duration::from_secs(30),
+            Err(error) if platform_await!(self.session_failed(error.clone(), output)) => Duration::from_secs(30),
             Err(_) => {
                 *failed_polls = failed_polls.saturating_add(1);
                 Duration::from_secs((1u64 << (*failed_polls).min(5)).min(30))
@@ -627,7 +672,7 @@ macro_rules! serial_driver {
                     Err(RequestFailure::Status(400))
                 };
                 if let Err(error) = result.as_ref() {
-                    platform_await!(client.session_failed(*error, &output));
+                    platform_await!(client.session_failed(error.clone(), &output));
                 }
                 let response = match result {
                     Ok(value) => {
@@ -687,7 +732,7 @@ macro_rules! serial_driver {
                     .request("/v1/commands", Some(&body)))
                     .and_then(|value| client.batch(value, &output));
                 if let Err(error) = result.as_ref() {
-                    platform_await!(client.session_failed(*error, &output));
+                    platform_await!(client.session_failed(error.clone(), &output));
                 }
                 let response = match result {
                     Ok(()) => Response::MapUploaded {
@@ -752,12 +797,20 @@ macro_rules! serial_driver {
                             code: 0x8004_0064,
                         });
                     }
-                    Err(RequestFailure::Status(426)) => {
-                        let _ = output.send(Response::UpgradeRequired { attempt });
+                    Err(RequestFailure::UpgradeRequired(message)) => {
+                        let _ = output.send(Response::UpgradeRequired { attempt, message });
                     }
                     Err(_) => {
                         let _ = output.send(Response::LoginFailed { attempt, code: 0 });
                     }
+                }
+            }
+            Some(Request::AdoptSession { token }) => {
+                if client.token.is_none() {
+                    client.token = Some(token);
+                    client.cursor = 0;
+                    client.active_match = None;
+                    failed_polls = 0;
                 }
             }
             Some(Request::Channels(kind)) => {
@@ -818,7 +871,7 @@ macro_rules! serial_driver {
                     result
                 };
                 let completed = result.is_ok();
-                if let Err(error) = result {
+                if let Err(error) = &result {
                     // Static operation names and numeric status only: request
                     // bodies, headers and transport errors can carry secrets.
                     log::warn!(
@@ -834,7 +887,7 @@ macro_rules! serial_driver {
                         let _ = output.send(Response::CommandCompleted { id, operation });
                     }
                     Err(error)
-                        if !platform_await!(client.session_failed(error, &output)) && operation != "renew_relay" =>
+                        if !platform_await!(client.session_failed(error.clone(), &output)) && operation != "renew_relay" =>
                     {
                         let _ = output.send(if operation == "start" {
                             Response::StartRejected { id }
@@ -1046,7 +1099,7 @@ mod tests {
             409,
             br#"{"error":{"code":"history_expired","message":"Sign in again."}}"#,
         );
-        client.poll_finished(Err(expired), &mut 0, &output);
+        client.poll_finished(Err(expired.clone()), &mut 0, &output);
         assert!(client.token.is_none());
         assert_eq!(client.cursor, 19);
         assert!(matches!(input.try_recv(), Ok(Response::Offline)));
@@ -1057,6 +1110,44 @@ mod tests {
             RequestFailure::response(409, br#"{"error":{"code":"invalid_cursor"}}"#),
             RequestFailure::LostCursor
         );
+    }
+
+    #[test]
+    fn update_refusal_keeps_only_a_plain_lobby_reason_and_the_session() {
+        let reason = "Online play needs VERA20k 0.3.0 or newer.";
+        let refused = |message: &str| {
+            let body = json!({"error":{"code":"upgrade_required","message":message}});
+            RequestFailure::response(426, body.to_string().as_bytes())
+        };
+        let longest = "x".repeat(MAX_UPGRADE_MESSAGE_CHARS);
+        assert_eq!(
+            refused(&longest),
+            RequestFailure::UpgradeRequired(Some(longest.clone()))
+        );
+        let too_long = format!("{longest}x");
+        for unusable in [too_long.as_str(), "Update.\r\n[Ask]", "  "] {
+            assert_eq!(refused(unusable), RequestFailure::UpgradeRequired(None));
+        }
+        assert_eq!(
+            RequestFailure::response(426, b"not json"),
+            RequestFailure::UpgradeRequired(None)
+        );
+
+        let (output, input) = std::sync::mpsc::channel();
+        let mut client = Client {
+            stopping: Arc::new(AtomicBool::new(false)),
+            agent: ureq::Agent::new_with_defaults(),
+            base: String::new(),
+            token: Some("synthetic-test-session".to_owned()),
+            cursor: 19,
+            active_match: None,
+        };
+        assert!(!client.session_failed(refused(reason), &output));
+        assert!(client.token.is_some());
+        assert!(matches!(
+            input.try_recv(),
+            Ok(Response::Outdated { message: Some(message) }) if message == reason
+        ));
     }
 
     #[test]

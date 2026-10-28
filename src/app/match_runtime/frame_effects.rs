@@ -440,7 +440,7 @@ mod tactical_radar_tests {
         )
         .unwrap();
         sim.install_waypoints(&map.waypoints);
-        sim.initialize_trigger_definitions(&map, &Default::default(), None, None);
+        sim.initialize_trigger_definitions(&map, &Default::default(), None, None, None);
         sim.classify_map_triggers(&rules);
         sim.advance_triggers(&rules, None, FrameEffects::empty());
         assert!(matches!(

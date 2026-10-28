@@ -3,6 +3,7 @@
 //! Simulation admission, draw composition, submit/present, transition commits,
 //! captures, and loading-after-present remain in their original source order.
 
+use super::input::precedence::{ModalPage, ScreenPage};
 use super::loading::transitions;
 use super::{
     ActiveEventLoop, App, AppState, GameScreen, Instant, Result, frontend::startup_splash, render,
@@ -270,6 +271,8 @@ impl App {
             };
         }
         crate::app::lan_service::poll(state, scenario_now_ms);
+        Self::poll_external_launch_progress(state);
+        Self::poll_spawn_actions(state);
         // Resume receipts must release only the relay clock hold even while
         // focus or a local modal prevents another simulation transaction.
         state
@@ -301,6 +304,10 @@ impl App {
                     // Main_Game55D347 returns directly to shell cleanup.
                     // This is the same route as WaitPass::Leave, without an
                     // EXIT command or BattleControlTerminated686570.
+                    Self::record_external_match_result(
+                        state,
+                        super::cncnet::ExternalMatchResult::Disconnected,
+                    );
                     Self::return_to_main_menu(state);
                 }
             }
@@ -374,6 +381,18 @@ impl App {
                 // `Stop(1)` that began the wait; the exit ends any fade tail.
                 state.audio.stop_theme();
                 state.frontend.quit_cascade = None;
+                // docs/spawn.md: the browser host learns that the external
+                // launch is over and the page may start another; desktop
+                // exits the process instead and writes its result file.
+                #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+                if state.frontend.external_launch {
+                    Self::finish_browser_external_launch(state, None);
+                    return RuntimeServiceResult {
+                        main_tick_admitted,
+                        screen_shake_offset,
+                        ..Default::default()
+                    };
+                }
                 event_loop.exit();
                 return RuntimeServiceResult {
                     quit_requested: true,
@@ -442,6 +461,10 @@ impl App {
                 // Result 8 clears GameActive without an EXIT event, so
                 // Main_Game returns past the router without 0x00686570's
                 // EVA and fades (0x0064806C..0x006482A6, 0x0055D347).
+                Self::record_external_match_result(
+                    state,
+                    super::cncnet::ExternalMatchResult::Disconnected,
+                );
                 Self::return_to_main_menu(state);
                 return RuntimeServiceResult {
                     main_tick_admitted,
@@ -791,16 +814,24 @@ impl App {
             Self::ensure_skirmish_shell_chrome(state);
         }
         Self::update_saved_game_browser(state, false);
+        // Input routes to these same pages (`input::precedence`).
+        let (page, screen_page) = crate::app::input::precedence::presented(state);
         match &state.frontend.screen {
-            GameScreen::InGame if crate::app::match_runtime::network_failure::pending(state) => {
+            _ if page == Some(ModalPage::ShellError) => {
+                Self::render_shell_error(state, &mut encoder, &view)?;
+            }
+            _ if page == Some(ModalPage::NetworkFailure) => {
                 crate::app::frontend::skirmish_shell_render::render_network_failure(
                     state, &mut encoder, &output.texture,
                 )?;
             }
-            GameScreen::MainMenu if state.frontend.main_menu_shell_error.is_some() => {
-                Self::render_shell_error(state, &mut encoder, &view)?;
+            _ if page == Some(ModalPage::NetworkWait)
+                && crate::app::frontend::skirmish_shell_render::connection_shell_drawable(state) =>
+            {
+                // 0xEA is pushed over whatever the game shows, in-game A3 included.
+                crate::app::frontend::skirmish_shell_render::render_connection_shell(state, &mut encoder, &output.texture)?;
             }
-            _ if state.frontend.keyboard_dialog.is_some() => {
+            _ if page == Some(ModalPage::Keyboard) => {
                 // The launcher's A3 is a family page, so its entry wave has to be
                 // pumped here: it is the only place that advances and completes a
                 // non-main-menu wave, and an uncompleted wave leaves the page
@@ -821,7 +852,7 @@ impl App {
                     crate::app::frontend::skirmish_shell_render::render_keyboard_shell(state, &mut encoder, &output.texture)?;
                 }
             }
-            _ if state.frontend.network_options.is_some() => {
+            _ if page == Some(ModalPage::NetworkOptions) => {
                 presented_shell = PresentedShell::NetworkOptions;
                 let slid = matches!(
                     crate::app::frontend::shell_transition::render_shell_first_paint_slide(
@@ -833,7 +864,7 @@ impl App {
                     crate::app::frontend::skirmish_shell_render::render_network_options(state, &mut encoder, &output.texture)?;
                 }
             }
-            GameScreen::MainMenu if state.frontend.fullscreen_movie.is_some() => {
+            _ if screen_page == ScreenPage::FullscreenMovie => {
                 Self::advance_fullscreen_movie(state)?;
                 if state.frontend.fullscreen_movie.is_some() {
                     crate::app::frontend::movies_credits_render::render_fullscreen_movie(
@@ -852,7 +883,7 @@ impl App {
                     );
                 }
             }
-            GameScreen::MainMenu if state.frontend.credits_roll.is_some() => {
+            _ if screen_page == ScreenPage::CreditsRoll => {
                 Self::advance_credits_roll(state);
                 if state.frontend.credits_roll.is_some() {
                     crate::app::frontend::movies_credits_render::render_credits_roll(
@@ -878,108 +909,116 @@ impl App {
                     &output.texture,
                 )? {
                     pending_main_menu_entry_token = main_menu_entry_token;
-                } else if Self::movie_list_active(state) {
-                    if crate::app::frontend::movies_credits_render::render_movie_list(
-                        state,
-                        &mut encoder,
-                        &output.texture,
-                    )? {
-                        presented_shell = PresentedShell::MovieList;
-                    } else {
-                        Self::render_shell_error(state, &mut encoder, &view)?;
-                    }
-                } else if Self::campaign_active(state) {
-                    if crate::app::frontend::campaign_shell_render::render_campaign_page(
-                        state,
-                        &mut encoder,
-                        &output.texture,
-                    )? {
-                        presented_shell = PresentedShell::Campaign;
-                    } else {
-                        Self::render_shell_error(state, &mut encoder, &view)?;
-                    }
-                } else if state.frontend.shell_route.lan_lobby() {
-                    crate::app::frontend::skirmish_shell_render::render_lan_lobby(state, &mut encoder, &output.texture)?;
-                    presented_shell = PresentedShell::LanLobby;
-                } else if state.frontend.shell_route.network_setup() {
-                    if state.frontend.skirmish_shell_state.choose_map_modal.is_some() {
-                        crate::app::frontend::skirmish_shell_render::render_skirmish_shell(state, &mut encoder, &output.texture)?;
-                    } else {
-                        crate::app::frontend::skirmish_shell_render::render_multiplayer_setup(state, &mut encoder, &output.texture)?;
-                    }
-                    presented_shell = PresentedShell::NetworkSetup;
-                } else if Self::wol_active(state) {
-                    if crate::app::frontend::wol_welcome_render::render_wol_page(
-                        state,
-                        &mut encoder,
-                        &output.texture,
-                    )? {
-                        presented_shell = crate::app::frontend::wol_welcome_render::presented_wol_page(state);
-                    } else {
-                        Self::render_shell_error(state, &mut encoder, &view)?;
-                    }
-                } else if Self::load_saved_game_active(state) {
-                    if crate::app::frontend::load_saved_game_render::render_load_saved_game_page(
-                        state,
-                        &mut encoder,
-                        &output.texture,
-                    )? {
-                        presented_shell = PresentedShell::LoadSavedGame;
-                    } else {
-                        Self::render_shell_error(state, &mut encoder, &view)?;
-                    }
-                } else if Self::native_launcher_options_active(state) {
-                    crate::app::frontend::skirmish_shell_render::render_launcher_options(
-                        state, &mut encoder, &output.texture,
-                    )?;
-                    presented_shell = PresentedShell::Options;
-                } else if Self::native_skirmish_shell_active(state) {
-                    crate::app::frontend::skirmish_shell_render::render_skirmish_shell(
-                        state,
-                        &mut encoder,
-                        &output.texture,
-                    )?;
-                    if state.frontend.skirmish_shell_chrome.is_some() {
-                        presented_shell = PresentedShell::Skirmish;
-                    }
-                } else if let Some(page) = crate::app::frontend::menu_page_render::ActiveMenuPage::from_state(state) {
-                    match crate::app::frontend::menu_page_render::render_active_menu_page(
-                        state,
-                        &mut encoder,
-                        &output.texture,
-                    )? {
-                        crate::app::frontend::menu_page_render::MenuPageRenderResult::Rendered => {
-                            presented_shell = match page {
-                                crate::app::frontend::menu_page_render::ActiveMenuPage::SinglePlayer => {
-                                    PresentedShell::SinglePlayer
-                                }
-                                crate::app::frontend::menu_page_render::ActiveMenuPage::MoviesAndCredits => {
-                                    PresentedShell::MoviesAndCredits
-                                }
-                            };
-                        }
-                        crate::app::frontend::menu_page_render::MenuPageRenderResult::Fallback => {
-                            Self::render_shell_error(state, &mut encoder, &view)?;
-                        }
-                    }
-                } else if state.frontend.main_menu_shell_error.is_none() {
-                    match crate::app::frontend::main_menu_shell_render::render_main_menu_shell(
-                        state,
-                        &mut encoder,
-                        &output.texture,
-                    )? {
-                        crate::app::frontend::main_menu_shell_render::MainMenuShellRenderResult::Rendered {
-                            title_receipt,
-                        } => {
-                            pending_main_menu_title_receipt = title_receipt;
-                            presented_shell = PresentedShell::MainMenu;
-                        }
-                        crate::app::frontend::main_menu_shell_render::MainMenuShellRenderResult::Fallback => {
-                            Self::render_shell_error(state, &mut encoder, &view)?;
-                        }
-                    }
                 } else {
-                    Self::render_shell_error(state, &mut encoder, &view)?;
+                    match screen_page {
+                        ScreenPage::MovieList => {
+                            if crate::app::frontend::movies_credits_render::render_movie_list(
+                                state,
+                                &mut encoder,
+                                &output.texture,
+                            )? {
+                                presented_shell = PresentedShell::MovieList;
+                            } else {
+                                Self::render_shell_error(state, &mut encoder, &view)?;
+                            }
+                        }
+                        ScreenPage::Campaign => {
+                            if crate::app::frontend::campaign_shell_render::render_campaign_page(
+                                state,
+                                &mut encoder,
+                                &output.texture,
+                            )? {
+                                presented_shell = PresentedShell::Campaign;
+                            } else {
+                                Self::render_shell_error(state, &mut encoder, &view)?;
+                            }
+                        }
+                        ScreenPage::LanLobby => {
+                            crate::app::frontend::skirmish_shell_render::render_lan_lobby(state, &mut encoder, &output.texture)?;
+                            presented_shell = PresentedShell::LanLobby;
+                        }
+                        ScreenPage::NetworkSetup => {
+                            if state.frontend.skirmish_shell_state.choose_map_modal.is_some() {
+                                crate::app::frontend::skirmish_shell_render::render_skirmish_shell(state, &mut encoder, &output.texture)?;
+                            } else {
+                                crate::app::frontend::skirmish_shell_render::render_multiplayer_setup(state, &mut encoder, &output.texture)?;
+                            }
+                            presented_shell = PresentedShell::NetworkSetup;
+                        }
+                        ScreenPage::Wol => {
+                            if crate::app::frontend::wol_welcome_render::render_wol_page(
+                                state,
+                                &mut encoder,
+                                &output.texture,
+                            )? {
+                                presented_shell = crate::app::frontend::wol_welcome_render::presented_wol_page(state);
+                            } else {
+                                Self::render_shell_error(state, &mut encoder, &view)?;
+                            }
+                        }
+                        ScreenPage::LoadSavedGame => {
+                            if crate::app::frontend::load_saved_game_render::render_load_saved_game_page(
+                                state,
+                                &mut encoder,
+                                &output.texture,
+                            )? {
+                                presented_shell = PresentedShell::LoadSavedGame;
+                            } else {
+                                Self::render_shell_error(state, &mut encoder, &view)?;
+                            }
+                        }
+                        ScreenPage::LauncherOptions => {
+                            crate::app::frontend::skirmish_shell_render::render_launcher_options(
+                                state, &mut encoder, &output.texture,
+                            )?;
+                            presented_shell = PresentedShell::Options;
+                        }
+                        ScreenPage::Skirmish => {
+                            crate::app::frontend::skirmish_shell_render::render_skirmish_shell(
+                                state,
+                                &mut encoder,
+                                &output.texture,
+                            )?;
+                            if state.frontend.skirmish_shell_chrome.is_some() {
+                                presented_shell = PresentedShell::Skirmish;
+                            }
+                        }
+                        ScreenPage::SinglePlayer | ScreenPage::MoviesAndCredits => {
+                            match crate::app::frontend::menu_page_render::render_active_menu_page(
+                                state,
+                                &mut encoder,
+                                &output.texture,
+                            )? {
+                                crate::app::frontend::menu_page_render::MenuPageRenderResult::Rendered => {
+                                    presented_shell = if screen_page == ScreenPage::SinglePlayer {
+                                        PresentedShell::SinglePlayer
+                                    } else {
+                                        PresentedShell::MoviesAndCredits
+                                    };
+                                }
+                                crate::app::frontend::menu_page_render::MenuPageRenderResult::Fallback => {
+                                    Self::render_shell_error(state, &mut encoder, &view)?;
+                                }
+                            }
+                        }
+                        _ => {
+                            match crate::app::frontend::main_menu_shell_render::render_main_menu_shell(
+                                state,
+                                &mut encoder,
+                                &output.texture,
+                            )? {
+                                crate::app::frontend::main_menu_shell_render::MainMenuShellRenderResult::Rendered {
+                                    title_receipt,
+                                } => {
+                                    pending_main_menu_title_receipt = title_receipt;
+                                    presented_shell = PresentedShell::MainMenu;
+                                }
+                                crate::app::frontend::main_menu_shell_render::MainMenuShellRenderResult::Fallback => {
+                                    Self::render_shell_error(state, &mut encoder, &view)?;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             GameScreen::Loading => {
@@ -1004,38 +1043,40 @@ impl App {
                     }
                 }
             }
-            GameScreen::InGame if crate::app::frontend::skirmish_shell_render::connection_shell_drawable(state) => {
-                // 0xEA is pushed over whatever the game shows.
-                crate::app::frontend::skirmish_shell_render::render_connection_shell(state, &mut encoder, &output.texture)?;
-            }
-            GameScreen::InGame if crate::app::frontend::skirmish_shell_render::native_in_game_shell_active(state) => {
+            _ if matches!(screen_page, ScreenPage::InGameShell(_)) => {
                 // 621FCE -> 72F540 clears and paints a complete active-game shell.
                 // No battlefield commands share this encoder/camera upload.
-                if state.match_state.match_presentation.in_game_menu == crate::ui::pause_menu::InGameMenuState::Menu {
-                    let buttons = crate::app::input::pause_menu::button_states(state);
-                    crate::app::frontend::skirmish_shell_render::render_pause_menu_shell(
-                        state, &mut encoder, &output.texture, buttons,
-                    )?;
-                } else if state.match_state.match_presentation.in_game_menu == crate::ui::pause_menu::InGameMenuState::AbortConfirm {
-                    crate::app::frontend::skirmish_shell_render::render_abort_shell(state, &mut encoder, &output.texture)?;
-                } else if state.match_state.match_presentation.in_game_menu == crate::ui::pause_menu::InGameMenuState::Sound {
-                    crate::app::frontend::skirmish_shell_render::render_sound_shell(state, &mut encoder, &output.texture)?;
-                } else if state.match_state.match_presentation.in_game_menu == crate::ui::pause_menu::InGameMenuState::Diplomacy {
-                    crate::app::frontend::skirmish_shell_render::render_diplomacy_shell(state, &mut encoder, &output.texture)?;
-                } else if state.match_state.match_presentation.in_game_menu == crate::ui::pause_menu::InGameMenuState::MissionBriefing {
-                    crate::app::frontend::skirmish_shell_render::render_restate_shell(state, &mut encoder, &output.texture)?;
-                } else if matches!(state.match_state.match_presentation.in_game_menu, crate::ui::pause_menu::InGameMenuState::SavedGame(_)) {
-                    crate::app::frontend::skirmish_shell_render::render_saved_game_shell(state, &mut encoder, &output.texture)?;
-                } else {
-                    crate::app::frontend::skirmish_shell_render::render_in_game_options_shell(
-                        state, &mut encoder, &output.texture,
-                    )?;
+                use crate::ui::pause_menu::InGameMenuState;
+                match screen_page {
+                    ScreenPage::InGameShell(InGameMenuState::Menu) => {
+                        let buttons = crate::app::input::pause_menu::button_states(state);
+                        crate::app::frontend::skirmish_shell_render::render_pause_menu_shell(
+                            state, &mut encoder, &output.texture, buttons,
+                        )?;
+                    }
+                    ScreenPage::InGameShell(InGameMenuState::AbortConfirm) => {
+                        crate::app::frontend::skirmish_shell_render::render_abort_shell(state, &mut encoder, &output.texture)?;
+                    }
+                    ScreenPage::InGameShell(InGameMenuState::Sound) => {
+                        crate::app::frontend::skirmish_shell_render::render_sound_shell(state, &mut encoder, &output.texture)?;
+                    }
+                    ScreenPage::InGameShell(InGameMenuState::Diplomacy) => {
+                        crate::app::frontend::skirmish_shell_render::render_diplomacy_shell(state, &mut encoder, &output.texture)?;
+                    }
+                    ScreenPage::InGameShell(InGameMenuState::MissionBriefing) => {
+                        crate::app::frontend::skirmish_shell_render::render_restate_shell(state, &mut encoder, &output.texture)?;
+                    }
+                    ScreenPage::InGameShell(InGameMenuState::SavedGame(_)) => {
+                        crate::app::frontend::skirmish_shell_render::render_saved_game_shell(state, &mut encoder, &output.texture)?;
+                    }
+                    _ => {
+                        crate::app::frontend::skirmish_shell_render::render_in_game_options_shell(
+                            state, &mut encoder, &output.texture,
+                        )?;
+                    }
                 }
             }
-            GameScreen::InGame
-                if state.match_state.match_presentation.in_game_menu.is_open()
-                    && !state.match_state.match_presentation.in_game_menu.draws_over_battlefield() =>
-            {
+            _ if screen_page == ScreenPage::InGameCard => {
                 let abort = state.match_state.match_presentation.in_game_menu
                     == crate::ui::pause_menu::InGameMenuState::AbortConfirm;
                 crate::app::frontend::status_screen::render(
@@ -1103,28 +1144,30 @@ impl App {
                 // screens with no native analogue (a load failure, a
                 // trigger-driven campaign end) carry no model and keep the
                 // non-art card.
-                let score_rendered = if crate::app::input::coop_score::active(state) {
-                    crate::app::frontend::skirmish_shell_render::render_coop_score(
-                        state,
-                        &mut encoder,
-                        &output.texture,
-                    )?
-                } else if Self::campaign_score_shell_active(state) {
-                    matches!(
-                        crate::app::frontend::shell_transition::render_shell_first_paint_slide(
+                let score_rendered = match screen_page {
+                    ScreenPage::CoopScore => {
+                        crate::app::frontend::skirmish_shell_render::render_coop_score(
                             state,
                             &mut encoder,
                             &output.texture,
-                        )?,
-                        crate::app::frontend::shell_transition::ShellFirstPaintRenderResult::Rendered { .. }
-                    ) || crate::app::frontend::campaign_score_shell_render::render_campaign_score_page(
-                        state,
-                        &mut encoder,
-                        &output.texture,
-                    )?
-                } else {
-                    Self::score_shell_active(state)
-                        && (matches!(
+                        )?
+                    }
+                    ScreenPage::CampaignScore => {
+                        matches!(
+                            crate::app::frontend::shell_transition::render_shell_first_paint_slide(
+                                state,
+                                &mut encoder,
+                                &output.texture,
+                            )?,
+                            crate::app::frontend::shell_transition::ShellFirstPaintRenderResult::Rendered { .. }
+                        ) || crate::app::frontend::campaign_score_shell_render::render_campaign_score_page(
+                            state,
+                            &mut encoder,
+                            &output.texture,
+                        )?
+                    }
+                    ScreenPage::Score => {
+                        matches!(
                             crate::app::frontend::shell_transition::render_shell_first_paint_slide(
                                 state,
                                 &mut encoder,
@@ -1135,7 +1178,9 @@ impl App {
                             state,
                             &mut encoder,
                             &output.texture,
-                        )?)
+                        )?
+                    }
+                    _ => false,
                 };
                 if score_rendered {
                     presented_shell = PresentedShell::Score;

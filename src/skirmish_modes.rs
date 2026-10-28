@@ -473,6 +473,25 @@ mod tests {
         assert!(modes[0].must_ally);
     }
     #[test]
+    fn stock_launch_rows_are_the_retail_roster_rows() {
+        use crate::rules::retail_ini_fixture::retail_ini;
+        use crate::skirmish_launch::SkirmishLaunchMode;
+        let Some(roster) = retail_ini("mpmodesmd.ini") else {
+            return;
+        };
+        let modes = parse_mpmodes_ini_with_overrides(&roster, retail_ini);
+        assert_eq!(modes.len(), 9);
+        for mode in &modes {
+            assert_eq!(
+                SkirmishLaunchMode::stock(mode.id),
+                Some(SkirmishLaunchMode::from_game_mode(mode)),
+                "{}",
+                mode.ui_name_key
+            );
+        }
+    }
+
+    #[test]
     fn stock_contract_modes_match_selected_retail_roster_and_overrides() {
         let Some((_, assets)) = crate::rules::retail_ini_fixture::retail_assets() else {
             return;

@@ -455,28 +455,13 @@ pub(super) fn build_world_instances(
     // live enemy objects the local viewer cannot see leave the draw plan fully
     // (body, shadow, attached anim parts and extras) instead of showing through
     // the fog. Terrain, overlays and revealed map art stay visible.
-    if state.translucent_fog_enabled() && !state.match_state.sandbox_full_visibility {
-        let viewer_name = crate::app::input::commands::preferred_local_owner_name(state);
-        if let (Some(rt), Some(viewer_name)) = (
-            state.match_state.sim_runtime.as_ref(),
-            viewer_name.as_deref(),
-        ) {
-            let sim = &rt.simulation;
+    if let Some(rt) = state.match_state.sim_runtime.as_ref() {
+        let sim = &rt.simulation;
+        if let Some(viewer) = instances::translucent_fog_viewer(state, sim) {
             let rules = &rt.resources.rules;
-            let viewer = sim.interner().get(viewer_name);
             let fog_of_war = sim.session().game_options().fog_of_war;
             let concealed = |entity: &crate::sim::game_entity::GameEntity| {
-                let owner = sim.interner().resolve(entity.owner());
-                instances::translucent_fog_conceals(
-                    Some(viewer_name),
-                    sim.fog(),
-                    sim.house_alliances(),
-                    &entity.position,
-                    owner,
-                    false,
-                    viewer,
-                    fog_of_war,
-                )
+                instances::translucent_fog_conceals(sim, viewer, entity)
             };
             // Particles owned by an object follow it out of the fog.
             let particle_owners: std::collections::BTreeMap<u64, Option<u64>> = sim
@@ -525,7 +510,7 @@ pub(super) fn build_world_instances(
                 };
                 let cell = instances::lepton_cell(coord.x, coord.y);
                 !instances::translucent_fog_conceals_cell(
-                    viewer,
+                    Some(viewer),
                     Some(sim.fog()),
                     cell.0,
                     cell.1,
@@ -1313,7 +1298,6 @@ pub(super) fn build_sidebar_instances(state: &mut AppState) -> SidebarInstances 
             crate::app::presentation::sidebar_text::build_sidebar_credits_instances(
                 &state.renderer.bit_font,
                 v,
-                state.match_state.match_presentation.ui_scale,
                 crate::app::presentation::sidebar_text::credits_tint(theme),
                 [
                     state.match_state.input.camera_x,
@@ -1393,13 +1377,12 @@ fn build_radar_anim_instance(state: &AppState) -> Vec<SpriteInstance> {
     let spec = state.match_state.match_presentation.sidebar_layout_spec;
     let layout = crate::ui::sidebar::compute_layout_with_spec(spec, sw, sh, 0);
 
-    let s = state.match_state.match_presentation.ui_scale;
     vec![SpriteInstance {
         position: [
             state.match_state.input.camera_x + layout.sidebar_x,
             state.match_state.input.camera_y + layout.radar_y,
         ],
-        size: [ra.width as f32 * s, ra.height as f32 * s],
+        size: [ra.width as f32, ra.height as f32],
         uv_origin: [0.0, 0.0],
         uv_size: [1.0, 1.0],
         depth: 0.00048,

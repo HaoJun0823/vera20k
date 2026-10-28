@@ -535,10 +535,7 @@ fn render_main_menu_shell_to_target_inner(
     let status_label = if leaving || backdrop {
         None
     } else {
-        let hovered = state
-            .frontend
-            .main_menu_shell_state
-            .hovered_owner_draw_button;
+        let hovered = crate::ui::main_menu_shell::hovered_control(&state.frontend.shell_controller);
         let status_text = main_menu_status_csf_key(hovered)
             .map(|key| resolve_csf(state, key).into_owned())
             .unwrap_or_default();
@@ -594,10 +591,7 @@ fn render_main_menu_shell_to_target_inner(
         }
         None => main_menu_paint_buttons(
             &layout,
-            state
-                .frontend
-                .main_menu_shell_state
-                .pressed_owner_draw_button,
+            crate::ui::main_menu_shell::pressed_control(&state.frontend.shell_controller),
         ),
     };
     // 0xE2 never flashes, so the hover clock is unused (None) — keep the call
@@ -614,10 +608,7 @@ fn render_main_menu_shell_to_target_inner(
         resolve_csf(state, "GUI:Version"),
         state.frontend.version_txt
     );
-    let pressed = state
-        .frontend
-        .main_menu_shell_state
-        .pressed_owner_draw_button;
+    let pressed = crate::ui::main_menu_shell::pressed_control(&state.frontend.shell_controller);
     let mut labels = if backdrop {
         Vec::new()
     } else {

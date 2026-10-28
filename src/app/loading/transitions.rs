@@ -70,7 +70,6 @@ pub(crate) fn fallback_map_load_result() -> init::MapLoadResult {
             map_lighting_config: crate::map::lighting::LightingConfig::default(),
             theater_name: "TEMPERATE".to_string(),
             theater_ext: "tem".to_string(),
-            initial_local_owner: None,
             sandbox_full_visibility: false,
             opening_view_cell: None,
             camera_anchor_x: 0.0,
@@ -151,6 +150,8 @@ pub(crate) fn install_world_presentation(
     state.match_state.match_presentation.combat_lights.clear();
     state.match_state.match_presentation.interpolation.clear();
     state.match_state.match_presentation.lasers.clear_on_load();
+    #[cfg(feature = "ares")]
+    state.match_state.match_presentation.flying_credits.borrow_mut().clear_on_load();
     state
         .match_state
         .match_presentation
@@ -624,7 +625,6 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
     state.match_state.input.cursor_y = tactical_height as f32 * 0.5;
     state.platform.frame_pacer.reset_for_new_world();
     state.match_state.input.queued_order_mode = render::OrderMode::Move;
-    state.match_state.local_owner_override = result.scenario.initial_local_owner;
     state.match_state.match_audio.reset_for_new_match();
     state.match_state.sandbox_full_visibility = result.scenario.sandbox_full_visibility;
 

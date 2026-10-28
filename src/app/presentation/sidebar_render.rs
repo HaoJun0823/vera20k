@@ -52,7 +52,9 @@ pub(crate) fn advance_sidebar_credits_after_frame(
     if !crate::app::sidebar_projection::credits_advance_for_frame(frame_committed, tick_lane) {
         return;
     }
-    let owner_name = preferred_local_owner_name(state).unwrap_or_else(|| "Americans".to_string());
+    let Some(owner_name) = preferred_local_owner_name(state) else {
+        return;
+    };
     let Some(sim) = state
         .match_state
         .sim_runtime
@@ -136,13 +138,18 @@ pub(crate) fn refresh_sidebar_projection(state: &mut AppState) {
     let (screen_w, screen_h) = state.sidebar_frame().layout_screen();
     let visible_rows =
         sidebar::compute_layout_with_spec(spec, screen_w, screen_h, 0).side2_tile_count;
-    let owner_name: String =
-        preferred_local_owner_name(state).unwrap_or_else(|| "Americans".to_string());
+    let Some(owner_name) = preferred_local_owner_name(state) else {
+        state
+            .match_state
+            .match_presentation
+            .sidebar_projection
+            .replace_view(None);
+        return;
+    };
     let Some((
         build_options,
         queue_items,
         ready_buildings,
-        producer_focus,
         credits,
         power_produced,
         power_drained,
@@ -156,19 +163,6 @@ pub(crate) fn refresh_sidebar_projection(state: &mut AppState) {
                 .map(|rt| &rt.simulation)?,
             state.rules()?,
         );
-        let producer_focus = [
-            production::ProductionCategory::Building,
-            production::ProductionCategory::Defense,
-            production::ProductionCategory::Infantry,
-            production::ProductionCategory::Vehicle,
-            production::ProductionCategory::Aircraft,
-            production::ProductionCategory::Ship,
-        ]
-        .into_iter()
-        .filter_map(|category| {
-            production::active_producer_for_owner_category(sim, rules, &owner_name, category)
-        })
-        .collect::<Vec<_>>();
         let owner_iid = sim.interner().get(&owner_name).unwrap_or_default();
         let sw_views = crate::sim::superweapon::superweapon_views_for_owner(sim, rules, &owner_iid);
         let (power_produced, power_drained) =
@@ -177,7 +171,6 @@ pub(crate) fn refresh_sidebar_projection(state: &mut AppState) {
             production::all_build_options_for_owner(sim, rules, &owner_name),
             production::queue_view_for_owner(sim, rules, &owner_name),
             production::ready_buildings_for_owner(sim, rules, &owner_name),
-            producer_focus,
             counter_credits(sim, &owner_name),
             power_produced,
             power_drained,
@@ -299,9 +292,8 @@ pub(crate) fn refresh_sidebar_projection(state: &mut AppState) {
         scroll_up_btn_size,
         top_btn_sizes,
     ) = {
-        let scale = state.match_state.match_presentation.ui_scale;
         let size = |entry: Option<&crate::render::sidebar_chrome::SidebarChromeEntry>| {
-            entry.map(|entry| [entry.pixel_size[0] * scale, entry.pixel_size[1] * scale])
+            entry.map(|entry| entry.pixel_size)
         };
         let atlas = current_sidebar_chrome(state);
         (
@@ -345,7 +337,6 @@ pub(crate) fn refresh_sidebar_projection(state: &mut AppState) {
         &build_options,
         &ready_buildings,
         armed_entry.as_ref(),
-        &producer_focus,
         state
             .match_state
             .sim_runtime
@@ -455,18 +446,9 @@ pub(crate) fn refresh_sidebar_projection(state: &mut AppState) {
 /// two House rechecks must reach the very next frame. Membership and the House
 /// pass stay with [`refresh_sidebar_projection`].
 pub(crate) fn refresh_sidebar_cameo_draw_state(state: &mut AppState) {
-    // Without a current House the projection's owner comes from the sandbox
-    // guess, whose resolution scans every entity and each candidate's build
-    // options. That debug path keeps the drawn state of its last rebuild.
-    if state
-        .match_state
-        .sim_runtime
-        .as_ref()
-        .is_none_or(|runtime| runtime.simulation.session().current_house().is_none())
-    {
+    let Some(owner_name) = preferred_local_owner_name(state) else {
         return;
-    }
-    let owner_name = preferred_local_owner_name(state).unwrap_or_else(|| "Americans".to_string());
+    };
     let AppState { match_state, .. } = state;
     let Some(runtime) = match_state.sim_runtime.as_ref() else {
         return;

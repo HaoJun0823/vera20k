@@ -31,6 +31,8 @@ pub(crate) mod object_fall;
 pub mod arena_fixture;
 pub(crate) mod build_site;
 pub mod building_art;
+#[cfg(feature = "ares")]
+pub mod bounty;
 pub(crate) mod building_upgrades;
 pub(crate) mod building_power;
 pub(crate) mod building_entry;
@@ -51,6 +53,8 @@ pub mod crates; // scenario-start crate placement (Post_Map_Init step 3)
 pub mod credit_income; // oil-derrick ProduceCash + Floating Disc money drain (object-loop money)
 pub(crate) mod conversion_health;
 pub(crate) mod crew_survival; // building SpawnSurvivors and vehicle crew escape
+#[cfg(feature = "ares")]
+pub(crate) mod vehicle_theft;
 pub mod economy; // per-house wallet/storage/statistics value-type (production+economy substrate)
 #[cfg(feature = "ares")]
 pub(crate) mod factory_owners;

@@ -269,7 +269,7 @@ pub(crate) fn current_cursor_feedback_kind(state: &AppState) -> Option<CursorFee
     if !query.cell_visible(cell) {
         return Some(query.hidden_cell(cell));
     }
-    let owner = preferred_local_owner_name(state).unwrap_or_else(|| "Americans".to_string());
+    let owner = preferred_local_owner_name(state)?;
     let hover_object = crate::app::input::entity_pick::hover_object_at_point(
         crate::app::input::entity_pick::presented(state, sim),
         world_x,
@@ -278,7 +278,14 @@ pub(crate) fn current_cursor_feedback_kind(state: &AppState) -> Option<CursorFee
         state.match_state.sandbox_full_visibility,
     );
     if selected.is_empty() {
-        return no_selection_cursor(hover_object.and_then(HoverObject::techno).as_ref());
+        let fog = (!state.match_state.sandbox_full_visibility).then(|| sim.fog());
+        let player = sim.interner().get(&owner);
+        let hover = hover_object.and_then(HoverObject::techno).filter(|hover| {
+            sim.entities().get(hover.stable_id).is_some_and(|entity| {
+                !crate::app::input::entity_pick::no_selection_refuses_select(entity, fog, player)
+            })
+        });
+        return no_selection_cursor(hover.as_ref());
     }
     query.selection_action(cell, hover_object)
 }
@@ -313,7 +320,6 @@ impl<'a> ActionQuery<'a> {
         selected: &'a [u64],
         mouse_over: bool,
     ) -> Self {
-        let owner = preferred_local_owner_name(state).unwrap_or_else(|| "Americans".to_string());
         let mut modifier = crate::app::input::context_order::resolve_order_modifiers(
             crate::app::input::dispatch::is_ctrl_held(state),
             crate::app::input::dispatch::is_shift_held(state),
@@ -333,7 +339,7 @@ impl<'a> ActionQuery<'a> {
             sim,
             rules: state.rules(),
             overlays: state.overlay_registry(),
-            viewer: sim.interner().get(&owner),
+            viewer: preferred_local_owner_name(state).and_then(|owner| sim.interner().get(&owner)),
             selected,
             modifier,
             force_move_key,
@@ -421,6 +427,7 @@ impl<'a> ActionQuery<'a> {
                 sim,
                 rules,
                 id,
+                terrain_id,
                 None,
                 modifier,
                 force_move_key,
@@ -432,6 +439,7 @@ impl<'a> ActionQuery<'a> {
                 super::context_order::ObjectKeyAction::Move => {
                     key_move_feedback(sim, rules, id, terrain_id)
                 }
+                super::context_order::ObjectKeyAction::NoMove => CursorFeedbackKind::Invalid,
             };
             return Some(promote_attack_move_feedback(kind, attack_move));
         }
@@ -765,6 +773,7 @@ pub(super) fn capability_cursor_for_hover(
             sim,
             rules,
             best_id?,
+            hover.stable_id,
             Some(hover.stable_id),
             modifier,
             force_move_key,
@@ -892,6 +901,23 @@ pub(super) fn capability_cursor_for_hover(
             };
         }
 
+        #[cfg(feature = "ares")]
+        if rules.is_some_and(|rules| {
+            super::context_order::vehicle_capture_action(
+                sim,
+                rules,
+                best_id,
+                hover.stable_id,
+                modifier,
+                force_move_key,
+            )
+        }) {
+            // Ares100496EF selects TakeVehicle92. Its default constructor
+            //1000735C..10007370 copies native Enter25's complete descriptor.
+            // RESIDUAL: custom [MouseCursors] overrides are not bound yet.
+            return CursorFeedbackKind::Enter;
+        }
+
         // 5. Entry: a Unit's Select over a friendly building it may enter
         //    (refinery, Service Depot, Tank Bunker, Grinder), an Infantryman's
         //    over a Grinding= building, either's over a friendly passenger
@@ -925,16 +951,18 @@ pub(super) fn capability_cursor_for_hover(
 
         let is_infantry = sel_entity.category() == EntityCategory::Infantry;
 
-        // 6. Infantry garrisoning uses the shared CanBeOccupiedBy-equivalent predicate.
-        //    garrisonable — only show Enter for those, not actual enemy-player buildings.
+        // 6. Infantry's garrison arm, shared with the click.
         if is_infantry
-            && !matches!(
-                modifier,
-                OrderModifier::ForceFire | OrderModifier::GuardArea
-            )
-            && hovered_obj.is_some_and(|object| object.can_be_occupied)
-            && let Some(rules) = rules
-            && crate::sim::passenger::can_enter_transport(sim, rules, best_id, hover.stable_id)
+            && rules.is_some_and(|rules| {
+                super::context_order::infantry_garrisons(
+                    sim,
+                    rules,
+                    best_id,
+                    hover.stable_id,
+                    modifier,
+                    force_move_key,
+                )
+            })
         {
             return CursorFeedbackKind::Enter;
         }
@@ -946,6 +974,9 @@ pub(super) fn capability_cursor_for_hover(
             && let Some(rules) = rules
         {
             return key_move_feedback(sim, rules, best_id, hover.stable_id);
+        }
+        if key_action == Some(super::context_order::ObjectKeyAction::NoMove) {
+            return CursorFeedbackKind::Invalid;
         }
         if modifier == OrderModifier::ForceFire {
             if let Some(kind) = force_fire_feedback(
@@ -970,13 +1001,26 @@ pub(super) fn capability_cursor_for_hover(
 
         // Native garrison precedes C4, which precedes the late infiltration
         // arm. C4 can terminate with ordinary Attack, not just Sabotage.
+        // Both need the Attack the click's arms need too.
+        let arm_attacks = rules.is_some_and(|rules| {
+            super::context_order::infantry_arm_attacks(
+                sim,
+                rules,
+                best_id,
+                hover.stable_id,
+                modifier,
+                force_move_key,
+                overlay_registry,
+            )
+        });
         let c4_action = rules.and_then(|rules| {
-            super::context_order::infantry_c4_action(sim, rules, best_id, hover, false)
+            super::context_order::infantry_c4_action(sim, rules, best_id, hover, arm_attacks)
         });
         if c4_action == Some(super::context_order::InfantryC4Action::Sabotage) {
             return CursorFeedbackKind::Demolish;
         }
         if c4_action.is_none()
+            && arm_attacks
             && matches!(
                 hover.kind,
                 HoverTargetKind::FriendlyStructure | HoverTargetKind::EnemyStructure
@@ -1037,34 +1081,12 @@ pub(super) fn capability_cursor_for_hover(
 
     // 9. Generic fallback.
     //
-    // A selected own unit under its own cursor answers NoMove, not Select:
-    // retail refuses the move order onto a cell held by an own *selected*
-    // techno, and the select action rejects an already-selected object — the
-    // self-click resolves to ACTION_SELF / ACTION_SELECT instead
-    // (`TechnoClass::What_Action_OnObject` `0x0070000B`, `[0xA8ECC8] == 1` at
-    // `0x007000C1`, see `self_click_command`) — so the barred cursor wins.
-    // Hovering an own unit that is NOT selected still takes Select, and a
-    // no-selection hover keeps DetermineAction's no-selection Select. An
-    // Aircraft cursor owner's 0 there becomes its Cell action instead
-    // (`0x00417D7C`), and a Building's stays 0 (`0x0044750D`), which the
-    // object action below answers.
-    if hover_is_selected_own_unit(hover, &selected)
-        && !best_id
-            .and_then(|id| sim.entities().get(id))
-            .is_some_and(|actor| {
-                matches!(
-                    actor.category(),
-                    EntityCategory::Aircraft | EntityCategory::Structure
-                )
-            })
-        // Unit `0x007403EB` and Infantry `0x0051F05E` make that 0 NoMove
-        // only for an object they may control (vt+0xA0); else it stays 0.
-        && best_id
-            .zip(rules)
-            .is_none_or(|(id, rules)| sim.techno_player_controllable(id, rules))
-    {
-        return CursorFeedbackKind::Invalid;
-    }
+    // A selected object under the cursor of a larger selection takes
+    // Techno's tail, whose 0 over a selected object (`0x007005BF`) the class
+    // tails answer: NoMove for a player's Unit or Infantryman it may control
+    // (`0x007403EB`, `0x0051F05E`), an Aircraft's Cell action (`0x00417D7C`)
+    // and a Building's 0 (`0x0044750D`). The click dispatches the same
+    // answer ([`super::context_order::attack_action`]).
     match hover.kind {
         HoverTargetKind::FriendlyUnit
         | HoverTargetKind::FriendlyStructure
@@ -1250,21 +1272,6 @@ fn no_selection_cursor(
         ) => Some(CursorFeedbackKind::Select),
         _ => None,
     }
-}
-
-/// Whether the hovered own unit is itself selected — the self-hover that
-/// answers NoMove instead of Select. Retail refuses the move order onto a
-/// cell held by an own *selected* techno, and its select action rejects an
-/// already-selected object: the self-click resolves to ACTION_SELF /
-/// ACTION_SELECT instead (`TechnoClass::What_Action_OnObject` `0x0070000B`,
-/// `[0xA8ECC8] == 1` at `0x007000C1`, see `self_click_command`), so the
-/// barred cursor wins. An own unit that is not selected, a structure, or an
-/// enemy is not this arm.
-fn hover_is_selected_own_unit(
-    hover: &crate::app::input::entity_pick::HoverTargetKindWithId,
-    selected: &[u64],
-) -> bool {
-    hover.kind == HoverTargetKind::FriendlyUnit && selected.contains(&hover.stable_id)
 }
 
 /// The display mapping for Unit's shared repair-object action. Original
@@ -3823,43 +3830,6 @@ mod cursor_animation_tests {
         assert_eq!(
             super::cursor_id_for_feedback(CursorFeedbackKind::Select),
             Some(CursorId::Select)
-        );
-    }
-
-    /// A selected own unit under its own cursor answers NoMove — the barred
-    /// cursor — not Select: retail's move order refuses a cell held by an own
-    /// selected techno and its select action rejects an already-selected one
-    /// (`TechnoClass::What_Action_OnObject` `0x0070000B`, `[0xA8ECC8] == 1` at
-    /// `0x007000C1`, see `self_click_command`). An own unit that is not
-    /// selected keeps Select; structures and enemies are not this arm.
-    #[test]
-    fn selected_own_unit_self_hover_answers_no_move() {
-        let hover = |kind, stable_id| HoverTargetKindWithId { kind, stable_id };
-        let selected = [7u64, 9];
-        assert!(super::hover_is_selected_own_unit(
-            &hover(HoverTargetKind::FriendlyUnit, 9),
-            &selected
-        ));
-        assert!(!super::hover_is_selected_own_unit(
-            &hover(HoverTargetKind::FriendlyUnit, 8),
-            &selected
-        ));
-        assert!(!super::hover_is_selected_own_unit(
-            &hover(HoverTargetKind::FriendlyStructure, 9),
-            &selected
-        ));
-        assert!(!super::hover_is_selected_own_unit(
-            &hover(HoverTargetKind::EnemyUnit, 9),
-            &selected
-        ));
-        assert!(!super::hover_is_selected_own_unit(
-            &hover(HoverTargetKind::FriendlyUnit, 9),
-            &[]
-        ));
-        // The cursor that answer lands on is row 19's barred frame.
-        assert_eq!(
-            super::cursor_id_for_feedback(CursorFeedbackKind::Invalid),
-            Some(CursorId::NoMove)
         );
     }
 

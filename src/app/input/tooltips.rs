@@ -195,7 +195,7 @@ fn tactical_world_tip_text(
     world: (f32, f32),
     cursor_coordinates: bool,
 ) -> String {
-    tactical_world_tip_text_sampled(view, rules, csf, world, cursor_coordinates, None)
+    tactical_world_tip_text_sampled(view, rules, csf, world, cursor_coordinates, None, None)
 }
 
 fn tactical_world_tip_text_sampled(
@@ -205,6 +205,7 @@ fn tactical_world_tip_text_sampled(
     world: (f32, f32),
     cursor_coordinates: bool,
     interpolation: Option<&crate::app::presentation::interpolation::RenderInterpolation>,
+    translucent_viewer: Option<crate::sim::intern::InternedId>,
 ) -> String {
     let Some((terrain, viewer)) = view.resolved_terrain().zip(view.session().current_house())
     else {
@@ -233,6 +234,7 @@ fn tactical_world_tip_text_sampled(
         crate::app::input::entity_pick::PresentedWorld {
             sim,
             interpolation: interpolation.unwrap_or(&native),
+            translucent_viewer,
         },
         &order,
         Some(view.fog()),
@@ -337,6 +339,15 @@ fn unit_turret_tip_text(
     object: &crate::rules::object_type::ObjectType,
     csf: Option<&crate::assets::csf_file::CsfFile>,
 ) -> String {
+    // Ares UnitGetUIName746B89 ->1004BF20 returns the configured full
+    // weapon-mode name before the original passenger/turret formatter.
+    #[cfg(feature = "ares")]
+    if let Some(label) = object
+        .gunner_turrets
+        .weapon_ui_name(entity.current_weapon_number())
+    {
+        return crate::assets::csf_file::type_ui_name(Some(label), csf);
+    }
     let tip = |key: &str| csf.map_or_else(|| key.to_owned(), |csf| csf.text(key).into_owned());
     let passenger = entity
         .passenger_role
@@ -357,10 +368,18 @@ fn unit_turret_tip_text(
         },
         None => tip("Tip:Rocket"),
     };
-    format!(
-        "{word} {}",
-        crate::assets::csf_file::type_ui_name(object.ui_name.as_deref(), csf)
-    )
+    let own = crate::assets::csf_file::type_ui_name(object.ui_name.as_deref(), csf);
+    #[cfg(feature = "ares")]
+    {
+        // Ares spacing hook746C55 ->1004BF90 separates nonempty pieces only.
+        if word.is_empty() {
+            return own;
+        }
+        if own.is_empty() {
+            return word;
+        }
+    }
+    format!("{word} {own}")
 }
 
 fn tactical_tip_text(state: &AppState) -> String {
@@ -383,6 +402,8 @@ fn tactical_tip_text(state: &AppState) -> String {
         input.cursor_x,
         input.cursor_y,
     );
+    let translucent_viewer =
+        crate::app::presentation::instances::translucent_fog_viewer(state, view.simulation());
     tactical_world_tip_text_sampled(
         view,
         rules,
@@ -390,6 +411,7 @@ fn tactical_tip_text(state: &AppState) -> String {
         world,
         input.cursor_coordinates,
         Some(&state.match_state.match_presentation.interpolation),
+        translucent_viewer,
     )
 }
 

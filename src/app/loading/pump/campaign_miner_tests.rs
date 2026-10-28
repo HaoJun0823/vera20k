@@ -114,6 +114,7 @@ fn load_campaign(
         #[cfg(feature = "ares")]
         &mut prepared_rules_prefix,
         audio,
+        None,
         dummy,
         cache,
         &mut SilentProgress,

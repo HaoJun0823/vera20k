@@ -268,6 +268,8 @@ pub(crate) fn render_coop_score(
                 rect,
                 thumb_left: bar.thumb_left(rect, scale),
                 plaque: false,
+                // EnableWindow(0x732) at `0x0046DDF3..0x0046DE10`.
+                disabled: !bar.enabled,
             },
             scale,
         );

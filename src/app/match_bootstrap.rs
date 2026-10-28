@@ -627,14 +627,8 @@ pub fn classify_startup_session(session: &SkirmishLaunchSession) -> StartupSessi
     }
 
     let mode = &session.mode;
-    let is_stock_battle = mode.id == 1
-        && mode.ui_name_key.eq_ignore_ascii_case("GUI:Battle")
-        && mode.tooltip_key.eq_ignore_ascii_case("STT:ModeBattle")
-        && mode.override_file.eq_ignore_ascii_case("MPBattleMD.ini")
-        && mode.map_filter.eq_ignore_ascii_case("standard")
-        && mode.random_maps_allowed
-        && mode.allies_allowed
-        && !mode.must_ally;
+    let is_stock_battle =
+        mode.id == crate::skirmish_launch::BATTLE_MODE_ID && mode.matching_stock().is_some();
     if !is_stock_battle {
         return StartupSessionClassification::UnverifiedLegacy(
             UnverifiedStartupReason::NonBattleMode,

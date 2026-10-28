@@ -8,7 +8,7 @@ use super::{WolPage, WolVisit};
 use crate::app::frontend::{shell_layout, shell_transition};
 use crate::app::{App, AppState};
 use crate::ui::main_menu_dialogs::options::LauncherCue;
-use crate::ui::shell::combobox::ComboPopup;
+use crate::ui::shell::combobox::{ComboPopup, ComboPress};
 use crate::ui::skirmish_shell::{COMBO_DROPDOWN_ROW_H, COMBO_FACE_H};
 use crate::ui::wol_login::*;
 use winit::keyboard::KeyCode;
@@ -55,7 +55,7 @@ pub(crate) fn open_login_art(state: &mut AppState) -> bool {
 /// The nickname combo's drop list. ComboDrop's internals are untraced: the
 /// list fills the template height below the face.
 pub(crate) fn combo_popup(login: &WolLoginState, layout: &WolLoginLayout) -> Option<ComboPopup> {
-    if login.policy == LoginPolicy::Online || !login.combo_open {
+    if login.policy == LoginPolicy::Online || login.popup.control.is_none() {
         return None;
     }
     let base = layout.page.scale.base_rect(layout.nickname_combo);
@@ -65,7 +65,7 @@ pub(crate) fn combo_popup(login: &WolLoginState, layout: &WolLoginLayout) -> Opt
         layout.page.scale,
         login.rows.len(),
         cap,
-        login.combo_top,
+        login.popup.top_index,
     ))
 }
 
@@ -202,12 +202,7 @@ pub(super) fn cursor_moved(state: &mut AppState) {
     with_login(state, |login, _, _| {
         login.buttons.hovered = layout.control_at(x, y);
         if let Some(popup) = combo_popup(login, &layout) {
-            if let Some(row) = popup.row_at(x, y) {
-                login.combo_hot_row = Some(row);
-            }
-            login
-                .combo_scroll
-                .pointer_moved(popup.scroll_geometry(), &mut login.combo_top, x, y);
+            login.popup.pointer_moved(popup, x, y);
         }
     });
     state.platform.window.request_redraw();
@@ -226,7 +221,7 @@ pub(super) fn mouse(state: &mut AppState, pressed: bool) {
     let scale = layout.page.scale;
     if !pressed {
         let action = with_login(state, |login, globals, _| {
-            login.combo_scroll.cancel();
+            login.popup.cancel_pointer();
             login
                 .buttons
                 .release(over)
@@ -242,35 +237,30 @@ pub(super) fn mouse(state: &mut AppState, pressed: bool) {
     }
     let press = with_login(state, |login, globals, credentials| {
         if let Some(popup) = combo_popup(login, &layout) {
-            if let Some(part) = popup.scroll_part_at(x, y) {
-                login.combo_scroll.press(
-                    part,
-                    popup.scroll_geometry(),
-                    &mut login.combo_top,
-                    y,
-                    Instant::now(),
-                );
-                return Press::Nothing;
+            let press = login.popup.press_list(popup, x, y, Instant::now());
+            if let ComboPress::Pick(row) = press {
+                login.select_row(row, globals, credentials);
             }
-            match popup.row_at(x, y).filter(|row| *row < login.rows.len()) {
-                Some(row) => login.select_row(row, globals, credentials),
-                None => login.combo_open = false,
-            }
-            return Press::Cue(LauncherCue::ComboClose);
+            return press
+                .cue()
+                .map_or(Press::Nothing, |cue| Press::Cue(cue.into()));
         }
         match over {
             Some(NICKNAME) => {
-                if login.policy == LoginPolicy::Legacy
-                    && crate::ui::skirmish_shell::combo_arrow_hit_rect(layout.nickname_face, scale)
-                        .contains(x, y)
-                {
-                    login.combo_open = true;
-                    login.combo_top = 0;
-                    login.combo_hot_row = login
+                // The editable combo's edit child takes every press outside
+                // the arrow zone, so only an opening press reaches the combo.
+                if login.policy == LoginPolicy::Legacy {
+                    let selected = login
                         .rows
                         .iter()
                         .position(|row| row.nickname.eq_ignore_ascii_case(&globals.nickname));
-                    return Press::Cue(LauncherCue::ComboOpen);
+                    let press =
+                        login
+                            .popup
+                            .press_face((), layout.nickname_face, scale, selected, x, y);
+                    if press == ComboPress::Open {
+                        return Press::Cue(LauncherCue::ComboOpen);
+                    }
                 }
                 login.focus(NICKNAME);
                 Press::Nothing
@@ -318,14 +308,14 @@ pub(crate) fn poll_scroll_repeat(state: &mut AppState) -> Option<Instant> {
         return None;
     };
     let popup = combo_popup(login, &layout)?;
-    if login.combo_scroll.poll(
+    if login.popup.scroll.poll(
         popup.scroll_geometry(),
-        &mut login.combo_top,
+        &mut login.popup.top_index,
         x,
         y,
         Instant::now(),
     ) {
         state.platform.window.request_redraw();
     }
-    login.combo_scroll.repeat_at()
+    login.popup.scroll.repeat_at()
 }

@@ -10,12 +10,12 @@
 use crate::util::time::Instant;
 
 use crate::ui::shell::button::ShellButtonInteraction;
+use crate::ui::shell::combobox::ComboPopupInteraction;
 use crate::ui::shell::descriptor::DialogId;
 use crate::ui::shell::geom::{
     RectPx, SHELL_BASE_H, SHELL_BASE_W, ShellScale, child_window, dlu_rect,
 };
 use crate::ui::shell::layout::status_line_rect;
-use crate::ui::shell::list::ListScrollInteraction;
 use crate::ui::shell::menu_page::{self, MenuPageButtonSpec, MenuPageLayout, MenuPageSpec};
 use crate::ui::skirmish_shell::{COMBO_FACE_H, SavedSeedDescriptionEdit};
 
@@ -258,10 +258,8 @@ pub(crate) struct WolLoginState {
     pub(crate) login_enabled: bool,
     pub(crate) focused_control: u16,
     pub(crate) buttons: ShellButtonInteraction<u16>,
-    pub(crate) combo_open: bool,
-    pub(crate) combo_top: usize,
-    pub(crate) combo_hot_row: Option<usize>,
-    pub(crate) combo_scroll: ListScrollInteraction,
+    /// The nickname combo's open list.
+    pub(crate) popup: ComboPopupInteraction<()>,
     focus_started_at: Instant,
 }
 
@@ -341,10 +339,7 @@ impl WolLoginState {
             login_enabled: policy.accepts(&globals.nickname, &globals.password),
             focused_control: NICKNAME,
             buttons: ShellButtonInteraction::default(),
-            combo_open: false,
-            combo_top: 0,
-            combo_hot_row: None,
-            combo_scroll: ListScrollInteraction::default(),
+            popup: ComboPopupInteraction::default(),
             focus_started_at: Instant::now(),
         };
         state.focus(
@@ -456,8 +451,7 @@ impl WolLoginState {
         if self.policy == LoginPolicy::Online {
             return;
         }
-        self.combo_open = false;
-        self.combo_scroll.cancel();
+        self.popup.close();
         globals.nickname.clear();
         globals.password.clear();
         globals.changed = true;
@@ -631,7 +625,7 @@ impl WolLoginState {
 
     pub(crate) fn cancel_pointer(&mut self) {
         self.buttons = ShellButtonInteraction::default();
-        self.combo_scroll.cancel();
+        self.popup.cancel_pointer();
     }
 }
 

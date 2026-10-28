@@ -412,7 +412,12 @@ const MIN_DISTINCT_DECK_CELLS: usize = 6;
 // #3099 adds the permanent-stealth grant byte for every entity, false here.
 // Omitting only that hash fold recovers 0x8934_6F95_0887_B80C; the unchanged
 // replay, route and absolute RNG assertions pass with either hash composition.
-const BRIDGE_HARNESS_FINAL_HASH: u64 = 0x57D9_C8C7_DA7A_FBD6;
+// #3234 removed the entity hash's sensor deposit, a None byte for every object
+// here. It sat in the same run of zero bytes as that grant byte, so the pin
+// returns to the value above. Hash composition only: a temporary control
+// restoring the byte gave the previous value, with every tripwire above green.
+// Control removed. Previous: 0x57D9_C8C7_DA7A_FBD6.
+const BRIDGE_HARNESS_FINAL_HASH: u64 = 0x8934_6F95_0887_B80C;
 
 fn bridge_ini() -> IniFile {
     // One armed ground vehicle and one distant infantryman on a second house, so

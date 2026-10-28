@@ -601,12 +601,6 @@ pub struct GameEntity {
     /// Instance stealth grant; sim::cloak_disguise owns its mutations.
     #[serde(default)]
     pub(crate) stealth_ability: StealthAbility,
-    /// Last sensor coverage actually deposited into CellClass counters.
-    /// Removal must use these cached owner/location/radius values after the
-    /// entity's current facts have changed.
-    /// `sensor_lifecycle` owns it.
-    #[serde(default)]
-    pub(crate) sensor_deposit: Option<crate::sim::sensor_lifecycle::SensorDeposit>,
     /// Core disguise identity, timestamp, and reveal tuple, owned by
     /// `cloak_disguise`.
     #[serde(default)]
@@ -741,6 +735,13 @@ pub struct GameEntity {
     ///
     /// [`CapturedInfantryType`]: crate::sim::world::CapturedInfantryType
     pub(crate) capture_infantry_type_index: crate::sim::world::CapturedInfantryType,
+    #[cfg(feature = "ares")]
+    #[serde(default)]
+    pub(crate) vehicle_driver: crate::sim::vehicle_theft::VehicleDriverState,
+    /// Ares TechnoExt+A8/AC, owned by sim::bounty; presentation only.
+    #[cfg(feature = "ares")]
+    #[serde(default)]
+    pub(crate) bounty_display: crate::sim::bounty::BountyDisplayState,
     /// Shared Building C4/PostMortem detonation latch: the marker `+0x6DF`
     /// with its C4Timer (`+0x528`) and C4AppliedBy (`+0x540`). The C4 plant
     /// (`sim::c4_plant`) owns one producer; qualifying delayed-death receiver
@@ -1758,6 +1759,12 @@ impl GameEntity {
         self.useless
     }
 
+    /// Ares TechnoExt+9C. Gameplay and drawing read the same driver state.
+    #[cfg(feature = "ares")]
+    pub fn driver_killed(&self) -> bool {
+        self.vehicle_driver.killed()
+    }
+
     /// `Mission_Harvest`'s two writes to Techno+3D0 (`0x0073E8FA`,
     /// `0x0073E925`). Other systems only read this shared Techno state.
     pub(crate) fn set_useless(&mut self, useless: bool) {
@@ -1920,7 +1927,6 @@ impl GameEntity {
             mega_mission: Default::default(),
             cloak: None,
             stealth_ability: StealthAbility::default(),
-            sensor_deposit: None,
             disguise: Some(DisguiseRuntime::new(construction_frame)),
             low_bridge_tube_state: None,
             capture_manager: None,
@@ -1957,6 +1963,10 @@ impl GameEntity {
             passenger_role: PassengerRole::default(),
             display_type_override: Default::default(),
             capture_infantry_type_index: crate::sim::world::CapturedInfantryType::constructed(),
+            #[cfg(feature = "ares")]
+            vehicle_driver: Default::default(),
+            #[cfg(feature = "ares")]
+            bounty_display: Default::default(),
             pending_c4_detonation: Default::default(),
             has_been_captured: Default::default(),
             no_survivor: Default::default(),
@@ -2349,6 +2359,11 @@ impl GameEntity {
     pub(crate) fn hash_capture_infantry_type(&self, hasher: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
         self.capture_infantry_type_index.get().hash(hasher);
+        #[cfg(feature = "ares")]
+        if self.vehicle_driver != Default::default() {
+            b"ares-vehicle-driver-v1".hash(hasher);
+            self.vehicle_driver.hash(hasher);
+        }
     }
 }
 

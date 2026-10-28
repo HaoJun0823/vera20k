@@ -763,115 +763,16 @@ pub fn stock_offline_start_callback_family(
     session: &SkirmishLaunchSession,
 ) -> Result<StockOfflineStartCallbackFamily, PreFillScenarioPrefixPlanError> {
     let mode = &session.mode;
-    let expected = match mode.id {
-        1 => (
-            "GUI:Battle",
-            "STT:ModeBattle",
-            "MPBattleMD.ini",
-            "standard",
-            true,
-            true,
-            false,
-            StockOfflineStartCallbackFamily::Battle,
-        ),
-        2 => (
-            "GUI:FreeForAll",
-            "STT:ModeFreeForAll",
-            "MPFreeForAllMD.ini",
-            "standard",
-            true,
-            false,
-            false,
-            StockOfflineStartCallbackFamily::Battle,
-        ),
-        3 => (
-            "GUI:Cooperative",
-            "STT:ModeCooperative",
-            "MPCoopMD.ini",
-            "cooperative",
-            false,
-            false,
-            false,
-            StockOfflineStartCallbackFamily::Cooperative,
-        ),
-        4 => (
-            "GUI:UnholyAlliance",
-            "STT:ModeUnholyAlliance",
-            "MPUnholyMD.ini",
-            "standard",
-            false,
-            true,
-            false,
-            StockOfflineStartCallbackFamily::Battle,
-        ),
-        5 => (
-            "GUI:Megawealth",
-            "STT:ModeMegawealth",
-            "MPMWMD.ini",
-            "megawealth",
-            false,
-            true,
-            false,
-            StockOfflineStartCallbackFamily::Battle,
-        ),
-        6 => (
-            "GUI:Duel",
-            "STT:ModeDuel",
-            "MPDuelMD.ini",
-            "duel",
-            false,
-            true,
-            false,
-            StockOfflineStartCallbackFamily::Battle,
-        ),
-        7 => (
-            "GUI:MeatGrind",
-            "STT:ModeMeatGrind",
-            "MPMeatMD.ini",
-            "meatgrind",
-            false,
-            true,
-            false,
-            StockOfflineStartCallbackFamily::Battle,
-        ),
-        8 => (
-            "GUI:NavalWar",
-            "STT:ModeNavalWar",
-            "MPNavalMD.ini",
-            "navalwar",
-            false,
-            true,
-            false,
-            StockOfflineStartCallbackFamily::Battle,
-        ),
-        9 => (
-            "GUI:TeamGame",
-            "STT:ModeTeamGame",
-            "MPTeamMD.ini",
-            "teamgame",
-            false,
-            true,
-            true,
-            StockOfflineStartCallbackFamily::Battle,
-        ),
-        _ => {
-            return Err(PreFillScenarioPrefixPlanError::UnsupportedStockMode { id: mode.id });
-        }
-    };
-    let (ui_name, tooltip, override_file, map_filter, random_maps, allies, must_ally, family) =
-        expected;
-    if mode.ui_name_key.eq_ignore_ascii_case(ui_name)
-        && mode.tooltip_key.eq_ignore_ascii_case(tooltip)
-        && mode.override_file.eq_ignore_ascii_case(override_file)
-        && mode.map_filter.eq_ignore_ascii_case(map_filter)
-        && mode.random_maps_allowed == random_maps
-        && mode.allies_allowed == allies
-        && mode.must_ally == must_ally
-    {
-        Ok(family)
-    } else {
-        Err(PreFillScenarioPrefixPlanError::UnsupportedStockMode { id: mode.id })
-    }
+    let stock = mode
+        .matching_stock()
+        .ok_or(PreFillScenarioPrefixPlanError::UnsupportedStockMode { id: mode.id })?;
+    Ok(
+        if stock.class == crate::skirmish_modes::MpModeClass::Cooperative {
+            StockOfflineStartCallbackFamily::Cooperative
+        } else {
+            StockOfflineStartCallbackFamily::Battle
+        },
+    )
 }
 
 #[cfg(any(test, feature = "test-support"))]

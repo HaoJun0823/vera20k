@@ -7,7 +7,7 @@
 use crate::app::AppState;
 use crate::app::presentation::sidebar_build::{
     CameoStatusLabels, READY_PAD_X, READY_PAD_Y, build_gclock_stage_instance,
-    place_canvas_crop_in_slot, ready_text_scale, superweapon_status_label,
+    place_canvas_crop_in_slot, superweapon_status_label,
 };
 use crate::render::batch::SpriteInstance;
 use crate::render::sidebar_chrome::SidebarChromeEntry;
@@ -123,8 +123,6 @@ pub(crate) fn build(
         .match_presentation
         .sidebar_cameo_atlas
         .as_ref();
-    // Native screen pixels, like `SWButtonClass::Draw` on `DSurface::Composite`.
-    let ts = ready_text_scale(1.0);
     let chrome = crate::app::presentation::sidebar_render::current_sidebar_chrome(state);
     let gclock_frames: &[SidebarChromeEntry] = chrome
         .map(|atlas| atlas.gclock_frames.as_slice())
@@ -194,9 +192,11 @@ pub(crate) fn build(
         if let Some(text) = hotkey.as_deref().or(readiness)
             && state.renderer.bit_font.darken_texture().is_some()
         {
-            let text_w = state.renderer.bit_font.text_width(text) as f32 * ts;
-            let strip_w = text_w + READY_PAD_X * 2.0 * ts;
-            let strip_h = (state.renderer.bit_font.cell_height() + READY_PAD_Y * 2.0) * ts;
+            // Native screen pixels, like `SWButtonClass::Draw` on
+            // `DSurface::Composite`.
+            let text_w = state.renderer.bit_font.text_width(text) as f32;
+            let strip_w = text_w + READY_PAD_X * 2.0;
+            let strip_h = state.renderer.bit_font.cell_height() + READY_PAD_Y * 2.0;
             out.overlay.push(SpriteInstance {
                 position: [slot.x + (slot.w - strip_w) * 0.5, slot.y],
                 size: [strip_w, strip_h.min(slot.h)],
@@ -211,8 +211,8 @@ pub(crate) fn build(
             out.text.extend(state.renderer.bit_font.build_text(
                 text,
                 text_x,
-                slot.y + READY_PAD_Y * ts,
-                ts,
+                slot.y + READY_PAD_Y,
+                1.0,
                 DEPTH_TEXT,
                 ready_tint,
                 [0.0, 0.0],

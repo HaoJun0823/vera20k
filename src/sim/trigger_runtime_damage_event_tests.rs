@@ -648,7 +648,7 @@ fn retail_damage_scene(route: &Value) -> Option<RetailDamageScene> {
     sim.install_team_ai_registry(&teams, &rules).unwrap();
     let eva =
         EvaRegistry::from_ini(&IniFile::from_bytes(assets.get_ref("EVAMD.INI").unwrap()).unwrap());
-    sim.initialize_trigger_definitions(&excerpt, &teams, Some(&eva), None);
+    sim.initialize_trigger_definitions(&excerpt, &teams, Some(&eva), None, None);
     sim.classify_map_triggers(&rules);
     // Declared clear geometry isolates the selected received-damage route.
     // Retail rules/roster/definitions remain intact; whole campaign timing,

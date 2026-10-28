@@ -595,7 +595,7 @@ mod tests {
         // Steady dispatch presents the page directly to the swapchain.
         let app_source = include_str!("../frame.rs");
         let dispatch = &app_source[app_source
-            .find("ActiveMenuPage::from_state(state)")
+            .find("ScreenPage::SinglePlayer | ScreenPage::MoviesAndCredits =>")
             .expect("menu page steady dispatch")..];
         let shell_call = dispatch
             .find("render_active_menu_page")

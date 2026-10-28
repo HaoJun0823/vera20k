@@ -48,7 +48,7 @@ fn campaign_fixture(triggers: &str) -> Option<(Simulation, RuleSet, InternedId)>
         &map.ini,
     );
     sim.session.install_waypoints(&map.waypoints);
-    sim.initialize_trigger_definitions(&map, &Default::default(), None, None);
+    sim.initialize_trigger_definitions(&map, &Default::default(), None, None, None);
     sim.classify_map_triggers(&rules);
     sim.session.publish_started();
     let remote = sim.interner.get("Remote").unwrap();

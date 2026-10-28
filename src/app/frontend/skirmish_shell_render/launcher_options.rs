@@ -79,6 +79,7 @@ fn build_controls(
                 rect,
                 thumb_left: dialog.shell_trackbar_thumb_left(id, rect, scale),
                 plaque: id.plaque_reserve() > 0,
+                disabled: !dialog.trackbar_enabled(id),
             },
             scale,
         );
@@ -195,7 +196,7 @@ fn build_text(
                 &dialog.trackbar_position(id).to_string(),
                 crate::ui::shell::trackbar::value_text_rect(rect, scale),
                 ShellAlign::H_CENTER | ShellAlign::V_CENTER,
-                if dialog.launcher_audio_available() {
+                if dialog.trackbar_enabled(id) {
                     SHELL_LABEL_TEXT_RGB
                 } else {
                     SHELL_DISABLED_TEXT_RGB_FROM_PACKED_0000009F

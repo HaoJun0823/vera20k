@@ -716,6 +716,18 @@ pub(super) fn dispatch_draw_passes(
     let mut pass = begin_main_load_pass(encoder, view, &world_depth);
     pass.set_scissor_rect(tac_x, tac_y, tac_w, tac_h);
 
+    // Ares Tactical_Draw_FlyingStrings hooks 6D4684, right after the radial
+    // indicators 6D467F and before BeaconManager 6D46B6, and draws the copied
+    // signed credit labels (->10064430) with the shared GAME.FNT passthrough.
+    #[cfg(feature = "ares")]
+    draw_pooled_ui_passthrough(
+        &mut pass,
+        &state.renderer.batch_renderer,
+        pool,
+        Some(state.renderer.bit_font.atlas()),
+        "bounty_text",
+    );
+
     // BeaconManager Draw 430AC0 (6D46B6) precedes BandBox. Its flags 600
     // bypass A and Z; each House row has its own Convert strip.
     if let Some(art) = state.match_state.match_presentation.beacon_art.as_ref() {

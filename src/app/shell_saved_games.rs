@@ -8,7 +8,7 @@ use crate::ui::shell::list::ListMetrics;
 use crate::ui::shell::saved_file_input::{self, BrowserInputResult};
 use crate::ui::skirmish_shell::seed_list::SeedListGeometry;
 use crate::ui::skirmish_shell::{
-    SavedSeedLayout, SavedSeedMode, SavedSeedOutcome, SavedSeedPrompt, SavedSeedPromptPurpose,
+    SavedSeedLayout, SavedSeedMode, SavedSeedOutcome, SavedSeedPromptPurpose,
 };
 use std::path::PathBuf;
 use winit::keyboard::KeyCode;
@@ -52,27 +52,14 @@ impl App {
         body: String,
         confirm: bool,
     ) {
-        let affirmative = Self::csf_label(
-            state,
-            if confirm { "TXT_YES" } else { "TXT_OK" },
-            if confirm { "Yes" } else { "OK" },
-        );
-        let negative = confirm.then(|| Self::csf_label(state, "TXT_NO", "No"));
+        let prompt = Self::saved_browser_prompt(state, purpose, body, confirm);
         if let Some(browser) = state
             .match_state
             .match_presentation
             .saved_game_browser
             .as_mut()
         {
-            browser.description_edit.focused = false;
-            browser.pressed_control = None;
-            browser.scroll_repeat_at = None;
-            browser.prompt = Some(SavedSeedPrompt {
-                purpose,
-                body,
-                affirmative,
-                negative,
-            });
+            browser.show_prompt(prompt);
         }
     }
 

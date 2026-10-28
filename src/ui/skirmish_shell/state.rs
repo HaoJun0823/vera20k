@@ -92,6 +92,15 @@ pub enum SkirmishShellUiSound {
     GuiComboCloseSound,
 }
 
+impl SkirmishShellUiSound {
+    pub(crate) fn combo(cue: crate::ui::shell::combobox::ComboCue) -> Self {
+        match cue {
+            crate::ui::shell::combobox::ComboCue::Open => Self::GuiComboOpenSound,
+            crate::ui::shell::combobox::ComboCue::Close => Self::GuiComboCloseSound,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkirmishComboId {
     AiType(usize),

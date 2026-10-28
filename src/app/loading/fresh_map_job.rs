@@ -14,6 +14,7 @@ pub(crate) struct FreshMapLoadServices<'a> {
     pub(crate) prepared_noncampaign_prefix:
         &'a mut Option<crate::rules::process_owner::NativeNonCampaignPrefixPreparation>,
     pub(crate) audio: Option<&'a crate::app::process_assets::ProcessAudioCatalog>,
+    pub(crate) themes: Option<&'a crate::rules::theme_ini::ThemeCatalog>,
     pub(crate) shared_cell_dummy: crate::map::resolved_terrain::SharedCellDummy,
     pub(crate) tile_variant_selector_cache:
         &'a mut crate::map::tile_variant_selector::TileVariantSelectorCache,

@@ -66,9 +66,6 @@ pub(crate) fn commit_prepared_load(
         crate::app::loading::pump::present_game_mode_blank(state);
     }
 
-    // Saved native identity is session.current_house. Never borrow an outgoing
-    // sandbox preference or another match's human display handle.
-    state.match_state.local_owner_override = None;
     // Load_Game 0x0067E4E8 restores GameMode from the save header; VERA's
     // persisted classification rides on the restored ScenarioSession.
     let game_mode = state

@@ -438,8 +438,9 @@ impl NativeRulesProcessingFailure {
 /// Reproduce the Type-constructor portion of active YR's cold rules startup.
 ///
 /// This is deliberately not a `RulesClass::Process` call for the selected
-/// RULESMD root. `Load_Game_Rules @ 0x0052CD70` first runs only
-/// Colors, ColorAdd and `ReadAudioVisual(root)`, may then run one full Process for optional
+/// RULESMD root. `Load_Game_Rules @ 0x0052CD70` first runs only Colors,
+/// ColorAdd, `Read_Movies(ARTMD)`, `ReadAudioVisual(root)` and
+/// `ReadMultiplayerDialogSettings(root)`, may then run one full Process for optional
 /// `LANGRULE.INI`, and `Init_Game @ 0x0052BA60` follows with the root Anim and
 /// Building master/body sweeps. Both body loops reload their live family count.
 ///
@@ -1921,6 +1922,84 @@ impl ProcessedRulesLayers {
             })
     }
 
+    #[cfg(feature = "ares")]
+    pub(crate) fn selection_group_states(
+        &self,
+    ) -> impl Iterator<Item = (ObjectCategory, &str, &str)> {
+        let registry = self.native_type_construction_trace.registry_state();
+        registry.techno_type_order.iter().map(|&(family, index)| {
+            let member = &registry.families[&family][index];
+            (
+                family.object_category().expect("TechnoType category"),
+                member.native_stored_id.as_str(),
+                member.selection_group.as_str(),
+            )
+        })
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn driver_states(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            ObjectCategory,
+            &str,
+            &crate::rules::ares_driver::DriverTypeRules,
+        ),
+    > {
+        let registry = self.native_type_construction_trace.registry_state();
+        registry.techno_type_order.iter().map(|&(family, index)| {
+            let member = &registry.families[&family][index];
+            (
+                family.object_category().expect("TechnoType category"),
+                member.native_stored_id.as_str(),
+                &member.driver,
+            )
+        })
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn bounty_states(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            ObjectCategory,
+            &str,
+            &crate::rules::ares_bounty::BountyTypeRules,
+        ),
+    > {
+        let registry = self.native_type_construction_trace.registry_state();
+        registry.techno_type_order.iter().map(|&(family, index)| {
+            let member = &registry.families[&family][index];
+            (
+                family.object_category().expect("TechnoType category"),
+                member.native_stored_id.as_str(),
+                &member.bounty,
+            )
+        })
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn crew_states(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            ObjectCategory,
+            &str,
+            &crate::rules::ares_crew::CrewTypeRules,
+        ),
+    > {
+        let registry = self.native_type_construction_trace.registry_state();
+        registry.techno_type_order.iter().map(|&(family, index)| {
+            let member = &registry.families[&family][index];
+            (
+                family.object_category().expect("TechnoType category"),
+                member.native_stored_id.as_str(),
+                &member.crew,
+            )
+        })
+    }
+
     pub(crate) fn ares_techno_states(
         &self,
     ) -> impl Iterator<
@@ -1928,9 +2007,11 @@ impl ProcessedRulesLayers {
             ObjectCategory,
             &str,
             Option<&crate::rules::ares_emp::EmpTypeRules>,
+            Option<&crate::rules::ares_abilities::PromotionAbilities>,
             Option<&crate::rules::ares_warhead::AttachEffectRules>,
             bool,
             Option<i32>,
+            Option<bool>,
         ),
     > {
         self.native_type_construction_trace
@@ -1946,10 +2027,18 @@ impl ProcessedRulesLayers {
                         category,
                         member.native_stored_id.as_str(),
                         member.emp_type.as_ref(),
+                        #[cfg(feature = "ares")]
+                        member.promotion_abilities.as_ref(),
+                        #[cfg(not(feature = "ares"))]
+                        None,
                         member.self_attach_effect.as_ref(),
                         member.cloak_allowed,
                         #[cfg(feature = "ares")]
                         member.turret_rot_override,
+                        #[cfg(not(feature = "ares"))]
+                        None,
+                        #[cfg(feature = "ares")]
+                        member.aircraft_crashable,
                         #[cfg(not(feature = "ares"))]
                         None,
                     )
@@ -2178,6 +2267,25 @@ impl ProcessedRulesLayers {
             .registry_state()
             .rules_prism_type
             .as_deref()
+    }
+
+    /// Phobos `[AudioVisual] TimerBlinkColorScheme=`, the runtime ColorScheme
+    /// index the ordered passes resolved.
+    #[cfg(feature = "phobos")]
+    pub(crate) fn timer_blink_color_scheme(&self) -> i32 {
+        self.native_type_construction_trace
+            .registry_state()
+            .rules_timer_blink_color_scheme
+    }
+
+    /// Phobos `[AudioVisual] MissingCameo=`, retained with the Rules scalars
+    /// rather than read from the compatibility projection.
+    #[cfg(feature = "phobos")]
+    pub(crate) fn missing_cameo(&self) -> &str {
+        &self
+            .native_type_construction_trace
+            .registry_state()
+            .rules_missing_cameo
     }
 
     /// `[General] PrerequisiteProcAlternate=` (Rules `+0x400`), the stored ID
@@ -2963,7 +3071,7 @@ fn read_valueable_int_vector(section: &IniSection, key: &str, current: &[i32]) -
 /// list and an unconsumed parent attempt. This state shares the existing
 /// Country owner, persistence and immutable RuleSet projection.
 #[cfg(feature = "ares")]
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct AresCountryState {
     phase: i32,
     parent_initialized: bool,
@@ -2972,6 +3080,38 @@ struct AresCountryState {
     presentation: crate::rules::ares_country_presentation::AresCountryPresentation,
     paradrop: crate::rules::ares_country_paradrop::AresCountryParadrop,
     power_plants: Vec<String>,
+    /// CountryExt+1BC/+1BD: ctor1001B8DA leaves it unset;
+    /// nullable CanBeDriven reader1001C70A..1001C71B. Parent copy
+    /// 1001BDC0..1001C0D6 deliberately does not copy this pair.
+    #[serde(default)]
+    can_be_driven: Option<bool>,
+    /// CountryExt+1D1: ctor1001B908 stores the pair+1D0 as0x0100;
+    /// common reader1001C74C..1001C75D retains GivesBounty on missing keys.
+    /// Parent copy1001BDC0..1001C0D6 stops before these appended flags.
+    #[serde(default = "default_gives_bounty")]
+    gives_bounty: bool,
+}
+
+#[cfg(feature = "ares")]
+fn default_gives_bounty() -> bool {
+    true // CountryExt constructor1001B908's high byte.
+}
+
+#[cfg(feature = "ares")]
+impl Default for AresCountryState {
+    fn default() -> Self {
+        Self {
+            phase: 0,
+            parent_initialized: false,
+            buildings: Vec::new(),
+            loading: Default::default(),
+            presentation: Default::default(),
+            paradrop: Default::default(),
+            power_plants: Vec::new(),
+            can_be_driven: None,
+            gives_bounty: default_gives_bounty(),
+        }
+    }
 }
 
 // GUI fields are process-retained and persisted, but do not enter simulation CRC.
@@ -2983,10 +3123,25 @@ impl Hash for AresCountryState {
         self.buildings.hash(state);
         self.paradrop.hash(state);
         self.power_plants.hash(state);
+        if let Some(value) = self.can_be_driven {
+            b"ares-country-driving-v1".hash(state);
+            value.hash(state);
+        }
+        self.gives_bounty.hash(state);
     }
 }
 
 impl CountryVeterancyState {
+    #[cfg(feature = "ares")]
+    pub(crate) fn gives_bounty(&self) -> bool {
+        self.ares.gives_bounty
+    }
+
+    #[cfg(feature = "ares")]
+    pub(crate) fn can_be_driven_override(&self) -> Option<bool> {
+        self.ares.can_be_driven
+    }
+
     #[cfg(feature = "ares")]
     pub(crate) fn loading(&self) -> &crate::rules::country_loading::AresCountryLoading {
         &self.ares.loading
@@ -3037,7 +3192,7 @@ impl CountryVeterancyState {
 /// Native constructor/phase2 reads: rules_oracle/ares_factory_owners.json
 /// global_controls; Process caller/order rests on installed instructions.
 #[cfg(feature = "ares")]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AresGlobalControls {
     phase: i32,
     /// RulesExt+70: constructor empty; LoadAfterTypeData reads HSBuilding.
@@ -3047,10 +3202,41 @@ pub(crate) struct AresGlobalControls {
     // RulesExt+160/+164: constructor zero/unset; retained by the global
     // Rules owner, independently of per-Type reset.
     emp_ai_recover_mission: Option<crate::rules::mission_data::MissionType>,
+    /// RulesExt+4B: constructor1002A3DF sets true; reader1002AC23..35.
+    #[serde(default = "AresGlobalControls::default_type_select_use_deploy")]
+    type_select_use_deploy: bool,
+    #[serde(default)]
+    bounty: crate::rules::ares_bounty::BountyGlobalRules,
+}
+
+#[cfg(feature = "ares")]
+impl Default for AresGlobalControls {
+    fn default() -> Self {
+        Self {
+            phase: 0,
+            hunter_seeker_buildings: Vec::new(),
+            allow_bypass_build_limit: [false; 3],
+            emp_ai_recover_mission: None,
+            type_select_use_deploy: Self::default_type_select_use_deploy(),
+            bounty: Default::default(),
+        }
+    }
 }
 
 #[cfg(feature = "ares")]
 impl AresGlobalControls {
+    const fn default_type_select_use_deploy() -> bool {
+        true
+    }
+
+    pub(crate) fn type_select_use_deploy(&self) -> bool {
+        self.type_select_use_deploy
+    }
+
+    pub(crate) fn bounty(&self) -> &crate::rules::ares_bounty::BountyGlobalRules {
+        &self.bounty
+    }
+
     pub(crate) fn hunter_seeker_buildings(&self) -> &[String] {
         &self.hunter_seeker_buildings
     }
@@ -3070,6 +3256,12 @@ impl AresGlobalControls {
     /// Unlike the Process-entry controls above, this unconditional reader
     /// runs immediately before Type data. The native named lookup is5B3910.
     fn read_before_type_data(&mut self, pass: &IniFile) {
+        // Installed Ares1002AC23..1002AC35: General, retained bool reader.
+        if let Some(section) = pass.section("General") {
+            self.type_select_use_deploy =
+                section.read_ares_bool("TypeSelectUseDeploy", self.type_select_use_deploy);
+        }
+        self.bounty.read_before_type_data(pass);
         if let Some(mission) = pass
             .section("CombatDamage")
             .and_then(|section| section.read_name("EMPAIRecoverMission", 2048))
@@ -3171,6 +3363,17 @@ pub(crate) struct NativeRulesRegistryState {
     rules_ion_blast_anim: String,
     rules_ion_beam_anim: String,
     rules_ion_cannon_warhead: String,
+    /// Phobos `RulesExt::TimerBlinkColorScheme`: the runtime ColorScheme the
+    /// blinking timer prints in, `[Colors]` entry `R / 2`, or -1 for `none`.
+    #[cfg(feature = "phobos")]
+    rules_timer_blink_color_scheme: i32,
+    /// Phobos `RulesExt::MissingCameo`: the file a type with no cameo art and
+    /// a superweapon with no icon take in place of the stock `XXICON.SHP`
+    /// (`Replace_XXICON_With_New` at `0x715A4D`, `0x716D13`, `0x6CE8AA` and
+    /// `0x6CEE31`); empty after `none`.
+    #[cfg(feature = "phobos")]
+    #[serde(default = "crate::rules::ruleset::default_missing_cameo")]
+    rules_missing_cameo: String,
     rules_mind_control_attack_line_frames: i32,
     rules_line_trail_override: [u8; 3],
     rules_chrono_beam_color: [u8; 3],
@@ -3253,6 +3456,12 @@ impl Default for NativeRulesRegistryState {
             rules_ion_blast_anim: String::new(),
             rules_ion_beam_anim: String::new(),
             rules_ion_cannon_warhead: String::new(),
+            // RulesExt::ExtData constructor `TimerBlinkColorScheme { 5 }`, the
+            // scheme the game blinks in.
+            #[cfg(feature = "phobos")]
+            rules_timer_blink_color_scheme: 5,
+            #[cfg(feature = "phobos")]
+            rules_missing_cameo: crate::rules::ruleset::DEFAULT_MISSING_CAMEO.to_owned(),
             // MindControlAttackLineFrames, Rules+310: constructor 0x00665ABE.
             rules_mind_control_attack_line_frames: 15,
             rules_line_trail_override: general.line_trail_color_override,
@@ -3619,6 +3828,11 @@ impl NativeRulesRegistryState {
             //686D35 precedes this TypeReset6876AC and its flags/phase survive.
             #[cfg(feature = "ares")]
             ares_global_controls: self.ares_global_controls,
+            // Phobos allocates RulesExt only with RulesClass (0x667A1D).
+            #[cfg(feature = "phobos")]
+            rules_timer_blink_color_scheme: self.rules_timer_blink_color_scheme,
+            #[cfg(feature = "phobos")]
+            rules_missing_cameo: self.rules_missing_cameo,
             rules_color_add: self.rules_color_add,
             rules_color_add_selectors: self.rules_color_add_selectors,
             rules_detail: self.rules_detail,
@@ -4022,6 +4236,9 @@ struct ProcessedType {
     ares_verses: Option<AresWarheadVerses>,
     ares_warhead: Option<crate::rules::ares_warhead::AresWarheadRules>,
     emp_type: Option<crate::rules::ares_emp::EmpTypeRules>,
+    #[cfg(feature = "ares")]
+    #[serde(default)]
+    promotion_abilities: Option<crate::rules::ares_abilities::PromotionAbilities>,
     self_attach_effect: Option<crate::rules::ares_warhead::AttachEffectRules>,
     #[cfg(feature = "ares")]
     #[serde(default)]
@@ -4036,6 +4253,23 @@ struct ProcessedType {
     #[cfg(feature = "ares")]
     #[serde(default)]
     spotlight: crate::rules::ares_spotlight::SpotlightTypeRules,
+    #[cfg(feature = "ares")]
+    #[serde(default)]
+    driver: crate::rules::ares_driver::DriverTypeRules,
+    /// Ares TypeExt+250, empty in constructor1003CA53. Read1003EC3C..7C.
+    #[cfg(feature = "ares")]
+    #[serde(default)]
+    selection_group: String,
+    #[cfg(feature = "ares")]
+    #[serde(default)]
+    bounty: crate::rules::ares_bounty::BountyTypeRules,
+    #[cfg(feature = "ares")]
+    #[serde(default)]
+    crew: crate::rules::ares_crew::CrewTypeRules,
+    ///1003CB5B leaves the Nullable<bool> presence byte+324 clear.
+    #[cfg(feature = "ares")]
+    #[serde(default)]
+    aircraft_crashable: Option<bool>,
     /// ObjectType4753F0 -> Ares10006E10 binds at each reached body read.
     armor_id: ArmorId,
     /// ParticleSystemType+294, the bound ParticleType's index: constructor -1
@@ -4362,9 +4596,23 @@ pub(crate) struct WeaponSlots {
     /// Base (+898) and elite (+A94) arrays, as stored WeaponType IDs.
     base: [Option<String>; WEAPON_SLOT_COUNT],
     elite: [Option<String>; WEAPON_SLOT_COUNT],
+    // Installed Ares loader10040020 and GetWeapon1003DBC0 retain the
+    // original eighteen records and own separate resized extension vectors.
+    #[cfg(feature = "ares")]
+    #[serde(default)]
+    extra_base: Vec<Option<String>>,
+    #[cfg(feature = "ares")]
+    #[serde(default)]
+    extra_elite: Vec<Option<String>>,
+    #[serde(default)]
+    offsets: crate::rules::weapon_offsets::WeaponOffsets,
 }
 
 impl WeaponSlots {
+    pub(crate) fn offsets(&self) -> &crate::rules::weapon_offsets::WeaponOffsets {
+        &self.offsets
+    }
+
     pub(crate) fn turret_count(&self) -> i32 {
         self.turret_count
     }
@@ -4373,12 +4621,24 @@ impl WeaponSlots {
         self.weapon_count
     }
 
-    pub(crate) fn base(&self) -> &[Option<String>] {
-        &self.base
+    pub(crate) fn base(&self) -> Vec<Option<String>> {
+        let records = self.base.to_vec();
+        #[cfg(feature = "ares")]
+        let records = records
+            .into_iter()
+            .chain(self.extra_base.iter().cloned())
+            .collect();
+        records
     }
 
-    pub(crate) fn elite(&self) -> &[Option<String>] {
-        &self.elite
+    pub(crate) fn elite(&self) -> Vec<Option<String>> {
+        let records = self.elite.to_vec();
+        #[cfg(feature = "ares")]
+        let records = records
+            .into_iter()
+            .chain(self.extra_elite.iter().cloned())
+            .collect();
+        records
     }
 }
 
@@ -4502,6 +4762,8 @@ impl ProcessedType {
             ares_verses: None,
             ares_warhead: None,
             emp_type: None,
+            #[cfg(feature = "ares")]
+            promotion_abilities: None,
             self_attach_effect: None,
             #[cfg(feature = "ares")]
             super_weapon_techno: Default::default(),
@@ -4510,6 +4772,16 @@ impl ProcessedType {
             turret_rot_override: None,
             #[cfg(feature = "ares")]
             spotlight: Default::default(),
+            #[cfg(feature = "ares")]
+            driver: Default::default(),
+            #[cfg(feature = "ares")]
+            selection_group: String::new(),
+            #[cfg(feature = "ares")]
+            bounty: Default::default(),
+            #[cfg(feature = "ares")]
+            crew: Default::default(),
+            #[cfg(feature = "ares")]
+            aircraft_crashable: None,
             armor_id: ArmorId::NONE,
             holds_what: None,
             super_weapon_weapon: None,
@@ -4604,6 +4876,7 @@ fn find_or_construct_type(
         #[cfg(feature = "ares")]
         {
             members[index].emp_type = Some(Default::default());
+            members[index].promotion_abilities = Some(Default::default());
             members[index].self_attach_effect = Some(Default::default());
         }
         #[cfg(feature = "ares")]
@@ -4677,6 +4950,12 @@ struct RulesPassProcessor {
     rules_ion_blast_anim: String,
     rules_ion_beam_anim: String,
     rules_ion_cannon_warhead: String,
+    #[cfg(feature = "phobos")]
+    rules_timer_blink_color_scheme: i32,
+    /// Phobos `[AudioVisual] MissingCameo=`, retained with the other Rules
+    /// scalars for the pass.
+    #[cfg(feature = "phobos")]
+    rules_missing_cameo: String,
     rules_mind_control_attack_line_frames: i32,
     rules_line_trail_override: [u8; 3],
     rules_chrono_beam_color: [u8; 3],
@@ -4748,6 +5027,10 @@ impl RulesPassProcessor {
             rules_ion_blast_anim: registry_state.rules_ion_blast_anim,
             rules_ion_beam_anim: registry_state.rules_ion_beam_anim,
             rules_ion_cannon_warhead: registry_state.rules_ion_cannon_warhead,
+            #[cfg(feature = "phobos")]
+            rules_timer_blink_color_scheme: registry_state.rules_timer_blink_color_scheme,
+            #[cfg(feature = "phobos")]
+            rules_missing_cameo: registry_state.rules_missing_cameo,
             rules_mind_control_attack_line_frames: registry_state
                 .rules_mind_control_attack_line_frames,
             rules_line_trail_override: registry_state.rules_line_trail_override,
@@ -4818,6 +5101,22 @@ impl RulesPassProcessor {
             self.resolve_existing_list_from(section, "HSBuilding", RulesTypeFamily::Building, 2048)
         }) {
             self.ares_global_controls.hunter_seeker_buildings = buildings;
+        }
+        // The same LoadAfterTypeData1002A800 continues with General's
+        // BountyEnablers1002AAAB and AudioVisual's BountyDisplay1002AAC5.
+        #[cfg(feature = "ares")]
+        {
+            let enablers = pass.section("General").and_then(|section| {
+                self.resolve_existing_list_from(
+                    section,
+                    "BountyEnablers",
+                    RulesTypeFamily::Building,
+                    2048,
+                )
+            });
+            self.ares_global_controls
+                .bounty
+                .read_after_type_data(pass, enablers);
         }
 
         // ReadDifficulty66D270 skips an absent section. Once present, each
@@ -5182,8 +5481,9 @@ impl RulesPassProcessor {
         )
     }
 
-    /// Installed Ares typed pointers: Anim Parser1000C9C0/Find1000D3E0
-    /// and Unit Parser1002D970/Find1002DCF0 look up registered types only.
+    /// Installed Ares typed pointers: Anim Parser1000C9C0/Find1000D3E0,
+    /// Unit Parser1002D970/Find1002DCF0 and the Survivor.SideN Infantry
+    /// reads 1003E040..1003E070 look up registered types only.
     /// A successful none clears; absent/unknown retains.
     #[cfg(feature = "ares")]
     fn resolve_existing_type_from(
@@ -5746,6 +6046,29 @@ impl RulesPassProcessor {
             );
             self.ares_prerequisites = Some(catalog);
         }
+        // Phobos RulesData_LoadBeforeTypeData (0x679A15), before this pass's
+        // type bodies.
+        #[cfg(feature = "phobos")]
+        if let Some(section) = pass.section("AudioVisual") {
+            // `PhobosFixedString<32>`: an empty read keeps the earlier pass's
+            // name, and `none` or `<none>` clears it.
+            if let Some(name) = section.read_name("MissingCameo", 0x20) {
+                self.rules_missing_cameo =
+                    if crate::rules::ini_parser::is_native_none_type_name(name) {
+                        String::new()
+                    } else {
+                        name.to_owned()
+                    };
+            }
+            // `ValueableIdx<ColorScheme>` resolves the name against the
+            // [Colors] this pass has read (0x668BFE precedes 0x668EF0), so a
+            // later pass naming no entry keeps the index.
+            self.rules_timer_blink_color_scheme = section.read_ares_color_scheme_index(
+                "TimerBlinkColorScheme",
+                self.rules_timer_blink_color_scheme,
+                |name| self.loading_color_index(name),
+            );
+        }
         self.process_house_family(pass, primary_rules);
         self.process_super_weapon_family(pass, _fixed_eva);
         self.process_anim_family(fixed_art);
@@ -5955,6 +6278,14 @@ impl RulesPassProcessor {
                 .loading
                 .clone();
             loading.read_color(section, |name| self.loading_color_index(name));
+            let current = self.families[&RulesTypeFamily::Country][index]
+                .country_veterancy
+                .ares
+                .can_be_driven;
+            self.family_mut(RulesTypeFamily::Country)[index]
+                .country_veterancy
+                .ares
+                .can_be_driven = section.read_ares_nullable_bool("CanBeDriven", current);
             self.family_mut(RulesTypeFamily::Country)[index]
                 .country_veterancy
                 .ares
@@ -5982,6 +6313,12 @@ impl RulesPassProcessor {
                 .ares
                 .buildings = resolved;
         }
+        if let Some(section) = pass.section(&id) {
+            let current = &mut self.family_mut(RulesTypeFamily::Country)[index]
+                .country_veterancy
+                .ares;
+            current.gives_bounty = section.read_ares_bool("GivesBounty", current.gives_bounty);
+        }
         self.family_mut(RulesTypeFamily::Country)[index]
             .country_veterancy
             .ares
@@ -5990,7 +6327,8 @@ impl RulesPassProcessor {
 
     /// CountryExt1001BB30 finds the current kind1 runtime scheme. Each
     /// retained [Colors] entry contributes kind1 then kind53, in native order.
-    #[cfg(feature = "ares")]
+    /// Phobos's `ColorScheme::FindIndex(name, 1)` makes the same match.
+    #[cfg(any(feature = "ares", feature = "phobos"))]
     fn loading_color_index(&self, name: &str) -> Option<i32> {
         self.colors
             .iter()
@@ -6419,12 +6757,14 @@ impl RulesPassProcessor {
                 self.families.get_mut(&family).unwrap()[index]
                     .recoil
                     .apply_pass(&raw);
+                let weapon_count = self.families[&family][index].weapon_slots.weapon_count;
                 self.families.get_mut(&family).unwrap()[index]
                     .gunner_turrets
                     .apply_pass(
                         &native_stored_id,
                         &raw,
                         family.object_category().expect("TechnoType family"),
+                        weapon_count,
                     );
                 if family == RulesTypeFamily::Infantry {
                     let member = &mut self.families.get_mut(&family).unwrap()[index];
@@ -6464,6 +6804,14 @@ impl RulesPassProcessor {
                 member.voxel_shadow_index = fixed_art
                     .section_or_empty(&image)
                     .read_int("ShadowIndex", member.voxel_shadow_index);
+                // TechnoRead715B10..716005 reads the WeaponStruct coordinates
+                // after the retained Image selects this pass's fixed ART.
+                let slots = &mut member.weapon_slots;
+                slots.offsets.read_pass(
+                    &fixed_art.section_or_empty(&image),
+                    slots.turret_count,
+                    slots.weapon_count,
+                );
                 // TechnoRead716090..7160A4 reaches LoadVoxel5F8110 only
                 // with the retained Voxel byte. Later Image changes cannot
                 // rename a resource whose load was skipped.
@@ -6473,10 +6821,75 @@ impl RulesPassProcessor {
                 // Installed suffix hooks716123/716132 ->10040DF0 ->1003DEC0
                 // reach the common TechnoType extension before subclass reads.
                 #[cfg(feature = "ares")]
+                {
+                    //1003E01B sizes to the live Side array;1003E040..1003E070
+                    // reads each Survivor.Side%u through Infantry Find only.
+                    let side_count = self
+                        .families
+                        .get(&RulesTypeFamily::Side)
+                        .map_or(0, Vec::len);
+                    let pilots = (0..side_count)
+                        .map(|side| {
+                            self.resolve_existing_type_from(
+                                &raw,
+                                &format!("Survivor.Side{side}"),
+                                RulesTypeFamily::Infantry,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    self.family_mut(family)[index].crew.read_pass(&raw, &pilots);
+                    // TypeExt ReadINI1003EADC..1003EAED, NullableBool1000E9B0.
+                    let member = &mut self.family_mut(family)[index];
+                    // Ares1003EC3C..1003EC7C reads 2048 then strncpy_s with
+                    // capacity32/_TRUNCATE. Missing/empty retains; either
+                    // native none spelling clears the override.
+                    member.selection_group = raw.read_string_with(
+                        "GroupAs",
+                        2048,
+                        std::mem::take(&mut member.selection_group),
+                        |_, value| {
+                            if is_native_none_type_name(value) {
+                                String::new()
+                            } else {
+                                crate::rules::ini_value::truncate_native_bytes(value, 31).to_owned()
+                            }
+                        },
+                    );
+                    member.aircraft_crashable =
+                        raw.read_ares_nullable_bool("Crashable", member.aircraft_crashable);
+                }
+                #[cfg(feature = "ares")]
                 self.process_factory_owners(family, index, &raw);
                 #[cfg(feature = "ares")]
                 {
+                    use crate::rules::ares_driver::OperatorRequirement;
+                    let operator = raw.read_name("Operator", 2048).map(|name| {
+                        if name.eq_ignore_ascii_case("_ANY_") {
+                            OperatorRequirement::Any
+                        } else {
+                            let types = self
+                                .resolve_existing_techno_type_list_from(&raw, "Operator")
+                                .expect("same nonempty Operator read");
+                            if types.is_empty() {
+                                OperatorRequirement::None
+                            } else {
+                                OperatorRequirement::Types(types)
+                            }
+                        }
+                    });
+                    self.family_mut(family)[index]
+                        .driver
+                        .read_pass(&raw, operator);
+                    self.family_mut(family)[index].bounty.read_pass(&raw);
+                }
+                #[cfg(feature = "ares")]
+                {
                     // Find only: this nullable Anim reader never allocates.
+                    self.family_mut(family)[index]
+                        .promotion_abilities
+                        .as_mut()
+                        .expect("TechnoType promotion abilities")
+                        .read_pass(&raw);
                     let sparkle = self.resolve_existing_type_from(
                         &raw,
                         "EMP.Sparkles",
@@ -6820,36 +7233,55 @@ impl RulesPassProcessor {
         slots.weapon_count = raw.read_int("WeaponCount", slots.weapon_count);
         slots.clear_all_weapons = raw.read_bool("ClearAllWeapons", slots.clear_all_weapons);
         if slots.turret_count > 0 {
-            // 0x007128C0..0x0071299E: Weapon%d then EliteWeapon%d for
-            // 1..=WeaponCount, each ReadString128 empty read keeping the slot.
+            #[cfg(feature = "ares")]
+            {
+                self.family_mut(family)[index]
+                    .gunner_turrets
+                    .prepare_numbered_read(slots.weapon_count);
+                //10040020 resizes before reading: shrinking destroys the
+                // extra tail; regrowing supplies null WeaponStruct pointers.
+                let extra = usize::try_from(slots.weapon_count)
+                    .unwrap_or(0)
+                    .saturating_sub(WEAPON_SLOT_COUNT);
+                slots.extra_base.resize(extra, None);
+                slots.extra_elite.resize(extra, None);
+            }
+            let capacity = if cfg!(feature = "ares") { 2048 } else { 0x80 };
             for slot in 1..=slots.weapon_count {
+                // Ares1003C6B0 ->10010570 retains Find-or-Allocate semantics
+                // (constructor trampoline100103C0 -> WeaponType771C70).
                 let base = self.resolve_scalar_from(
                     raw,
                     &format!("Weapon{slot}"),
                     RulesTypeFamily::Weapon,
-                    0x80,
+                    capacity,
                 );
                 let elite = self.resolve_scalar_from(
                     raw,
                     &format!("EliteWeapon{slot}"),
                     RulesTypeFamily::Weapon,
-                    0x80,
+                    capacity,
                 );
-                // RESIDUAL: native has no bound, so WeaponCount > 18 stores
-                // past both arrays (slot 19's base write lands on
-                // ClearAllWeapons at +A90). VERA allocates every authored slot
-                // but keeps the first 18. Retail's largest WeaponCount is 17.
-                let Some(slot) = usize::try_from(slot - 1)
-                    .ok()
-                    .filter(|&slot| slot < WEAPON_SLOT_COUNT)
-                else {
-                    continue;
-                };
-                if let Some(weapon) = base {
-                    slots.base[slot] = weapon;
-                }
-                if let Some(weapon) = elite {
-                    slots.elite[slot] = weapon;
+                let index = (slot - 1) as usize;
+                if index < WEAPON_SLOT_COUNT {
+                    if let Some(weapon) = base {
+                        slots.base[index] = weapon;
+                    }
+                    if let Some(weapon) = elite {
+                        slots.elite[index] = weapon;
+                    }
+                } else {
+                    #[cfg(feature = "ares")]
+                    {
+                        if let Some(weapon) = base {
+                            slots.extra_base[index - WEAPON_SLOT_COUNT] = weapon;
+                        }
+                        if let Some(weapon) = elite {
+                            slots.extra_elite[index - WEAPON_SLOT_COUNT] = weapon;
+                        }
+                    }
+                    // Original gamemd writes out of bounds beyond eighteen.
+                    // The default build keeps its existing safety boundary.
                 }
             }
         } else if !slots.clear_all_weapons {
@@ -7795,6 +8227,10 @@ impl RulesPassProcessor {
                     rules_ion_blast_anim: self.rules_ion_blast_anim,
                     rules_ion_beam_anim: self.rules_ion_beam_anim,
                     rules_ion_cannon_warhead: self.rules_ion_cannon_warhead,
+                    #[cfg(feature = "phobos")]
+                    rules_timer_blink_color_scheme: self.rules_timer_blink_color_scheme,
+                    #[cfg(feature = "phobos")]
+                    rules_missing_cameo: self.rules_missing_cameo,
                     rules_mind_control_attack_line_frames: self
                         .rules_mind_control_attack_line_frames,
                     rules_line_trail_override: self.rules_line_trail_override,

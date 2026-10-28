@@ -1280,7 +1280,9 @@ impl ShellCaptureRequest {
         match self.checkpoint.movies_target() {
             Some(movies::MoviesTarget::Wol(target)) => !matches!(
                 target,
-                movies::WolTarget::ModernLobby | movies::WolTarget::ModernUsername
+                movies::WolTarget::ModernLobby
+                    | movies::WolTarget::ModernOptions
+                    | movies::WolTarget::ModernUsername
             ),
             Some(movies::MoviesTarget::WolWelcome {
                 provider: crate::app::shell_wol::WolProvider::Unavailable,
@@ -2946,7 +2948,18 @@ impl ShellCaptureSession {
             capture.cleanup()?;
         }
 
-        self.outcome = Some(Ok(()));
+        // The bundle keeps every partial observation, but an incomplete
+        // measurement must not exit as a successful capture.
+        self.outcome = Some(
+            match self
+                .movies
+                .as_ref()
+                .and_then(movies::MoviesCapture::measurement_failure)
+            {
+                Some(failure) => Err(failure),
+                None => Ok(()),
+            },
+        );
         Ok(())
     }
 

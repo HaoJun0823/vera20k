@@ -95,7 +95,7 @@ pub(crate) fn paint_wol_login_children(
             ControlPaint::Combo {
                 rect: layout.nickname_face,
                 swatch: None,
-                open: login.combo_open,
+                open: login.popup.control.is_some(),
                 disabled: false,
             },
             scale,
@@ -205,10 +205,10 @@ pub(crate) fn paint_wol_login_children(
             &mut paint.popup,
             atlas,
             popup.rect,
-            login.combo_hot_row.and_then(|row| popup.row_rect(row)),
+            login.popup.hot_row.and_then(|row| popup.row_rect(row)),
             [],
             popup.scrollbar().zip(popup.thumb()),
-            login.combo_scroll.pressed_part().map(dropdown_scroll_part),
+            login.popup.scroll.pressed_part().map(dropdown_scroll_part),
             scale,
             SHELL_DROPDOWN_DEPTH - 0.00002,
         );

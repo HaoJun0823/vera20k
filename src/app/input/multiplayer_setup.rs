@@ -6,6 +6,7 @@ use crate::app::{App, AppState};
 use crate::ui::lan_shell::LanEditKey;
 use crate::ui::main_menu_dialogs::options::LauncherCue;
 use crate::ui::multiplayer_setup::*;
+use crate::ui::shell::combobox::ComboPress;
 use crate::ui::shell::trackbar::TrackbarPress;
 use crate::util::time::Instant;
 use winit::event::{KeyEvent, MouseButton};
@@ -301,40 +302,31 @@ pub(crate) fn mouse(state: &mut AppState, button: MouseButton, pressed: bool) {
     let mut cue = None;
     if pressed {
         if let Some(popup) = ui.popup_geometry(&view, &layout) {
-            if let Some(part) = popup.scroll_part_at(x, y) {
-                ui.popup.scroll.press(
-                    part,
-                    popup.scroll_geometry(),
-                    &mut ui.popup.top_index,
-                    y,
-                    Instant::now(),
-                );
-            } else {
-                if let Some(index) = popup.row_at(x, y)
-                    && let Some(control) = ui.popup.control
-                    && let Some(item) = view
-                        .combo(control)
-                        .and_then(|combo| combo.choices.get(index))
-                {
-                    action = Some(SetupAction::Select {
-                        control,
-                        value: item.value,
-                    });
-                }
-                ui.popup.close();
-                cue = Some(LauncherCue::ComboClose);
+            let open = ui.popup.control;
+            let press = ui.popup.press_list(popup, x, y, Instant::now());
+            if let ComboPress::Pick(index) = press
+                && let Some(control) = open
+                && let Some(item) = view
+                    .combo(control)
+                    .and_then(|combo| combo.choices.get(index))
+            {
+                action = Some(SetupAction::Select {
+                    control,
+                    value: item.value,
+                });
             }
+            cue = press.cue().map(LauncherCue::from);
         } else if let Some(control) = over {
             if let Some(combo) = view.combo(control) {
-                if crate::ui::skirmish_shell::combo_arrow_hit_rect(
+                let press = ui.popup.press_face(
+                    control,
                     layout.control_rect(control).expect("combo rect"),
                     layout.page.scale,
-                )
-                .contains(x, y)
-                {
-                    ui.popup.open(control, combo.selected);
-                }
-                cue = Some(LauncherCue::ComboOpen);
+                    combo.selected,
+                    x,
+                    y,
+                );
+                cue = press.cue().map(LauncherCue::from);
             } else if CHECKBOXES.contains(&control) {
                 if crate::ui::skirmish_shell::checkbox_icon_rect(
                     layout.control_rect(control).expect("checkbox rect"),

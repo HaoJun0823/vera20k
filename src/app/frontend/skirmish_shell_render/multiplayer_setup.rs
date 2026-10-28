@@ -18,8 +18,9 @@ use super::text::{
     status_line_label,
 };
 use super::{
-    SHELL_CONTROL_DEPTH, SHELL_CONTROL_TEXT_DEPTH, SHELL_DROPDOWN_DEPTH, SHELL_DROPDOWN_TEXT_DEPTH,
-    SHELL_LABEL_TEXT_RGB, SHELL_PARENT_BACKGROUND_DEPTH,
+    SHELL_CONTROL_DEPTH, SHELL_CONTROL_TEXT_DEPTH, SHELL_DISABLED_TEXT_RGB_FROM_PACKED_0000009F,
+    SHELL_DROPDOWN_DEPTH, SHELL_DROPDOWN_TEXT_DEPTH, SHELL_LABEL_TEXT_RGB,
+    SHELL_PARENT_BACKGROUND_DEPTH,
 };
 use crate::app::AppState;
 use crate::app::frontend::shell_transition::ShellSlideKind;
@@ -393,6 +394,8 @@ pub(crate) fn render_multiplayer_setup(
                     rect,
                     thumb_left: bar.thumb_left(rect, scale),
                     plaque: bar.id != DIFFICULTY,
+                    // A guest's are disabled windows (`0x005E30EB..0x005E30F4`).
+                    disabled: !view.enabled(bar.id),
                 },
                 scale,
             );
@@ -401,7 +404,11 @@ pub(crate) fn render_multiplayer_setup(
                     &bar.range.stepped(bar.value).to_string(),
                     crate::ui::shell::trackbar::value_text_rect(rect, scale),
                     ShellAlign::H_CENTER | ShellAlign::V_CENTER,
-                    SHELL_LABEL_TEXT_RGB,
+                    if view.enabled(bar.id) {
+                        SHELL_LABEL_TEXT_RGB
+                    } else {
+                        SHELL_DISABLED_TEXT_RGB_FROM_PACKED_0000009F
+                    },
                     SHELL_CONTROL_TEXT_DEPTH,
                 ));
             }

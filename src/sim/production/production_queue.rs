@@ -109,14 +109,6 @@ pub fn build_options_for_owner(sim: &Simulation, rules: &RuleSet, owner: &str) -
         .collect()
 }
 
-/// True if this owner has at least one buildable production option — useful
-/// for picking a likely local player house in UI code.
-pub fn has_build_option_for_owner(sim: &Simulation, rules: &RuleSet, owner: &str) -> bool {
-    super::production_tech::all_build_options_for_owner(sim, rules, owner)
-        .iter()
-        .any(|o| o.enabled)
-}
-
 /// StripClass::AI6A8DC6 visits the local sidebar's retained Factory links.
 /// HasChanged4C9C60 is consumed before IsComplete4CA130, in entry order; a
 /// remote or absent strip never consumes that Factory's notification. Mobile

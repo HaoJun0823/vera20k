@@ -55,14 +55,16 @@ pub(crate) const PLAYER_SORT_ALPHA: u16 = 0x76A;
 pub(crate) const PLAYER_SORT_RANK: u16 = 0x76B;
 pub(crate) const PLAYER_SORT_CLAN: u16 = 0x76C;
 
-/// The modern lobby lists names and ping; legacy service-only columns stay
+/// The modern lobby lists names and ping, and with its one chat lobby it
+/// shows no lobby list; legacy service-only columns and the list stay
 /// available to native diagnostics through the same layout and state owners.
-const LEGACY_SORT_CONTROLS: [u16; 5] = [
+const LEGACY_CONTROLS: [u16; 6] = [
     SORT_GAMETYPE,
     SORT_PASSWORD,
     SORT_RESLOCK,
     PLAYER_SORT_CLAN,
     PLAYER_SORT_RANK,
+    LOBBIES,
 ];
 
 const fn button(
@@ -108,6 +110,13 @@ const ONLINE_PAGE: MenuPageSpec = MenuPageSpec {
     ],
     ..PAGE
 };
+
+/// Record `+0xD5`: the retail page's top panel holds the lobby list. The
+/// online page shows no list, so it keeps the family's warning monitor
+/// there, as the other online pages do.
+pub(crate) fn keeps_top_panel(page: &MenuPageSpec) -> bool {
+    *page != ONLINE_PAGE
+}
 
 /// The game list's header buttons and the player list's, with captions.
 pub(crate) const SORT_BUTTONS: [(u16, &str); 8] = [
@@ -345,6 +354,7 @@ impl WolLobbyLayout {
         .map(|(id, _)| id)
     }
 
+    /// The child's window; a child the page hides has none.
     pub(crate) fn control_rect(&self, id: u16) -> Option<RectPx> {
         if let Some(rect) = self.page.button_rect(id) {
             return Some(rect);
@@ -364,6 +374,7 @@ impl WolLobbyLayout {
             CHAT => self.chat,
             _ => return None,
         })
+        .filter(|rect| rect.w > 0)
     }
 }
 
@@ -557,7 +568,7 @@ impl WolLobbyState {
 
     pub(crate) fn enabled(&self, control: u16) -> bool {
         !self.disabled.contains(&control)
-            && (!self.modern || !LEGACY_SORT_CONTROLS.contains(&control))
+            && (!self.modern || !LEGACY_CONTROLS.contains(&control))
             && (PAGE.button(control).is_none() || self.page_spec().button(control).is_some())
     }
 
@@ -578,7 +589,7 @@ impl WolLobbyState {
         if self.modern {
             layout
                 .sort_buttons
-                .retain(|(id, _)| !LEGACY_SORT_CONTROLS.contains(id));
+                .retain(|(id, _)| !LEGACY_CONTROLS.contains(id));
             let scale = layout.page.scale;
             for (id, rect) in &mut layout.sort_buttons {
                 match *id {
@@ -597,6 +608,8 @@ impl WolLobbyState {
             layout.observer_toggle = scale.scale_rect(RectPx::new(604, 10, 18, 18));
             layout.observer_caption = Some(scale.scale_rect(RectPx::new(484, 10, 114, 17)));
             layout.observer_image = RectPx::new(0, 0, 0, 0);
+            // One chat lobby, so no lobby list.
+            layout.lobbies = RectPx::new(0, 0, 0, 0);
         }
         layout
     }
@@ -927,14 +940,21 @@ mod tests {
     }
 
     #[test]
-    fn modern_body_keeps_useful_controls_and_cannot_activate_legacy_headers() {
+    fn modern_body_keeps_useful_controls_and_hides_legacy_ones() {
         let mut lobby = WolLobbyState::new(false, true);
         let layout = lobby.layout(800, 600, false);
         let legacy = WolLobbyState::new(false, false).layout(800, 600, false);
         let headers: Vec<_> = layout.sort_buttons.iter().map(|(id, _)| *id).collect();
         assert_eq!(headers, [SORT_ALPHA, SORT_PING, PLAYER_SORT_ALPHA]);
-        for id in LEGACY_SORT_CONTROLS {
-            let old = legacy.control_rect(id).expect("legacy header");
+        for id in [
+            SORT_GAMETYPE,
+            SORT_PASSWORD,
+            SORT_RESLOCK,
+            PLAYER_SORT_CLAN,
+            PLAYER_SORT_RANK,
+            LOBBIES,
+        ] {
+            let old = legacy.control_rect(id).expect("legacy control");
             assert_eq!(layout.control_rect(id), None);
             assert_ne!(
                 layout.control_at(old.x + old.w / 2, old.y + old.h / 2),
@@ -952,7 +972,6 @@ mod tests {
             EMOTE,
             GAMES,
             PLAYERS,
-            LOBBIES,
             CHAT_LOG,
             CHAT,
             OBSERVER_TOGGLE,

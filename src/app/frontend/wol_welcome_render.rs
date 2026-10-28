@@ -326,8 +326,15 @@ pub(crate) fn render_wol_page(
     let page_statics = painted.kind().is_some() && !leaving;
     // The chat lobby 0x113 has no warning monitor (template static 0x71C;
     // 0x60AB71..0x60AC9E lists the family dialogs carrying it) but has the
-    // +0xD5 top panel instead; every other painted WOL page is the reverse.
-    let top_panel = matches!(painted, Painted::Lobby(_));
+    // +0xD5 top panel instead; every other painted WOL page is the reverse,
+    // as is the online lobby, which has no lobby list.
+    let top_panel = matches!(painted, Painted::Lobby(_))
+        && state
+            .frontend
+            .wol
+            .as_ref()
+            .and_then(|visit| visit.lobby())
+            .is_none_or(|lobby| crate::ui::wol_lobby::keeps_top_panel(lobby.ui.page_spec()));
     let monitor_frame = if page_statics && !top_panel {
         crate::app::frontend::menu_page_render::paint_shell_monitor(state)
     } else {
