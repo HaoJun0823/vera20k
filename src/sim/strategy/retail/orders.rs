@@ -435,7 +435,7 @@ fn nearest_site(sites: &[(u64, (u16, u16))], from: (u16, u16)) -> Option<u64> {
 /// Whether an earlier step already gave this unit an order this frame. The
 /// steps run in priority order — a bridge before a capture, a capture before a
 /// guard — and a unit is one unit: the first answer wins.
-fn ordered_this_frame(out: &Outbox, actor: u64) -> bool {
+pub(super) fn ordered_this_frame(out: &Outbox, actor: u64) -> bool {
     out.orders.iter().any(|order| order.actor == actor)
 }
 
@@ -465,6 +465,11 @@ pub(super) fn forces(
         // A team's script or one of the player's control groups owns its
         // members; this step is for the units no hand has taken.
         if unit.hand {
+            continue;
+        }
+        // A unit already given this frame's order — a step out of a shell — is
+        // not told to guard where it was standing.
+        if ordered_this_frame(out, unit.entity_id) {
             continue;
         }
         // A unit that is already holding or fighting is doing exactly this, and

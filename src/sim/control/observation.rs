@@ -103,6 +103,31 @@ pub struct EnemyEntity {
     pub cell: (u16, u16),
 }
 
+/// One shot in the air that names an object, as that object reads it.
+///
+/// The three facts that decide whether a step aside is worth anything: where
+/// the shot is committed to land, how many frames it has left, and whether it
+/// follows the object. Splash is the warhead's, resolved by the caller against
+/// the rules ([`IncomingShot::warhead`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncomingShot {
+    pub projectile_id: u64,
+    pub source_id: u64,
+    /// Where the shot will land, in cells: the target position captured at
+    /// fire for an unguided bullet, the live position for a guided one.
+    pub impact: (i16, i16),
+    /// Frames to that point along a straight line, rounded up. Zero for a
+    /// shot that has already arrived (`Inviso=` bullets are placed on the
+    /// target and land the same frame).
+    pub frames: u32,
+    /// `BulletType ROT >= 1`: the shot re-reads the live position every frame,
+    /// so leaving the impact cell changes nothing.
+    pub homing: bool,
+    pub warhead: InternedId,
+    /// `(+0x150 * +0x6C) >> 8`, the damage this impact would apply.
+    pub damage: i32,
+}
+
 /// One production line's occupancy: what its factory holds, whether that build
 /// is suspended, and how many copies are queued behind it.
 ///
@@ -399,6 +424,105 @@ impl<'a> Observation<'a> {
                 cell: (entity.position.rx(), entity.position.ry()),
             })
         })
+    }
+
+    /// Every shot in the air that names `entity_id`, in projectile order.
+    ///
+    /// What a player sees as a shell crossing the screen is here as the three
+    /// facts that decide whether stepping aside is worth anything: where the
+    /// shot is committed to land, how many frames it needs to get there, and
+    /// whether it follows the object or its launch-time aim. A homing bullet
+    /// (`BulletType ROT >= 1`, `tracks_target`) re-reads the live position, so
+    /// walking out of it does nothing; a plain one keeps the point it was fired
+    /// at (`BulletClass::Fire 0x00468A80`, `initial_target_position`), which is
+    /// why a target that has stepped away is not there when it lands.
+    ///
+    /// An `Inviso=` bullet is placed on its target at fire time with no speed
+    /// and detonates the same frame: `frames` is zero and nothing can be done
+    /// about it. That is most small-arms fire, and it is not a gap — it is what
+    /// the bullet type says.
+    pub fn incoming_shots(&self, entity_id: u64) -> impl Iterator<Item = IncomingShot> + '_ {
+        self.shots_in_flight()
+            .filter(move |(target, _)| *target == entity_id)
+            .map(|(_, shot)| shot)
+    }
+
+    /// Every shot in the air, with the object it names, in projectile order.
+    ///
+    /// The whole-frame form of [`Self::incoming_shots`], for a pass that asks
+    /// about the whole army once: one walk over the projectiles instead of one
+    /// walk per unit.
+    pub fn shots_in_flight(&self) -> impl Iterator<Item = (u64, IncomingShot)> + '_ {
+        let per_cell = crate::util::lepton::LEPTONS_PER_CELL_I32;
+        self.sim
+            .projectiles()
+            .iter()
+            .filter_map(move |(id, projectile)| {
+                let target = projectile.target().object_id()?;
+                let aim = projectile.last_target_position();
+                let speed = i32::from(projectile.speed_leptons_per_frame()).max(0);
+                let dx = aim.x - projectile.position().x;
+                let dy = aim.y - projectile.position().y;
+                let distance = isqrt(dx * dx + dy * dy);
+                let frames = if speed <= 0 {
+                    0
+                } else {
+                    u32::try_from((distance + speed - 1) / speed).unwrap_or(u32::MAX)
+                };
+                let payload = projectile.payload();
+                Some((
+                    target,
+                    IncomingShot {
+                        projectile_id: *id,
+                        source_id: projectile.source_id(),
+                        impact: (
+                            i16::try_from(aim.x.div_euclid(per_cell)).unwrap_or(0),
+                            i16::try_from(aim.y.div_euclid(per_cell)).unwrap_or(0),
+                        ),
+                        frames,
+                        homing: projectile.tracks_target(),
+                        warhead: payload.warhead,
+                        damage: payload.area_damage(),
+                    },
+                ))
+            })
+    }
+
+    /// The object `entity_id` is shooting at, when it has one.
+    ///
+    /// The native mission AI picks it (`TechnoClass::Greatest_Threat` behind
+    /// the fire loop), and a brain that wants to move a unit around a fight
+    /// reads the choice here rather than picking a second one: the unit is
+    /// already aimed at this, and a second opinion is what makes a soldier
+    /// turn away from what it is shooting.
+    pub fn attack_target(&self, entity_id: u64) -> Option<u64> {
+        match self.sim.entities().get(entity_id)?.attack_target.target() {
+            Some(crate::sim::combat::TargetKind::Entity(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Whether `entity_id`'s weapon may fire this frame: the rearm timer has
+    /// run out (`TechnoClass+0x2E4`, `sim::combat::rof`).
+    ///
+    /// The reload is the whole clock of a fire-and-move cycle: a unit steps out
+    /// while it is reloading and back in when it is not, so the answer is read
+    /// per frame rather than remembered.
+    pub fn weapon_ready(&self, entity_id: u64) -> bool {
+        let frame = self.sim.session().binary_frame() as i32;
+        self.sim
+            .entities()
+            .get(entity_id)
+            .is_some_and(|entity| entity.rearm_timer.remaining(frame) <= 0)
+    }
+
+    /// The blast radius of a warhead, in whole cells: `CellSpread=` floored, so
+    /// a `0.4` shell hurts only the cell it lands in and a `2.0` one reaches two
+    /// cells out.
+    pub fn warhead_spread_cells(&self, rules: &RuleSet, warhead: InternedId) -> i32 {
+        rules
+            .warhead(self.sim.interner().resolve(warhead))
+            .map_or(0, |warhead| warhead.cell_spread_f64.floor().max(0.0) as i32)
     }
 
     /// Buildings any engineer may take: alive, not this house's, and
@@ -820,4 +944,27 @@ impl<'a> Observation<'a> {
             .path_grid()
             .is_some_and(|grid| grid.is_walkable(rx, ry))
     }
+}
+
+/// Integer square root of a non-negative lepton distance.
+///
+/// A flight time is a decision input, so it is computed in integers: `f64`
+/// `sqrt` is correctly rounded on every platform VERA runs on, but an exact
+/// integer answer costs one small loop and cannot drift with a libm change.
+fn isqrt(value: i32) -> i32 {
+    if value <= 0 {
+        return 0;
+    }
+    let value = i64::from(value);
+    // 46 341 is the largest root whose square still fits in an i32.
+    let (mut low, mut high) = (0_i64, 46_341_i64);
+    while low < high {
+        let mid = (low + high + 1) / 2;
+        if mid * mid <= value {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    i32::try_from(low).unwrap_or(i32::MAX)
 }

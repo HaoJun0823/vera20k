@@ -60,6 +60,18 @@ pub(super) enum TrackedKind {
     Capture,
     /// The D key: take, or leave, the deployed pose.
     Deploy,
+    /// Step out of the landing point of a shot already in the air.
+    ///
+    /// Its own kind because its term is its own: a shell lands in a handful of
+    /// frames, and the whole point is to be free to step again the moment the
+    /// next one is fired — a march's half-minute term would make a unit dodge
+    /// once and stand still through everything after it.
+    Dodge,
+    /// Step out of a shorter-ranged enemy's reach while reloading.
+    ///
+    /// One micro cycle: a step is a cell, and the cycle re-reads the reload, so
+    /// the next decision comes when the gun is about to be ready again.
+    Kite,
 }
 
 /// One micro cycle, in frames: a second at play cadence. The layer that
@@ -78,6 +90,11 @@ impl TrackedKind {
         match self {
             Self::Deploy => 45,
             Self::Engage => MICRO_FRAMES,
+            // A step is one cell's worth of walk: three frames is enough for
+            // the next shell to be a new decision, and long enough that a
+            // single shot cannot make a unit jitter between two cells.
+            Self::Dodge => 3,
+            Self::Kite => MICRO_FRAMES,
             Self::Enter | Self::Capture => 300,
             Self::Move | Self::Attack | Self::AttackMove | Self::Guard => 450,
         }
@@ -256,7 +273,9 @@ pub(super) fn kinds_for(goal: Goal) -> &'static [TrackedKind] {
     match goal {
         Goal::Attack { .. } => &[TrackedKind::Engage, TrackedKind::Attack],
         Goal::AttackMove { .. } => &[TrackedKind::AttackMove],
-        Goal::Move { .. } | Goal::MoveToObject { .. } => &[TrackedKind::Move],
+        Goal::Move { .. } | Goal::MoveToObject { .. } => {
+            &[TrackedKind::Move, TrackedKind::Dodge, TrackedKind::Kite]
+        }
         Goal::Guard | Goal::GuardAt { .. } => &[TrackedKind::Guard],
         Goal::Capture { .. } => &[TrackedKind::Capture],
         Goal::Enter { .. } => &[TrackedKind::Enter],

@@ -1772,9 +1772,17 @@ fn place_ready_building_for_tab(state: &mut AppState, tab: SidebarTab) {
 
 /// How many commands one agent may issue in a frame. No native equivalent is
 /// known — gamemd has no auto play — so this caps VERA's own path rather than
-/// reproducing a limit. It is generous next to what a player can click in a
-/// 67 ms frame.
-const AUTO_PLAY_COMMANDS_PER_FRAME: usize = 8;
+/// reproducing a limit.
+///
+/// It is no longer a hand: an eight-command frame is a player's click rate, and
+/// the agent is not clicking. At eight, an army of a hundred units waited
+/// thirteen frames for its turn and the frame's allowance went to whichever
+/// step ran first — measured on the pinned match, raising it alone moved the win
+/// from tick 35 726 to 29 238. The number here is a safety valve against a
+/// pathological frame, not a fairness rule: fog and reaction are where honesty
+/// lives now, and per-object rate limits in the board keep a single unit from
+/// being re-tasked every frame.
+const AUTO_PLAY_COMMANDS_PER_FRAME: usize = 512;
 
 /// The retail policy's own generator seed. The policy's draws belong to it, not
 /// to a simulation stream, so a fixed seed keeps an unattended match

@@ -69,6 +69,11 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
         if issued >= MICRO_ORDERS_PER_FRAME {
             break;
         }
+        // A step out of a shell's landing point is this frame's answer for the
+        // unit; an engage order on top of it would walk it back into the blast.
+        if super::orders::ordered_this_frame(out, item.entity_id) {
+            continue;
+        }
         // What is in reach now outranks where the unit was going: this is the
         // whole reason the layer exists.
         if let Some(enemy) = in_reach(&brain.census.enemies, item.cell, item.reach) {

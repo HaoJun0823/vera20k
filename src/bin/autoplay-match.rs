@@ -44,9 +44,9 @@ const TEAM_PROGRESS: u64 = 600;
 /// Team detail lines per house, so a large `Max=` registry cannot bury the
 /// rest of the run.
 const MAX_TEAM_LINES: usize = 12;
-/// Commands the control layer admits per frame. The client's hotkey uses 8;
-/// a headless run is not a player, but the budget is the same shape.
-const DEFAULT_PER_FRAME: usize = 8;
+/// Commands the control layer admits per frame: the same safety valve the
+/// client uses (`app::input::dispatch`). It is not a hand — see the note there.
+const DEFAULT_PER_FRAME: usize = 512;
 
 struct Args {
     ra2_dir: PathBuf,

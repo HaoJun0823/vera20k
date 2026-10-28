@@ -95,7 +95,9 @@ pub(super) mod advance;
 pub(super) mod build;
 pub(super) mod census;
 pub(super) mod composition;
+pub(super) mod dodge;
 pub(super) mod expand;
+pub(super) mod kite;
 pub(super) mod micro;
 pub(super) mod orders;
 pub(super) mod plan;
@@ -296,6 +298,15 @@ impl Brain for RetailBrain {
         orders::bridges(self, rules, obs, out);
         orders::captures(self, rules, obs, out);
         orders::garrison(self, rules, obs, out);
+        // A shell already in the air outranks every other unit decision: it is
+        // the only one whose whole window is a handful of frames, and a unit
+        // that is not there when it lands takes nothing. Everything below
+        // leaves a unit this pass ordered alone.
+        dodge::run(self, rules, obs, out);
+        // And the other half of the same micro: a unit that out-ranges what it
+        // is shooting at spends the reach only if it is not standing in the
+        // enemy's own — one step out while the gun reloads, back in to fire.
+        kite::run(self, rules, obs, out);
         // What each unit shoots *this second*, before the march is decided: a
         // hostile in reach outranks a walk towards a target, and this is the
         // only layer that asks.
