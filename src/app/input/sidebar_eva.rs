@@ -167,7 +167,14 @@ pub(crate) fn cameo_click_with_queue(
         }
         (CameoPress::Left, _) => {
             let busy = in_category().next().is_some();
-            if busy && is_structure_strip(category) && !building_production_queue {
+            // An idle strip beside a building one: the press is on a *different*
+            // type, and the Factory it would reach already holds a product. The
+            // sim's own queue would abandon what is being paid for and start the
+            // new type, which is how a player ended up with two builds and
+            // neither finished. Clicking the type already being built still
+            // queues another of it, and Phobos' structure queue still appends.
+            let other_type = busy && own != Some(BuildQueueState::Building);
+            if other_type && !(is_structure_strip(category) && building_production_queue) {
                 CameoClick {
                     clear_building_placement: false,
                     sound: false,
@@ -418,5 +425,47 @@ mod tests {
             shift_queue_repeat_with_queue(ProductionCategory::Building, None, true, 5, false),
             1
         );
+    }
+
+    /// A unit strip is a Factory too, and a Factory holds one product: a press
+    /// on another type while one is being paid for is refused instead of
+    /// abandoning it. Pressing the type already being built still queues
+    /// another of it.
+    #[test]
+    fn a_busy_mobile_strip_refuses_a_different_type() {
+        use crate::sim::production::{BuildQueueState, QueueItemView};
+        let mut interner = StringInterner::new();
+        let running = interner.intern("MTNK");
+        let clicked = interner.intern("E1");
+        let queue = [QueueItemView {
+            type_id: running,
+            display_name: "MTNK".to_owned(),
+            queue_category: ProductionCategory::Vehicle,
+            state: BuildQueueState::Building,
+            progress: 10,
+        }];
+        let refused = cameo_click(
+            &queue,
+            ProductionCategory::Vehicle,
+            Some(clicked),
+            None,
+            None,
+            CameoPress::Left,
+            false,
+        );
+        assert_eq!(refused.order, None, "no second build while one is running");
+        assert_eq!(refused.eva, Some(EVA_UNABLE_TO_COMPLY));
+        assert!(!refused.sound);
+
+        let same = cameo_click(
+            &queue,
+            ProductionCategory::Vehicle,
+            Some(running),
+            Some(BuildQueueState::Building),
+            None,
+            CameoPress::Left,
+            false,
+        );
+        assert_eq!(same.order, Some(CameoOrder::Produce), "one more of it");
     }
 }

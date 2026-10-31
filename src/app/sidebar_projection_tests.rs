@@ -1575,6 +1575,74 @@ fn an_agent_order_without_a_button_waits_for_the_press_path() {
     );
 }
 
+/// An agent's Begin can run in the frame whose House pass first publishes the
+/// option, so `StartProduction` publishes the Factory link before this
+/// projection holds the cameo `LinkFactory6A6140` writes it into. The emitted
+/// association waits for the pass that inserts the entry: without it the strip
+/// has neither link nor request and draws no clock at all while the Factory
+/// builds.
+#[test]
+fn an_agent_build_that_begins_before_its_button_is_drawn_shows_the_linked_clock() {
+    let (mut sim, rules, owner) = agent_clock_world();
+    let e1 = sim.interner().get("E1").unwrap();
+    let options = all_build_options_for_owner(&sim, &rules, "Americans");
+    let candidates = cameo_candidates(&sim, &rules, None, owner, &options, &[], &[]);
+    let mut projection = SidebarProjectionState::default();
+    projection.reconcile_cameos(owner, &[], 3, &[]);
+
+    // The agent's order executes in this frame; the barracks Begin publishes
+    // its link before the House pass has drawn the GI's button.
+    assert!(
+        crate::sim::production::enqueue_by_type(
+            &mut sim,
+            &rules,
+            "Americans",
+            "E1",
+            Default::default(),
+            false,
+        ),
+        "the idle barracks admits the GI"
+    );
+    for output in sim.take_lifecycle_outputs_for_test() {
+        projection.apply_lifecycle_output(&output, Some(owner));
+    }
+    assert!(
+        projection.cameo_factory(&sim, owner, e1).is_none(),
+        "an absent cameo takes no link yet (6A61C7..6A61E4)"
+    );
+
+    // The same frame's House pass publishes the option; the projection's pass
+    // inserts the entry and only then can the link be written.
+    projection.apply_lifecycle_output(
+        &LifecycleOutput::SidebarConstructionOption { owner, type_id: e1 },
+        Some(owner),
+    );
+    projection.apply_lifecycle_output(&LifecycleOutput::SidebarRecalculated { owner }, Some(owner));
+    projection.reconcile_cameos(owner, &candidates, 3, &[]);
+    assert!(projection.cameo_factory(&sim, owner, e1).is_none());
+    projection.apply_pending_factory_links(&sim, owner);
+    projection.reconcile_factory_links(&sim, owner);
+    assert!(
+        projection.cameo_factory(&sim, owner, e1).is_some(),
+        "the pass that inserted the entry writes the pending link"
+    );
+
+    let tab = SidebarTab::for_category(crate::sim::production::category_for_object(
+        rules.object("E1").unwrap(),
+    ));
+    let mut view = view(&sim, &options, &projection, tab, 480.0);
+    projection.apply_cameo_draw_state(&mut view, &sim, &rules, owner, None);
+    let item = view
+        .items
+        .iter()
+        .find(|item| item.type_id == "E1")
+        .expect("the House pass inserted the GI");
+    assert!(
+        item.is_building_this_type && item.enabled,
+        "the linked Factory draws the build clock the agent's build runs on"
+    );
+}
+
 /// The press path keeps the native admission: `Select6AB0C9` searches the
 /// retained strip, and a mouse press can only land on a drawn button.
 #[test]

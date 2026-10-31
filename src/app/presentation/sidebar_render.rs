@@ -240,6 +240,13 @@ pub(crate) fn refresh_sidebar_projection(state: &mut AppState) {
         .match_presentation
         .sidebar_projection
         .set_cameo_frame(sim.session().binary_frame() as i32);
+    // A Begin in the frame that also inserted this entry published its link
+    // before the strip held the cameo; admit it in the pass that inserted it.
+    state
+        .match_state
+        .match_presentation
+        .sidebar_projection
+        .apply_pending_factory_links(sim, owner);
     state
         .match_state
         .match_presentation

@@ -50,6 +50,18 @@ pub(crate) struct SidebarProjectionState {
     /// Begin/House abandonment facts and validated save restoration write these
     /// foreign handles.
     factory_links: HashMap<InternedId, CameoFactoryLink>,
+    /// Emitted Factory links whose strip entry the House pass had not inserted
+    /// yet, installed by [`SidebarProjectionState::apply_pending_factory_links`].
+    ///
+    /// `FactoryClass::StartProduction` publishes
+    /// [`LifecycleOutput::ProductionFactoryLinked`] in the frame its command
+    /// executes, while the pass that inserts the cameo (`AddCameo`, from the
+    /// same frame's House outputs) reaches the projection one pass later. A
+    /// player's press can only land on a drawn button, so
+    /// `SidebarClass::LinkFactory6A6140` always finds its entry; an agent's
+    /// order is one pass early. The emitted association waits here — it is
+    /// never a retry of a refused link and never inferred from a queue head.
+    pending_factory_links: Vec<(InternedId, CameoFactoryLink)>,
     /// House5005B0/500700/5007A0 gate repeated local prediction, independently
     /// of each entry's retained request. Begin clears this before FindFactory,
     /// including refusal. These are presentation gates, never Factory state.
@@ -104,6 +116,7 @@ impl SidebarProjectionState {
             self.pending_cameo_recheck = None;
             self.pending_cameo_additions.clear();
             self.factory_links.clear();
+            self.pending_factory_links.clear();
             self.prediction_categories.clear();
             self.auto_play_orders.clear();
         }
@@ -120,6 +133,7 @@ impl SidebarProjectionState {
         self.pending_cameo_recheck = None;
         self.pending_cameo_additions.clear();
         self.factory_links.clear();
+        self.pending_factory_links.clear();
         self.prediction_categories.clear();
         self.auto_play_orders.clear();
     }
@@ -144,6 +158,7 @@ impl SidebarProjectionState {
             .as_ref()
             .is_some_and(|(previous, _)| *previous == owner);
         if !initialized {
+            self.pending_factory_links.clear();
             if self.cameos.is_some() {
                 self.factory_links.clear();
                 self.prediction_categories.clear();
@@ -239,6 +254,7 @@ impl SidebarProjectionState {
         }
         self.pending_cameo_recheck = None;
         self.pending_cameo_additions.clear();
+        self.pending_factory_links.clear();
     }
 
     /// House4F92E2 schedules the retained membership pass. Sidebar6A6140
@@ -279,6 +295,11 @@ impl SidebarProjectionState {
                 category,
                 construction_order,
             } if local_house == Some(owner) => {
+                let link = CameoFactoryLink {
+                    owner,
+                    category,
+                    construction_order,
+                };
                 // SidebarClass::LinkFactory6A6140 searches the retained entry
                 // (6A61C7..6A61E4); an absent cameo returns false without a write.
                 let tab = crate::ui::sidebar::SidebarTab::for_category(category);
@@ -289,16 +310,15 @@ impl SidebarProjectionState {
                             .iter()
                             .any(|entry| entry.id == CameoId::Object(type_id))
                 }) {
+                    // A press that reaches the Factory before the strip holds
+                    // its button: hold the emitted association for the pass
+                    // that inserts the entry instead of dropping it.
+                    self.pending_factory_links
+                        .retain(|(pending, _)| *pending != type_id);
+                    self.pending_factory_links.push((type_id, link));
                     return None;
                 }
-                self.factory_links.insert(
-                    type_id,
-                    CameoFactoryLink {
-                        owner,
-                        category,
-                        construction_order,
-                    },
-                );
+                self.factory_links.insert(type_id, link);
                 None
             }
             LifecycleOutput::ProductionFactoryAbandoning {
@@ -463,6 +483,12 @@ impl SidebarProjectionState {
 
     /// The per-frame write: [`Self::apply_cameo_draw_state`] on the retained
     /// view, without recomputing membership.
+    ///
+    /// `StripAI::AI` (`0x006A8F7C`) advances the request clock once per native
+    /// frame, not once per House rebuild. Advancing it here as well is what
+    /// makes a build's progress bar fill while the sidebar is not being
+    /// rebuilt: the clock reads the frame number, so the full pass's own call
+    /// in the same frame adds nothing.
     pub(crate) fn refresh_cameo_draw_state(
         &mut self,
         sim: &crate::sim::world::Simulation,
@@ -470,6 +496,7 @@ impl SidebarProjectionState {
         owner: InternedId,
         armed_building: Option<InternedId>,
     ) {
+        self.advance_cameo_requests(sim, owner);
         let Some(mut view) = self.current_view.take() else {
             return;
         };
@@ -499,6 +526,56 @@ impl SidebarProjectionState {
                     .view(owner, link.category)
                     .is_some_and(|factory| factory.construction_order() == link.construction_order)
         });
+    }
+
+    /// Write the Factory links that were published before their strip entry
+    /// stood (see `pending_factory_links`), in the projection pass that has now
+    /// inserted the entry — the pass where a press could have landed. Called
+    /// after [`Self::reconcile_cameos`], next to
+    /// [`Self::reconcile_factory_links`].
+    ///
+    /// An association still names one Factory instance: one whose Factory has
+    /// since been replaced is dropped rather than pointed at the successor,
+    /// exactly like the validated handles the registry owns.
+    pub(crate) fn apply_pending_factory_links(
+        &mut self,
+        sim: &crate::sim::world::Simulation,
+        owner: InternedId,
+    ) {
+        if self.pending_factory_links.is_empty() {
+            return;
+        }
+        let Some((local_owner, strips)) = self.cameos.as_ref() else {
+            return;
+        };
+        if *local_owner != owner {
+            return;
+        }
+        let mut waiting = Vec::new();
+        for (type_id, link) in std::mem::take(&mut self.pending_factory_links) {
+            if link.owner != owner {
+                continue;
+            }
+            if !sim
+                .production()
+                .factories()
+                .view(owner, link.category)
+                .is_some_and(|factory| factory.construction_order() == link.construction_order)
+            {
+                continue;
+            }
+            let tab = crate::ui::sidebar::SidebarTab::for_category(link.category);
+            if strips
+                .items(tab)
+                .iter()
+                .any(|entry| entry.id == CameoId::Object(type_id))
+            {
+                self.factory_links.insert(type_id, link);
+            } else {
+                waiting.push((type_id, link));
+            }
+        }
+        self.pending_factory_links = waiting;
     }
 
     /// Sidebar Action6A7780 visits all four strips in order; StripAI6A8B30
