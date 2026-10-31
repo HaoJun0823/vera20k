@@ -807,7 +807,15 @@ pub(super) fn issue(
         );
         return false;
     }
-    out.want(unit, rank, goal)
+    let taken = out.want(unit, rank, goal);
+    if brain.trace == Some(unit) {
+        log::info!(
+            "trace {unit}: {} {} (rank {rank}, taken {taken})",
+            format!("{goal:?}"),
+            if taken { "issued" } else { "replaced" }
+        );
+    }
+    taken
 }
 
 /// Whether the walker can get to `cell` at all.

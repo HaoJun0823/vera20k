@@ -533,6 +533,20 @@ Three invariants, and the migration that establishes them one slice at a time:
 A rule lives in one of four places — the rank table, the pilot table, the
 refusal loop, or the army book — and nowhere else.
 
+
+
+## Tracing one unit
+
+AUTOPLAY_TRACE=<entity id> makes the brain print that unit's orders and
+refusals at info level, from the two places every order passes through
+(orders::issue and Brain::orders_refused):
+
+    trace 4211: Attack { target: 91 } issued (rank 3, taken true)
+    trace 4211: Move { cell: (120, 44) } refused by the world
+
+It is a start-up switch, read once when the brain is built, and never an input
+to a decision.
+
 ## Validation per stage
 
 - Headless scenario runs (`src/headless_scenario.rs`), never retail assets in the lib

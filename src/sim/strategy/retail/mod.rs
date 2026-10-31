@@ -316,6 +316,12 @@ pub struct RetailBrain {
     /// and the army goes anyway. Killing units does not count: a trade in the
     /// field that never reaches the base is exactly the stalemate this reads.
     pub(super) push_progress: (u64, usize),
+    /// The object whose orders are traced, from \`AUTOPLAY_TRACE\`: a diagnostic
+    /// switch read once at construction, never a decision input. "Why did this
+    /// unit do that" is the question every play test asks, and until now the
+    /// only answer was to grep four passes' debug lines and guess at the
+    /// interleaving.
+    pub(super) trace: Option<u64>,
 }
 
 impl RetailBrain {
@@ -344,6 +350,9 @@ impl RetailBrain {
             breaches: Vec::new(),
             blocked_goals: BTreeMap::new(),
             push_progress: (0, usize::MAX),
+            trace: std::env::var("AUTOPLAY_TRACE")
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u64>().ok()),
         }
     }
 
@@ -531,6 +540,9 @@ impl Brain for RetailBrain {
 
     fn orders_refused(&mut self, refused: &[(u64, Goal)]) {
         for (actor, goal) in refused {
+            if self.trace == Some(*actor) {
+                log::info!("trace {actor}: {goal:?} refused by the world");
+            }
             for kind in tracked::kinds_for(*goal) {
                 // The record goes, so the intent itself can be decided again —
                 // but the refusal leaves a short term behind it. Without the
