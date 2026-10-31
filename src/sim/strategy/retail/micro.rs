@@ -756,7 +756,7 @@ fn enemy_economy(
 /// worse than one that goes and looks at the enemy. Only a map with no
 /// navigation projection at all falls back to the open ground and then to
 /// the nearest cell regardless — there, no cell answers either question.
-fn nearest_unexplored(
+pub(super) fn nearest_unexplored(
     obs: &Observation<'_>,
     from: (u16, u16),
     zone: MovementZone,

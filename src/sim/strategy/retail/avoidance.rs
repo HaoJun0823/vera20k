@@ -806,6 +806,22 @@ fn answer_blocked(
             brain.blocked_goals.remove(&entity_id);
             continue;
         };
+        // A walker with no gun cannot open what is in its way. Sending it the
+        // click anyway is an order the engine refuses every frame, which is
+        // the engineer standing at a neutral wall for the rest of the match.
+        // Ask the house's guns instead, the same way the walking pass does,
+        // and leave the engineer out of it until the wall is gone.
+        let armed = obs.object_type(rules, unit.type_id).is_some_and(|ty| {
+            super::advance::weapon_range_cells(rules, ty, obs.is_deployed(entity_id)) > 0
+        });
+        if !armed {
+            brain
+                .breaches
+                .push((blocker, tick.saturating_add(BREACH_REQUEST_FRAMES)));
+            brain.blocked_goals.remove(&entity_id);
+            brain.tracked.refuse(tick, entity_id, TrackedKind::Capture);
+            continue;
+        }
         let goal = if obs.overlay_at(blocker.0, blocker.1) {
             Goal::AttackCell { cell: blocker }
         } else if let Some((target, true)) = obs.structure_at(rules, blocker) {

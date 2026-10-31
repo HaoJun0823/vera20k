@@ -617,15 +617,15 @@ pub(super) fn queue_segment(
     if free_credits < WALL_CREDITS {
         return false;
     }
+    // A unit standing on the ring is a hole the plan keeps going round, and
+    // it is also how a unit ends up inside the pen: nudge it off every frame,
+    // not only once the last piece has been placed and the plan gives up.
+    clear_the_ring(brain, rules, obs, out, obs.tick());
     let line = brain.census.line(ProductionCategory::Defense);
     if line.busy() {
         return false;
     }
     let Some(segment) = next_segment(brain, rules, obs) else {
-        // No cell left to fill: if the only thing missing is a unit standing
-        // on the ring, ask it to step outside. The plan does not go round it
-        // forever — the base has a hole where that unit stands.
-        clear_the_ring(brain, rules, obs, out, obs.tick());
         return false;
     };
     log::info!(

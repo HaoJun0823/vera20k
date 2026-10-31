@@ -77,6 +77,20 @@ fn push_stalled(progress: (u64, usize), now: u64, current: usize) -> bool {
     since != 0 && current >= then && now.saturating_sub(since) >= PUSH_STALL_FRAMES
 }
 
+/// Where the army looks when it knows of nothing to attack: the nearest
+/// ground nobody has seen, else the middle of the map.
+fn searching_cell(obs: &Observation<'_>, anchor: (u16, u16)) -> Option<(u16, u16)> {
+    if let Some(cell) = super::micro::nearest_unexplored(
+        obs,
+        anchor,
+        crate::rules::locomotor_type::MovementZone::Normal,
+    ) {
+        return Some(cell);
+    }
+    let (width, height) = obs.map_extent();
+    (width > 0 && height > 0).then_some((width / 2, height / 2))
+}
+
 /// How few enemy objects are left before the strength gate stops asking. Below
 /// this the enemy is a clean-up job, not a fight: the army goes in and finishes
 /// it instead of waiting for a comparison it can only lose by arithmetic.
@@ -188,7 +202,19 @@ pub(super) fn advance(
         );
     }
     if targets.is_empty() {
-        return false;
+        // Nothing hostile is known: the army goes to look instead of
+        // standing. That is what a player does after the ground in front of
+        // them is clear, and what "everyone waits until the next target
+        // appears" is missing. The cell is the nearest ground nobody has
+        // seen yet, so the march is also the scouting pass.
+        let Some(cell) = searching_cell(obs, army.anchor) else {
+            return false;
+        };
+        targets.push(EnemyEntity {
+            entity_id: 0,
+            type_id: crate::sim::intern::InternedId::from_index(0),
+            cell,
+        });
     }
 
     // One target for the whole army, not the nearest for each unit: units
@@ -231,7 +257,11 @@ pub(super) fn advance(
     // 21 objects and the push never left, on every variant that changed what
     // gets ordered. This is the reason those variants looked worse than they
     // were.
-    if !mopping_up && !super::squads::outguns(&brain.census, rules, obs, target.cell) {
+    // A search is not a fight: there is nothing to weigh the army against, and
+    // the march is the point.
+    let searching = target.entity_id == 0;
+    if !mopping_up && !searching && !super::squads::outguns(&brain.census, rules, obs, target.cell)
+    {
         return false;
     }
 
@@ -291,6 +321,33 @@ pub(super) fn advance(
         // anyway is the "sent at the enemy and wiped out for nothing" a play
         // test reports, and their attack-moves are also what made a squad
         // shuffle around a structure it could never damage.
+        // Searching: a march with the gun up, toward the ground nobody has
+        // looked at yet.
+        if searching {
+            let kind = super::tracked::TrackedKind::AttackMove;
+            if !brain
+                .tracked
+                .admits(tick, unit.entity_id, kind, None, Some(target_cell))
+            {
+                continue;
+            }
+            brain
+                .tracked
+                .record(tick, unit.entity_id, kind, None, Some(target_cell));
+            if !super::orders::issue(
+                brain,
+                out,
+                rules,
+                obs,
+                unit.entity_id,
+                Goal::AttackMove { cell: target_cell },
+            ) {
+                brain.tracked.void(unit.entity_id, kind);
+                continue;
+            }
+            issued += 1;
+            continue;
+        }
         let attack = Goal::Attack { target: target_id };
         let engagement = obs.engage(rules, unit.entity_id, target_id);
         if engagement == crate::sim::control::observation::Engage::Cannot {

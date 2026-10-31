@@ -499,7 +499,7 @@ fn owned(rules: &RuleSet, obs: &Observation<'_>, census: &Census, item: Item) ->
         Item::Refinery => census.refineries,
         Item::Barracks => build::count_in(obs, rules, census, &rules.build_barracks_types),
         Item::Weapons => build::count_in(obs, rules, census, &rules.build_weapons_types),
-        Item::Defense => build::count_in(obs, rules, census, build::base_defenses(rules, obs)),
+        Item::Defense => build::defenses(rules, obs, census),
         Item::Radar => build::count_in(obs, rules, census, &rules.build_radar_types),
         Item::Tech => build::count_in(obs, rules, census, &rules.build_tech_types),
         // A house that owns a plant of the category has nothing to build, and
@@ -527,7 +527,7 @@ fn pick<'r>(
         Item::Refinery => build::first_buildable(rules, obs, &rules.build_refinery_types),
         Item::Barracks => build::first_buildable(rules, obs, &rules.build_barracks_types),
         Item::Weapons => build::first_buildable(rules, obs, &rules.build_weapons_types),
-        Item::Defense => build::first_buildable(rules, obs, build::base_defenses(rules, obs)),
+        Item::Defense => build::defense_building(rules, obs),
         Item::Radar => build::first_buildable(rules, obs, &rules.build_radar_types),
         // The lab that authorises a power the house will actually fire.
         Item::Tech => build::tech_building(rules, obs),

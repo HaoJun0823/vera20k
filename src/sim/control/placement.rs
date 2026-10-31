@@ -186,7 +186,12 @@ impl<'a, 'b> Placement<'a, 'b> {
 
     /// Whether a foundation at `cell` would stand inside the grown footprint of
     /// another building: no lane between the two.
-    fn too_close(&self, cell: (u16, u16), foundation: (u16, u16), crowd: &BTreeSet<(u16, u16)>) -> bool {
+    fn too_close(
+        &self,
+        cell: (u16, u16),
+        foundation: (u16, u16),
+        crowd: &BTreeSet<(u16, u16)>,
+    ) -> bool {
         if crowd.is_empty() {
             return false;
         }
@@ -337,8 +342,7 @@ impl<'a, 'b> Placement<'a, 'b> {
                         }
                         let sector = sector_of(anchors.first().copied(), (rx, ry));
                         admitted.push(Candidate {
-                            too_close: !ty.wall
-                                && self.too_close((rx, ry), foundation, &crowd),
+                            too_close: !ty.wall && self.too_close((rx, ry), foundation, &crowd),
                             covers_reserved: self.covers_reserved((rx, ry), foundation),
                             sector: crowded[sector],
                             open: self.openness(rx, ry, &blocked),
@@ -364,7 +368,10 @@ impl<'a, 'b> Placement<'a, 'b> {
         // a building is. What is left is logged when nothing legal remains,
         // because a base that cannot place anything looks exactly like a base
         // that is not trying to.
-        let legal = admitted.iter().filter(|candidate| !candidate.too_close).count();
+        let legal = admitted
+            .iter()
+            .filter(|candidate| !candidate.too_close)
+            .count();
         if legal == 0 {
             log::warn!(
                 "placement: no site keeps {} cells from another building for {}; \
@@ -409,9 +416,8 @@ impl<'a, 'b> Placement<'a, 'b> {
         // sweep filled every cell touching the yard before it used the ring
         // outside it.
         let yard = anchors.first().copied();
-        let distance = |candidate: &Candidate| {
-            yard.map_or(0, |yard| cell_distance(candidate.cell, yard))
-        };
+        let distance =
+            |candidate: &Candidate| yard.map_or(0, |yard| cell_distance(candidate.cell, yard));
         admitted.sort_by(|a, b| {
             a.covers_reserved
                 .cmp(&b.covers_reserved)
@@ -589,7 +595,13 @@ impl<'a, 'b> Placement<'a, 'b> {
             }
             if ty.build_const_eligible {
                 anchors.push(entity.cell);
-            } else {
+            } else if !(ty.capturable || ty.can_be_occupied) {
+                // Ground the yard grows on is ground the house built. A
+                // captured derrick or the map's civilian house is
+                // `Capturable=`/`CanBeOccupied=`, and treating one as an
+                // anchor put new structures out at the oil well while the
+                // yard stood empty. A captured enemy *building* is not
+                // either, and stays an anchor: that one really is a base.
                 rest.push(entity.cell);
             }
         }
@@ -608,11 +620,8 @@ mod tests {
 
     /// Whether a foundation at `cell` covers any of `cells`.
     fn covers(cells: &BTreeSet<(u16, u16)>, cell: (u16, u16), foundation: (u16, u16)) -> bool {
-        (0..foundation.1).any(|dy| {
-            (0..foundation.0).any(|dx| {
-                cells.contains(&(cell.0 + dx, cell.1 + dy))
-            })
-        })
+        (0..foundation.1)
+            .any(|dy| (0..foundation.0).any(|dx| cells.contains(&(cell.0 + dx, cell.1 + dy))))
     }
 
     /// A war factory is five by three, so `placement_admits` — which asks about
@@ -631,8 +640,7 @@ mod tests {
         let art = crate::rules::ini_parser::IniFile::from_str(
             "[GACNST]\nFoundation=4x4\n[GAWEAP]\nFoundation=5x3\n",
         );
-        let rules =
-            RuleSet::from_ini_with_fixed_art_for_test(&ini, &art).expect("base rules");
+        let rules = RuleSet::from_ini_with_fixed_art_for_test(&ini, &art).expect("base rules");
         let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xA17);
         sim.intern_rule_type_ids(&rules);
         sim.resolve_type_handles(&rules);
@@ -669,9 +677,7 @@ mod tests {
         );
 
         let keeping = Placement::new(&obs, &rules).reserving(ring.clone());
-        let kept = keeping
-            .sweep(factory, 0)
-            .expect("a cell for the factory");
+        let kept = keeping.sweep(factory, 0).expect("a cell for the factory");
         assert!(
             !covers(&ring, kept, (fw, fh)),
             "the ring is kept for the wall: {kept:?}"

@@ -555,6 +555,43 @@ pub(super) fn base_defenses<'r>(rules: &'r RuleSet, obs: &Observation<'_>) -> &'
         .map_or(&[], |side| rules.base_defense_types(side))
 }
 
+/// The defensive building the house should put up now.
+///
+/// The `[AI]` list is the native answer and it is empty for some sides (a
+/// player's own side in a mod, or a side the list does not name), which left
+/// the house with no towers at all. When it is empty, any buildable building
+/// whose `Primary=` is a weapon is the answer: that key is the rules' own
+/// statement that the structure fires.
+pub(super) fn defense_building<'r>(
+    rules: &'r RuleSet,
+    obs: &Observation<'_>,
+) -> Option<(&'r ObjectType, InternedId)> {
+    if let Some(found) = first_buildable(rules, obs, base_defenses(rules, obs)) {
+        return Some(found);
+    }
+    class_types(rules, obs, ObjectCategory::Building)
+        .filter(|(ty, _)| ty.weapon_at(0).is_some())
+        .min_by_key(|(ty, _)| (obs.cost_of(rules, ty), ty.id.clone()))
+}
+
+/// How many defensive structures the house has: the `[AI]` list's types, or
+/// a building that shoots when the list names none.
+pub(super) fn defenses(rules: &RuleSet, obs: &Observation<'_>, census: &Census) -> usize {
+    let named = base_defenses(rules, obs);
+    if named.is_empty() {
+        return census
+            .units
+            .iter()
+            .filter(|unit| {
+                obs.object_type(rules, unit.type_id).is_some_and(|ty| {
+                    ty.category == ObjectCategory::Building && ty.weapon_at(0).is_some()
+                })
+            })
+            .count();
+    }
+    count_in(obs, rules, census, named)
+}
+
 /// The `UnitRepair=` shed the house can build now (`[GADEPT]`
 /// `UnitRepair=yes`, `ini/rulesmd.ini`): the one building a damaged unit can
 /// enter, pay at, and leave repaired.
