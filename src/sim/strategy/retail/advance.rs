@@ -132,11 +132,31 @@ pub(super) fn advance(
         .filter(|(ty, _)| ty.resource_destination)
         .map(|(_, enemy)| *enemy)
         .collect();
-    let targets: Vec<EnemyEntity> = if economy.is_empty() {
+    let mut targets: Vec<EnemyEntity> = if economy.is_empty() {
         structures.iter().map(|(_, enemy)| *enemy).collect()
     } else {
         economy
     };
+    // Clean-up targets whatever is left. A house down to a handful of objects
+    // is not a base: the army that only ever aims at structures stands in
+    // front of the last two units until the match times out — measured, a
+    // timeout at 36000 with two enemies alive. Units join the list only here,
+    // so an ordinary push still aims at what a base is.
+    let mopping_up = brain.census.enemies.len() <= MOP_UP_OBJECTS;
+    if mopping_up {
+        targets.extend(
+            brain
+                .census
+                .enemies
+                .iter()
+                .filter(|enemy| {
+                    !structures
+                        .iter()
+                        .any(|(_, structure)| structure.entity_id == enemy.entity_id)
+                })
+                .copied(),
+        );
+    }
     if targets.is_empty() {
         return false;
     }
@@ -181,7 +201,6 @@ pub(super) fn advance(
     // 21 objects and the push never left, on every variant that changed what
     // gets ordered. This is the reason those variants looked worse than they
     // were.
-    let mopping_up = brain.census.enemies.len() <= MOP_UP_OBJECTS;
     if !mopping_up && !super::squads::outguns(&brain.census, rules, obs, target.cell) {
         return false;
     }
@@ -204,12 +223,13 @@ pub(super) fn advance(
         if issued >= ADVANCE_ORDERS_PER_FRAME {
             break;
         }
-        // A unit already fighting or walking is doing what this would ask.
-        if matches!(
-            unit.mission,
-            mission if mission == MissionId::from_known(MissionType::Attack)
-                || mission == MissionId::from_known(MissionType::Move)
-        ) {
+        // A unit already fighting or walking is doing what this would ask. A
+        // mission with nothing behind it is not: a unit left on Attack after
+        // its target died was skipped here, in `micro` and in the guard step,
+        // and stood in the yard for the rest of the match.
+        let attacking = unit.mission == MissionId::from_known(MissionType::Attack)
+            && obs.attack_target(unit.entity_id).is_some();
+        if attacking || unit.mission == MissionId::from_known(MissionType::Move) {
             continue;
         }
         // A dug-in unit cannot walk, and the push is a walk: the micro layer
@@ -260,7 +280,7 @@ pub(super) fn advance(
                 None,
                 None,
             );
-            if super::orders::issue(out, rules, obs, unit.entity_id, Goal::Guard) {
+            if super::orders::issue(brain, out, rules, obs, unit.entity_id, Goal::Guard) {
                 issued += 1;
             }
             continue;
@@ -298,7 +318,7 @@ pub(super) fn advance(
         // against the frame's eight, and it must not be remembered as if it had
         // been given. Eight refusals a frame is eight orders the house never
         // gave, and a record of one holds the unit for its whole term.
-        if !super::orders::issue(out, rules, obs, unit.entity_id, goal) {
+        if !super::orders::issue(brain, out, rules, obs, unit.entity_id, goal) {
             brain.tracked.void(unit.entity_id, kind);
             continue;
         }

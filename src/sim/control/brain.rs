@@ -14,6 +14,8 @@
 //! second brain — a script, a replay, a network — drop in without a second
 //! implementation of "may I issue this".
 
+use std::collections::BTreeMap;
+
 use crate::rules::ruleset::RuleSet;
 use crate::sim::behavior::goal::Goal;
 use crate::sim::behavior::managed::{MicroKind, MicroParams};
@@ -54,19 +56,86 @@ pub struct Outbox {
     /// Objects handed to a managed routine this frame. Consumed before the
     /// orders below, so an object a routine just took owns no second issuer.
     pub attachments: Vec<Attachment>,
+    /// The strongest rank each object was asked for this frame, and where its
+    /// order sits in `orders` — the arbiter's own record.
+    ///
+    /// Passes run in a fixed order, and before this the *last* pass to speak
+    /// owned the object: a dodge followed by a march was a march, and fixing
+    /// one pass's precedence left the next one's hole open. A rank is a fact
+    /// about the order, not about who asked first, so the strongest ask wins
+    /// wherever it appears in the frame.
+    wants: BTreeMap<u64, (u8, usize)>,
 }
+
+/// The rank of an order nobody ranked: the march's own. A source that does
+/// not name a kind is asking for the ordinary fleet order, never for a dodge.
+pub const ORDINARY_RANK: u8 = 6;
 
 impl Outbox {
     /// Ask for one object order.
     pub fn order(&mut self, actor: u64, goal: Goal) {
+        self.want(actor, ORDINARY_RANK, goal);
+    }
+
+    /// Ask for one object order, saying how strong the ask is: the smaller the
+    /// rank, the more the order owns the object this frame.
+    ///
+    /// A weaker ask for an object already owned by a stronger one is dropped,
+    /// and a stronger ask replaces the one already in `orders` — resolved
+    /// before the frame's orders leave, so the engine still sees one order per
+    /// object and the winner is the same whichever pass asked first.
+    pub fn want(&mut self, actor: u64, rank: u8, goal: Goal) -> bool {
+        if self
+            .wants
+            .get(&actor)
+            .is_some_and(|(held, _)| *held <= rank)
+        {
+            // The object already has an ask at least this strong: this one is
+            // not sent, and `false` is what tells the caller not to remember
+            // an order the object never received.
+            return false;
+        }
         self.orders.push(Order { actor, goal });
+        let index = self.orders.len() - 1;
+        self.wants.insert(actor, (rank, index));
+        true
+    }
+
+    /// Whether this frame already holds an order for `actor`, at any rank.
+    pub fn ordered_this_frame(&self, actor: u64) -> bool {
+        self.wants.contains_key(&actor)
+    }
+
+    /// Drop the orders a stronger ask replaced, leaving one per object.
+    ///
+    /// Called once, after every pass has had its say and before the frame's
+    /// orders are applied. The survivors keep the order they were asked in.
+    pub fn resolve(&mut self) {
+        if self.wants.is_empty() {
+            return;
+        }
+        let keep: std::collections::BTreeSet<usize> =
+            self.wants.values().map(|(_, index)| *index).collect();
+        let mut index = 0usize;
+        self.orders.retain(|_| {
+            let held = keep.contains(&index);
+            index += 1;
+            held
+        });
+        self.wants.clear();
     }
 
     /// Ask L2 to hand `actor` to a managed routine. The routine becomes that
     /// object's only issuer: the brain's own orders for it are dropped before
     /// admission from this frame on, and its later hand-back is logged by the
     /// control layer.
-    pub fn attach(&mut self, actor: u64, kind: MicroKind, params: MicroParams, post: Option<(u16, u16)>) {
+    pub fn attach(
+        &mut self,
+        actor: u64,
+        kind: MicroKind,
+        params: MicroParams,
+        post: Option<(u16, u16)>,
+    ) {
         self.attachments.push(Attachment {
             actor,
             kind,
@@ -91,7 +160,51 @@ impl Outbox {
             && self.commands.is_empty()
             && self.attachments.is_empty()
     }
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frame's arbiter: the strongest ask owns the object, whoever made it
+    /// and in whatever order. Two passes that disagree are a fact about their
+    /// ranks, not about the order the brain happens to run them in.
+    #[test]
+    fn the_strongest_ask_owns_the_object() {
+        let mut out = Outbox::default();
+        assert!(out.want(7, 6, Goal::Move { cell: (10, 10) }));
+        assert!(
+            !out.want(7, 6, Goal::Move { cell: (20, 20) }),
+            "an equal ask does not replace the one already sent"
+        );
+        assert!(
+            !out.want(7, 7, Goal::Guard),
+            "and a weaker one does not either"
+        );
+        assert!(
+            out.want(7, 3, Goal::Attack { target: 9 }),
+            "the fight replaces the march"
+        );
+        out.resolve();
+        assert_eq!(out.orders.len(), 1, "one order per object");
+        assert!(
+            matches!(out.orders[0].goal, Goal::Attack { target: 9 }),
+            "and it is the strongest ask: {:?}",
+            out.orders[0].goal
+        );
+    }
+
+    /// A weaker ask that arrives after a stronger one is refused, so the pass
+    /// that made it does not record an order the object never received.
+    #[test]
+    fn a_refused_ask_is_not_sent() {
+        let mut out = Outbox::default();
+        assert!(out.want(7, 0, Goal::Move { cell: (11, 10) }));
+        assert!(!out.want(7, 6, Goal::Move { cell: (30, 30) }));
+        out.resolve();
+        assert_eq!(out.orders.len(), 1);
+        assert!(matches!(out.orders[0].goal, Goal::Move { cell: (11, 10) }));
+    }
 }
 
 /// A decision source for one house.

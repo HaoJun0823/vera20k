@@ -256,7 +256,7 @@ pub(super) fn run(
         brain
             .tracked
             .record(tick, unit.entity_id, TrackedKind::Dodge, None, Some(target));
-        super::orders::issue(out, rules, obs, unit.entity_id, Goal::Move { cell: target });
+        super::orders::issue(brain, out, rules, obs, unit.entity_id, Goal::Move { cell: target });
     }
 }
 

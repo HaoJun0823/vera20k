@@ -370,6 +370,17 @@ impl Tracker {
         self.held.insert(unit, until);
     }
 
+    /// The rank of the intent that owns `unit` right now, when one does.
+    ///
+    /// The same ladder [`rank`] gives `admits`, asked by the frame's arbiter:
+    /// an order's rank is the rank of the intent its caller recorded.
+    pub(super) fn rank_of(&self, now: u64, unit: u64) -> Option<u8> {
+        self.intents
+            .get(&unit)
+            .filter(|tracked| now < tracked.until)
+            .map(|tracked| rank(tracked.kind))
+    }
+
     /// Whether a routine owns `unit` right now.
     pub(super) fn held(&self, now: u64, unit: u64) -> bool {
         self.held.get(&unit).is_some_and(|until| now < *until)

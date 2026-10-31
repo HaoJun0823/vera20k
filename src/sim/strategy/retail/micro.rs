@@ -105,6 +105,19 @@ pub(super) fn run(
         })
         .map(|enemy| enemy.entity_id)
         .collect();
+    // Who each hostile is shooting, read once for the whole army: one query per
+    // enemy rather than one per enemy and unit. A unit that is being shot at
+    // answers the gun that is shooting it before the wall it was shelling —
+    // the "attacked the base while a tank killed it" report.
+    let aimed_at: std::collections::BTreeMap<u64, u64> = brain
+        .census
+        .enemies
+        .iter()
+        .filter_map(|enemy| {
+            obs.attack_target(enemy.entity_id)
+                .map(|t| (enemy.entity_id, t))
+        })
+        .collect();
     let mut issued = 0;
     for item in work {
         if issued >= MICRO_ORDERS_PER_FRAME {
@@ -125,6 +138,7 @@ pub(super) fn run(
                     enemy.entity_id,
                     enemy.cell,
                     structures.contains(&enemy.entity_id),
+                    aimed_at.get(&enemy.entity_id) == Some(&item.entity_id),
                 )
             }),
             item.cell,
@@ -165,6 +179,7 @@ pub(super) fn run(
                     Some(enemy.1),
                 );
                 if issue(
+                    brain,
                     out,
                     rules,
                     obs,
@@ -208,6 +223,7 @@ pub(super) fn run(
                 Some(enemy.1),
             );
             if !issue(
+                brain,
                 out,
                 rules,
                 obs,
@@ -252,6 +268,7 @@ pub(super) fn run(
                     None,
                 );
                 if issue(
+                    brain,
                     out,
                     rules,
                     obs,
@@ -307,6 +324,7 @@ pub(super) fn run(
                     Some(cell),
                 );
                 issue(
+                    brain,
                     out,
                     rules,
                     obs,
@@ -346,6 +364,7 @@ pub(super) fn run(
                     Some(cell),
                 );
                 issue(
+                    brain,
                     out,
                     rules,
                     obs,
@@ -396,6 +415,7 @@ pub(super) fn run(
                     .tracked
                     .record(tick, item.entity_id, TrackedKind::Move, None, Some(cell));
                 issue(
+                    brain,
                     out,
                     rules,
                     obs,
@@ -447,6 +467,7 @@ pub(super) fn firing(obs: &Observation<'_>, mission: MissionId, entity_id: u64) 
 /// The order itself goes through [`super::orders::issue`], the one door that
 /// asks the simulation whether the unit can act on the target at all.
 fn issue(
+    brain: &RetailBrain,
     out: &mut Outbox,
     rules: &RuleSet,
     obs: &Observation<'_>,
@@ -468,7 +489,7 @@ fn issue(
         if deployed { " deployed" } else { "" },
         reach
     );
-    super::orders::issue(out, rules, obs, entity_id, goal)
+    super::orders::issue(brain, out, rules, obs, entity_id, goal)
 }
 
 /// Every team member that may be told anything, with what the cycle needs to
@@ -496,7 +517,15 @@ fn collect(
             // A unit already mid-fight is told nothing: its mission owns it,
             // and re-ordering it is what makes the fight stutter. The same is
             // true of a unit on its way into a building or a depot.
-            if unit.mission == MissionId::from_known(MissionType::Attack) || unit.in_service() {
+            //
+            // Mid-fight means *holding a target*. A unit whose mission is
+            // still Attack with nothing to shoot is a leftover the mission
+            // engine kept, and every pass that reads the mission as "busy"
+            // leaves it standing there for the rest of the match — the army
+            // the play test reports as "a lot of units doing nothing".
+            let fighting = unit.mission == MissionId::from_known(MissionType::Attack)
+                && obs.attack_target(unit.entity_id).is_some();
+            if fighting || unit.in_service() {
                 continue;
             }
             // A unit a routine has taken is that routine's: the retreat owns
@@ -540,7 +569,7 @@ fn collect(
 /// actually take — so the reach test and the weapon test are the same search,
 /// and a dog with only tanks in reach is told nothing at all.
 fn in_reach(
-    enemies: impl Iterator<Item = (u64, (u16, u16), bool)>,
+    enemies: impl Iterator<Item = (u64, (u16, u16), bool, bool)>,
     from: (u16, u16),
     reach: i32,
     answers: impl Fn(u64) -> bool,
@@ -550,14 +579,24 @@ fn in_reach(
     }
     let reach = (reach + ENGAGE_MARGIN_CELLS).max(1);
     enemies
-        .filter(|(_, cell, _)| squared_distance(*cell, from) <= reach * reach)
-        .filter(|(id, _, _)| answers(*id))
-        // A mobile hostile outranks a structure at the same distance: the one
-        // that shoots back is the one that kills the unit while it shells a
-        // wall. Within a kind the nearest wins, ties by id, so the answer does
-        // not depend on the ledger's order.
-        .min_by_key(|(id, cell, structure)| (*structure, squared_distance(*cell, from), *id))
-        .map(|(id, cell, _)| (id, cell))
+        .filter(|(_, cell, _, _)| squared_distance(*cell, from) <= reach * reach)
+        .filter(|(id, _, _, _)| answers(*id))
+        // The gun pointed at this unit is the first answer, whatever else is
+        // in reach: a unit that answers the crowd in front of it while a tank
+        // behind it fires is a unit that dies to the one it ignored. Then a
+        // mobile hostile outranks a structure — the one that shoots back is
+        // the one that kills the unit while it shells a wall. Within a kind
+        // the nearest wins, ties by id, so the answer does not depend on the
+        // ledger's order.
+        .min_by_key(|(id, cell, structure, shooting_me)| {
+            (
+                !*shooting_me,
+                *structure,
+                squared_distance(*cell, from),
+                *id,
+            )
+        })
+        .map(|(id, cell, _, _)| (id, cell))
 }
 
 /// How near a neutral building has to stand to a unit for it to be what the
@@ -741,13 +780,13 @@ mod tests {
     /// not nothing.
     #[test]
     fn what_is_in_reach_is_what_the_unit_can_shoot() {
-        let enemies = [(42u64, (22u16, 20u16), false)];
+        let enemies = [(42u64, (22u16, 20u16), false, false)];
         assert_eq!(
             in_reach(enemies.into_iter(), (20, 20), 5, |_| true),
             Some((42, (22, 20))),
             "two cells away, and the weapon reaches five"
         );
-        let far = [(43u64, (40u16, 20u16), false)];
+        let far = [(43u64, (40u16, 20u16), false, false)];
         assert_eq!(
             in_reach(far.into_iter(), (20, 20), 1, |_| true),
             None,
@@ -760,12 +799,32 @@ mod tests {
         );
     }
 
+    /// The gun pointed at this unit is answered first, even when something
+    /// else is nearer: a unit that shells the crowd in front of it while a
+    /// tank behind it fires is a unit that dies to the one it ignored.
+    #[test]
+    fn the_gun_pointed_at_this_unit_is_the_first_answer() {
+        // 7 is three cells away and shooting; 8 is next to the unit and is not.
+        let enemies = [
+            (7u64, (23u16, 20u16), false, true),
+            (8u64, (21u16, 20u16), false, false),
+        ];
+        assert_eq!(
+            in_reach(enemies.into_iter(), (20, 20), 5, |_| true),
+            Some((7, (23, 20))),
+            "the one shooting this unit, not the nearest one"
+        );
+    }
+
     /// A mobile hostile outranks a wall at the same distance: the one that
     /// shoots back is the one that kills a unit busy shelling a building.
     #[test]
     fn a_mobile_hostile_outranks_a_structure_in_reach() {
         // 8 is the building at two cells, 9 the rifleman at three.
-        let enemies = [(8u64, (22u16, 20u16), true), (9u64, (23u16, 20u16), false)];
+        let enemies = [
+            (8u64, (22u16, 20u16), true, false),
+            (9u64, (23u16, 20u16), false, false),
+        ];
         assert_eq!(
             in_reach(enemies.into_iter(), (20, 20), 4, |_| true),
             Some((9, (23, 20))),
@@ -785,7 +844,10 @@ mod tests {
     #[test]
     fn the_search_skips_what_the_weapon_cannot_take() {
         // 8 is the tank at one cell, 9 the rifleman at two.
-        let enemies = [(8u64, (21u16, 20u16), false), (9u64, (22u16, 20u16), false)];
+        let enemies = [
+            (8u64, (21u16, 20u16), false, false),
+            (9u64, (22u16, 20u16), false, false),
+        ];
         let can_hurt = |target: u64| target == 9;
         assert_eq!(
             in_reach(enemies.into_iter(), (20, 20), 2, can_hurt),

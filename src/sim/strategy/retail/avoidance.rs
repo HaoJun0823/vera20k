@@ -627,7 +627,7 @@ pub(super) fn run(
                     heading,
                     cell
                 );
-                super::orders::issue(out, rules, obs, unit.entity_id, Goal::Move { cell });
+                super::orders::issue(brain, out, rules, obs, unit.entity_id, Goal::Move { cell });
                 issued += 1;
                 continue;
             }
@@ -699,7 +699,7 @@ pub(super) fn run(
                 .tracked
                 .record(tick, unit.entity_id, TrackedKind::Breach, None, claim);
             log::debug!("auto play: breach {} through {goal:?}", unit.entity_id);
-            if !super::orders::issue(out, rules, obs, unit.entity_id, goal) {
+            if !super::orders::issue(brain, out, rules, obs, unit.entity_id, goal) {
                 brain.tracked.void(unit.entity_id, TrackedKind::Breach);
                 continue;
             }
@@ -794,7 +794,7 @@ pub(super) fn run(
             ours,
             theirs
         );
-        super::orders::issue(out, rules, obs, unit.entity_id, Goal::Move { cell });
+        super::orders::issue(brain, out, rules, obs, unit.entity_id, Goal::Move { cell });
         issued += 1;
     }
     if total > 0 {
@@ -917,7 +917,7 @@ fn answer_breaches(
             .tracked
             .record(tick, helper, TrackedKind::Avoid, None, Some(cell));
         log::debug!("auto play: {helper} opens {goal:?} at {cell:?} for the house's engineers");
-        if super::orders::issue(out, rules, obs, helper, goal) {
+        if super::orders::issue(brain, out, rules, obs, helper, goal) {
             // The engineer's own path is clear once the wall is gone; nothing
             // else is ordered here. The request is kept until the issue is
             // accepted, so a helper whose own order preempted the shot does

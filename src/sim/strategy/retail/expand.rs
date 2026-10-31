@@ -128,7 +128,7 @@ pub(super) fn deploy_yard_maker(
         return;
     }
     if obs.deploy_site_admits(rules, entity_id, yard) {
-        super::orders::issue(out, rules, obs, entity_id, Goal::Deploy);
+        super::orders::issue(brain, out, rules, obs, entity_id, Goal::Deploy);
         return;
     }
     let Some(yard_id) = obs.type_id(&yard.id) else {
@@ -141,7 +141,7 @@ pub(super) fn deploy_yard_maker(
     let attempt = brain.site_attempts.get(&yard_id).copied().unwrap_or(0);
     match Placement::new(obs, rules).cell_for(yard_id, attempt) {
         Some(target) if target != cell => {
-            super::orders::issue(out, rules, obs, entity_id, Goal::Move { cell: target });
+            super::orders::issue(brain, out, rules, obs, entity_id, Goal::Move { cell: target });
         }
         _ => {
             let next = (attempt + 1) % PLACEMENT_ATTEMPTS;
@@ -202,11 +202,11 @@ fn deploy_second_yard(
     if cell_distance(cell, home) >= EXPAND_MIN_CELLS
         && obs.deploy_site_admits(rules, entity_id, yard)
     {
-        super::orders::issue(out, rules, obs, entity_id, Goal::Deploy);
+        super::orders::issue(brain, out, rules, obs, entity_id, Goal::Deploy);
         return;
     }
     if let Some(target) = expansion_cell(brain, rules, obs, home, yard) {
-        super::orders::issue(out, rules, obs, entity_id, Goal::Move { cell: target });
+        super::orders::issue(brain, out, rules, obs, entity_id, Goal::Move { cell: target });
     }
 }
 

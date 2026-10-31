@@ -50,11 +50,11 @@ use crate::rules::locomotor_type::MovementZone;
 use crate::rules::object_type::{ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
 use crate::rules::superweapon_type::SuperWeaponKind;
-use crate::sim::control::{Goal, MicroKind, MicroParams};
+use crate::sim::command::Command;
 use crate::sim::control::brain::Outbox;
 use crate::sim::control::intent::Intent;
-use crate::sim::command::Command;
 use crate::sim::control::observation::{EnemyEntity, Observation};
+use crate::sim::control::{Goal, MicroKind, MicroParams};
 use crate::sim::mission::{MissionId, MissionType};
 use crate::sim::strategy::retail::RetailBrain;
 
@@ -69,7 +69,11 @@ const FORCE_ORDERS_PER_FRAME: usize = 8;
 
 /// The intents that mean a unit is already on its way somewhere: the advance
 /// step owns those, and a guard here would pull it back out of the push.
-const PUSHING: &[TrackedKind] = &[TrackedKind::Attack, TrackedKind::AttackMove, TrackedKind::Move];
+const PUSHING: &[TrackedKind] = &[
+    TrackedKind::Attack,
+    TrackedKind::AttackMove,
+    TrackedKind::Move,
+];
 
 /// How near one of the house's own buildings a bridge or a garrison has to be
 /// for the policy to spend a unit on it, in cells. A garrison is only worth
@@ -229,6 +233,7 @@ pub(super) fn captures(
             Some(target.cell),
         );
         issue(
+            brain,
             out,
             rules,
             obs,
@@ -294,10 +299,21 @@ pub(super) fn bridges(
         ) {
             continue;
         }
-        brain
-            .tracked
-            .record(tick, unit.entity_id, TrackedKind::Capture, Some(target), None);
-        issue(out, rules, obs, unit.entity_id, Goal::Capture { target });
+        brain.tracked.record(
+            tick,
+            unit.entity_id,
+            TrackedKind::Capture,
+            Some(target),
+            None,
+        );
+        issue(
+            brain,
+            out,
+            rules,
+            obs,
+            unit.entity_id,
+            Goal::Capture { target },
+        );
         issued += 1;
     }
 }
@@ -387,6 +403,7 @@ pub(super) fn garrison(
             Some(billet.cell),
         );
         if issue(
+            brain,
             out,
             rules,
             obs,
@@ -646,8 +663,7 @@ fn built_capture_value(rules: &RuleSet, ty: &ObjectType) -> u8 {
         || ty.super_weapon2.is_some()
     {
         5
-    } else if rules.build_weapons_types.iter().any(|name| *name == ty.id)
-        || ty.resource_destination
+    } else if rules.build_weapons_types.iter().any(|name| *name == ty.id) || ty.resource_destination
     {
         4
     } else if rules.build_barracks_types.iter().any(|name| *name == ty.id) || ty.radar {
@@ -672,7 +688,7 @@ fn nearest_site(sites: &[(u64, (u16, u16))], from: (u16, u16)) -> Option<u64> {
 /// steps run in priority order — a bridge before a capture, a capture before a
 /// guard — and a unit is one unit: the first answer wins.
 pub(super) fn ordered_this_frame(out: &Outbox, actor: u64) -> bool {
-    out.orders.iter().any(|order| order.actor == actor)
+    out.ordered_this_frame(actor)
 }
 
 /// Whether `goal` names a target this unit can actually act on.
@@ -726,20 +742,22 @@ pub(super) fn admits(rules: &RuleSet, obs: &Observation<'_>, unit: u64, goal: &G
 /// on: nothing is ordered, nothing is recorded, and the caller is free to pick
 /// another target or leave the unit alone.
 pub(super) fn issue(
+    brain: &RetailBrain,
     out: &mut Outbox,
     rules: &RuleSet,
     obs: &Observation<'_>,
     unit: u64,
     goal: Goal,
 ) -> bool {
-    // One order per unit per frame, enforced here rather than at each call
-    // site: the outbox is applied in order and the last order wins at the
-    // receiver, so the second pass to speak silently replaces the first. That
-    // is how a unit sent to clear a neutral blocker ended up walking to a new
-    // spot instead — the re-aim outlived the order it replaced.
-    if ordered_this_frame(out, unit) {
-        return false;
-    }
+    // One order per unit per frame, and it is the strongest ask that stands:
+    // the outbox keeps the best rank each object was asked for, so a pass
+    // cannot take an object from a stronger one merely by running later. The
+    // rank is the intent the caller recorded for this unit — the same ladder
+    // `Tracker::admits` uses across frames, so both axes answer alike.
+    let rank = brain
+        .tracked
+        .rank_of(obs.tick(), unit)
+        .unwrap_or(crate::sim::control::brain::ORDINARY_RANK);
     // The map is the other thing a goal can be wrong about, and neither the
     // funnel nor `Funnel::prepare` looks at it: `Command::Move` to a cell past
     // the edge is accepted, the nav target is never reached, and the unit
@@ -770,7 +788,10 @@ pub(super) fn issue(
     if let Goal::Attack { target } = goal
         && already_attacking(obs, unit, target)
     {
-        log::debug!("auto play: {} for {unit} is already its mission; not re-issued", format!("{goal:?}"));
+        log::debug!(
+            "auto play: {} for {unit} is already its mission; not re-issued",
+            format!("{goal:?}")
+        );
         return false;
     }
     if !admits(rules, obs, unit, &goal) {
@@ -780,8 +801,7 @@ pub(super) fn issue(
         );
         return false;
     }
-    out.order(unit, goal);
-    true
+    out.want(unit, rank, goal)
 }
 
 /// Whether the walker can get to `cell` at all.
@@ -850,7 +870,12 @@ pub(super) fn forces(
     let tick = obs.tick();
     // Forget the units the house no longer has, so the memory stays bounded by
     // the army and a recycled id cannot inherit an old order.
-    let ids: BTreeSet<u64> = brain.census.units.iter().map(|unit| unit.entity_id).collect();
+    let ids: BTreeSet<u64> = brain
+        .census
+        .units
+        .iter()
+        .map(|unit| unit.entity_id)
+        .collect();
     brain.tracked.retain(&ids);
     if !brain.census.units.iter().any(|unit| unit.traits.combat) {
         return;
@@ -897,7 +922,7 @@ pub(super) fn forces(
         brain
             .tracked
             .record(tick, unit.entity_id, TrackedKind::Guard, None, None);
-        issue(out, rules, obs, unit.entity_id, Goal::Guard);
+        issue(brain, out, rules, obs, unit.entity_id, Goal::Guard);
         issued += 1;
     }
 }
@@ -944,7 +969,12 @@ pub(super) fn deploy(brain: &mut RetailBrain, obs: &Observation<'_>, out: &mut O
     let tick = obs.tick();
     // Forget the soldiers the house no longer has, so a recycled id cannot
     // inherit another soldier's pose.
-    let live: BTreeSet<u64> = brain.census.units.iter().map(|unit| unit.entity_id).collect();
+    let live: BTreeSet<u64> = brain
+        .census
+        .units
+        .iter()
+        .map(|unit| unit.entity_id)
+        .collect();
     brain.tracked.retain(&live);
     // Collected before anything is written: the toggle has to be recorded
     // against the soldier, and the ledger is borrowed while it is read.
@@ -953,7 +983,12 @@ pub(super) fn deploy(brain: &mut RetailBrain, obs: &Observation<'_>, out: &mut O
         .units
         .iter()
         .filter(|unit| unit.traits.deployer && !unit.hand && unit.orderable)
-        .map(|unit| (unit.entity_id, nearest_distance(&brain.census.enemies, unit.cell)))
+        .map(|unit| {
+            (
+                unit.entity_id,
+                nearest_distance(&brain.census.enemies, unit.cell),
+            )
+        })
         .collect();
     let mut issued = 0;
     for (entity_id, distance) in wanted {
@@ -1078,7 +1113,7 @@ pub(super) fn harvesters(
         {
             continue;
         }
-        if issue(out, rules, obs, id, Goal::Harvest { cell }) {
+        if issue(brain, out, rules, obs, id, Goal::Harvest { cell }) {
             brain
                 .tracked
                 .record(tick, id, TrackedKind::Harvest, None, None);
@@ -1128,9 +1163,7 @@ pub(super) fn crates(
         let Some(cell) = cells
             .iter()
             .copied()
-            .filter(|cell| {
-                squared_distance(from, *cell) <= CRATE_SEEK_CELLS * CRATE_SEEK_CELLS
-            })
+            .filter(|cell| squared_distance(from, *cell) <= CRATE_SEEK_CELLS * CRATE_SEEK_CELLS)
             .filter(|cell| obs.can_reach(MovementZone::Infantry, from, *cell))
             .min_by_key(|cell| (squared_distance(from, *cell), *cell))
         else {
@@ -1142,7 +1175,7 @@ pub(super) fn crates(
         {
             continue;
         }
-        if issue(out, rules, obs, id, Goal::Move { cell }) {
+        if issue(brain, out, rules, obs, id, Goal::Move { cell }) {
             brain
                 .tracked
                 .record(tick, id, TrackedKind::Move, None, Some(cell));
@@ -1188,11 +1221,14 @@ pub(super) fn repairs(
         if ty.category != ObjectCategory::Building {
             continue;
         }
-        let Some(full) = obs.max_health(rules, entity.type_id).filter(|full| *full > 0) else {
+        let Some(full) = obs
+            .max_health(rules, entity.type_id)
+            .filter(|full| *full > 0)
+        else {
             continue;
         };
-        let permille = i32::try_from(i64::from(entity.health.max(0)) * 1_000 / i64::from(full))
-            .unwrap_or(0);
+        let permille =
+            i32::try_from(i64::from(entity.health.max(0)) * 1_000 / i64::from(full)).unwrap_or(0);
         if permille >= 1_000 {
             whole.push(entity.entity_id);
         } else if permille < REPAIR_HEALTH_PERMILLE && brain.repaired.contains(&entity.entity_id) {
@@ -1326,21 +1362,21 @@ pub(super) fn managed(
             }
             // The same click again while the previous one is still walking is
             // what restarts the walk: the intent table is the throttle.
-            if brain.tracked.admits(
-                tick,
-                entity_id,
-                TrackedKind::Enter,
-                Some(depot),
-                Some(cell),
-            ) {
-                brain.tracked.record(
-                    tick,
+            if brain
+                .tracked
+                .admits(tick, entity_id, TrackedKind::Enter, Some(depot), Some(cell))
+            {
+                brain
+                    .tracked
+                    .record(tick, entity_id, TrackedKind::Enter, Some(depot), Some(cell));
+                issue(
+                    brain,
+                    out,
+                    rules,
+                    obs,
                     entity_id,
-                    TrackedKind::Enter,
-                    Some(depot),
-                    Some(cell),
+                    Goal::Enter { target: depot },
                 );
-                issue(out, rules, obs, entity_id, Goal::Enter { target: depot });
             }
             brain
                 .tracked
@@ -1420,11 +1456,7 @@ pub(super) fn supers(
         if !ready.contains(&type_id) {
             continue;
         }
-        if brain
-            .super_at
-            .get(&type_id)
-            .is_some_and(|at| tick < *at)
-        {
+        if brain.super_at.get(&type_id).is_some_and(|at| tick < *at) {
             continue;
         }
         let Some(super_weapon) = rules.super_weapon(name) else {
@@ -1618,6 +1650,7 @@ mod tests {
         let obs = Observation::new(&sim, owner);
         let mut out = Outbox::default();
         assert!(issue(
+            &RetailBrain::new(0xA17),
             &mut out,
             &rules,
             &obs,
@@ -1626,6 +1659,7 @@ mod tests {
         ));
         assert!(
             !issue(
+                &RetailBrain::new(0xA17),
                 &mut out,
                 &rules,
                 &obs,
@@ -1823,8 +1857,7 @@ mod tests {
             })
             .expect("the spy is given a target");
         assert_eq!(
-            target,
-            power,
+            target, power,
             "the power plant blacks the enemy out; the derrick and the refinery are nearer"
         );
         assert_ne!(target, derrick);
@@ -2015,6 +2048,7 @@ mod tests {
 
         assert!(
             !issue(
+                &RetailBrain::new(0xA17),
                 &mut out,
                 &rules,
                 &obs,
@@ -2028,6 +2062,7 @@ mod tests {
         assert!(out.orders.is_empty(), "nothing was ordered");
         assert!(
             issue(
+                &RetailBrain::new(0xA17),
                 &mut out,
                 &rules,
                 &obs,
@@ -2064,10 +2099,8 @@ mod tests {
         garrison(&mut brain, &rules, &obs, &mut out);
 
         assert!(
-            out.orders
-                .iter()
-                .any(|order| order.actor == gi
-                    && matches!(order.goal, Goal::Capture { target } if target == bunker)),
+            out.orders.iter().any(|order| order.actor == gi
+                && matches!(order.goal, Goal::Capture { target } if target == bunker)),
             "the rifleman takes the bunker: {:?}",
             out.orders
         );
@@ -2334,7 +2367,9 @@ mod tests {
         // in none of the three.
         let civilian = sim.interner.intern("Civilian");
         sim.houses
-            .register(crate::sim::house_state::HouseState::new(civilian, 0, None, false, 0, 10));
+            .register(crate::sim::house_state::HouseState::new(
+                civilian, 0, None, false, 0, 10,
+            ));
         let derrick = sim
             .spawn_object("CAOILD", "Civilian", 20, 10, 255, &rules)
             .expect("the map's own oil derrick");
@@ -2561,14 +2596,7 @@ mod tests {
             "a `Capturable=` enemy structure is the click"
         );
         assert!(
-            !admits(
-                &rules,
-                &obs,
-                engineer,
-                &Goal::Capture {
-                    target: our_plant
-                }
-            ),
+            !admits(&rules, &obs, engineer, &Goal::Capture { target: our_plant }),
             "our own building is a Repair click, never a capture"
         );
         assert!(
@@ -2747,11 +2775,25 @@ mod tests {
         let obs = Observation::new(&sim, owner);
         let mut out = Outbox::default();
         assert!(
-            !issue(&mut out, &rules, &obs, rifleman, Goal::Move { cell: (28, 4) }),
+            !issue(
+                &RetailBrain::new(0xA17),
+                &mut out,
+                &rules,
+                &obs,
+                rifleman,
+                Goal::Move { cell: (28, 4) }
+            ),
             "the far bank is not somewhere a rifleman can walk"
         );
         assert!(
-            issue(&mut out, &rules, &obs, rifleman, Goal::Move { cell: (10, 4) }),
+            issue(
+                &RetailBrain::new(0xA17),
+                &mut out,
+                &rules,
+                &obs,
+                rifleman,
+                Goal::Move { cell: (10, 4) }
+            ),
             "and the near bank is"
         );
     }

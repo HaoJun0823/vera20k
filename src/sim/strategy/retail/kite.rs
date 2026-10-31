@@ -325,6 +325,7 @@ pub(super) fn run(
                         Some(step),
                     );
                     super::orders::issue(
+                        brain,
                         out,
                         rules,
                         obs,
@@ -400,6 +401,7 @@ pub(super) fn run(
                 None,
             );
             super::orders::issue(
+                brain,
                 out,
                 rules,
                 obs,
@@ -429,7 +431,7 @@ pub(super) fn run(
         brain
             .tracked
             .record(tick, unit.entity_id, TrackedKind::Kite, None, Some(step));
-        super::orders::issue(out, rules, obs, unit.entity_id, Goal::Move { cell: step });
+        super::orders::issue(brain, out, rules, obs, unit.entity_id, Goal::Move { cell: step });
     }
 }
 

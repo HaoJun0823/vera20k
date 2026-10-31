@@ -42,7 +42,9 @@ use crate::sim::control::observation::Observation;
 use crate::sim::intern::InternedId;
 use crate::sim::production::{CanBuild, ProductionCategory};
 
+use super::Goal;
 use super::RetailBrain;
+use super::tracked::TrackedKind;
 
 /// Credits in hand before a segment is worth a production slot. A wall costs
 /// the price of a soldier and stalls nothing, but a house that builds walls on
@@ -128,7 +130,10 @@ pub(super) fn protected(ty: &ObjectType) -> bool {
 /// the lane the house's own units are born on. [`ring_at`] is the door to a
 /// ring at a stated offset, and the wall's is `WALL_OFFSET_CELLS`.
 pub(super) fn perimeter(cell: (u16, u16), foundation: (u16, u16)) -> Vec<(u16, u16)> {
-    let (width, height) = (i32::from(foundation.0.max(1)), i32::from(foundation.1.max(1)));
+    let (width, height) = (
+        i32::from(foundation.0.max(1)),
+        i32::from(foundation.1.max(1)),
+    );
     let (x0, y0) = (i32::from(cell.0), i32::from(cell.1));
     let (x1, y1) = (x0 + width - 1, y0 + height - 1);
     let mut cells: Vec<(u16, u16)> = Vec::new();
@@ -157,7 +162,10 @@ pub(super) fn ring_at(cell: (u16, u16), foundation: (u16, u16), offset: i32) -> 
     let back = u16::try_from(offset.max(1) - 1).unwrap_or(0);
     perimeter(
         (cell.0.saturating_sub(back), cell.1.saturating_sub(back)),
-        (foundation.0.saturating_add(2 * back), foundation.1.saturating_add(2 * back)),
+        (
+            foundation.0.saturating_add(2 * back),
+            foundation.1.saturating_add(2 * back),
+        ),
     )
 }
 
@@ -231,7 +239,7 @@ pub(super) fn next_segment(
     if structures < WALL_MIN_STRUCTURES {
         return None;
     }
-    let (centre, targets) = base_targets(rules, obs)?;
+    let (centre, ring) = planned_ring(rules, obs)?;
     let blocked = blocked_cells(rules, obs);
     let house = obs.house();
     // A cell that already holds a wall, its own or a hostile one, is not walled
@@ -251,25 +259,9 @@ pub(super) fn next_segment(
             && obs.wall_owner_at(x, y).is_none()
             && obs.is_ground_walkable(x, y)
     };
-    // The ring stands on the cell beside each protected building's foundation:
-    // the wall touches the base instead of leaving a corridor between the two.
-    // The gate (below) is what keeps the house's own units moving; build.rs
-    // reserves the same ring, so a building never lands on the wall's cell.
-    //
-    // Walled all the way round, one two-cell gate aside. The enemy-facing arc
-    // alone was half a pen, and the base's own outline was worse: the segments
-    // followed the alleys between buildings, so the loop cut through whatever
-    // stood beside the lane — half a power plant inside, half outside.
-    let mut ring: Vec<(u16, u16)> = Vec::new();
-    for (cell, foundation) in &targets {
-        for cell in ring_at(*cell, *foundation, WALL_OFFSET_CELLS) {
-            if !ring.contains(&cell) {
-                ring.push(cell);
-            }
-        }
-    }
-    ring.retain(|(x, y)| !blocked.contains(&(*x, *y)));
-    ring.sort_unstable();
+    // The ring is `planned_ring`'s — the same cells `clear_the_ring` moves a
+    // unit off, so the plan and the unblocking pass cannot disagree about the
+    // one cell that matters.
     // What the cap counts is the wall on the outline the plan fills. A standing
     // wall is an overlay rather than an object (`Observation::wall_owner_at`),
     // so it is counted where it stands.
@@ -469,6 +461,152 @@ fn chebyshev(a: (u16, u16), b: (u16, u16)) -> i32 {
 ///
 /// Returns `true` when this frame's structure decision was spent on a wall, so
 /// the plan does not start something else on top of it.
+
+/// The cells the wall plan wants to fill: one ring around every protected
+/// building's foundation, minus the cells a structure or terrain closes.
+///
+/// One owner for the outline: the planner picks segments from it and the
+/// unblocking pass clears the units off it, and two computations of "the ring"
+/// would disagree about the cell that matters.
+fn planned_ring(rules: &RuleSet, obs: &Observation<'_>) -> Option<((u16, u16), Vec<(u16, u16)>)> {
+    let (centre, targets) = base_targets(rules, obs)?;
+    let blocked = blocked_cells(rules, obs);
+    let mut ring: Vec<(u16, u16)> = Vec::new();
+    for (cell, foundation) in &targets {
+        for cell in ring_at(*cell, *foundation, WALL_OFFSET_CELLS) {
+            if !ring.contains(&cell) {
+                ring.push(cell);
+            }
+        }
+    }
+    ring.retain(|(x, y)| !blocked.contains(&(*x, *y)));
+    ring.sort_unstable();
+    Some((centre, ring))
+}
+
+/// Ask the house's own units standing on the ring to step outside it.
+///
+/// The plan goes around whatever occupies a cell, so a single rifleman parked
+/// on the ring is a permanent gap: the wall closes everywhere else and the one
+/// cell it cannot have is never revisited, which is the base the play test
+/// reports as "the wall never went round the yard". A player presses X and the
+/// unit steps aside, so this does the same for one unit a frame, to the free
+/// cell outside the ring nearest to where it stands.
+///
+/// Only the house's own orderable ground units are moved, only outwards, and
+/// only while nothing else is being built on the ring — a unit already walking
+/// somewhere is not this pass's.
+fn clear_the_ring(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    out: &mut Outbox,
+    tick: u64,
+) -> bool {
+    let Some((centre, ring)) = planned_ring(rules, obs) else {
+        return false;
+    };
+    let occupied = obs.ground_object_cells(rules);
+    // The cell has to be one the wall would otherwise take: open ground, no
+    // wall yet, and holding a unit — not a building, a cliff or the sea.
+    let blocked_by_structure = blocked_cells(rules, obs);
+    let waiting: Vec<(u64, (u16, u16))> = brain
+        .census
+        .units
+        .iter()
+        .filter(|unit| unit.orderable && !unit.hand && !unit.in_service())
+        .filter(|unit| {
+            ring.contains(&unit.cell)
+                && !blocked_by_structure.contains(&unit.cell)
+                && obs.wall_owner_at(unit.cell.0, unit.cell.1).is_none()
+                && obs.is_ground_walkable(unit.cell.0, unit.cell.1)
+        })
+        .map(|unit| (unit.entity_id, unit.cell))
+        .collect();
+    let mut moved = false;
+    for (entity_id, cell) in waiting {
+        if moved {
+            break;
+        }
+        let Some(target) = outward_cell(rules, obs, &ring, &occupied, centre, cell) else {
+            continue;
+        };
+        if !brain
+            .tracked
+            .admits(tick, entity_id, TrackedKind::Avoid, None, Some(target))
+        {
+            continue;
+        }
+        brain
+            .tracked
+            .record(tick, entity_id, TrackedKind::Avoid, None, Some(target));
+        log::debug!("auto play: clear {entity_id} off the wall at {cell:?} to {target:?}");
+        if super::orders::issue(
+            brain,
+            out,
+            rules,
+            obs,
+            entity_id,
+            Goal::Move { cell: target },
+        ) {
+            moved = true;
+        } else {
+            brain.tracked.void(entity_id, TrackedKind::Avoid);
+        }
+    }
+    moved
+}
+
+/// The free cell outside the ring nearest to `from`, preferring the side away
+/// from the base's centre so the unit steps out rather than through.
+fn outward_cell(
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    ring: &[(u16, u16)],
+    occupied: &std::collections::BTreeSet<(u16, u16)>,
+    centre: (u16, u16),
+    from: (u16, u16),
+) -> Option<(u16, u16)> {
+    let (width, height) = obs.map_extent();
+    let mut best: Option<((u16, u16), i32, i32)> = None;
+    for dy in -3i32..=3 {
+        for dx in -3i32..=3 {
+            let (Some(x), Some(y)) = (
+                u16::try_from(i32::from(from.0) + dx).ok(),
+                u16::try_from(i32::from(from.1) + dy).ok(),
+            ) else {
+                continue;
+            };
+            if width > 0 && (x >= width || y >= height) {
+                continue;
+            }
+            let cell = (x, y);
+            if ring.contains(&cell)
+                || occupied.contains(&cell)
+                || obs.wall_owner_at(x, y).is_some()
+                || !obs.is_ground_walkable(x, y)
+            {
+                continue;
+            }
+            // Further from the centre than the cell it leaves: a unit parked
+            // on the ring steps outward, not into the yard it is walling.
+            let outward = chebyshev(cell, centre) > chebyshev(from, centre);
+            let key = (
+                cell,
+                i32::from(u8::from(outward)),
+                super::squared_distance(cell, from),
+            );
+            if best.is_none_or(|(_, held_out, held_distance)| {
+                (key.1, -key.2) > (held_out, -held_distance)
+            }) {
+                best = Some((cell, key.1, key.2));
+            }
+        }
+    }
+    let _ = rules;
+    best.map(|(cell, _, _)| cell)
+}
+
 pub(super) fn queue_segment(
     brain: &mut RetailBrain,
     rules: &RuleSet,
@@ -484,6 +622,10 @@ pub(super) fn queue_segment(
         return false;
     }
     let Some(segment) = next_segment(brain, rules, obs) else {
+        // No cell left to fill: if the only thing missing is a unit standing
+        // on the ring, ask it to step outside. The plan does not go round it
+        // forever — the base has a hole where that unit stands.
+        clear_the_ring(brain, rules, obs, out, obs.tick());
         return false;
     };
     log::info!(

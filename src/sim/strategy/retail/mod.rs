@@ -500,6 +500,9 @@ impl Brain for RetailBrain {
         // deployed position where the orders above have left it, and the toggle
         // is issued on the edge only.
         orders::deploy(self, obs, out);
+        // Every pass has had its say: keep one order per object, the strongest
+        // ask, in the order the asks were made.
+        out.resolve();
     }
 
     fn orders_refused(&mut self, refused: &[(u64, Goal)]) {
