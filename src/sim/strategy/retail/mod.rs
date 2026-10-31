@@ -464,10 +464,22 @@ impl Brain for RetailBrain {
         // cadence the board and the yard deploy log on: "the AI builds nothing"
         // has to be answerable from the log the client already writes.
         if obs.tick() % 600 == 0 {
+            // Shadow perception: how much of what the brain is using the
+            // player could actually see. The census is omniscient today, and
+            // switching it off without a reading is how a policy starts
+            // fighting a world it cannot see. This measures the gap first.
+            let seen = self
+                .census
+                .enemies
+                .iter()
+                .filter(|enemy| obs.is_cell_revealed(enemy.cell.0, enemy.cell.1))
+                .count();
             log::info!(
-                "auto play: {} income={}/min",
+                "auto play: {} income={}/min seen={}/{}",
                 self.census.describe(),
-                budget.income.map_or(-1, |rate| rate)
+                budget.income.map_or(-1, |rate| rate),
+                seen,
+                self.census.enemies.len()
             );
         }
         expand::deploy_yard_maker(self, rules, obs, out);
