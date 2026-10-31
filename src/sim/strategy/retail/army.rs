@@ -37,6 +37,18 @@ impl<'a> Army<'a> {
         Self { members, anchor }
     }
 
+    /// The units that hold ground: every fighting object the brain may give a
+    /// guard order to. Wider than [`Self::members`] on purpose — a spawned
+    /// sub-unit or a unit the census cannot order still guards the base, and
+    /// narrowing this set took the guards off it (measured: won at 23086
+    /// became a timeout at 30000 when `forces` read the fist's members).
+    pub(super) fn guards(census: &'a Census) -> Vec<&'a Unit> {
+        census
+            .combat_units()
+            .filter(|unit| !unit.hand && !unit.in_service())
+            .collect()
+    }
+
     pub(super) fn len(&self) -> usize {
         self.members.len()
     }

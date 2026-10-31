@@ -894,23 +894,15 @@ pub(super) fn forces(
     if !brain.census.units.iter().any(|unit| unit.traits.combat) {
         return;
     }
+    // The army's holding list: one definition of "who guards the base", from
+    // the same object that answers "who attacks". It is wider than the fist,
+    // and that width is the lesson from wiring it to the fist's members: the
+    // guards went with the spawned units and the match stopped finishing.
+    let guards = super::army::Army::guards(&brain.census);
     let mut issued = 0;
-    for unit in &brain.census.units {
+    for unit in &guards {
         if issued >= FORCE_ORDERS_PER_FRAME {
             break;
-        }
-        if !unit.traits.combat {
-            continue;
-        }
-        // A team's script or one of the player's control groups owns its
-        // members; this step is for the units no hand has taken.
-        if unit.hand {
-            continue;
-        }
-        // A visit in progress owns the unit: a guard here would cancel the
-        // walk-in.
-        if unit.in_service() {
-            continue;
         }
         // A unit already given this frame's order — a step out of a shell — is
         // not told to guard where it was standing.
