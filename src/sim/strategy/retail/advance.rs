@@ -224,28 +224,11 @@ pub(super) fn advance(
         if out.orders.iter().any(|order| order.actor == unit.entity_id) {
             continue;
         }
-        // The micro layer has this unit fighting something in reach, and the
-        // fight outranks the march. Its mission cannot say so yet — the order
-        // was issued this frame — so the intent table is what is asked.
-        //
-        // The same holds for the walk the unit is already on: a dodge, a kite
-        // step, a detour around a fight it would lose, and a breach it is
-        // shooting through are all routes this pass must not re-aim. A march
-        // sent over them is the ping-pong a unit shows at a gate: the shot
-        // opens the way, the march clears the shot, and neither finishes.
-        if brain.tracked.stands(
-            tick,
-            unit.entity_id,
-            &[
-                super::tracked::TrackedKind::Engage,
-                super::tracked::TrackedKind::Dodge,
-                super::tracked::TrackedKind::Kite,
-                super::tracked::TrackedKind::Avoid,
-                super::tracked::TrackedKind::Breach,
-            ],
-        ) {
-            continue;
-        }
+        // Who owns the unit is the tracker's ladder: a fight in reach, a step
+        // out from under a shell, a detour or a breach outranks the march, and
+        // `admits` below refuses the order while one is live. A march sent
+        // over them is the ping-pong a unit shows at a gate: the shot opens the
+        // way, the march clears the shot, and neither finishes.
         // A unit whose weapons have nothing for the target does not march at
         // it. `admits` is `GetFireError` plus the armour floor, the same answer
         // the player's click gets, and the units it refuses are exactly the

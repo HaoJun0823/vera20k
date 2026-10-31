@@ -557,27 +557,6 @@ pub(super) fn run(
         if !walking(unit.mission, obs.is_deployed(unit.entity_id)) {
             continue;
         }
-        // The step that owns a specialist's walk owns its route too: an
-        // engineer walking into a derrick is not routed around the derrick.
-        //
-        // A fight this unit is already in, and a step out from under a shell,
-        // own the next cell as well: the layers above this one decided where
-        // the unit goes this second, and a detour here is the second half of
-        // the left-right shuffle a unit shows when two passes disagree.
-        if brain.tracked.stands(
-            tick,
-            unit.entity_id,
-            &[
-                TrackedKind::Capture,
-                TrackedKind::Enter,
-                TrackedKind::Deploy,
-                TrackedKind::Engage,
-                TrackedKind::Dodge,
-                TrackedKind::Kite,
-            ],
-        ) {
-            continue;
-        }
         // An earlier pass gave it this frame's order.
         if super::orders::ordered_this_frame(out, unit.entity_id) {
             continue;
@@ -731,7 +710,22 @@ pub(super) fn run(
         if threats.is_empty() {
             continue;
         }
-        let Some(blocker) = blocker_at(&threats, heading).copied() else {
+        // A gun covering the next cell is a blocker to a unit that cannot
+        // answer it. The walkers this is for are the ones with no gun at all —
+        // an engineer on its way to a derrick, a harvester on its way home —
+        // and for them the friends standing nearby are not what keeps them
+        // alive: the round does. So the covering gun is the thing to walk
+        // around, and the balance below is not asked.
+        let armed =
+            super::advance::weapon_range_cells(rules, ty, obs.is_deployed(unit.entity_id)) > 0;
+        let Some(blocker) = blocker_at(&threats, heading)
+            .or_else(|| {
+                (!armed)
+                    .then(|| threats.iter().find(|threat| threat.covers(heading)))
+                    .flatten()
+            })
+            .copied()
+        else {
             continue;
         };
         // Two different questions, and the walk answers one of them alone.
@@ -762,7 +756,7 @@ pub(super) fn run(
         // winning the neighbourhood.
         let one_shot = blocker_shooter(&brain.census, obs, rules, &blocker)
             .is_some_and(|shooter| kills_outright(rules, shooter, ty, unit.points));
-        if !passing && !outmatched(ours, theirs) && !one_shot {
+        if !passing && armed && !outmatched(ours, theirs) && !one_shot {
             continue;
         }
         // Two legs, two sides: the unit's own side first, the other only when

@@ -115,14 +115,6 @@ pub(super) fn run(
         if super::orders::ordered_this_frame(out, item.entity_id) {
             continue;
         }
-        // A detour or a breach owns the walk until its term runs: re-aiming
-        // the unit at the thing it is walking around is the other half of the
-        // two-step shuffle, and the fight below still gets its say.
-        let route_owned = brain.tracked.stands(
-            tick,
-            item.entity_id,
-            &[TrackedKind::Avoid, TrackedKind::Breach],
-        );
         // What is in reach now outranks where the unit was going: this is the
         // whole reason the layer exists. "In reach" is reach and weapon
         // together, so a dog walks on past the tank to the infantry behind it
@@ -152,8 +144,27 @@ pub(super) fn run(
                     .entity_type(rules, enemy.0)
                     .is_some_and(|ty| ty.category == ObjectCategory::Infantry)
                 && obs.crushes(rules, item.entity_id, enemy.0)
+                && brain.tracked.admits(
+                    tick,
+                    item.entity_id,
+                    TrackedKind::Engage,
+                    Some(enemy.0),
+                    Some(enemy.1),
+                )
             {
-                issue(
+                // The crush is this unit's fight for the micro term: recorded
+                // as the engage it is, so the next frame does not read the
+                // empty target the walk leaves behind as "no fight here" and
+                // send the tank back — the attack/move loop a crush that
+                // landed used to start.
+                brain.tracked.record(
+                    tick,
+                    item.entity_id,
+                    TrackedKind::Engage,
+                    Some(enemy.0),
+                    Some(enemy.1),
+                );
+                if issue(
                     out,
                     rules,
                     obs,
@@ -161,9 +172,11 @@ pub(super) fn run(
                     Goal::Move { cell: enemy.1 },
                     item.reach,
                     item.deployed,
-                );
-                issued += 1;
-                continue;
+                ) {
+                    issued += 1;
+                    continue;
+                }
+                brain.tracked.void(item.entity_id, TrackedKind::Engage);
             }
             // An attack on the target it already holds is not an order.
             //
@@ -310,9 +323,6 @@ pub(super) fn run(
             // a harvester is worth the tank that was going to be bought with
             // the load it is carrying.
             Role::Harass => {
-                if route_owned {
-                    continue;
-                }
                 let Some((_, cell)) = enemy_economy(rules, obs, &brain.census, item.cell) else {
                     continue;
                 };
@@ -356,9 +366,6 @@ pub(super) fn run(
             // known hostile is only the fallback once there is nothing left to
             // find.
             Role::Scout => {
-                if route_owned {
-                    continue;
-                }
                 // A scout walks the leg it is on. The nearest unexplored cell
                 // changes sides as the dog moves — two cells at the same
                 // distance, and the tie-break follows the dog — so re-deciding
@@ -884,5 +891,32 @@ mod tests {
         assert!(!obs.crushes(&rules, ifv, other), "an IFV has no Crusher=");
         assert!(crush_adjacent((20, 20), (21, 20)));
         assert!(!crush_adjacent((20, 20), (22, 20)));
+    }
+
+    /// A dug-in Guardian GI still shoots: `[GGI] DeployFire=yes` with the
+    /// missile in slot 1 is the deployed weapon. The brain measures a
+    /// deployed soldier's reach through that slot, and a zero there is an
+    /// order path with nothing to ask for — the deployed unit that stands in
+    /// front of a tank and never fires.
+    #[test]
+    fn a_deployed_guardian_gi_has_a_reach_to_measure() {
+        let Some(rules) = crate::rules::retail_ini_fixture::retail_unlayered_rules() else {
+            return;
+        };
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xA17);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let obs = Observation::new(&sim, crate::sim::intern::InternedId::from_index(0));
+        let ty = obs
+            .type_id("GGI")
+            .and_then(|type_id| obs.object_type(&rules, type_id))
+            .expect("the Guardian GI is in the rules");
+        let standing = super::super::advance::weapon_range_cells(&rules, ty, false);
+        let dug_in = super::super::advance::weapon_range_cells(&rules, ty, true);
+        assert!(standing > 0, "the standing soldier reaches: {standing}");
+        assert!(
+            dug_in > 0,
+            "the dug-in one has the missile to fire: {dug_in}"
+        );
     }
 }

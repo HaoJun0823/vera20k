@@ -114,6 +114,41 @@ pub(super) const MICRO_FRAMES: u64 = 15;
 /// unit still matters.
 const REFUSED_FRAMES: u64 = 30;
 
+/// How strongly a kind owns the unit's next command. Lower wins.
+///
+/// The passes each decide one unit's next order, and before this every pass
+/// carried its own list of kinds to defer to — so a rule added to one pass was
+/// a hole in the next, and fixing one unit's walk broke another's. One ladder,
+/// asked by [`Tracker::admits`], is the whole answer: a live intent of a
+/// stronger kind is the unit's owner until its term runs, whatever pass would
+/// like to say otherwise.
+///
+/// - A step out from under a shell, a kite step, and a click into a building
+///   outrank everything: they are one frame's worth of a decision that cannot
+///   wait.
+/// - The fight in reach outranks the route: a unit shoots what it can see
+///   before it walks anywhere.
+/// - A breach outranks a detour: the wall it is shooting is the way through.
+/// - The march is the weakest order a unit takes, and a guard weaker still.
+fn rank(kind: TrackedKind) -> u8 {
+    match kind {
+        TrackedKind::Dodge => 0,
+        TrackedKind::Kite => 1,
+        TrackedKind::Enter | TrackedKind::Capture | TrackedKind::Deploy => 2,
+        TrackedKind::Engage => 3,
+        TrackedKind::Breach => 4,
+        TrackedKind::Avoid => 5,
+        // A harvester's cycle is a walk and a stop on ore: it is the same
+        // family as the march, not below it, or the walk to the field would
+        // hold the harvest off for the walk's whole term.
+        TrackedKind::Move
+        | TrackedKind::Attack
+        | TrackedKind::AttackMove
+        | TrackedKind::Harvest => 6,
+        TrackedKind::Guard => 7,
+    }
+}
+
 impl TrackedKind {
     /// How long the intent stands before it may be issued again, in frames.
     ///
@@ -214,6 +249,13 @@ impl Tracker {
         let Some(tracked) = self.intents.get(&unit) else {
             return true;
         };
+        // Whoever owns the unit outranks the asker: a pass may not replace a
+        // stronger intent that has not finished. This is the one place the
+        // ladder is asked, so every pass inherits the same rule and no pass
+        // can learn it differently.
+        if tracked.kind != kind && now < tracked.until && rank(tracked.kind) < rank(kind) {
+            return false;
+        }
         if tracked.kind != kind || tracked.target != target {
             return true;
         }
@@ -454,5 +496,40 @@ mod tests {
         tracker.refuse(0, 7, TrackedKind::Move);
         assert!(!tracker.admits(10, 7, TrackedKind::Move, None, Some((0, 0))));
         assert!(tracker.admits(10, 7, TrackedKind::Dodge, None, Some((1, 0))));
+    }
+
+    /// One ladder for the whole brain: whoever owns the unit outranks the
+    /// asker, so no pass has to carry its own list of kinds to defer to.
+    /// The lists that used to live in `advance`, `avoidance` and `micro` were
+    /// three copies of this rule, and a rule added to one was a hole in the
+    /// next — which is why fixing one unit's walk kept breaking another's.
+    #[test]
+    fn a_stronger_intent_owns_the_unit_until_its_term_runs() {
+        let mut tracker = Tracker::new();
+        // A kite step outranks the fight it is stepping out of.
+        tracker.record(0, 7, TrackedKind::Kite, None, Some((10, 10)));
+        assert!(
+            !tracker.admits(1, 7, TrackedKind::Engage, Some(9), None),
+            "an attack does not interrupt a kite step"
+        );
+        assert!(
+            !tracker.admits(1, 7, TrackedKind::AttackMove, None, Some((20, 20))),
+            "nor does a march"
+        );
+        // A step out from under a shell outranks the kite.
+        assert!(tracker.admits(1, 7, TrackedKind::Dodge, None, Some((11, 10))));
+        // A guard is the weakest order a unit takes.
+        let mut guard = Tracker::new();
+        guard.record(0, 7, TrackedKind::Guard, None, None);
+        assert!(
+            guard.admits(1, 7, TrackedKind::AttackMove, None, Some((20, 20))),
+            "a guard does not hold a unit against the march"
+        );
+        // A breach outranks the detour around the wall it is shooting.
+        let mut breach = Tracker::new();
+        breach.record(0, 7, TrackedKind::Breach, None, Some((10, 10)));
+        assert!(!breach.admits(1, 7, TrackedKind::Avoid, None, Some((11, 10))));
+        // And it expires on its own term.
+        assert!(breach.admits(90, 7, TrackedKind::Avoid, None, Some((11, 10))));
     }
 }
