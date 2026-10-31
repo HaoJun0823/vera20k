@@ -531,9 +531,10 @@ Three invariants, and the migration that establishes them one slice at a time:
 | S6 | `--trace <id>`, behaviour fingerprints, golden replays | every change shows its diff |
 
 Status (2026-11-01): S0, S1, S2, S3, S4 (advance + forces), S5 (tables) and S6 (trace) are in the
-tree; S3 is a working switch — AUTOPLAY_HONEST=1 makes the brain act on
-sightings and remembered sightings (with a term and no invented positions),
-while the default stays omniscient. The census line prints seen=<visible>/<all>;
+tree; S3 is on by default — the brain acts on sightings and remembered
+sightings (with a term and no invented positions), and each unit sees by its
+own Sight=. AUTOPLAY_HONEST=0 restores the omniscient list for a comparison:
+the pinned map wins at 27792 honest against 23086 omniscient. The census line prints seen=<visible>/<all>;
 on the pinned map the omniscient run reads 0/19 to 2/32 through the opening,
 and the honest run reads 9/9, which is the gap a policy has to close. S4's
 forces pass is deliberately on the wider census set: wiring it to the army took
