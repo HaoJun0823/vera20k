@@ -43,7 +43,32 @@ pub(super) enum Pilot {
     Structure,
 }
 
+/// What a pilot goes for first when several hostiles are in reach.
+///
+/// The one thing a capability changes about an ordinary fight: what the unit
+/// is worth against. A terror drone's jump eats a vehicle; an IFV without a
+/// passenger carries an anti-aircraft rocket. Both are facts about the pilot,
+/// so both are answered here rather than in the target loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Preference {
+    /// Anything: the ordinary soldier's answer.
+    Any,
+    /// Vehicles and aircraft first: what a parasite eats.
+    Armour,
+    /// Aircraft first: the IFV's own rocket.
+    Air,
+}
+
 impl Pilot {
+    /// What this pilot prefers in reach.
+    pub(super) fn preference(self) -> Preference {
+        match self {
+            Pilot::Parasite => Preference::Armour,
+            Pilot::Gunner => Preference::Air,
+            _ => Preference::Any,
+        }
+    }
+
     /// The pilot for a type, by the tags it carries. Order is the decision:
     /// a specialist outranks the ordinary fight, and the fight outranks the
     /// march.

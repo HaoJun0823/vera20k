@@ -70,6 +70,8 @@ struct Work {
     /// What this unit runs: the capability table's answer, not a flag each
     /// pass re-derives.
     pilot: super::pilots::Pilot,
+    /// What its pilot goes for first when several hostiles are in reach.
+    preference: super::pilots::Preference,
 }
 
 pub(super) fn run(
@@ -143,6 +145,7 @@ pub(super) fn run(
             item.cell,
             item.reach,
             |target| super::orders::admits(rules, obs, item.entity_id, &Goal::Attack { target }),
+            |target| prefer(rules, obs, item.preference, target),
         ) {
             // A tank beside a soldier flattens him instead of trading shots:
             // `Crusher=` on the tank, `Crushable=` on the infantry, and the
@@ -539,6 +542,9 @@ fn collect(
             // again now rather than on its 450-frame term.
             let deployed = obs.is_deployed(unit.entity_id);
             let ty = obs.object_type(rules, unit.type_id);
+            let pilot = ty.map_or(super::pilots::Pilot::Structure, |ty| {
+                super::pilots::Pilot::of(rules, ty)
+            });
             let reach = ty.map_or(0, |ty| {
                 super::advance::weapon_range_cells(rules, ty, deployed)
             });
@@ -551,9 +557,8 @@ fn collect(
                 deployed,
                 zone: ty.map_or(MovementZone::Normal, |ty| ty.movement_zone),
                 burst: ty.map_or(1, |ty| super::advance::weapon_burst(rules, ty, deployed)),
-                pilot: ty.map_or(super::pilots::Pilot::Structure, |ty| {
-                    super::pilots::Pilot::of(rules, ty)
-                }),
+                pilot: pilot,
+                preference: pilot.preference(),
             });
         }
     }
@@ -574,6 +579,7 @@ fn in_reach(
     from: (u16, u16),
     reach: i32,
     answers: impl Fn(u64) -> bool,
+    rank: impl Fn(u64) -> u8,
 ) -> Option<(u64, (u16, u16))> {
     if reach <= 0 {
         return None;
@@ -592,12 +598,37 @@ fn in_reach(
         .min_by_key(|(id, cell, structure, shooting_me)| {
             (
                 !*shooting_me,
+                rank(*id),
                 *structure,
                 squared_distance(*cell, from),
                 *id,
             )
         })
         .map(|(id, cell, _, _)| (id, cell))
+}
+
+/// Where a pilot's preference ranks a target: 0 is what it goes for first.
+///
+/// The one thing a capability changes about an ordinary fight. A parasite goes
+/// for what it can eat, an IFV's own rocket for what flies; everything else
+/// takes the reach order the pass already had.
+fn prefer(
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    preference: super::pilots::Preference,
+    target: u64,
+) -> u8 {
+    let category = obs.entity_type(rules, target).map(|ty| ty.category);
+    match preference {
+        super::pilots::Preference::Any => 0,
+        super::pilots::Preference::Armour => u8::from(!matches!(
+            category,
+            Some(ObjectCategory::Vehicle) | Some(ObjectCategory::Aircraft)
+        )),
+        super::pilots::Preference::Air => {
+            u8::from(!matches!(category, Some(ObjectCategory::Aircraft)))
+        }
+    }
 }
 
 /// How near a neutral building has to stand to a unit for it to be what the
@@ -783,20 +814,80 @@ mod tests {
     fn what_is_in_reach_is_what_the_unit_can_shoot() {
         let enemies = [(42u64, (22u16, 20u16), false, false)];
         assert_eq!(
-            in_reach(enemies.into_iter(), (20, 20), 5, |_| true),
+            in_reach(enemies.into_iter(), (20, 20), 5, |_| true, |_| 0),
             Some((42, (22, 20))),
             "two cells away, and the weapon reaches five"
         );
         let far = [(43u64, (40u16, 20u16), false, false)];
         assert_eq!(
-            in_reach(far.into_iter(), (20, 20), 1, |_| true),
+            in_reach(far.into_iter(), (20, 20), 1, |_| true, |_| 0),
             None,
             "twenty cells away is out of a one-cell reach"
         );
         assert_eq!(
-            in_reach(enemies.into_iter(), (20, 20), 0, |_| true),
+            in_reach(enemies.into_iter(), (20, 20), 0, |_| true, |_| 0),
             None,
             "a unit with no weapon engages nothing"
+        );
+    }
+
+    /// A pilot's preference is what its capability is for: a parasite goes
+    /// for a vehicle even when a soldier is nearer, and an IFV without a
+    /// passenger goes for what flies. Both are answers from the capability
+    /// table, not from a name list in the target loop.
+    #[test]
+    fn a_pilots_preference_changes_what_it_shoots_first() {
+        let Some(rules) = crate::rules::retail_ini_fixture::retail_unlayered_rules() else {
+            return;
+        };
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xA17);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let owner = sim.interner.intern("Americans");
+        let gi = sim
+            .spawn_object("E1", "Russians", 21, 20, 255, &rules)
+            .expect("a conscript");
+        let tank = sim
+            .spawn_object("MTNK", "Russians", 23, 20, 255, &rules)
+            .expect("a Rhino");
+        let orca = sim
+            .spawn_object("ORCA", "Americans", 24, 20, 255, &rules)
+            .expect("an aircraft");
+        let obs = Observation::new(&sim, owner);
+        let enemies = [
+            (gi, (21u16, 20u16), false, false),
+            (tank, (23, 20), false, false),
+        ];
+        assert_eq!(
+            in_reach(
+                enemies.into_iter(),
+                (20, 20),
+                6,
+                |_| true,
+                |target| prefer(
+                    &rules,
+                    &obs,
+                    super::super::pilots::Preference::Armour,
+                    target
+                )
+            ),
+            Some((tank, (23, 20))),
+            "the parasite goes for the vehicle, not the nearer soldier"
+        );
+        let mixed = [
+            (tank, (21u16, 20u16), false, false),
+            (orca, (24, 20), false, false),
+        ];
+        assert_eq!(
+            in_reach(
+                mixed.into_iter(),
+                (20, 20),
+                6,
+                |_| true,
+                |target| prefer(&rules, &obs, super::super::pilots::Preference::Air, target)
+            ),
+            Some((orca, (24, 20))),
+            "the gunner goes for what flies"
         );
     }
 
@@ -811,7 +902,7 @@ mod tests {
             (8u64, (21u16, 20u16), false, false),
         ];
         assert_eq!(
-            in_reach(enemies.into_iter(), (20, 20), 5, |_| true),
+            in_reach(enemies.into_iter(), (20, 20), 5, |_| true, |_| 0),
             Some((7, (23, 20))),
             "the one shooting this unit, not the nearest one"
         );
@@ -827,12 +918,18 @@ mod tests {
             (9u64, (23u16, 20u16), false, false),
         ];
         assert_eq!(
-            in_reach(enemies.into_iter(), (20, 20), 4, |_| true),
+            in_reach(enemies.into_iter(), (20, 20), 4, |_| true, |_| 0),
             Some((9, (23, 20))),
             "the soldier, not the closer building"
         );
         assert_eq!(
-            in_reach(enemies.into_iter(), (20, 20), 4, |target| target == 8),
+            in_reach(
+                enemies.into_iter(),
+                (20, 20),
+                4,
+                |target| target == 8,
+                |_| 0
+            ),
             Some((8, (22, 20))),
             "the building is still taken when nothing else can be hurt"
         );
@@ -851,12 +948,12 @@ mod tests {
         ];
         let can_hurt = |target: u64| target == 9;
         assert_eq!(
-            in_reach(enemies.into_iter(), (20, 20), 2, can_hurt),
+            in_reach(enemies.into_iter(), (20, 20), 2, can_hurt, |_| 0),
             Some((9, (22, 20))),
             "the rifleman the jaw can take, not the nearer tank"
         );
         assert_eq!(
-            in_reach(enemies.into_iter(), (20, 20), 2, |_| false),
+            in_reach(enemies.into_iter(), (20, 20), 2, |_| false, |_| 0),
             None,
             "nothing it can act on is nothing to do"
         );
