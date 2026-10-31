@@ -99,14 +99,11 @@ pub(super) fn advance(
     // decides matches: an enemy already at the yard is what the army is for,
     // and marching out with it in the base loses the production the army
     // came from.
-    let mut fighters: Vec<&Unit> = brain
-        .census
-        .combat_units()
-        // A unit walking into a building or a depot is not available to the
-        // fist: sending it at a target would drop the visit it is half-way
-        // through.
-        .filter(|unit| unit.controllable() && !unit.in_service())
-        .collect();
+    // The army, as the one object that answers "who is in it and where it
+    // stands": the same list every pass below reads, instead of each pass
+    // filtering the ledger its own way.
+    let army = super::army::Army::of(&brain.census, obs);
+    let mut fighters: Vec<&Unit> = army.members.clone();
     if fighters.len() < super::squads::ARMY_TO_ATTACK
         || !super::build::can_replace_units(rules, obs, &brain.census)
         || !super::build::base_defended(rules, obs, &brain.census)
@@ -197,7 +194,7 @@ pub(super) fn advance(
     // One target for the whole army, not the nearest for each unit: units
     // pointed at their own nearest structure arrive one at a time and are
     // killed one at a time. A fist is what takes a base.
-    let anchor = fighters.first().map_or((0, 0), |unit| unit.cell);
+    let anchor = army.anchor;
     let Some(nearest) = nearest_target(&targets, anchor) else {
         return false;
     };

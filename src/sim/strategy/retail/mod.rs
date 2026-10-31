@@ -101,6 +101,7 @@
 //!   [`expand`] cannot run without a factory to buy it from.
 
 pub(super) mod advance;
+pub(super) mod army;
 pub(super) mod avoidance;
 pub(super) mod build;
 pub(super) mod census;
