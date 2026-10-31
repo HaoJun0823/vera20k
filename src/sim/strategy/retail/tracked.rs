@@ -182,15 +182,24 @@ impl TrackedKind {
 
 /// One unit's standing intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Tracked {
+pub(super) struct UnitRuntime {
     pub(super) kind: TrackedKind,
     /// The object the intent names, when it names one.
     pub(super) target: Option<u64>,
     /// The cell the intent names, when it names one: the thing that can move
     /// out from under the order.
     pub(super) cell: Option<(u16, u16)>,
-    /// The frame before which it is not issued again.
+    /// The frame before which it is not issued again — the commit window.
     pub(super) until: u64,
+    /// The frame the order was issued on. Kept apart from `until` so a commit
+    /// window can be read as a duration rather than recomputed from the term,
+    /// and so a diagnostic can say how long a unit has been on one order.
+    pub(super) issued_at: u64,
+    /// How many times the world refused this unit's last order. A refusal is
+    /// the one fact the decision layer needs and the simulation does not keep:
+    /// without it a unit whose every order is dropped looks like a unit that
+    /// chose to stand still.
+    pub(super) refusals: u8,
 }
 
 /// How far a target may move before an otherwise-valid intent is worth
@@ -203,7 +212,7 @@ const REISSUE_CELLS: i32 = 3;
 /// Every unit's standing intent, and the units a routine is busy with.
 #[derive(Debug, Default)]
 pub(super) struct Tracker {
-    intents: BTreeMap<u64, Tracked>,
+    intents: BTreeMap<u64, UnitRuntime>,
     /// Units a managed routine owns, and the frame it hands them back on. A
     /// routine is its object's only issuer, so the layers above ask here before
     /// they tell one anything.
@@ -319,6 +328,21 @@ impl Tracker {
     pub(super) fn refuse(&mut self, now: u64, unit: u64, kind: TrackedKind) {
         self.refused
             .insert((unit, kind), now.saturating_add(REFUSED_FRAMES));
+        // The refusal belongs to the unit's runtime as well, not only to the
+        // cool-off table: "this unit has been refused five times" is what
+        // separates a unit that cannot act from one that chose not to.
+        if let Some(runtime) = self.intents.get_mut(&unit) {
+            runtime.refusals = runtime.refusals.saturating_add(1);
+        }
+    }
+
+    /// How many units are holding an order the world refused at least once:
+    /// the reading that says whether a pass is asking for the impossible.
+    pub(super) fn refused_units(&self) -> usize {
+        self.intents
+            .values()
+            .filter(|runtime| runtime.refusals > 0)
+            .count()
     }
 
     /// Record that `unit` has been told to do `kind` at `frame`.
@@ -335,11 +359,13 @@ impl Tracker {
         self.refused.remove(&(unit, kind));
         self.intents.insert(
             unit,
-            Tracked {
+            UnitRuntime {
                 kind,
                 target,
                 cell,
                 until: now.saturating_add(kind.term()),
+                issued_at: now,
+                refusals: 0,
             },
         );
     }

@@ -62,6 +62,21 @@ const ADVANCE_ORDERS_PER_FRAME: usize = 8;
 /// at, so the whole army stood in the yard while the raid burned it.
 pub(super) const THREAT_RADIUS: i32 = 18;
 
+/// How long the army may go without taking an enemy object before the push
+/// stops waiting for a favourable comparison, in frames: one minute.
+const PUSH_STALL_FRAMES: u64 = 900;
+
+/// Whether the push has stalled: the enemy has not lost an object since
+/// `progress` was stamped, and a minute has passed since then.
+///
+/// `progress` is `(frame, enemy count)`, stamped when the army first became
+/// large enough to push and refreshed every time the count falls. Before the
+/// first stamp the answer is no: an opening army is not stalled, it is small.
+fn push_stalled(progress: (u64, usize), now: u64, current: usize) -> bool {
+    let (since, then) = progress;
+    since != 0 && current >= then && now.saturating_sub(since) >= PUSH_STALL_FRAMES
+}
+
 /// How few enemy objects are left before the strength gate stops asking. Below
 /// this the enemy is a clean-up job, not a fight: the army goes in and finishes
 /// it instead of waiting for a comparison it can only lose by arithmetic.
@@ -142,7 +157,25 @@ pub(super) fn advance(
     // front of the last two units until the match times out — measured, a
     // timeout at 36000 with two enemies alive. Units join the list only here,
     // so an ordinary push still aims at what a base is.
-    let mopping_up = brain.census.enemies.len() <= MOP_UP_OBJECTS;
+    // A push that has not taken an enemy **structure** for a minute is not
+    // waiting for a better moment: the comparison holding it home can be held
+    // forever by a base the army is strong enough to trade into. Past the
+    // stall the army goes, the way a player stops waiting for the perfect
+    // engagement. This is a group-level reading on purpose — it is the army's
+    // progress, not any one unit's orders, and no per-unit pass can see it.
+    //
+    // The count is structures, not objects: a field trade that never reaches
+    // the base keeps the object count falling and would reset this forever,
+    // which is the stalemate it is meant to catch.
+    let standing = structures.len();
+    if brain.push_progress.1 == usize::MAX {
+        brain.push_progress = (tick, standing);
+    }
+    if standing < brain.push_progress.1 {
+        brain.push_progress = (tick, standing);
+    }
+    let stalled = push_stalled(brain.push_progress, tick, standing);
+    let mopping_up = brain.census.enemies.len() <= MOP_UP_OBJECTS || stalled;
     if mopping_up {
         targets.extend(
             brain
@@ -413,6 +446,31 @@ mod tests {
     use super::*;
     use crate::rules::unit_role::RoleTable;
     use crate::sim::world::Simulation;
+
+    /// A push that has taken nothing for a minute stops waiting for a
+    /// favourable comparison. The gate is a group reading on purpose: no
+    /// per-unit pass can see the army's progress, and a comparison that
+    /// never opens is the army standing in front of a base until the clock
+    /// runs out.
+    #[test]
+    fn a_push_that_takes_nothing_for_a_minute_goes_anyway() {
+        assert!(
+            !push_stalled((0, usize::MAX), 5_000, 30),
+            "an opening army is small, not stalled"
+        );
+        assert!(
+            !push_stalled((100, 30), 900, 30),
+            "under a minute is still a wait"
+        );
+        assert!(
+            push_stalled((100, 30), 1_000, 30),
+            "a minute with nothing taken"
+        );
+        assert!(
+            !push_stalled((100, 30), 1_000, 25),
+            "the enemy lost objects since the reading"
+        );
+    }
 
     /// A dug-in soldier reaches further than the same soldier standing up:
     /// `[E1] Primary=M60 Range=4` against `Secondary=Para Range=5`, and

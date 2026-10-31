@@ -309,6 +309,12 @@ pub struct RetailBrain {
     /// unit standing in front of it with no mission and no record, and every
     /// pass that reads missions sees an idle unit.
     pub(super) blocked_goals: BTreeMap<u64, ((u16, u16), u64)>,
+    /// When the enemy last lost a **structure**, and how many it had then: the
+    /// group-level progress reading. A push that has not taken a building in a
+    /// minute is not waiting for a better moment — the moment is the problem —
+    /// and the army goes anyway. Killing units does not count: a trade in the
+    /// field that never reaches the base is exactly the stalemate this reads.
+    pub(super) push_progress: (u64, usize),
 }
 
 impl RetailBrain {
@@ -336,6 +342,7 @@ impl RetailBrain {
             stuck_retried: BTreeSet::new(),
             breaches: Vec::new(),
             blocked_goals: BTreeMap::new(),
+            push_progress: (0, usize::MAX),
         }
     }
 
