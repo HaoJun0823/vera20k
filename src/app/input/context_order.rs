@@ -301,7 +301,13 @@ pub(crate) fn attack_action(
         return action;
     };
     let human = sim.house_is_human_player(actor.owner());
-    let armed = crate::sim::combat::combat_weapon::is_armed(actor, kind);
+    let armed = crate::sim::combat::combat_weapon::is_armed(
+        actor,
+        kind,
+        sim.entities(),
+        rules,
+        sim.interner(),
+    );
     let infiltrator = actor.category() == EntityCategory::Infantry && kind.infiltrate;
     let healing_unit = actor.category() == EntityCategory::Unit
         && human
@@ -520,7 +526,13 @@ pub(super) fn base_action(
         return AttackAction::None;
     };
     let human = sim.house_is_human_player(actor.owner());
-    let armed = crate::sim::combat::combat_weapon::is_armed(actor, kind);
+    let armed = crate::sim::combat::combat_weapon::is_armed(
+        actor,
+        kind,
+        sim.entities(),
+        rules,
+        sim.interner(),
+    );
     let infiltrator = actor.category() == EntityCategory::Infantry && kind.infiltrate;
     let admitted = match target {
         TargetKind::Entity(target_id) => {
@@ -790,7 +802,13 @@ pub(crate) fn armed_action(
             sim.interner(),
         )
         .is_some(),
-        TargetKind::Entity(_) => crate::sim::combat::combat_weapon::is_armed(actor, object),
+        TargetKind::Entity(_) => crate::sim::combat::combat_weapon::is_armed(
+            actor,
+            object,
+            sim.entities(),
+            rules,
+            sim.interner(),
+        ),
     };
     armed.then(|| attack_action(sim, rules, actor_id, target, forced, overlay_registry))
 }
@@ -871,7 +889,14 @@ pub(crate) fn resolved_unit_in_range(
             None => return false,
         },
     };
-    crate::sim::combat::mapless_in_range(actor, target, weapon, rules, sim.interner())
+    crate::sim::combat::mapless_in_range(
+        actor,
+        target,
+        weapon,
+        rules,
+        sim.interner(),
+        Some(sim.entities()),
+    )
 }
 
 /// Resolved attack receiver batch. These are ephemeral input decisions;
@@ -2152,6 +2177,7 @@ pub(crate) fn try_queue_context_order(
                 hover_object_at_point(
                     crate::app::input::entity_pick::PresentedWorld {
                         sim,
+                        rules: Some(&resources.rules),
                         interpolation: &state.match_state.match_presentation.interpolation,
                         translucent_viewer,
                     },
@@ -3919,9 +3945,24 @@ pub(super) fn infantry_attack_action(
             },
         );
     }
-    // Infantry51EAD2..51EB21: anything but a C4-able building keeps Attack
-    // and returns before the tail below.
+    // Infantry51EAD2..51EB21: anything the airstrike arm accepts keeps Attack
+    // and returns before the tail below. Phobos
+    // `TechnoClass_WhatAction_AllowAirstrike` (`0x51EAE0`) replaces the
+    // building-only `CanC4` test: `AllowAirstrike` decides, defaulting to
+    // `CanC4` for a building and to targetable for every other kind, while
+    // `InvisibleInGame` still refuses a building.
     if weapon.mig_attack_cursor {
+        #[cfg(feature = "phobos")]
+        let air_strike = target.is_some_and(|target| {
+            sim.interner()
+                .object_type(target.type_ref(), rules)
+                .is_some_and(|object| {
+                    let building = target.category() == EntityCategory::Structure;
+                    object.allows_airstrike(building)
+                        && !(building && object.invisible_in_game)
+                })
+        });
+        #[cfg(not(feature = "phobos"))]
         let air_strike = target.is_some_and(|target| {
             target.category() == EntityCategory::Structure
                 && sim

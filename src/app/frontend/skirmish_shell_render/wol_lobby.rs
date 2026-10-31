@@ -459,10 +459,12 @@ pub(crate) fn paint_wol_lobby_children(
 }
 
 /// `0xC3` or `0xE1` over the covered dialog; `status` is `0xC3`'s own
-/// status line text.
+/// status line text. The `modern` lobby draws them on Red Alert 2's box art,
+/// as VERA's updater boxes do; the native lobby keeps gamemd's mode-2 art.
 pub(crate) fn paint_wol_lobby_popup(
     state: &AppState,
     popup: &WolLobbyPopup,
+    modern: bool,
     width: i32,
     height: i32,
     status: &str,
@@ -504,59 +506,59 @@ pub(crate) fn paint_wol_lobby_popup(
     };
     let (dialog, buttons, mut labels, password) = match &popup.kind {
         WolPopupKind::Create(create) => {
-            let layout = crate::ui::shell::modal::wol_create_game_layout(width, height);
-            for (rect, checked) in [
-                (layout.clan, create.clan),
-                (layout.limit, create.limit),
-                (layout.observe, create.observe),
+            let layout = crate::ui::shell::modal::wol_create_game_layout(width, height, modern);
+            let check_text = |rect| crate::ui::skirmish_shell::checkbox_text_rect(rect, scale);
+            // Style SS_RIGHT.
+            let mut labels = vec![caption(
+                "GUI:Password",
+                layout.password_label,
+                ShellAlign::H_RIGHT,
+                true,
+            )];
+            // The online layout has no clan or observer box.
+            for (rect, checked, key, enabled) in [
+                (
+                    layout.clan,
+                    create.clan,
+                    "GUI:BattleClanTournament",
+                    create.clan_enabled,
+                ),
+                (
+                    Some(layout.limit),
+                    create.limit,
+                    "WOL:LimitScreenResolution",
+                    create.limit_enabled,
+                ),
+                (layout.observe, create.observe, "GUI:Observe", true),
             ] {
+                let Some(rect) = rect else {
+                    continue;
+                };
                 paint_control(
                     &mut paint.controls,
                     &atlas.control_chrome(),
                     ControlPaint::Checkbox { rect, checked },
                     scale,
                 );
+                labels.push(caption(
+                    key,
+                    check_text(rect),
+                    ShellAlign::V_CENTER,
+                    enabled,
+                ));
             }
-            let check_text = |rect| crate::ui::skirmish_shell::checkbox_text_rect(rect, scale);
-            let mut labels = vec![
-                // Style SS_RIGHT.
-                caption(
-                    "GUI:Password",
-                    layout.password_label,
-                    ShellAlign::H_RIGHT,
-                    true,
-                ),
-                caption(
-                    "GUI:BattleClanTournament",
-                    check_text(layout.clan),
-                    ShellAlign::V_CENTER,
-                    create.clan_enabled,
-                ),
-                caption(
-                    "WOL:LimitScreenResolution",
-                    check_text(layout.limit),
-                    ShellAlign::V_CENTER,
-                    create.limit_enabled,
-                ),
-                caption(
-                    "GUI:Observe",
-                    check_text(layout.observe),
-                    ShellAlign::V_CENTER,
-                    true,
-                ),
-                caption(
-                    "GUI:OK",
-                    ok_label(layout.ok),
-                    button_align,
-                    popup.ok_enabled(),
-                ),
-                caption(
-                    "GUI:Cancel",
-                    cancel_label(layout.cancel),
-                    button_align,
-                    true,
-                ),
-            ];
+            labels.push(caption(
+                "GUI:OK",
+                ok_label(layout.ok),
+                button_align,
+                popup.ok_enabled(),
+            ));
+            labels.push(caption(
+                "GUI:Cancel",
+                cancel_label(layout.cancel),
+                button_align,
+                true,
+            ));
             labels.push(PaintLabel {
                 text: status.to_owned().into(),
                 rect: layout.status,
@@ -607,9 +609,13 @@ pub(crate) fn paint_wol_lobby_popup(
             )
         }
     };
+    let background = atlas
+        .ra2_dialog_background
+        .filter(|_| modern)
+        .or_else(|| atlas.mode_two_dialog_background(None));
     let draw = shell_paint::paint_modal_shp(
         &state.renderer.bit_font,
-        atlas.mode_two_dialog_background(None),
+        background,
         super::type3_button_frames(atlas),
         dialog,
         &buttons,

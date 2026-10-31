@@ -66,6 +66,10 @@ fn main() -> Result<()> {
         "VeraX support compiled in: {}",
         vera20k::rules::VERAX_ENABLED
     );
+    log::info!(
+        "NPBUG support compiled in: {}",
+        vera20k::rules::NPBUG_ENABLED
+    );
     if let Some(path) = &log_path {
         log::info!("Log file: {}", path.display());
     }

@@ -82,6 +82,18 @@ pub(crate) struct WolLoginAccepted {
     pub(crate) motd: String,
 }
 
+/// The game's own message of the day for an accepted login, used when the
+/// lobby sends no operator welcome: a welcome, and how to page with the chat's
+/// `TXT_PAGE_COMMAND`, since the online screens have no Page button.
+pub(super) fn vera_motd(state: &AppState) -> String {
+    let page = App::csf_label(state, "TXT_PAGE_COMMAND", "TXT_PAGE_COMMAND");
+    format!(
+        "Welcome to VERA20K Online!\n\
+         Create a game or join one, and chat with everyone here.\n\
+         To send a private message, type {page} <name> <message>."
+    )
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum WolServiceRequest {
     /// `WOL__EnsureWolapiObject` `0x00786390`.
@@ -315,6 +327,9 @@ pub(crate) enum WolServiceEvent {
         action: bool,
         ansi: bool,
         options: Option<Box<crate::app::shell_network_setup::HostOptions>>,
+        /// When VERA20K Online's lobby sent it (Unix seconds); a notice's
+        /// is when it was set.
+        sent_at: Option<u64>,
     },
     /// The find sink `0x007A9970`: the channel the located user is in, or
     /// the result code.
@@ -896,6 +911,7 @@ pub(crate) fn service_event(state: &mut AppState, event: WolServiceEvent) {
             action,
             ansi,
             options,
+            sent_at,
         } => {
             super::lobby::message_received(
                 state,
@@ -906,6 +922,7 @@ pub(crate) fn service_event(state: &mut AppState, event: WolServiceEvent) {
                     action,
                     ansi,
                     options,
+                    sent_at,
                 },
             );
             return;

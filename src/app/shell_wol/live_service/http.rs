@@ -3,6 +3,7 @@
 
 use crate::util::time::{Duration, Instant};
 use base64::Engine;
+use std::collections::VecDeque;
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
 use std::io::Read;
 use std::path::PathBuf;
@@ -67,8 +68,6 @@ pub(super) enum Request {
         token: String,
     },
     Channels(u32),
-    /// `GET /v1/stats`; a failure is dropped and the next poll asks again.
-    Stats,
     Command {
         id: u64,
         operation: &'static str,
@@ -80,6 +79,50 @@ pub(super) enum Request {
         text: String,
         target: &'static str,
     },
+}
+
+impl Request {
+    /// The periodic requests a waiting copy already covers: the host's 5 s
+    /// `ping` and the 10 s relay renewal retry.
+    fn repeats(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Command {
+                    operation, payload, ..
+                },
+                Self::Command {
+                    operation: other_operation,
+                    payload: other_payload,
+                    ..
+                },
+            ) => {
+                matches!(*operation, "ping" | "renew_relay")
+                    && operation == other_operation
+                    && payload == other_payload
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Queues what arrived during the last request behind `queued`, without a
+/// periodic request that `current` or a queued one repeats. A failing command
+/// takes about 24 s, so copies would otherwise pile up ahead of Ready, Start
+/// and chat for as long as the lobby is unreachable.
+fn queue_arrivals(
+    input: &Receiver<Request>,
+    current: Option<&Request>,
+    queued: &mut VecDeque<Request>,
+) {
+    while let Ok(request) = input.try_recv() {
+        if !current
+            .into_iter()
+            .chain(queued.iter())
+            .any(|waiting| waiting.repeats(&request))
+        {
+            queued.push_back(request);
+        }
+    }
 }
 
 pub(super) enum Response {
@@ -118,6 +161,7 @@ pub(super) enum Response {
         attempt: u64,
         player_id: String,
         nickname: String,
+        motd: Option<String>,
     },
     LoginFailed {
         attempt: u64,
@@ -135,7 +179,6 @@ pub(super) enum Response {
         message: Option<String>,
     },
     Channels(ChannelList),
-    Stats(crate::ui::wol_shell::WolLobbyStats),
     Event(Envelope),
     CommandCompleted {
         id: u64,
@@ -148,8 +191,14 @@ pub(super) enum Response {
     },
     Failure(&'static str),
     Offline,
+    /// The first event poll of an outage failed; polling keeps retrying.
+    LobbyUnreachable,
+    /// An event poll succeeded again after `LobbyUnreachable`.
+    LobbyReachable,
     StartRejected {
         id: u64,
+        /// 429, 5xx or no answer: the lobby, not the setup, refused it.
+        retryable: bool,
     },
     Translated {
         id: u64,
@@ -166,9 +215,13 @@ pub(super) enum TranslateFailure {
 }
 
 const MAX_BODY_BYTES: u64 = 1024 * 1024;
+const USER_AGENT: &str = concat!("VERA20k/", env!("CARGO_PKG_VERSION"), " multiplayer-client");
 // The server retains1024 events and returns at most256 at a time. Permit
 // concurrent arrivals too, but never release cleanup on a partial history.
 const MAX_CLEANUP_DRAIN_BATCHES: usize = 8;
+// After `timing_confirmed` a spawned match's only event is `relay_renewed`, in
+// the reply to its own `renew_relay`. This poll recovers a reply that was lost.
+const SPAWNED_MATCH_POLL: Duration = Duration::from_secs(60);
 // About three lines of the 0xD0 box body, which also holds the download link.
 const MAX_UPGRADE_MESSAGE_CHARS: usize = 160;
 
@@ -181,7 +234,7 @@ enum RequestFailure {
         code: u32,
     },
     AlreadyFinished,
-    /// 426 `upgrade_required` (services/lobby/protocol.md), with the lobby's
+    /// 426 `upgrade_required` (docs/lobby-protocol.md), with the lobby's
     /// message when it is one short line of plain text.
     UpgradeRequired(Option<String>),
 }
@@ -268,6 +321,8 @@ struct Client {
     token: Option<String>,
     cursor: u64,
     active_match: Option<String>,
+    /// The bearer came from an external launcher, not `/v1/sessions`.
+    spawned: bool,
 }
 
 fn decode_session(value: Value, requested_nickname: &str) -> Result<Session, RequestFailure> {
@@ -294,6 +349,13 @@ fn decode_session(value: Value, requested_nickname: &str) -> Result<Session, Req
 }
 
 impl Client {
+    fn adopt_session(&mut self, token: String) {
+        self.token = Some(token);
+        self.cursor = 0;
+        self.active_match = None;
+        self.spawned = true;
+    }
+
     fn accept_match_resume(
         &mut self,
         value: Value,
@@ -354,18 +416,34 @@ impl Client {
 
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
 impl Client {
+    /// The bearer a new stream opens with. A spawned match only needs events
+    /// during its start barrier, which polls cover, so it opens none.
+    fn stream_bearer(&self) -> Option<&str> {
+        self.token.as_deref().filter(|_| !self.spawned)
+    }
+
+    /// A stream frame starts at the stream's own cursor, which command
+    /// replies and polls may have passed: a stale frame is dropped, and
+    /// `batch` drops the events this worker already delivered.
+    fn streamed(&mut self, frame: Value, output: &Sender<Response>) -> Result<(), RequestFailure> {
+        if frame["cursor"]
+            .as_u64()
+            .is_some_and(|cursor| cursor < self.cursor)
+        {
+            return Ok(());
+        }
+        self.batch(frame, output)
+    }
+
     fn request(&self, path: &str, body: Option<&Value>) -> Result<Value, RequestFailure> {
         if self.stopping.load(Ordering::Acquire) {
             return Err(RequestFailure::Status(0));
         }
         let url = format!("{}{path}", self.base);
         let response = if let Some(body) = body {
-            let mut request = self.agent.post(&url).header(
-                "User-Agent",
-                concat!("VERA20k/", env!("CARGO_PKG_VERSION"), " multiplayer-client"),
-            );
+            let mut request = self.agent.post(&url).header("User-Agent", USER_AGENT);
             if path == "/v1/sessions" {
-                // Its relay CONFIRM carries a federation roster; see services/lobby.
+                // Its relay CONFIRM carries a federation roster; see docs/lobby-protocol.md.
                 request = request.header("Vera-Relay-Federation", "1");
             }
             if let Some(token) = &self.token {
@@ -373,10 +451,7 @@ impl Client {
             }
             request.send_json(body)
         } else {
-            let mut request = self.agent.get(&url).header(
-                "User-Agent",
-                concat!("VERA20k/", env!("CARGO_PKG_VERSION"), " multiplayer-client"),
-            );
+            let mut request = self.agent.get(&url).header("User-Agent", USER_AGENT);
             if let Some(token) = &self.token {
                 request = request.header("Authorization", format!("Bearer {token}"));
             }
@@ -430,6 +505,7 @@ fn spawn_translator(
         token: None,
         cursor: 0,
         active_match: None,
+        spawned: false,
     };
     let output = output.clone();
     std::thread::Builder::new()
@@ -469,6 +545,7 @@ pub(super) fn run(
         token: None,
         cursor: 0,
         active_match: None,
+        spawned: false,
     };
     let translator = spawn_translator(&client, &output);
     run_loop(client, input, output, translator);
@@ -496,7 +573,7 @@ macro_rules! serial_driver {
     $($asynchronous)? fn session_failed(&mut self, error: RequestFailure, output: &Sender<Response>) -> bool {
         if let RequestFailure::UpgradeRequired(message) = error {
             // The lobby keeps serving an outdated session's events, finish,
-            // leave and logout (services/lobby/service.js), so it stays.
+            // leave and logout (docs/lobby-protocol.md), so it stays.
             let _ = output.send(Response::Outdated { message });
             return false;
         }
@@ -553,11 +630,21 @@ macro_rules! serial_driver {
     ) -> Duration {
         match result {
             Ok(()) => {
+                if *failed_polls > 0 {
+                    let _ = output.send(Response::LobbyReachable);
+                }
                 *failed_polls = 0;
-                Duration::from_secs(1)
+                if self.spawned && self.active_match.is_some() {
+                    SPAWNED_MATCH_POLL
+                } else {
+                    Duration::from_secs(1)
+                }
             }
             Err(error) if platform_await!(self.session_failed(error.clone(), output)) => Duration::from_secs(30),
             Err(_) => {
+                if *failed_polls == 0 {
+                    let _ = output.send(Response::LobbyUnreachable);
+                }
                 *failed_polls = failed_polls.saturating_add(1);
                 Duration::from_secs((1u64 << (*failed_polls).min(5)).min(30))
             }
@@ -588,16 +675,23 @@ macro_rules! serial_driver {
             translator: Option<Sender<(u64, String, String, &'static str)>>,
         ) {
     let stopping = Arc::clone(&client.stopping);
+    #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+    let mut streams = stream::Streams::new(&client.base);
     let mut failed_polls = 0_u8;
     let mut next_poll = Instant::now();
+    let mut queued = VecDeque::new();
     loop {
         if stopping.load(Ordering::Acquire) {
             break;
         }
-        let request = match platform_await!(next_request(&input)) {
-            Ok(request) => request,
-            Err(()) => break,
+        let request = match queued.pop_front() {
+            Some(request) => Some(request),
+            None => match platform_await!(next_request(&input)) {
+                Ok(request) => request,
+                Err(()) => break,
+            },
         };
+        queue_arrivals(&input, request.as_ref(), &mut queued);
         if stopping.load(Ordering::Acquire) {
             break;
         }
@@ -776,6 +870,7 @@ macro_rules! serial_driver {
                                 attempt,
                                 player_id: session.player_id,
                                 nickname: session.nickname,
+                                motd: session.motd,
                             })
                             .is_err()
                         {
@@ -807,9 +902,7 @@ macro_rules! serial_driver {
             }
             Some(Request::AdoptSession { token }) => {
                 if client.token.is_none() {
-                    client.token = Some(token);
-                    client.cursor = 0;
-                    client.active_match = None;
+                    client.adopt_session(token);
                     failed_polls = 0;
                 }
             }
@@ -830,13 +923,6 @@ macro_rules! serial_driver {
                     }
                 }
             }
-            Some(Request::Stats) => {
-                if let Ok(stats) = platform_await!(client.request("/v1/stats", None)).and_then(|value| {
-                    serde_json::from_value(value).map_err(|_| RequestFailure::Status(0))
-                }) {
-                    let _ = output.send(Response::Stats(stats));
-                }
-            }
             Some(Request::Command {
                 id,
                 operation,
@@ -845,7 +931,7 @@ macro_rules! serial_driver {
                 if operation == "logout" && client.token.is_none() {
                     // This serial worker has either already acknowledged
                     // logout or never obtained a bearer. No old authority is
-                    // left to clean up, including Back from the welcome page.
+                    // left to clean up, including Back from the sign-in page.
                     let _ = output.send(Response::CommandCompleted { id, operation });
                     continue;
                 }
@@ -890,7 +976,11 @@ macro_rules! serial_driver {
                         if !platform_await!(client.session_failed(error.clone(), &output)) && operation != "renew_relay" =>
                     {
                         let _ = output.send(if operation == "start" {
-                            Response::StartRejected { id }
+                            Response::StartRejected {
+                                id,
+                                retryable: error.command_failure(operation)
+                                    == CommandFailure::Retryable,
+                            }
                         } else {
                             Response::CommandFailed {
                                 id,
@@ -919,7 +1009,24 @@ macro_rules! serial_driver {
             }
             None => {}
         }
-        if client.token.is_some() && Instant::now() >= next_poll {
+        #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+        let streaming = {
+            while let Some(frame) = streams.next(client.token.as_deref()) {
+                // A bad frame ends the stream; the next poll asks again.
+                if client.streamed(frame, &output).is_err() {
+                    streams.close();
+                }
+            }
+            streams.open(client.stream_bearer(), client.cursor, &stopping);
+            // A stream that is up is a lobby that answers.
+            if streams.live() && failed_polls > 0 {
+                client.poll_finished(Ok(()), &mut failed_polls, &output);
+            }
+            streams.live()
+        };
+        #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+        let streaming = false;
+        if client.token.is_some() && !streaming && Instant::now() >= next_poll {
             let result = platform_await!(client
                 .request(&format!("/v1/events?after={}", client.cursor), None))
                 .and_then(|value| client.batch(value, &output));
@@ -934,9 +1041,11 @@ serial_driver!();
 #[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
 serial_driver!(async);
 
+// Stream frames arrive on their own channel, so the worker looks for them
+// every 50 ms, as the browser worker does for requests.
 #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
 fn next_request(input: &Receiver<Request>) -> Result<Option<Request>, ()> {
-    match input.recv_timeout(Duration::from_secs(1)) {
+    match input.recv_timeout(Duration::from_millis(50)) {
         Ok(request) => Ok(Some(request)),
         Err(RecvTimeoutError::Timeout) => Ok(None),
         Err(RecvTimeoutError::Disconnected) => Err(()),
@@ -956,6 +1065,8 @@ async fn next_request(input: &Receiver<Request>) -> Result<Option<Request>, ()> 
 
 #[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
 mod browser;
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+mod stream;
 #[cfg(all(feature = "wasm-net", target_arch = "wasm32", target_os = "unknown"))]
 pub(super) use browser::{RequestOwner, start as start_browser};
 
@@ -986,6 +1097,23 @@ mod tests {
         let mut substituted = response;
         substituted["nickname"] = json!("AnotherAccount");
         assert!(decode_session(substituted, &nickname).is_err());
+    }
+
+    #[test]
+    fn authentication_response_carries_the_operators_welcome() {
+        let response = session_response();
+        let nickname = response["nickname"].as_str().unwrap().to_owned();
+        assert_eq!(
+            decode_session(response.clone(), &nickname).unwrap().motd,
+            None
+        );
+        let mut welcomed = response;
+        welcomed["motd"] = json!("Welcome to VERA20K Online!\nHave fun.");
+        let accepted = decode_session(welcomed, &nickname).unwrap();
+        assert_eq!(
+            accepted.motd.as_deref(),
+            Some("Welcome to VERA20K Online!\nHave fun.")
+        );
     }
 
     #[test]
@@ -1048,12 +1176,15 @@ mod tests {
             token: Some("synthetic-test-session".to_owned()),
             cursor: 19,
             active_match: None,
+            spawned: false,
         };
         let mut failures = 0;
         assert_eq!(
             client.poll_finished(Err(RequestFailure::Status(0)), &mut failures, &output),
             Duration::from_secs(2)
         );
+        // One status line when the outage begins and one when it ends.
+        assert!(matches!(input.try_recv(), Ok(Response::LobbyUnreachable)));
         assert_eq!(
             client.poll_finished(Err(RequestFailure::Status(503)), &mut failures, &output),
             Duration::from_secs(4)
@@ -1071,11 +1202,46 @@ mod tests {
             Duration::from_secs(1)
         );
         assert_eq!(failures, 0);
+        assert!(matches!(input.try_recv(), Ok(Response::LobbyReachable)));
+        client.poll_finished(Ok(()), &mut failures, &output);
+        assert!(input.try_recv().is_err());
         client.poll_finished(Err(RequestFailure::Status(401)), &mut failures, &output);
         assert!(client.token.is_none());
         assert!(matches!(input.try_recv(), Ok(Response::Offline)));
         assert!(client.session_failed(RequestFailure::Status(401), &output));
         assert!(input.try_recv().is_err());
+    }
+
+    #[test]
+    fn periodic_requests_do_not_pile_up_behind_a_timing_out_command() {
+        let (requests, input) = std::sync::mpsc::channel();
+        let command = |id, operation, payload| Request::Command {
+            id,
+            operation,
+            payload,
+        };
+        let renew = |id, match_id| command(id, "renew_relay", json!({"match_id":match_id}));
+        for request in [
+            command(2, "ready", json!({"ready":true})),
+            command(3, "ping", json!({})),
+            renew(4, "a"),
+            renew(5, "a"),
+            renew(6, "b"),
+            command(7, "chat", json!({"text":"gg"})),
+            command(8, "chat", json!({"text":"gg"})),
+        ] {
+            requests.send(request).unwrap();
+        }
+        let mut queued = VecDeque::new();
+        queue_arrivals(&input, Some(&command(1, "ping", json!({}))), &mut queued);
+        let ids: Vec<_> = queued
+            .iter()
+            .map(|request| match request {
+                Request::Command { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, [Some(2), Some(4), Some(6), Some(7), Some(8)]);
     }
 
     #[test]
@@ -1088,6 +1254,7 @@ mod tests {
             token: Some("synthetic-test-session".to_owned()),
             cursor: 19,
             active_match: None,
+            spawned: false,
         };
         let conflict = RequestFailure::response(
             409,
@@ -1141,6 +1308,7 @@ mod tests {
             token: Some("synthetic-test-session".to_owned()),
             cursor: 19,
             active_match: None,
+            spawned: false,
         };
         assert!(!client.session_failed(refused(reason), &output));
         assert!(client.token.is_some());
@@ -1160,6 +1328,7 @@ mod tests {
             token: None,
             cursor: 0,
             active_match: None,
+            spawned: false,
         };
         let response = json!({"cursor":2,"events":[
             {"sequence":1,"kind":"created","payload":{}},
@@ -1188,6 +1357,82 @@ mod tests {
     }
 
     #[test]
+    fn stream_frames_behind_a_command_reply_deliver_only_newer_events() {
+        let (output, input) = std::sync::mpsc::channel();
+        let mut client = Client {
+            stopping: Arc::new(AtomicBool::new(false)),
+            agent: ureq::Agent::new_with_defaults(),
+            base: String::new(),
+            token: None,
+            cursor: 5,
+            active_match: None,
+            spawned: false,
+        };
+        let event = |sequence| json!({"sequence":sequence,"kind":"chat","payload":{}});
+        client
+            .streamed(json!({"cursor":4,"events":[event(4)]}), &output)
+            .unwrap();
+        assert_eq!(client.cursor, 5);
+        client
+            .streamed(
+                json!({"cursor":6,"events":[event(4), event(5), event(6)]}),
+                &output,
+            )
+            .unwrap();
+        let delivered: Vec<_> = input
+            .try_iter()
+            .map(|response| match response {
+                Response::Event(event) => event.sequence,
+                _ => panic!("only events"),
+            })
+            .collect();
+        assert_eq!((delivered, client.cursor), (vec![6], 6));
+    }
+
+    #[test]
+    fn a_spawned_match_polls_slowly_and_never_streams_once_timing_is_confirmed() {
+        let (output, _input) = std::sync::mpsc::channel();
+        let timing = || {
+            json!({"cursor":1,"events":[{"sequence":1,"kind":"timing_confirmed",
+                "payload":{"match_id":"11111111-1111-1111-1111-111111111111"}}]})
+        };
+        let client = || Client {
+            stopping: Arc::new(AtomicBool::new(false)),
+            agent: ureq::Agent::new_with_defaults(),
+            base: String::new(),
+            token: None,
+            cursor: 0,
+            active_match: None,
+            spawned: false,
+        };
+        let mut failures = 0;
+
+        let mut spawned = client();
+        spawned.adopt_session("synthetic-test-session".to_owned());
+        assert_eq!(spawned.stream_bearer(), None);
+        // The start barrier waits on the other players' events.
+        assert_eq!(
+            spawned.poll_finished(Ok(()), &mut failures, &output),
+            Duration::from_secs(1)
+        );
+        spawned.batch(timing(), &output).unwrap();
+        assert_eq!(
+            spawned.poll_finished(Ok(()), &mut failures, &output),
+            Duration::from_secs(60)
+        );
+
+        // A lobby session's match keeps its stream and its pace.
+        let mut lobby = client();
+        lobby.token = Some("synthetic-test-session".to_owned());
+        assert_eq!(lobby.stream_bearer(), Some("synthetic-test-session"));
+        lobby.batch(timing(), &output).unwrap();
+        assert_eq!(
+            lobby.poll_finished(Ok(()), &mut failures, &output),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
     fn active_match_resume_preserves_identity_and_rejects_another_match_or_old_cursor() {
         let (output, input) = std::sync::mpsc::channel();
         let id = "11111111-1111-1111-1111-111111111111";
@@ -1198,6 +1443,7 @@ mod tests {
             token: Some("synthetic-test-session".to_owned()),
             cursor: 19,
             active_match: None,
+            spawned: false,
         };
         client
             .batch(

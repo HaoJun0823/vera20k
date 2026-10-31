@@ -151,7 +151,12 @@ pub(crate) fn install_world_presentation(
     state.match_state.match_presentation.interpolation.clear();
     state.match_state.match_presentation.lasers.clear_on_load();
     #[cfg(feature = "ares")]
-    state.match_state.match_presentation.flying_credits.borrow_mut().clear_on_load();
+    state
+        .match_state
+        .match_presentation
+        .flying_credits
+        .borrow_mut()
+        .clear_on_load();
     state
         .match_state
         .match_presentation
@@ -191,6 +196,11 @@ pub(crate) fn install_world_presentation(
         .match_presentation
         .super_timer_blinks
         .clear();
+    state
+        .match_state
+        .match_presentation
+        .super_timer_dock
+        .reset();
     sync_in_game_options_speed_from_sim(state);
 
     state.match_state.match_presentation.tile_atlas = assets.tile_atlas;
@@ -206,8 +216,10 @@ pub(crate) fn install_world_presentation(
     state.match_state.match_presentation.sidebar_chrome = assets.sidebar_chrome;
     #[cfg(feature = "phobos")]
     {
-        state.match_state.match_presentation.center_pause_menu_background =
-            assets.center_pause_menu_background;
+        state
+            .match_state
+            .match_presentation
+            .center_pause_menu_background = assets.center_pause_menu_background;
         state.match_state.match_presentation.sw_sidebar_art = assets.sw_sidebar_art;
         let significance = state
             .match_state
@@ -342,6 +354,13 @@ pub(crate) fn install_world_presentation(
             &state.renderer.batch_renderer,
             assets,
             rules.digital_display_types().types(),
+        );
+        overlay.load_insignia_shapes(
+            &state.renderer.gpu.device,
+            &state.renderer.gpu.queue,
+            &state.renderer.batch_renderer,
+            assets,
+            rules,
         );
     }
     // Phobos placement preview strips embed the active theater's palette and
@@ -730,6 +749,8 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
             // Main_Game 0x0048CE7E: State_Machine's admission latch.
             state.match_state.match_presentation.modal_latch = true;
             state.frontend.screen = GameScreen::InGame;
+            #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+            crate::web::match_started();
             if returns_scenario_rng_to_multiplayer_shell {
                 state
                     .frontend

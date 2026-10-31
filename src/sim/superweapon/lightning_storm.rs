@@ -676,6 +676,7 @@ pub(super) fn ground_strike(
             land,
             coordinate,
             coordinate,
+            false,
         ) {
             crate::sim::world::damage_consequences::admit_explosion_effect(sim, rules, effect);
         }
@@ -702,9 +703,11 @@ pub(super) fn ground_strike(
             coordinate,
             general.lightning_damage,
             warhead,
+            true,
             (crate::sim::combat::RAD_NO_ATTACKER, house, warhead_ref),
             frame_effects,
-        );
+        )
+        .bridge_state_changed;
     } else {
         log::warn!(
             "Lightning warhead '{}' not found in rules",

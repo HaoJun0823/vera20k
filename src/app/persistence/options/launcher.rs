@@ -19,8 +19,8 @@ use crate::ui::main_menu_dialogs::options::{
 /// `0x0055FDB0..0x0056047A`. Trackbar set-position rejects an out-of-range
 /// request and leaves the fresh position at zero; it does not clamp. VERA's
 /// Full Screen box starts unticked; the opener sets it from the window. Its
-/// Original 4:3 Shape and YR Loading & Menu Movie boxes and Sidebar list
-/// show the retained choices.
+/// Original 4:3 Shape and Original YR Style boxes and Sidebar list show the
+/// retained choices.
 pub(crate) fn launcher_values_from_profile(
     profile: &RetailOptionsProfile,
 ) -> LauncherOptionsValues {
@@ -39,7 +39,13 @@ pub(crate) fn launcher_values_from_profile(
         shift_queue: profile.shift_queue,
         wol_test_service: profile.wol_test_service,
         fps_counter: false,
+        skip_startup_logo: profile.skip_startup_logo,
         sidebar: profile.sidebar,
+        // The slider's position is the stored level less the retail strength,
+        // so gamemd's own bands sit at the left end.
+        house_color_position: profile
+            .house_color_strength
+            .saturating_sub(crate::rules::house_colors::STRENGTH_RETAIL),
         score_position: admitted_volume_position(profile.score_volume),
         sound_position: admitted_volume_position(profile.sound_volume),
         voice_position: admitted_volume_position(profile.voice_volume),
@@ -93,6 +99,9 @@ pub(crate) trait LauncherPreviewOperations: AudioVolumeOperations {
     fn store_shift_queue(&mut self, shift_queue: bool);
     fn store_wol_test_service(&mut self, wol_test_service: bool);
     fn set_fps_counter(&mut self, shown: bool);
+    fn store_skip_startup_logo(&mut self, skip: bool);
+    /// VERA's team-colour strength, as the level the profile stores.
+    fn store_house_color_strength(&mut self, strength: u8);
 }
 
 /// Dispatch one already-ordered UI event without an INI write. The three audio
@@ -129,6 +138,12 @@ pub(crate) fn dispatch_launcher_preview_event(
             operations.store_wol_test_service(wol_test_service);
         }
         LauncherOptionsEvent::FpsCounterChanged(shown) => operations.set_fps_counter(shown),
+        LauncherOptionsEvent::SkipStartupLogoChanged(skip) => {
+            operations.store_skip_startup_logo(skip);
+        }
+        LauncherOptionsEvent::HouseColorStrengthChanged(strength) => {
+            operations.store_house_color_strength(strength);
+        }
         LauncherOptionsEvent::ScorePreview(volume) => {
             apply_volume(operations, AudioVolume::Score, volume, true)
         }
@@ -308,6 +323,7 @@ mod tests {
             unit_action_lines: false,
             show_hidden: true,
             yr_original_style: true,
+            skip_startup_logo: true,
             render_interpolation: false,
             mouse_wheel_zoom: true,
             shift_queue: true,
@@ -318,6 +334,7 @@ mod tests {
         assert!(!booleans.target_lines);
         assert!(booleans.show_hidden);
         assert!(booleans.yr_original_style);
+        assert!(booleans.skip_startup_logo);
         assert!(!booleans.render_interpolation);
         assert!(booleans.mouse_wheel_zoom);
         assert!(booleans.shift_queue);

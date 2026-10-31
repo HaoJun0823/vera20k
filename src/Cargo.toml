@@ -1,6 +1,6 @@
 [package]
 name = "vera20k-core"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 description = "VERA20k's GPU-free engine: assets, rules, map, simulation, lockstep and the headless scenario"
 publish = false
@@ -49,6 +49,9 @@ phobos = []
 npatch = []
 # VERA20K's own first-party extension capability.
 verax = []
+# VERA20K's opt-in bug-fix extension adopting the NPExt changelog corrections;
+# builds without it keep every native path.
+npbug = []
 # The client's Ctrl+Shift dev chord reaches simulation and utility hooks.
 dev-overlays = []
 # Read-only snapshots and opt-in frame timing for the browser dashboard.
@@ -66,6 +69,11 @@ glam = { workspace = true }
 # Fixed-point arithmetic for simulation positions and other fixed-width mechanisms.
 # Native floating-point mechanisms document their numeric contract at their owner.
 fixed = { version = "1", features = ["serde"] }
+# musl's libm in plain Rust: the same transcendental results on every target, for
+# the few native atan/ln calls whose results reach shared state (the random map
+# generator). Host C libraries differ in the last bit between platforms, and
+# glibc picks its variant by CPU.
+libm = "0.2.16"
 
 # --- Serialization ---
 serde = { workspace = true }
@@ -126,6 +134,15 @@ half = { version = "2", default-features = false, features = ["num-traits"] }
 hashbrown = { version = "0.16", default-features = false, features = ["default-hasher", "inline-more"] }
 num-traits = { version = "0.2", features = ["libm"] }
 unicode-ident = "1"
+
+# The native client's tungstenite -> rand enables chacha20's RNG support.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
+chacha20 = { version = "0.10", default-features = false, features = ["rng"] }
+
+# wgpu's Vulkan/DX12 platform package enables gpu-allocator's hashbrown defaults.
+# Match that package's target gate, keeping Metal and browser tests unchanged.
+[target.'cfg(any(windows, target_os = "linux", target_os = "android", target_os = "freebsd"))'.dev-dependencies]
+hashbrown = { version = "0.16", default-features = false, features = ["default"] }
 
 # winit's Wayland decorations (this is winit's cfg) enable tiny-skia's SIMD,
 # which adds bytemuck's aarch64_simd feature to the client build.

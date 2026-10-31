@@ -495,8 +495,11 @@ fn relay_section_at(source: u8, sources_mask: u32, tick_hz: u16) -> String {
 
 #[test]
 fn one_human_with_ai_uses_the_certified_relay_transport() {
-    let text = network_spawn(1, 0, &relay_section(0, 1))
-        .replacen("[Settings]\n", "[Settings]\nAIPlayers=1\n", 1);
+    let text = network_spawn(1, 0, &relay_section(0, 1)).replacen(
+        "[Settings]\n",
+        "[Settings]\nAIPlayers=1\n",
+        1,
+    );
     let text = format!(
         "{text}\n[HouseHandicaps]\nMulti2=2\n[HouseCountries]\nMulti2=1\n[HouseColors]\nMulti2=1\n"
     );
@@ -738,6 +741,41 @@ fn single_player_spawn_keeps_its_offline_admission() {
     // Retail's eight waypoints still bound a single-player start.
     let far = SKIRMISH.replacen("Multi2=0\n[Multi1", "Multi2=8\n[Multi1", 1);
     assert!(SpawnRequest::parse(&far).is_err());
+}
+
+#[test]
+fn relay_gateway_is_an_optional_websocket_origin() {
+    let text = network_spawn(2, 1, &relay_section(1, 0b11));
+    let gateway = |value: &str| {
+        let named = text.replacen("[Relay]\n", &format!("[Relay]\nGatewayUrl={value}\n"), 1);
+        let SpawnTransport::Relay(relay) = parse_network(&named).transport else {
+            panic!("relay transport")
+        };
+        relay.gateway_url
+    };
+    let SpawnTransport::Relay(relay) = parse_network(&text).transport else {
+        panic!("relay transport")
+    };
+    assert_eq!(
+        relay.gateway_url, None,
+        "the compiled gateway stays the default"
+    );
+    assert_eq!(
+        gateway("wss://gw.example.com:8001/").as_deref(),
+        Some("wss://gw.example.com:8001")
+    );
+    assert_eq!(
+        gateway("ws://127.0.0.1:8788").as_deref(),
+        Some("ws://127.0.0.1:8788")
+    );
+    for broken in [
+        "https://gw.example.com",
+        "ws://gw.example.com",
+        "wss://gw.example.com/game",
+    ] {
+        let named = text.replacen("[Relay]\n", &format!("[Relay]\nGatewayUrl={broken}\n"), 1);
+        assert!(SpawnRequest::parse(&named).is_err(), "{broken}");
+    }
 }
 
 #[test]

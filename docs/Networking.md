@@ -19,8 +19,8 @@ VERA20k clients; legacy IPX and gamemd wire compatibility are not supported.
 
 The Network menu enters the LAN lobby. The physical service handles discovery,
 join, options, roster, readiness and GO, then transfers the same socket pair into
-the running match. For online play, choose Internet → Custom Match, enter a
-username and press OK. Names use 1–24 ASCII letters, digits, underscores or hyphens;
+the running match. For online play, choose Internet, enter a username and
+press OK. Names use 1–24 ASCII letters, digits, underscores or hyphens;
 each active player needs a different name. No password or account creation is
 required. Players then create or join a game. A host can
 select Easy, Normal or Hard AI from an open player slot in Battle or Free For All.
@@ -47,13 +47,20 @@ multiple human sources, including observers, retain synchronized scheduling even
 after other players leave. AI players never acquire network identities.
 
 Online matches with two or more human sources use a lobby-certified fixed clock
-and one immutable relay command stream. All originally admitted clients must agree
-to the initial world before it starts. At each deadline, missing input is empty;
-a command joins the next unsealed frame. The sender also waits for that commit.
-Each new command batch goes out twice, so one lost uplink datagram does not hold
-it and every later batch for the 100 ms retry.
+and one immutable relay command stream. Every originally admitted client that
+finishes loading must agree to the initial world before it starts. A player who
+never finishes loading leaves in the first frame once silent for 60 seconds, or 3
+minutes after the first client was ready; the native loading timeout leaves that
+departure to the relay. A match spread over several relays is cancelled instead.
+At each deadline, missing input is empty; a command joins the next unsealed
+frame. The sender also waits for that commit. Each new command batch goes out
+twice, so one lost uplink datagram does not hold it and every later batch for
+the 100 ms retry.
 Frames use the existing Event codec and simulation queues, with a fresh compression
 cache per self-contained encrypted batch. The relay never receives payload keys.
+A batch that fails the payload key's authentication or does not decode makes its
+sender leave at that frame on every client, as if by Leave; the rest of its
+stream is ignored.
 
 Clients negotiate server-pushed updates from that same retained history. Healthy
 clients send cumulative receive watermarks instead of continually requesting new
@@ -71,7 +78,8 @@ that same frame and stop. Resume uses a separate authenticated control, so it
 works while simulation ticks are stopped. Both markers use the normal ordered
 history and replay recovery. Connections, chat and ticket renewal keep running;
 accepted gameplay inputs wait for their assigned frames after resume. Opening
-Options alone remains local. Confirming Leave resumes as needed until the queued
+Options alone remains local. After a resume nobody can pause again for 30
+seconds. Confirming Leave resumes as needed until the queued
 EXIT executes. Shared paused time is excluded from the score-screen duration.
 This feature requires updated clients and relay;
 it is unavailable in a mixed-version room or a direct LAN match.
@@ -90,9 +98,16 @@ Peer lag, acknowledgements and CPU reports cannot slow the shared clock. The
 initial speed stays fixed for the match. The relay keeps a bounded RAM cache and the full encrypted match journal on
 disk. Temporary connection loss keeps the player's identity, units, input cursor
 and world in the match; the client renews its ticket and reads missed frames when
-connectivity returns. Network silence never writes an exit. The UI shows
-Reconnecting or Catching up while healthy clients continue. Explicit Leave or the
-24-hour match lifetime ends membership. The relay remains required for progress.
+connectivity returns. The UI shows Reconnecting or Catching up while healthy
+clients continue. After ten minutes of silence the relay removes the player
+through the same stream. Like a native lost connection, a removal for silence
+destroys the player's House and shows "connection lost"; a player who quits still
+leaves through EXIT. While Reconnecting, the relay cannot sequence that EXIT, so
+a confirmed Abort Mission returns to the shell once the relay has been silent for
+three seconds; the client's relay Leave, or else that silence, removes the player. Silence that long, explicit Leave, joining another online
+match on the same relay, or the match's final frame after 24 hours of play ends
+membership. The relay
+remains required for progress.
 
 Authored Battle matches record reconstructible JSON replays in `replays/`.
 `vera20k --replay <replay.json> --ra2-dir <retail-directory>` opens read-only

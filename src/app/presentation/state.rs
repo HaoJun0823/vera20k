@@ -82,6 +82,8 @@ pub(crate) struct MatchPresentationState {
     /// The Supers' timer blinks (`SuperClass+0x40`, `+0x48`), by owner and
     /// type (`presentation::super_timers`).
     pub(crate) super_timer_blinks: crate::app::presentation::super_timers::TimerBlinks,
+    /// Local timer-list folding and scroll state, independent of simulation.
+    pub(crate) super_timer_dock: crate::app::presentation::super_timers::TimerDock,
     pub(crate) combat_lights: crate::app::presentation::combat_lights::CombatLightRuntime,
     /// The sole client owner of native GScreenClass shake offsets; input
     /// events decay it and Simulation only sends ordered axis writes.
@@ -90,6 +92,10 @@ pub(crate) struct MatchPresentationState {
     /// Animated radar chrome — plays 33-frame open/close animation when radar gained/lost.
     pub(crate) radar_anim: Option<crate::render::radar::anim::RadarAnimState>,
     pub(crate) radar_movies: crate::app::radar_movie::RadarMovies,
+    /// Computer opponents' skirmish talking heads. Presentation only: the
+    /// simulation never reads it, and switching it off leaves every
+    /// personality and trigger weight alone.
+    pub(crate) commander_feedback: crate::app::commander_feedback::CommanderFeedback,
     pub(crate) chrono_screen: crate::app::chrono_screen::ChronoScreenPresentation,
     pub(crate) scenario_pause: crate::app::match_runtime::scenario_pause::ScenarioPauseClock,
     /// Requested-versus-resolved atlas identity used to construct `radar_anim`.

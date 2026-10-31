@@ -139,6 +139,10 @@ pub(crate) struct RelaySpawn {
     pub(crate) grant: crate::app::shell_wol::DecodedRelayGrant,
     /// HTTPS origin (loopback HTTP allowed) of the match API.
     pub(crate) service_url: String,
+    /// `[Relay] GatewayUrl`: the browser build's WebSocket gateway to `address`
+    /// (WSS origin, loopback WS allowed); without it, the compiled one. Desktop
+    /// sends UDP to `address` and does not use it.
+    pub(crate) gateway_url: Option<String>,
     /// Bearer for `service_url`.
     pub(crate) token: String,
     /// The launch speed the ordering certificate's fixed clock names.
@@ -155,6 +159,7 @@ impl std::fmt::Debug for RelaySpawn {
             .field("match_id", &self.match_id)
             .field("player_id", &self.player_id)
             .field("service_url", &self.service_url)
+            .field("gateway_url", &self.gateway_url)
             .field("game_speed", &self.game_speed)
             .field("admission_timeout", &self.admission_timeout)
             .finish_non_exhaustive()
@@ -565,8 +570,9 @@ fn skirmish(
         "AIPlayers={ai_count} does not match {} active HouseHandicaps entries",
         opponents.len()
     );
-    // The lobby's start admission (services/lobby/protocol.md): spectators
-    // exclude AI, and at least two participants play.
+    // The lobby's start admission (docs/lobby-protocol.md): spectators
+    // exclude AI, and at least two participants play. Each spectator takes
+    // an observer House (`ScenarioSession::observer_houses`).
     let spectators = humans.iter().filter(|human| human.is_observer()).count();
     ensure!(
         spectators == 0 || ai_count == 0,
@@ -900,6 +906,10 @@ fn transport(
             player_id,
             grant,
             service_url: service_origin(&text(relay, "ServiceUrl")?)?,
+            gateway_url: relay
+                .is_present("GatewayUrl")
+                .then(|| gateway_origin(&text(relay, "GatewayUrl")?))
+                .transpose()?,
             token,
             game_speed,
             admission_timeout: crate::util::time::Duration::from_secs(admission_timeout as u64),
@@ -939,19 +949,28 @@ fn port(section: &IniSection) -> Result<u16> {
 /// `ServiceUrl` is an origin: HTTPS, or HTTP to a loopback host for
 /// development. Returned without a trailing slash.
 fn service_origin(url: &str) -> Result<String> {
+    relay_origin("ServiceUrl", url, "https", "http")
+}
+
+fn gateway_origin(url: &str) -> Result<String> {
+    relay_origin("GatewayUrl", url, "wss", "ws")
+}
+
+fn relay_origin(key: &str, url: &str, secure_scheme: &str, plain_scheme: &str) -> Result<String> {
     let origin = url.strip_suffix('/').unwrap_or(url);
-    let (secure, authority) = if let Some(authority) = origin.strip_prefix("https://") {
-        (true, authority)
-    } else if let Some(authority) = origin.strip_prefix("http://") {
-        (false, authority)
-    } else {
-        bail!("[Relay] ServiceUrl must be an https:// origin");
-    };
+    let (secure, authority) =
+        if let Some(authority) = origin.strip_prefix(&format!("{secure_scheme}://")) {
+            (true, authority)
+        } else if let Some(authority) = origin.strip_prefix(&format!("{plain_scheme}://")) {
+            (false, authority)
+        } else {
+            bail!("[Relay] {key} must be an {secure_scheme}:// origin");
+        };
     ensure!(
         !authority.is_empty()
             && authority.bytes().all(|byte| byte.is_ascii_graphic())
             && !authority.contains(['/', '\\', '@', '?', '#']),
-        "[Relay] ServiceUrl must be an origin without path, query or credentials"
+        "[Relay] {key} must be an origin without path, query or credentials"
     );
     let host = match authority.rfind(':') {
         Some(colon) if !authority[colon..].contains(']') => &authority[..colon],
@@ -962,7 +981,7 @@ fn service_origin(url: &str) -> Result<String> {
             || host.eq_ignore_ascii_case("localhost")
             || host == "[::1]"
             || host.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_loopback()),
-        "[Relay] ServiceUrl must use HTTPS (HTTP only for loopback)"
+        "[Relay] {key} must use {secure_scheme}:// ({plain_scheme}:// only for loopback)"
     );
     Ok(origin.to_owned())
 }

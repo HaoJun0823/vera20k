@@ -223,8 +223,11 @@ pub(super) fn emit_projectile_shrapnel(
                 flak_scatter: child_projectile.flak_scatter,
                 anti_air: child_projectile.aa,
                 airburst: child_projectile.airburst,
+                explodes_airburst: Some(child_projectile.airburst_arm()),
                 inaccurate: child_projectile.inaccurate,
                 floater: child_projectile.floater,
+                #[cfg(feature = "phobos")]
+                gravity: child_projectile.gravity(),
                 elasticity_bits: child_projectile.elasticity.to_bits(),
                 arcing: child_projectile.arcing,
             },

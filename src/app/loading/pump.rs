@@ -301,10 +301,17 @@ pub(crate) struct LoadingRequest {
 }
 
 impl LoadingRequest {
-    pub(crate) fn replay(startup: &crate::sim::replay::ReplayStartup) -> Self {
+    pub(crate) fn replay(
+        startup: &crate::sim::replay::ReplayStartup,
+        map_beside: Option<&str>,
+    ) -> Self {
+        let mut session = startup.launch_session().clone();
+        if let Some(map) = map_beside {
+            session.selected_map_file = Some(map.to_owned());
+        }
         Self {
             startup: LoadingStartup::Replay {
-                session: startup.launch_session().clone(),
+                session,
                 game_mode: startup.game_mode(),
                 native_id_prefix: startup
                     .native_id_prefix()
@@ -1907,6 +1914,7 @@ fn pump_loading_after_present(
                     shared_cell_dummy,
                     tile_variant_selector_cache,
                     &mut progress.sink,
+                    state.persistence.options_profile.house_color_strength,
                 )
                 .map(Some)
             } else {
@@ -1930,6 +1938,7 @@ fn pump_loading_after_present(
                     shared_cell_dummy,
                     tile_variant_selector_cache,
                     progress: &mut progress.sink,
+                    house_color_strength: state.persistence.options_profile.house_color_strength,
                 })?;
                 if result.is_none() {
                     continuing = Some(load);
@@ -2093,6 +2102,7 @@ fn pump_map_construction(
             shared_cell_dummy,
             tile_variant_selector_cache,
             progress: &mut progress.sink,
+            house_color_strength: state.persistence.options_profile.house_color_strength,
         })
     })();
     match step {
@@ -3215,6 +3225,15 @@ fn apply_network_loading_disconnects(
     indices: &[usize],
 ) -> Vec<crate::app::match_runtime::network_match::ConnectionDestroyed> {
     use crate::app::match_runtime::network_match::{ConnectionError, destroy_connection};
+    // VERA online adaptation: the relay certificate fixes an online match's
+    // sources, and the relay departs a player who never becomes ready in the
+    // first frame for every client. A local disconnect would leave this
+    // client's roster short of that certificate.
+    if session.network_return_context()
+        == Some(crate::app::match_runtime::session::NetworkReturnContext::Wol)
+    {
+        return Vec::new();
+    }
     let Some(sim) = result.scenario.simulation.as_mut() else {
         // No House array to consult: the connections still drop.
         for &index in indices {
@@ -3287,50 +3306,44 @@ pub(crate) fn next_native_loading_frame(state: &AppState) -> Option<NextLoadingF
 /// The retained B7 browser is not painted or mutated, so failure can redraw it.
 /// The dialog paints no pointer; the window's own stays as the frame owner
 /// last set it, hidden wherever mouse.sha loaded.
-pub(crate) fn present_saved_game_loading(state: &mut AppState) {
+pub(crate) fn present_saved_game_loading(state: &mut AppState) -> anyhow::Result<bool> {
     if !crate::app::App::ensure_skirmish_shell_chrome(state) {
-        log::warn!("Saved-game loading dialog has no shell chrome");
-        return;
+        anyhow::bail!("Saved-game loading dialog has no shell chrome");
     }
-    let result = (|| -> anyhow::Result<()> {
-        let Some(output) = state
-            .renderer
-            .gpu
-            .acquire_frame()
-            .map_err(|error| anyhow::anyhow!("saved-game loading surface: {error}"))?
-        else {
-            return Ok(());
-        };
-        let mut encoder =
-            state
-                .renderer
-                .gpu
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Saved Game Loading"),
-                });
-        crate::app::frontend::skirmish_shell_render::render_saved_game_loading(
-            state,
-            &mut encoder,
-            &output.texture,
-        )?;
-        state.renderer.fps_overlay.encode(
-            &state.renderer.gpu,
-            &state.renderer.batch_renderer,
-            &mut encoder,
-            &output.texture,
-        );
+    let Some(output) = state
+        .renderer
+        .gpu
+        .acquire_frame()
+        .map_err(|error| anyhow::anyhow!("saved-game loading surface: {error}"))?
+    else {
+        return Ok(false);
+    };
+    let mut encoder =
         state
             .renderer
             .gpu
-            .queue
-            .submit(std::iter::once(encoder.finish()));
-        output.present();
-        Ok(())
-    })();
-    if let Err(error) = result {
-        log::warn!("Saved-game loading dialog presentation failed: {error:#}");
-    }
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Saved Game Loading"),
+            });
+    crate::app::frontend::skirmish_shell_render::render_saved_game_loading(
+        state,
+        &mut encoder,
+        &output.texture,
+    )?;
+    state.renderer.fps_overlay.encode(
+        &state.renderer.gpu,
+        &state.renderer.batch_renderer,
+        &mut encoder,
+        &output.texture,
+    );
+    state
+        .renderer
+        .gpu
+        .queue
+        .submit(std::iter::once(encoder.finish()));
+    output.present(&state.renderer.gpu.queue);
+    Ok(true)
 }
 
 /// After the load gamemd switches to the game mode and shows black until

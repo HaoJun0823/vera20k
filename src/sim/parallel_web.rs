@@ -1,4 +1,4 @@
-//! Single-threaded browser execution of the existing independent work items.
+//! Single-threaded wasm execution of the existing independent work items.
 pub(crate) fn map<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
     items.iter().map(work).collect()
 }

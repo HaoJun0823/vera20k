@@ -76,8 +76,15 @@ impl Simulation {
                 crate::sim::combat::combat_weapon::primary_for_tier(object, entity.veterancy.rank())
                     .is_some()
             }),
-            armed: object
-                .is_some_and(|object| crate::sim::combat::combat_weapon::is_armed(entity, object)),
+            armed: object.is_some_and(|object| {
+                crate::sim::combat::combat_weapon::is_armed(
+                    entity,
+                    object,
+                    &self.substrate.entities,
+                    rules,
+                    &self.interner,
+                )
+            }),
             ammo: entity.ammo().map_or(-1, |ammo| ammo.current()),
             type_ammo: object.map_or(0, |object| object.ammo),
             human: self.owner_is_human(entity.owner()),

@@ -2167,3 +2167,89 @@ fn action4_recruits_real_released_members_then_script50_and_cleanup_share_owners
         rng_before
     );
 }
+
+#[test]
+fn full_harvester_reinforcement_fills_its_hold_with_slot_zero_before_placement() {
+    // Native CreateMembers65DD30 fills slot0 at 65DE53..65DE80 (StorageClass
+    // AddAmount 6C9690) before veterancy and AddMember.
+    use crate::rules::tiberium_type::TiberiumTypeId;
+    use crate::sim::world::TickLane;
+    let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+        return;
+    };
+    let rules = &retail.rules;
+    let object = rules.object("HARV").unwrap();
+    assert_eq!(object.storage, 40, "selected retail HARV capacity");
+    assert_eq!(
+        rules.tiberium_types.get(TiberiumTypeId(0)).unwrap().section,
+        "Riparius"
+    );
+
+    let mut sim = Simulation::with_seed(0x65DD_0030);
+    sim.intern_rule_type_ids(rules);
+    sim.resolve_type_handles(rules);
+    crate::sim::arena_fixture::flat_arena(&mut sim, rules);
+    sim.overlay_grid = Some(crate::sim::overlay_grid::OverlayGrid::new(32, 32));
+    let owner = sim.interner.intern("Americans");
+    sim.houses
+        .register(HouseState::new(owner, 0, Some(owner), true, 0, 10));
+    sim.session.set_current_house_for_test(Some(owner));
+    let credits_before = sim.houses[&owner].economy().credits();
+
+    let map = crate::map::map_file::MapFile::from_bytes(b"[Map]\nTheater=TEMPERATE\nSize=0,0,2,1\nLocalSize=0,0,2,1\n\
+        [IsoMapPack5]\n1=DwALABwBAAIA/////wAAABEAAA==\n[Basic]\nNewINIFormat=4\n\
+        [Waypoints]\n4=16016\n[TeamTypes]\n0=FULL_MINER\n\
+        [FULL_MINER]\nHouse=Americans\nScript=FULL_SCRIPT\nTaskForce=FULL_FORCE\nWaypoint=E\nFull=yes\n\
+        [ScriptTypes]\n0=FULL_SCRIPT\n[FULL_SCRIPT]\n0=50,60\n\
+        [TaskForces]\n0=FULL_FORCE\n[FULL_FORCE]\n0=1,HARV\n\
+        [Triggers]\nARRIVAL=Americans,<none>,Full miner arrives,0,1,1,1,0\n\
+        [Events]\nARRIVAL=1,13,0,0\n[Actions]\nARRIVAL=1,80,1,FULL_MINER,0,0,0,0,E\n\
+        [Tags]\nARRIVAL_TAG=0,Full arrival,ARRIVAL\n").unwrap();
+    let (_, assets) = crate::rules::retail_ini_fixture::retail_assets().unwrap();
+    let teams = TeamAiIniRegistry::load_retail(&assets, &map.ini, true).unwrap();
+    sim.initialize_trigger_definitions(&map, &teams, None, None, None);
+    sim.install_team_ai_registry(&teams, rules).unwrap();
+    sim.session.install_waypoints(&map.waypoints);
+    sim.classify_map_triggers(rules);
+    let team_type = sim.interner.get("FULL_MINER").unwrap();
+    let mut reinforced = None;
+    for _ in 0..32 {
+        let result = sim
+            .advance_app_frame(
+                &[],
+                rules,
+                Some(rules.overlay_registry()),
+                67,
+                TickLane::Ordinary,
+                FrameEffects::default(),
+            )
+            .expect("ordinary frame");
+        assert!(result.tick.frame_committed);
+        if let Some(team) = sim.team_script_vm.first_team_of_type(team_type) {
+            let members: Vec<_> = team.members().collect();
+            assert_eq!(members.len(), 1);
+            reinforced = Some(members[0]);
+            break;
+        }
+    }
+    let reinforced = reinforced.expect("Full=yes must place its positive-Storage member");
+    let entity = sim.entities().get(reinforced).unwrap();
+    assert!(!entity.lifecycle.in_limbo() && entity.lifecycle.cell_marked());
+    assert_eq!(sim.interner.resolve(entity.type_ref()), "HARV");
+    let cargo = entity.miner.as_ref().unwrap().cargo();
+    assert_eq!(cargo.len(), 40);
+    assert!(
+        cargo
+            .iter()
+            .all(|bale| bale.tiberium_type == TiberiumTypeId(0))
+    );
+    assert_eq!(
+        entity.techno_pip_fill_level(object, rules, None),
+        object.pip_max(rules)
+    );
+    assert_eq!(
+        sim.houses[&owner].economy().credits(),
+        credits_before,
+        "fill is not payment"
+    );
+}

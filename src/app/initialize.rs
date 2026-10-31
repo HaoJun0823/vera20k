@@ -540,13 +540,16 @@ impl App {
                 assets,
             )
         });
-        // A client-selected game enters scenario loading directly. This splash
-        // is presented synchronously below, before start_spawn_session runs;
-        // clearing it in that later callback cannot hide the first frame.
-        let mut startup_splash = if !external_launch
-            && capture_dimensions.is_none()
-            && main_menu_shell_error.is_none()
-        {
+        // Native `Init_Game` plays its logo only when the bulk MIX mount
+        // returned success (`0x0052C5A1..A3`), and VERA plays nothing for a
+        // sealed capture or a client-selected launch. A client-selected game
+        // enters scenario loading directly, with no splash either.
+        let process_movies =
+            !external_launch && capture_dimensions.is_none() && main_menu_shell_error.is_none();
+        // `[VERA] SkipStartupLogo=` drops only the logo: the splash and the
+        // first-run intro still play.
+        let play_logo = process_movies && !options_profile.skip_startup_logo;
+        let mut startup_splash = if process_movies {
             startup_asset_manager
                 .as_ref()
                 .zip(startup_fnt.as_ref())
@@ -567,35 +570,39 @@ impl App {
         } else {
             None
         };
-        if let Some(splash) = startup_splash.as_mut() {
-            // Surface acquisition can be transient before the first event-loop
-            // redraw. A splash that did not reach the screen stays unarmed for
-            // the frame loop to retry.
+        if process_movies {
+            // `Init_Game` plays `EA_WWLOGO` (`0x0052C5E2`) before it presents
+            // the splash (`0x0052C5F3`), and the logo needs the frame loop, so
+            // with the logo the load below runs on black and the frame loop
+            // presents the splash and arms its hold once the logo has ended.
+            // Without it the splash goes up now and the load is spent inside
+            // its hold. A present that did not reach the screen stays unarmed
+            // for the frame loop to retry.
+            let splash = startup_splash.as_mut().filter(|_| !play_logo);
             match startup_splash::render_and_present(
                 &gpu,
                 &batch_renderer,
                 &shell_surface_presenter,
                 &depth_view,
                 &fps_overlay,
-                splash,
+                splash.as_deref(),
             ) {
-                Ok(true) => splash.mark_presented(Instant::now()),
-                Ok(false) => {
-                    log::warn!("Initial retail startup splash present deferred: no surface frame");
+                Ok(true) => {
+                    if let Some(splash) = splash {
+                        splash.mark_presented(Instant::now());
+                    }
                 }
-                Err(err) => {
-                    log::warn!("Initial retail startup splash present deferred: {err:#}");
-                }
+                Ok(false) => log::warn!("Initial startup present deferred: no surface frame"),
+                Err(err) => log::warn!("Initial startup present deferred: {err:#}"),
             }
         }
         if external_launch {
             log::info!("External launch: process-start splash skipped");
         }
         InitializationStep::pending(window.clone(), move || {
-            // Ordinary interactive startup runs with the splash already on screen: the
-            // presented swapchain frame stays composited while this thread blocks,
-            // and the hold armed above is measured from that present, so a slow
-            // load is spent inside the five seconds instead of before them.
+            // Ordinary interactive startup runs with the frame above on
+            // screen: the presented swapchain frame stays composited while this
+            // thread blocks.
             let mut process_assets =
                 crate::app::process_assets::ProcessAssets::new_with_ini_config(
                     startup_options.media_archive_mode,
@@ -841,6 +848,19 @@ impl App {
                     }
                     _ => crate::app::persistence::phobos_settings::PhobosClientSettings::default(),
                 };
+                // WinMain reads the one-shot `[Intro] Play=` (`ReadBool`
+                // 0x005295F0: section `Intro` 0x8241C0, key `Play` 0x840BE8,
+                // default 1, `0x006BDF64..0x006BDF89`) and, while the bit it
+                // sets is on, stores `Play=no` and saves the INI
+                // (`0x006BDFED..0x006BE018`) before the game run function
+                // `0x48CCC0` starts; `Init_Game` then plays the intro from
+                // `0x0052CA65`. Sealed captures and client-selected launches
+                // keep the profile untouched, like the retail options snapshot,
+                // and play nothing.
+                let play_intro = process_movies
+                    && game_config.as_ref().is_some_and(|config| {
+                        crate::app::persistence::intro_play::consume(config.paths.settings_dir())
+                    });
                 let mut state = AppState {
             platform: PlatformState::new(
                 window,
@@ -852,6 +872,7 @@ impl App {
                 session: Default::default(),
                 network_wait: Default::default(),
                 network_failure: None,
+                frame_stopped: false,
                 live_network: None,
                 lan_service: None,
                 auto_play: None,
@@ -912,9 +933,11 @@ impl App {
                     detail: Default::default(),
                     hidden_super_anims: Default::default(),
                     super_timer_blinks: Default::default(),
+                    super_timer_dock: Default::default(),
                     minimap: None,
                     radar_anim: None,
                     radar_movies: Default::default(),
+                    commander_feedback: Default::default(),
                     chrono_screen: Default::default(),
                     scenario_pause: Default::default(),
                     radar_animation_source: None,
@@ -1005,7 +1028,8 @@ impl App {
                 external_launch_error: None,
                 external_match_result: None,
                 external_progress: Default::default(),
-                external_idle: false,
+                #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+                browser_exit_pending: false,
                 screen: GameScreen::default(),
                 scenario_catalog,
                 skirmish_modes,
@@ -1022,6 +1046,8 @@ impl App {
                     crate::app::loading::pump::LoadingProgressState::standard_skirmish(),
                 frontend_rules: startup_rules,
                 shell_preview_overlay_registry: None,
+                #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+                updater: Default::default(),
                 skirmish_shell_state,
                 choose_map_last_mode_row: None,
                 multiplayer_shell_runtime,
@@ -1050,6 +1076,7 @@ impl App {
                 shell_exit: None,
                 quit_cascade: None,
                 startup_splash,
+                startup_intro_pending: false,
                 shell_message_box: None,
                 options_dialog: None,
                 keyboard_dialog: None,
@@ -1064,6 +1091,7 @@ impl App {
                 online_cleanup: Default::default(),
                 wol_account: Default::default(),
                 wol_test_credentials: Vec::new(),
+                native_shell_ui: false,
                 network_options: None,
                 lan: None,
                 multiplayer_setup: None,
@@ -1137,6 +1165,19 @@ impl App {
                 // even without a music device. The profile keeps native negative values
                 // for round-trip; physical output owners provide the safe gain clamp.
                 apply_startup_audio_profile(&state.persistence.options_profile, &mut state.audio);
+                // `Init_Game` plays the logo through Play_Movie (`0x0052C5E2`),
+                // then presents the splash (`0x0052C5F3`); the frame loop
+                // starts the first-run intro once the splash hold ends.
+                if process_movies && state.frontend.screen == GameScreen::MainMenu {
+                    state.frontend.startup_intro_pending = play_intro;
+                    if play_logo {
+                        Self::start_fullscreen_movie(
+                            &mut state,
+                            crate::app::frontend::fullscreen_movie::STARTUP_LOGO_MOVIE,
+                            crate::app::frontend::fullscreen_movie::MovieReturn::StartupLogo,
+                        );
+                    }
+                }
                 Self::sync_zoom_pass(&mut state);
                 #[cfg(feature = "telemetry-dashboard")]
                 attach_dashboard(&mut state);

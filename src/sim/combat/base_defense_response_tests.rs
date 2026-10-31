@@ -483,25 +483,43 @@ fn gsi_04_05_is_armed_reads_one_slot_not_the_whole_weapon_array() {
     // every slot NULL — so `GetWeapon(0)` has no `WeaponType`.
     let turret_no_gun = GameEntity::test_default(4, "TURRETNOGUN", "Empty turret", 4, 1);
 
-    assert!(is_armed(&armed, rules.object("ARMED").expect("ARMED")));
+    let mut entities = EntityStore::new();
+    let interner = test_interner();
+    assert!(is_armed(
+        &armed,
+        rules.object("ARMED").expect("ARMED"),
+        &entities,
+        &rules,
+        &interner
+    ));
     assert!(!is_armed(
         &unarmed,
-        rules.object("UNARMED").expect("UNARMED")
+        rules.object("UNARMED").expect("UNARMED"),
+        &entities,
+        &rules,
+        &interner,
     ));
-    assert!(is_armed(&gunner, rules.object("GUNNER").expect("GUNNER")));
+    assert!(is_armed(
+        &gunner,
+        rules.object("GUNNER").expect("GUNNER"),
+        &entities,
+        &rules,
+        &interner
+    ));
     assert!(!is_armed(
         &turret_no_gun,
-        rules.object("TURRETNOGUN").expect("TURRETNOGUN")
+        rules.object("TURRETNOGUN").expect("TURRETNOGUN"),
+        &entities,
+        &rules,
+        &interner,
     ));
 
     // `FootClass::Evaluate_Target_Threat @ 0x004D97A0` scores 0 only when the
     // candidate's existing target is an ARMED Techno; an unarmed one falls
     // through to the real distance/threat score.
-    let mut entities = EntityStore::new();
     entities.insert(armed.clone());
     entities.insert(unarmed.clone());
     let mut candidate = GameEntity::test_default(9, "ARMED", "Responder", 9, 9);
-    let interner = test_interner();
 
     candidate
         .attack_target

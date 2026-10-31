@@ -2410,6 +2410,93 @@ fn techno_weapon_bank_uses_effective_native_gates_and_elite_slot_order() {
     );
 }
 
+/// TiberiumRead721B20..721C1E, RulesRead66BC37..66BC51 and Process668F65:
+/// retain read-time Color/list answers while later passes add Colors and admit
+/// the late-created Debris types' ART bodies. A Type reset keeps the Rules scalar.
+#[test]
+fn mineral_start_inputs_retain_native_reader_state_across_process_and_reset() {
+    use crate::rules::ruleset::RuleSet;
+    use crate::rules::tiberium_type::TiberiumTypeId;
+    let art = IniFile::from_str("[A]\nRate=1\n[ B]\nRate=1\n");
+    let root = IniFile::from_str(
+        "[Colors]\nGold=43,239,255\n\
+         [CombatDamage]\nTiberiumExplosionDamage=-7\nC4Warhead=Super\n\
+         [Tiberiums]\n0=TIB\n[TIB]\nImage=1\nColor=Later\nDebris=A,A,<none>, B\n",
+    );
+    let first = RulesLayerStack::new(root)
+        .process_with_fixed_art(&art)
+        .unwrap();
+    let rules = RuleSet::from_processed_rules(&first).unwrap();
+    let tib = rules.tiberium_types.get(TiberiumTypeId(0)).unwrap();
+    assert_eq!(
+        (tib.color_scheme(), tib.debris()),
+        (0, &["A".into(), "A".into(), " B".into()][..])
+    );
+    assert_eq!(rules.combat_damage.tiberium_explosion_damage, -7);
+    assert_eq!(rules.bridge_warheads.c4_name, "Super");
+    assert_eq!(
+        rules.anim_type_art_read_states(),
+        &[("A".into(), false), (" B".into(), false)]
+    );
+    assert!(
+        crate::rules::effect_asset_catalog::anim_class_roots(&rules).contains(&" B".to_owned())
+    );
+
+    let (_, trace) = first.into_ini_and_native_type_construction_trace();
+    let state = trace.into_registry_state_discarding_events();
+    let restored = save_codec::deserialize(&save_codec::serialize(&state).unwrap()).unwrap();
+    let next = RulesLayerStack::new(IniFile::from_str(
+        "[Colors]\nLater=100,255,200\n\
+         [CombatDamage]\nTiberiumExplosionDamage=$not_hex\nC4Warhead=\n\
+         [Tiberiums]\n0=IGNORED\n[TIB]\nName=Tiberium\nDebris=\n",
+    ))
+    .process_with_fixed_art_and_registry_state(&art, restored)
+    .unwrap();
+    let rules = RuleSet::from_processed_rules(&next).unwrap();
+    let tib = rules.tiberium_types.get(TiberiumTypeId(0)).unwrap();
+    assert_eq!(tib.section, "TIB");
+    assert_eq!(
+        (tib.color_scheme(), tib.debris()),
+        (1, &["A".into(), "A".into(), " B".into()][..])
+    );
+    assert_eq!(rules.combat_damage.tiberium_explosion_damage, -7);
+    assert_eq!(rules.bridge_warheads.c4_name, "Super");
+    assert_eq!(
+        rules.anim_type_art_read_states(),
+        &[("A".into(), true), (" B".into(), true)]
+    );
+    assert!(next.native_type_construction_trace().events().is_empty());
+
+    let (_, trace) = next.into_ini_and_native_type_construction_trace();
+    let cleared = RulesLayerStack::new(IniFile::from_str(
+        "[Tiberiums]\n0=IGNORED\n[TIB]\nDebris=none,<none>\n",
+    ))
+    .process_with_fixed_art_and_registry_state(&art, trace.into_registry_state_discarding_events())
+    .unwrap();
+    let rules = RuleSet::from_processed_rules(&cleared).unwrap();
+    assert!(
+        rules
+            .tiberium_types
+            .get(TiberiumTypeId(0))
+            .unwrap()
+            .debris()
+            .is_empty()
+    );
+    let (_, trace) = cleared.into_ini_and_native_type_construction_trace();
+    let reset = RulesLayerStack::new(IniFile::empty())
+        .process_with_fixed_art_and_registry_state(
+            &art,
+            trace
+                .into_registry_state_discarding_events()
+                .destructive_reset(),
+        )
+        .unwrap();
+    let rules = RuleSet::from_processed_rules(&reset).unwrap();
+    assert_eq!(rules.combat_damage.tiberium_explosion_damage, -7);
+    assert!(rules.tiberium_types.is_empty());
+    assert!(rules.bridge_warheads.c4_name.is_empty());
+}
+
 #[test]
 fn post_type_readers_preserve_crate_through_tiberium_constructor_order() {
     let processed = RulesLayerStack::new(IniFile::from_str(

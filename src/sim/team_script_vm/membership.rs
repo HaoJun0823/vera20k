@@ -152,6 +152,7 @@ impl Simulation {
                         entity.veterancy.rank(),
                         0,
                     )
+                    .and_then(|record| record.weapon_id)
                     .is_some()
                 })
             && entity.ammo().is_some_and(|ammo| ammo.current() == 0)
@@ -247,6 +248,7 @@ impl Simulation {
                 entity.veterancy.rank(),
                 0,
             )
+            .and_then(|record| record.weapon_id)
             .is_some()
             && entity.ammo().is_some_and(|ammo| ammo.current() == 0)
         {

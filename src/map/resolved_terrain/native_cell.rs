@@ -201,11 +201,11 @@ impl NativeAllocatedCellCursor {
         terrain: &ResolvedTerrainGrid,
         size_width: i32,
     ) -> Option<NativeCellIdentity> {
-        let index = self.y.wrapping_mul(512).wrapping_add(self.x);
-        let selected = (0..0x40000)
-            .contains(&index)
-            .then(|| terrain.native_fixed_cell_index((index % 512) as i16, (index / 512) as i16))
-            .flatten()
+        let grid = terrain.cell_grid();
+        let index = self.y.wrapping_shl(grid.shift()).wrapping_add(self.x);
+        let selected = grid
+            .coord_from_index(i64::from(index))
+            .and_then(|(x, y)| terrain.native_fixed_cell_index(x as i16, y as i16))
             .map(NativeCellIdentity::Real);
         self.advance(size_width);
         selected
@@ -254,6 +254,19 @@ impl<'a> NativeCellQuery<'a> {
         }
     }
 
+    /// A simulation lookup driven by one client's input (PlayerPtr, the
+    /// selection). Offline games and their replays share that input, so a
+    /// miss stamps the shared Dummy (`0x00ABDC50`) as native does. VERA
+    /// network adaptation: peers differ in it, so a network game stamps a
+    /// fork, whose coordinate no retained target reads.
+    pub fn for_local_input(terrain: &'a ResolvedTerrainGrid, network: bool) -> Self {
+        if network {
+            Self::isolated(terrain)
+        } else {
+            Self::canonical(terrain)
+        }
+    }
+
     pub fn terrain(&self) -> &'a ResolvedTerrainGrid {
         self.terrain
     }
@@ -276,11 +289,10 @@ impl<'a> NativeCellQuery<'a> {
 
     pub fn lookup_world(&self, x: i32, y: i32) -> NativeCellIdentity {
         let (x, y) = (x / 256, y / 256);
-        let index = y.wrapping_mul(512).wrapping_add(x);
-        if (0..0x40000).contains(&index)
-            && let Some(real) = self
-                .terrain
-                .native_fixed_cell_index((index % 512) as i16, (index / 512) as i16)
+        let grid = self.terrain.cell_grid();
+        let index = y.wrapping_shl(grid.shift()).wrapping_add(x);
+        if let Some((rx, ry)) = grid.coord_from_index(i64::from(index))
+            && let Some(real) = self.terrain.native_fixed_cell_index(rx as i16, ry as i16)
         {
             return NativeCellIdentity::Real(real);
         }
@@ -808,9 +820,9 @@ pub(super) fn native_resolved_cell_index(
     x: i32,
     y: i32,
 ) -> Option<usize> {
-    let linear = crate::map::cell_index::cell_linear_index(x, y)?;
-    let rx = (linear % crate::map::cell_index::CELL_ROW_STRIDE) as usize;
-    let ry = (linear / crate::map::cell_index::CELL_ROW_STRIDE) as usize;
+    let grid = crate::map::cell_index::CellGrid::for_extent(width, height);
+    let (rx, ry) = grid.canonical_coord(x, y)?;
+    let (rx, ry) = (usize::from(rx), usize::from(ry));
     if rx >= usize::from(width) || ry >= usize::from(height) {
         return None;
     }
@@ -821,6 +833,11 @@ pub(super) fn native_resolved_cell_index(
 }
 
 impl ResolvedTerrainGrid {
+    /// Derived from this grid's existing rectangle; no global map mode is retained.
+    pub fn cell_grid(&self) -> crate::map::cell_index::CellGrid {
+        crate::map::cell_index::CellGrid::for_extent(self.width, self.height)
+    }
+
     pub fn shared_cell_dummy(&self) -> SharedCellDummy {
         self.shared_cell_dummy.clone()
     }
@@ -1088,7 +1105,7 @@ impl ResolvedTerrainGrid {
     /// outside the fixed array instead of reproducing native out-of-array UB.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn cellclass_allocation_probe(&self, x: i32, y: i32) -> bool {
-        let Some((rx, ry)) = crate::map::cell_index::canonical_cell_coord(x, y) else {
+        let Some((rx, ry)) = self.cell_grid().canonical_coord(x, y) else {
             return false;
         };
         self.cell(rx, ry).is_some()

@@ -38,6 +38,34 @@ thread_local! {
     static OUTPUT: RefCell<Option<WebOutput>> = const { RefCell::new(None) };
 }
 
+/// Silence the page-owned output when the application exits, keeping it for
+/// the next launch: a closed context cannot run again, and a later one could
+/// start without a user gesture only because this page already had one.
+pub(crate) fn pause() {
+    OUTPUT.with(|slot| {
+        if let Some(output) = slot.borrow_mut().as_mut() {
+            output.stopped = true;
+            let _ = output.ctx.suspend();
+        }
+    });
+}
+
+/// Stop the page-owned output for good, including queued blocks.
+/// Reached from the panic hook, which may interrupt a borrow of the output.
+pub(crate) fn shutdown() {
+    OUTPUT.with(|slot| {
+        if let Some(output) = slot
+            .try_borrow_mut()
+            .ok()
+            .as_deref_mut()
+            .and_then(Option::as_mut)
+        {
+            output.stopped = true;
+            let _ = output.ctx.close();
+        }
+    });
+}
+
 /// Handle to the shared browser output. The output lives for the page, so
 /// dropping a handle does not stop playback.
 pub struct WebAudioSink {
@@ -55,7 +83,13 @@ impl WebAudioSink {
                 output.top_up();
                 *slot = Some(output);
             }
-            let mixer = slot.as_ref().expect("output opened above").mixer.clone();
+            let output = slot.as_mut().expect("output opened above");
+            if output.stopped {
+                output.stopped = false;
+                let _ = output.ctx.resume();
+                output.top_up();
+            }
+            let mixer = output.mixer.clone();
             Ok(Self { mixer })
         })
     }
@@ -67,6 +101,7 @@ impl WebAudioSink {
 
 struct WebOutput {
     ctx: AudioContext,
+    stopped: bool,
     mixer: Mixer,
     source: MixerSource,
     buffers: Vec<AudioBuffer>,
@@ -97,6 +132,7 @@ impl WebOutput {
         );
         Ok(Self {
             ctx,
+            stopped: false,
             mixer,
             source,
             buffers,
@@ -117,6 +153,9 @@ impl WebOutput {
 
     /// Schedule blocks until [`BLOCKS_AHEAD`] are queued past the clock.
     fn top_up(&mut self) {
+        if self.stopped {
+            return;
+        }
         let now = self.ctx.current_time();
         if self.next_start < now {
             self.next_start = now + RESTART_MARGIN_SECS;

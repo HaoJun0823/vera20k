@@ -93,7 +93,13 @@ pub(crate) fn apply_action(state: &mut AppState, action: SetupAction) {
                 && !view.locked
                 && let Some(ui) = state.frontend.multiplayer_setup.as_mut()
             {
-                ui.page_rows(view.row_count, forward);
+                ui.page_rows(view.row_count, view.dialog.rows_per_page(), forward);
+            }
+            Ok(())
+        }
+        SetupAction::GameOptions { open } => {
+            if let Some(ui) = state.frontend.multiplayer_setup.as_mut() {
+                ui.show_options(open);
             }
             Ok(())
         }
@@ -224,7 +230,8 @@ fn select(state: &mut AppState, control: u16, value: i32) -> anyhow::Result<()> 
         SetupColumn::decode(control).ok_or_else(|| anyhow::anyhow!("unknown setup combo"))?;
     let row = usize::from(combo.row);
     if column == SetupColumn::Player {
-        if value == 0 {
+        // 0x5EC9F0 returns at once when the row keeps its item.
+        if value == 0 || combo.selected.map(|index| combo.choices[index].value) == Some(value) {
             return Ok(());
         }
         let kind = match value {
@@ -239,9 +246,14 @@ fn select(state: &mut AppState, control: u16, value: i32) -> anyhow::Result<()> 
         if let Some(peer) = state
             .match_state
             .session
-            .set_network_row_kind(row as u8, kind)?
+            .choose_network_row_kind(row as u8, kind)?
         {
             queue(state, NetworkSetupRequest::Kick { name: peer.name });
+        }
+        // Then online ([0xAC116C]) the advertisement 0x78F000: the game
+        // record and user limit count Open Observer rows.
+        if super::dialog(state).wol() {
+            queue(state, NetworkSetupRequest::Advertise);
         }
     } else {
         let mut slot = state
@@ -250,6 +262,8 @@ fn select(state: &mut AppState, control: u16, value: i32) -> anyhow::Result<()> 
             .network_row_choices(row as u8)
             .ok_or_else(|| anyhow::anyhow!("setup row has no choices"))?;
         match column {
+            // Observer (-3) asks to watch and keeps the side.
+            SetupColumn::Country if value == -3 => {}
             SetupColumn::Country => {
                 slot.country_random = value == -2;
                 if value >= 0 {
@@ -293,12 +307,18 @@ fn select(state: &mut AppState, control: u16, value: i32) -> anyhow::Result<()> 
                 .session
                 .network_setup()
                 .expect("choices retain setup");
+            // A VERA room's guest watches with Observer and plays with a side.
+            let observer = if column == SetupColumn::Country {
+                value == -3
+            } else {
+                launch.local_player().is_observer()
+            };
             queue(
                 state,
                 NetworkSetupRequest::PlayerChoices {
                     row: row as u8,
                     slot,
-                    observer: launch.local_player().is_observer(),
+                    observer,
                 },
             );
             return Ok(());
@@ -313,7 +333,7 @@ fn select(state: &mut AppState, control: u16, value: i32) -> anyhow::Result<()> 
     Ok(())
 }
 
-fn accept(state: &mut AppState) -> anyhow::Result<()> {
+pub(super) fn accept(state: &mut AppState) -> anyhow::Result<()> {
     let current = super::view(state).ok_or_else(|| anyhow::anyhow!("no setup"))?;
     anyhow::ensure!(current.enabled(ACCEPT), "Accept is not eligible");
     let index = state
@@ -550,5 +570,9 @@ pub(crate) fn commit_map_selection(
     super::note_scenario(state);
     super::cooperative::map_used(state, mode_changed, row.unwrap_or(0))?;
     queue(state, NetworkSetupRequest::PublishOptions);
+    // A VERA room's spectators may move past the new players.
+    if state.match_state.session.network_several_observers() {
+        queue(state, NetworkSetupRequest::PublishRoster);
+    }
     Ok(())
 }

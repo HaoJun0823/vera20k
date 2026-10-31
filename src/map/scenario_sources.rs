@@ -202,12 +202,10 @@ fn append_loose_yrm_records(
 fn loose_files_with_extension(ra2_dir: &Path, extension: &str) -> Result<Vec<(PathBuf, String)>> {
     let mut files = Vec::new();
 
-    for entry in crate::util::file_system::read_dir(ra2_dir)? {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
+    // `SessionClass::ScanMultiplayerMapFiles` (`0x00699980`) lists with
+    // FindFirstFileA (`0x00699AE6`, `0x00699C5D`, `0x0069A007`) and registers
+    // each YRO as it is listed.
+    for path in crate::util::case_insensitive_path::native_listing(ra2_dir)? {
         if !retail_enumerated_file(&path) {
             continue;
         }
@@ -616,5 +614,25 @@ mod tests {
         );
         assert_eq!(manager.registered_archive_names(), ["COLLIDE.YRO"]);
         assert_eq!(manager.get_ref("YROONLY.BIN"), Some(&b"retained"[..]));
+    }
+
+    #[test]
+    fn yro_packs_register_in_native_name_order() {
+        // The first pack by name wins an entry both carry. APFS lists these
+        // two the other way round.
+        let directory = TestDirectory::new("yro-name-order");
+        let pack = |body: &[u8]| make_new_format_mix_bytes(&[("SHARED.BIN", body)]);
+        directory.write("SECOND.YRO", &pack(b"second"));
+        directory.write("First.yro", &pack(b"first"));
+
+        let mut manager = AssetManager::from_loose_root_for_test(directory.path());
+        append_loose_yro_records(&mut Vec::new(), directory.path(), &mut manager, None)
+            .expect("scan loose YRO");
+
+        assert_eq!(
+            manager.registered_archive_names(),
+            ["First.yro", "SECOND.YRO"]
+        );
+        assert_eq!(manager.get_ref("SHARED.BIN"), Some(&b"first"[..]));
     }
 }

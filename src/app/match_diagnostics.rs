@@ -565,6 +565,33 @@ impl MatchDiagnosticsState {
         replays_dir: &Path,
         unix_secs: u64,
     ) -> anyhow::Result<Option<ReplayLogFlush>> {
+        // The browser has no std::fs and nothing reads a segment back: it goes
+        // straight to the host, or nowhere when the host takes no replays.
+        #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+        {
+            let Some(log) = self.replay_log.take() else {
+                return Ok(None);
+            };
+            if (log.ticks.is_empty() && log.initial_scenario_services.is_empty())
+                || !crate::web::has_replay_callback()
+            {
+                return Ok(None);
+            }
+            let name = format!("replay_tick{session_tick}_{unix_secs}.json");
+            let mut bytes = Vec::new();
+            let written = log
+                .write_json(&mut bytes)
+                .and_then(|()| crate::web::hand_over_replay(&name, &bytes));
+            if let Err(error) = written {
+                self.replay_log = Some(log);
+                return Err(error);
+            }
+            return Ok(Some(ReplayLogFlush {
+                path: replays_dir.join(name),
+                tick_count: log.ticks.len(),
+            }));
+        }
+        #[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
         self.flush_to_with_writer(session_tick, replays_dir, unix_secs, |log, file| {
             log.write_json(file)
         })

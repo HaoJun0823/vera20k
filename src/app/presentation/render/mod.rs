@@ -31,6 +31,8 @@ mod building_bracket_gpu_tests;
 mod building_shadow_gpu_tests;
 #[cfg(test)]
 mod building_slot_native_gpu_tests;
+#[cfg(test)]
+mod building_viewport_bounds_tests;
 mod draw_passes;
 #[cfg(test)]
 mod magnetic_wave_gpu_tests;
@@ -67,6 +69,7 @@ use crate::app::input::commands::preferred_local_owner_name;
 use crate::render::batch::InstanceBufferPool;
 use crate::ui::sidebar::SidebarView;
 
+pub(crate) use build_instances::tactical_world_viewport;
 use build_instances::{DebugInstances, SidebarInstances, UiInstances, WorldInstances};
 
 /// Exact sidebar-related instance counts emitted by the production render path.

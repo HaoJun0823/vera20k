@@ -427,6 +427,25 @@ pub fn wait_box_layout(screen_w: i32, screen_h: i32) -> WaitBoxLayout {
     }
 }
 
+/// WOL wait proc 0x00792CF0 uses the same shell mapping for art and hit rectangles.
+pub fn wait_box_layout_on(
+    screen_w: i32,
+    screen_h: i32,
+    scale: geom::ShellScale,
+) -> WaitBoxLayout {
+    if scale.is_retail() {
+        return wait_box_layout(screen_w, screen_h);
+    }
+    let base = wait_box_layout(geom::SHELL_BASE_W, geom::SHELL_BASE_H);
+    WaitBoxLayout {
+        dialog: scale.scale_rect(base.dialog),
+        text: scale.scale_rect(base.text),
+        disconnect: scale.scale_rect(base.disconnect),
+        check_status: scale.scale_rect(base.check_status),
+        animation: scale.scale_rect(base.animation),
+    }
+}
+
 /// The Westwood Online Create Game popup `0xC3` (`0x0078DB70`), the same
 /// 451x326 centred box: executed client rects (tools/storage_oracle/
 /// wol_shell.json) of its controls from their templates.
@@ -437,9 +456,10 @@ pub struct WolCreateGameLayout {
     pub password_label: RectPx,
     /// Edit `0x72C` after its NewEdit inset.
     pub password: RectPx,
-    pub clan: RectPx,
+    /// The clan and observer boxes; VERA's online popup has neither.
+    pub clan: Option<RectPx>,
     pub limit: RectPx,
-    pub observe: RectPx,
+    pub observe: Option<RectPx>,
     pub ok: RectPx,
     pub cancel: RectPx,
     /// Its own status line `0x695`.
@@ -451,19 +471,44 @@ fn new_edit_window(rect: RectPx) -> RectPx {
     RectPx::new(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2)
 }
 
-pub fn wol_create_game_layout(screen_w: i32, screen_h: i32) -> WolCreateGameLayout {
+/// The online popup's status line inset from each side of the box art's frame.
+const ONLINE_STATUS_INSET: i32 = 10;
+
+/// `online` is VERA's online lobby on Red Alert 2's box art: no clan or
+/// observer box (the lobby's own Observe box still seats an observer), Limit
+/// Screen Resolution in the clan row under the password field, clear of the
+/// art's Tesla Trooper, and the status line inside the frame.
+pub fn wol_create_game_layout(screen_w: i32, screen_h: i32, online: bool) -> WolCreateGameLayout {
     let dialog = centered_modal_dialog(screen_w, screen_h, MESSAGE_BOX_W, MESSAGE_BOX_H);
     let child = |x, y, w, h| modal_child(dialog, geom::child_window(x, y, w, h));
-    WolCreateGameLayout {
+    let field = child(133, 47, 140, 12);
+    let clan = child(34, 76, 234, 14);
+    let status = child(0, 186, 291, 12);
+    let layout = WolCreateGameLayout {
         dialog,
         password_label: child(11, 48, 113, 12),
-        password: new_edit_window(child(133, 47, 140, 12)),
-        clan: child(34, 76, 234, 14),
+        password: new_edit_window(field),
+        clan: Some(clan),
         limit: child(34, 93, 234, 14),
-        observe: child(34, 110, 234, 14),
+        observe: Some(child(34, 110, 234, 14)),
         ok: child(33, 128, 83, 15),
         cancel: child(184, 128, 83, 15),
-        status: child(0, 186, 291, 12),
+        status,
+    };
+    if !online {
+        return layout;
+    }
+    WolCreateGameLayout {
+        clan: None,
+        observe: None,
+        limit: RectPx::new(field.x, clan.y, field.w, clan.h),
+        status: RectPx::new(
+            dialog.x + ONLINE_STATUS_INSET,
+            status.y,
+            dialog.w - 2 * ONLINE_STATUS_INSET,
+            status.h,
+        ),
+        ..layout
     }
 }
 
@@ -895,7 +940,7 @@ mod tests {
             for (size, case) in corpus["layouts"][key]["sizes"].as_object().unwrap() {
                 let (w, h) = size.split_once('x').unwrap();
                 let (w, h): (i32, i32) = (w.parse().unwrap(), h.parse().unwrap());
-                let create = wol_create_game_layout(w, h);
+                let create = wol_create_game_layout(w, h, false);
                 let password = wol_channel_password_layout(w, h);
                 assert_eq!(create.dialog, rect(&case["dialog"]), "{key} {size}");
                 for (id, child) in case["controls"].as_object().unwrap() {
@@ -903,9 +948,9 @@ mod tests {
                     let actual = match (key, id.as_str()) {
                         ("0xC3", "0xFFFF") => create.password_label,
                         ("0xC3", "0x72C") => create.password,
-                        ("0xC3", "0x66C") => create.clan,
+                        ("0xC3", "0x66C") => create.clan.unwrap(),
                         ("0xC3", "0x71E") => create.limit,
-                        ("0xC3", "0x71F") => create.observe,
+                        ("0xC3", "0x71F") => create.observe.unwrap(),
                         ("0xC3", "0x1") => create.ok,
                         ("0xC3", "0x2") => create.cancel,
                         ("0xC3", "0x695") => create.status,
@@ -924,6 +969,23 @@ mod tests {
             }
         }
         assert_eq!(checked, 36);
+    }
+
+    #[test]
+    fn online_create_game_keeps_its_rows_inside_the_frame() {
+        let online = wol_create_game_layout(800, 600, true);
+        assert_eq!((online.clan, online.observe), (None, None));
+        let frame = online.dialog;
+        let inside = |rect: RectPx| {
+            rect.x >= frame.x + ONLINE_STATUS_INSET
+                && rect.x + rect.w <= frame.x + frame.w - ONLINE_STATUS_INSET
+                && rect.y + rect.h <= frame.y + frame.h
+        };
+        assert!(inside(online.status), "{:?}", online.status);
+        assert!(inside(online.limit), "{:?}", online.limit);
+        // Limit sits between the password field and the buttons.
+        assert!(online.limit.y >= online.password.y + online.password.h);
+        assert!(online.limit.y + online.limit.h <= online.ok.y);
     }
 
     #[test]

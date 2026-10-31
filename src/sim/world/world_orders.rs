@@ -822,17 +822,21 @@ impl Simulation {
             .entities
             .iter_sorted()
             .filter_map(|(id, entity)| {
-                let next =
-                    self.assigned_control_group(entity, entity.object_group(), group, &selected);
-                (next != entity.object_group()).then_some((id, next))
+                let current = entity.control_group();
+                let next = self.assigned_control_group(entity, current, group, &selected);
+                (next != current).then_some((id, next))
             })
             .collect();
+        // VERA network adaptation: the key's store is local to one client, so
+        // a network game keeps it in the local player's slot, off +214.
+        let local = self.session.game_mode().is_network();
         for (id, group) in changes {
-            self.substrate
-                .entities
-                .get_mut(id)
-                .unwrap()
-                .assign_object_group(group);
+            let entity = self.substrate.entities.get_mut(id).unwrap();
+            if local {
+                entity.assign_local_control_group(group);
+            } else {
+                entity.assign_object_group(group);
+            }
         }
         true
     }
@@ -915,7 +919,15 @@ impl Simulation {
             && self.house_is_human_player(actor.owner())
             && self
                 .object_type(actor.type_ref(), rules)
-                .is_some_and(|object| combat::combat_weapon::is_armed(actor, object))
+                .is_some_and(|object| {
+                    combat::combat_weapon::is_armed(
+                        actor,
+                        object,
+                        &self.substrate.entities,
+                        rules,
+                        &self.interner,
+                    )
+                })
     }
 
     /// Object-route Engineer action in Infantry51E49E..51E637. Ordinary

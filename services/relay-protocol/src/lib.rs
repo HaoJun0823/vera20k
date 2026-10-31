@@ -58,6 +58,8 @@ const PLAYER_HANDSHAKES_PER_SECOND: u64 = 8;
 const PLAYER_BYTES_PER_SECOND: u64 = 2 * 1024 * 1024;
 const ROOM_BYTES_PER_SECOND: u64 = 64 * 1024 * 1024;
 const TOTAL_BYTES_PER_SECOND: u64 = 64 * 1024 * 1024;
+const LEAVES_PER_SECOND: u64 = 512;
+const LEAVE_GRACE: u64 = sequenced::ROOM_LIFETIME_MS.div_ceil(1000) + MAX_TICKET_LIFETIME;
 const HELLO: u8 = 0;
 const CONFIRM: u8 = 1;
 const DATA: u8 = 2;
@@ -586,11 +588,13 @@ fn incoming<'a>(key: &SecretKey, bytes: &'a [u8], now: u64) -> Result<Incoming<'
         .map_err(|_| RelayError::Authentication)?;
     let target = bytes[CLIENT_HEADER - 3];
     let kind = bytes[4];
+    // Leave outlives its ticket only as long as any room the ticket named can.
     if ticket.expires > now.saturating_add(MAX_TICKET_LIFETIME)
         || (ticket.expires <= now
             && !(kind == CONTROL
                 && target == BROADCAST
-                && bytes[CLIENT_HEADER..CLIENT_HEADER + length] == [sequenced::LEAVE_REQUEST]))
+                && bytes[CLIENT_HEADER..CLIENT_HEADER + length] == [sequenced::LEAVE_REQUEST]
+                && now < ticket.expires.saturating_add(LEAVE_GRACE)))
     {
         return Err(RelayError::Expired);
     }
@@ -655,6 +659,96 @@ impl RateBudget {
     }
 }
 
+/// A per-second budget that rooms share max-min fairly: a relay-wide total,
+/// or one room's part of it. Each second `allocate` reserves every part what
+/// it asked for the second before, the largest asks cut to one level so the
+/// reservations fit the total. A part spends its reservation first, then only
+/// what no part reserved, so a room flooding past its level takes nothing
+/// another room steadily uses.
+#[derive(Default)]
+struct SharedBudget {
+    second: u64,
+    spent: u64,
+    // A part's asks this second, admitted or refused.
+    asked: u64,
+    // Reservations still unspent this second.
+    reserved: u64,
+}
+
+impl SharedBudget {
+    fn roll(&mut self, now: u64) {
+        if self.second != now {
+            *self = Self {
+                second: now,
+                ..Self::default()
+            };
+        }
+    }
+
+    /// A room's own rate within its part.
+    fn permits(&self, now: u64, amount: u64, limit: u64) -> bool {
+        let spent = if self.second == now { self.spent } else { 0 };
+        amount <= limit.saturating_sub(spent)
+    }
+
+    /// Reserve this second's parts of a `limit` total.
+    fn allocate<'a>(&mut self, now: u64, limit: u64, parts: impl Iterator<Item = &'a mut Self>) {
+        let mut parts: Vec<_> = parts
+            .map(|part| {
+                (
+                    if part.second + 1 == now {
+                        part.asked
+                    } else {
+                        0
+                    },
+                    part,
+                )
+            })
+            .collect();
+        parts.sort_unstable_by_key(|(asked, _)| *asked);
+        let (mut left, mut level) = (limit, u64::MAX);
+        for (index, (asked, _)) in parts.iter().enumerate() {
+            let share = left / (parts.len() - index) as u64;
+            if *asked > share {
+                level = share;
+                break;
+            }
+            left -= asked;
+        }
+        *self = Self {
+            second: now,
+            ..Self::default()
+        };
+        for (asked, part) in parts {
+            *part = Self {
+                second: now,
+                reserved: asked.min(level),
+                ..Self::default()
+            };
+            self.reserved += part.reserved;
+        }
+    }
+
+    /// Whether `part`'s room may spend `amount` of this `limit` total: its
+    /// own reservation first, then only what no part reserved. Admitted or
+    /// not, the ask counts toward the room's next reservation.
+    fn admit_part(&mut self, part: &mut Self, now: u64, amount: u64, limit: u64) -> bool {
+        self.roll(now);
+        part.roll(now);
+        part.asked = part.asked.saturating_add(amount);
+        amount.saturating_sub(part.reserved) <= limit.saturating_sub(self.spent + self.reserved)
+    }
+
+    /// Spend `amount` that `admit_part` admitted.
+    fn charge_part(&mut self, part: &mut Self, amount: u64) {
+        let own = amount.min(part.reserved);
+        part.reserved -= own;
+        part.spent += amount;
+        self.reserved = self.reserved.saturating_sub(own);
+        self.spent += amount;
+    }
+}
+
 struct Peer {
     ticket: Ticket,
     key: SecretKey,
@@ -669,8 +763,9 @@ struct Peer {
 #[derive(Default)]
 struct Room {
     peers: Vec<Peer>,
-    outgoing: RateBudget,
-    order_packets: RateBudget,
+    outgoing: SharedBudget,
+    ingress: SharedBudget,
+    order_packets: SharedBudget,
     ordering: Option<sequenced::OrderingRoom>,
     // Set by the first admission carrying a lobby relay roster.
     federation: Option<sequenced::federation::Federation>,
@@ -704,14 +799,25 @@ pub struct RelayServer {
     admissions: HashMap<[u8; 16], Admission>,
     max_rooms: usize,
     max_principals: usize,
-    ingress: RateBudget,
+    // Rooms share the relay-wide totals; handshakes, before any room, take
+    // part as one more room, and so does Leave for a room no longer held.
+    ingress: SharedBudget,
+    handshake_ingress: SharedBudget,
     handshakes: RateBudget,
-    outgoing: RateBudget,
-    order_packets: RateBudget,
+    // Handshake budgets of players without an admission. Only permitted
+    // exchanges add an entry, and `prune` clears them every second.
+    unadmitted_handshakes: HashMap<[u8; 16], RateBudget>,
+    outgoing: SharedBudget,
+    handshake_outgoing: SharedBudget,
+    order_packets: SharedBudget,
+    leaves: RateBudget,
     repeat_packets: RateBudget,
     last_pruned: u64,
     push_after: Option<([u8; 16], u8)>,
     journal_directory: Option<journal::JournalDirectory>,
+    // Ordering rooms cleaned up before their certificate expired, until that
+    // expiry: a late Ready gets Inactive instead of a new timeline.
+    ended_orderings: HashMap<[u8; 16], u64>,
 }
 
 impl RelayServer {
@@ -722,26 +828,35 @@ impl RelayServer {
             admissions: HashMap::new(),
             max_rooms,
             max_principals: max_rooms.saturating_mul(usize::from(MAX_PEERS)),
-            ingress: RateBudget::default(),
+            ingress: SharedBudget::default(),
+            handshake_ingress: SharedBudget::default(),
             handshakes: RateBudget::default(),
-            outgoing: RateBudget::default(),
-            order_packets: RateBudget::default(),
+            unadmitted_handshakes: HashMap::new(),
+            outgoing: SharedBudget::default(),
+            handshake_outgoing: SharedBudget::default(),
+            order_packets: SharedBudget::default(),
+            leaves: RateBudget::default(),
             repeat_packets: RateBudget::default(),
             last_pruned: 0,
             push_after: None,
             journal_directory: None,
+            ended_orderings: HashMap::new(),
         }
     }
 
     /// Enable full-match encrypted replay on the existing relay's private
-    /// StateDirectory. Existing room files are never overwritten or resumed.
+    /// StateDirectory. Existing room files are never overwritten or resumed;
+    /// those of long-ended matches move to its `archive` subfolder.
     pub fn with_journal(
         key: SecretKey,
         max_rooms: usize,
         state_dir: &std::path::Path,
     ) -> std::io::Result<Self> {
         let mut server = Self::new(key, max_rooms);
-        server.journal_directory = Some(journal::JournalDirectory::open(state_dir)?);
+        server.journal_directory = Some(journal::JournalDirectory::open(
+            state_dir,
+            std::time::SystemTime::now(),
+        )?);
         Ok(server)
     }
 
@@ -765,17 +880,16 @@ impl RelayServer {
         now: u64,
         now_millis: u64,
     ) -> Result<Vec<ForwardDatagram>, RelayError> {
-        // The cheap global gate bounds even malformed/forged authentication
-        // work. No source-address map can grow under spoofed UDP traffic.
-        if !self.ingress.permits(now, 1, INGRESS_PER_SECOND) {
-            return Err(RelayError::RateLimited);
-        }
-        self.ingress.charge(now, 1);
+        // Rooms reserve their fair parts of this second before any budget.
+        self.prune(now);
+        // Relay-wide budgets are charged only after authentication and the
+        // sender's own limits, so forged, junk or replayed datagrams cannot
+        // spend capacity other players need. Rejecting one costs at most
+        // three HMACs. No source-address map grows under spoofed UDP traffic.
         if bytes.starts_with(sequenced::federation::LINK_MAGIC) {
             return self.federation_receive(bytes, now, now_millis);
         }
         let message = incoming(&self.key, bytes, now)?;
-        self.prune(now);
         if message.kind == CONTROL && message.payload == [sequenced::LEAVE_REQUEST] {
             return self.ordering_leave(source, &message, now, now_millis);
         }
@@ -825,11 +939,23 @@ impl RelayServer {
             .admissions
             .get_mut(&message.ticket.player)
             .ok_or(RelayError::Unregistered)?;
-        if !admission.packets.permits(now, 1, 2048) {
+        if !admission.packets.permits(now, 1, 2048)
+            || !self
+                .ingress
+                .admit_part(&mut room.ingress, now, 1, INGRESS_PER_SECOND)
+        {
             return Err(RelayError::RateLimited);
         }
         admission.packets.charge(now, 1);
+        self.ingress.charge_part(&mut room.ingress, 1);
         room.peers[index].last_seen = now;
+        if let Some(ordering) = room.ordering.as_mut() {
+            ordering.heard(
+                message.ticket.source,
+                (message.ticket.player, message.ticket.generation),
+                now_millis,
+            );
+        }
         if message.kind == CONTROL {
             return self.ordering_request(&message, now, now_millis);
         }
@@ -869,13 +995,14 @@ impl RelayServer {
             .outgoing
             .permits(now, cost, PLAYER_BYTES_PER_SECOND)
             || !room.outgoing.permits(now, cost, ROOM_BYTES_PER_SECOND)
-            || !self.outgoing.permits(now, cost, TOTAL_BYTES_PER_SECOND)
+            || !self
+                .outgoing
+                .admit_part(&mut room.outgoing, now, cost, TOTAL_BYTES_PER_SECOND)
         {
             return Err(RelayError::RateLimited);
         }
         admission.outgoing.charge(now, cost);
-        room.outgoing.charge(now, cost);
-        self.outgoing.charge(now, cost);
+        self.outgoing.charge_part(&mut room.outgoing, cost);
         if message.kind == PING {
             return Ok(vec![server_packet(
                 &mut room.peers[index],
@@ -921,26 +1048,68 @@ impl RelayServer {
         });
         self.admissions
             .retain(|_, admission| admission.retain_until > now);
+        self.ended_orderings.retain(|_, expires| *expires > now);
+        self.unadmitted_handshakes.clear();
+        self.ingress.allocate(
+            now,
+            INGRESS_PER_SECOND,
+            (self.rooms.values_mut().map(|room| &mut room.ingress))
+                .chain([&mut self.handshake_ingress]),
+        );
+        self.outgoing.allocate(
+            now,
+            TOTAL_BYTES_PER_SECOND,
+            (self.rooms.values_mut().map(|room| &mut room.outgoing))
+                .chain([&mut self.handshake_outgoing]),
+        );
+        self.order_packets.allocate(
+            now,
+            INGRESS_PER_SECOND,
+            self.rooms.values_mut().map(|room| &mut room.order_packets),
+        );
         self.last_pruned = now;
     }
 
+    /// A player's own handshake budget, admitted or not. It is checked before
+    /// the relay-wide budgets: replaying one valid ticket must not spend the
+    /// capacity other players need to join, renew or change address.
+    fn player_handshakes(&self, player: &[u8; 16]) -> RateBudget {
+        match self.admissions.get(player) {
+            Some(admission) => admission.handshakes,
+            None => self
+                .unadmitted_handshakes
+                .get(player)
+                .copied()
+                .unwrap_or_default(),
+        }
+    }
+
+    fn charge_player_handshake(&mut self, player: [u8; 16], now: u64) {
+        match self.admissions.get_mut(&player) {
+            Some(admission) => admission.handshakes.charge(now, 1),
+            None => self
+                .unadmitted_handshakes
+                .entry(player)
+                .or_default()
+                .charge(now, 1),
+        }
+    }
+
     fn allow_handshake(&mut self, message: &Incoming<'_>, now: u64) -> Result<(), RelayError> {
-        if !self.handshakes.permits(now, 1, HANDSHAKES_PER_SECOND)
-            || self
-                .admissions
-                .get(&message.ticket.player)
-                .is_some_and(|admission| {
-                    !admission
-                        .handshakes
-                        .permits(now, 1, PLAYER_HANDSHAKES_PER_SECOND)
-                })
+        let player = message.ticket.player;
+        if !self
+            .player_handshakes(&player)
+            .permits(now, 1, PLAYER_HANDSHAKES_PER_SECOND)
+            || !self.handshakes.permits(now, 1, HANDSHAKES_PER_SECOND)
+            || !self
+                .ingress
+                .admit_part(&mut self.handshake_ingress, now, 1, INGRESS_PER_SECOND)
         {
             return Err(RelayError::RateLimited);
         }
+        self.charge_player_handshake(player, now);
         self.handshakes.charge(now, 1);
-        if let Some(admission) = self.admissions.get_mut(&message.ticket.player) {
-            admission.handshakes.charge(now, 1);
-        }
+        self.ingress.charge_part(&mut self.handshake_ingress, 1);
         Ok(())
     }
 
@@ -951,10 +1120,16 @@ impl RelayServer {
         now: u64,
     ) -> Result<Vec<ForwardDatagram>, RelayError> {
         let cost = (SERVER_HEADER + MAC_LEN + COOKIE_LEN) as u64;
-        if !self.outgoing.permits(now, cost, TOTAL_BYTES_PER_SECOND) {
+        if !self.outgoing.admit_part(
+            &mut self.handshake_outgoing,
+            now,
+            cost,
+            TOTAL_BYTES_PER_SECOND,
+        ) {
             return Err(RelayError::RateLimited);
         }
-        self.outgoing.charge(now, cost);
+        self.outgoing
+            .charge_part(&mut self.handshake_outgoing, cost);
         Ok(vec![self.challenge(source, message, now)])
     }
 
@@ -1012,7 +1187,12 @@ impl RelayServer {
             )?),
         };
         let cost = (SERVER_HEADER + MAC_LEN) as u64;
-        if !self.outgoing.permits(now, cost, TOTAL_BYTES_PER_SECOND) {
+        if !self.outgoing.admit_part(
+            &mut self.handshake_outgoing,
+            now,
+            cost,
+            TOTAL_BYTES_PER_SECOND,
+        ) {
             return Err(RelayError::RateLimited);
         }
         if newer {
@@ -1064,14 +1244,16 @@ impl RelayServer {
             room: message.ticket.room,
             source: message.ticket.source,
             retain_until: 0,
-            handshakes: RateBudget::default(),
+            // This Confirm and any earlier Hello this second are already
+            // charged here; admission keeps that count.
+            handshakes: self
+                .unadmitted_handshakes
+                .remove(&message.ticket.player)
+                .unwrap_or_default(),
             packets: RateBudget::default(),
             outgoing: RateBudget::default(),
             order_packets: RateBudget::default(),
         });
-        if prior.is_none() {
-            admission.handshakes.charge(now, 1);
-        }
         if prior.is_none() || newer {
             // Even an unseen older grant cannot outlive this tombstone. Its
             // signed maximum lifetime is measured at the time we see the newer
@@ -1083,8 +1265,9 @@ impl RelayServer {
         admission.room = message.ticket.room;
         admission.source = message.ticket.source;
         self.admissions.insert(message.ticket.player, admission);
-        self.outgoing.charge(now, cost);
-        self.retire_superseded_startups(message.ticket, now_ms, now);
+        self.outgoing
+            .charge_part(&mut self.handshake_outgoing, cost);
+        self.retire_superseded(message.ticket, now_ms, now);
         Ok(vec![reply])
     }
 
@@ -1198,12 +1381,16 @@ mod tests {
     use super::*;
 
     fn client(key: &SecretKey, room: u8, source: u8) -> ClientSession {
+        client_as(key, room, source, [source + 1; 16])
+    }
+
+    fn client_as(key: &SecretKey, room: u8, source: u8, player: [u8; 16]) -> ClientSession {
         let ticket = Ticket {
             room: [room; 16],
             source,
             expires: 1200,
             nonce: [source + 1; 16],
-            player: [source + 1; 16],
+            player,
             generation: 1,
         }
         .sign(key)
@@ -1331,8 +1518,10 @@ mod tests {
         let mut first = client(&key, 1, 0);
         let mut server = RelayServer::new(key.clone(), 1);
         let mut bytes = Vec::new();
+        // Replays of one never-confirmed ticket stop at its player's budget
+        // and leave the relay's handshakes to everyone else.
         first.probe(&mut bytes).unwrap();
-        for _ in 0..HANDSHAKES_PER_SECOND {
+        for _ in 0..PLAYER_HANDSHAKES_PER_SECOND {
             assert!(server.process(endpoint, &bytes, 1000).is_ok());
         }
         assert!(matches!(
@@ -1340,6 +1529,26 @@ mod tests {
             Err(RelayError::RateLimited)
         ));
         assert_eq!(server.room_count(), 0);
+        connect(
+            &mut server,
+            &mut client(&key, 1, 1),
+            SocketAddrV4::new(Ipv4Addr::LOCALHOST, 32002),
+        );
+
+        // Distinct players still share the relay-wide budget.
+        let mut server = RelayServer::new(key.clone(), 1);
+        let players = HANDSHAKES_PER_SECOND / PLAYER_HANDSHAKES_PER_SECOND;
+        for player in 1..=players + 1 {
+            let mut id = [0; 16];
+            id[..8].copy_from_slice(&player.to_le_bytes());
+            client_as(&key, 1, 0, id).probe(&mut bytes).unwrap();
+            for _ in 0..PLAYER_HANDSHAKES_PER_SECOND {
+                assert_eq!(
+                    server.process(endpoint, &bytes, 1000).err(),
+                    (player > players).then_some(RelayError::RateLimited)
+                );
+            }
+        }
 
         let mut server = RelayServer::new(key, 1);
         connect(&mut server, &mut first, endpoint);
@@ -1349,7 +1558,8 @@ mod tests {
         let ServerEvent::Challenge(cookie) = first.receive(&challenge.bytes).unwrap() else {
             panic!("challenge");
         };
-        for _ in 0..6 {
+        // The connecting Hello and Confirm count too: three of eight are spent.
+        for _ in 0..5 {
             first.confirm(cookie, &mut bytes).unwrap();
             assert!(server.process(endpoint, &bytes, 1000).is_ok());
         }
@@ -1358,6 +1568,31 @@ mod tests {
             server.process(endpoint, &bytes, 1000),
             Err(RelayError::RateLimited)
         ));
+    }
+
+    #[test]
+    fn forged_and_replayed_datagrams_cannot_spend_relay_input_budget() {
+        let key = SecretKey::new([74; 32]);
+        let mut server = RelayServer::new(key.clone(), 1);
+        let mut sender = client(&key, 1, 0);
+        let endpoint = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 32200);
+        connect(&mut server, &mut sender, endpoint);
+        let mut accepted = Vec::new();
+        sender.data(BROADCAST, b"input", &mut accepted).unwrap();
+        assert!(server.process(endpoint, &accepted, 1000).is_ok());
+        let mut forged = accepted.clone();
+        *forged.last_mut().unwrap() ^= 1;
+        for attempt in 0..=INGRESS_PER_SECOND {
+            let (packet, error) = if attempt % 2 == 0 {
+                (&forged, RelayError::Authentication)
+            } else {
+                (&accepted, RelayError::Replay)
+            };
+            assert_eq!(server.process(endpoint, packet, 1000).err(), Some(error));
+        }
+        let mut fresh = Vec::new();
+        sender.data(BROADCAST, b"input", &mut fresh).unwrap();
+        assert!(server.process(endpoint, &fresh, 1000).is_ok());
     }
 
     #[test]

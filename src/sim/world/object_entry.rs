@@ -747,7 +747,8 @@ impl<'a> EntryMover<'a> {
     /// `0x0073F49B`), and `Crusher=` (`+0xD28`) or `HasWeaponAbility(0x11)` (`0x0073FC6C`).
     fn new(live: &EntryReadContext<'a>, id: u64, e: &'a GameEntity, obj: &'a ObjectType) -> Self {
         let weapon0 = combat_weapon::weapon_for_index(obj, e.veterancy.rank(), 0)
-            .and_then(|(name, _)| live.rules.weapon(name));
+            .and_then(|record| record.weapon_id)
+            .and_then(|name| live.rules.weapon(name));
         let crusher = crate::sim::combat::veterancy::is_crusher(e.veterancy.rank_kind(), obj);
         Self {
             id,
@@ -1125,7 +1126,14 @@ fn full_foot_entry<'a>(
                 //is no wall to Infantry. Otherwise the primary warhead needs
                 //Wall= (772AC0); Infantry has no crusher or Wood= route.
                 if i32::from(live_overlay.overlay_data >> 4) != flags.damage_levels {
-                    if !combat_weapon::is_armed(e, obj) || !warhead.is_some_and(|w| w.wall) {
+                    if !combat_weapon::is_armed(
+                        e,
+                        obj,
+                        &live.sim.substrate.entities,
+                        live.rules,
+                        &live.sim.interner,
+                    ) || !warhead.is_some_and(|w| w.wall)
+                    {
                         return Ok(7);
                     }
                     entry_result = entry_result.max(if allied { 4 } else { 5 });
@@ -1137,8 +1145,13 @@ fn full_foot_entry<'a>(
                     entry_result = entry_result.max(4);
                 }
             } else {
-                if !combat_weapon::is_armed(e, obj)
-                    || !warhead.is_some_and(|w| w.wall || (w.wood && flags.armor_is_wood))
+                if !combat_weapon::is_armed(
+                    e,
+                    obj,
+                    &live.sim.substrate.entities,
+                    live.rules,
+                    &live.sim.interner,
+                ) || !warhead.is_some_and(|w| w.wall || (w.wood && flags.armor_is_wood))
                 {
                     return Ok(7);
                 }
@@ -1182,9 +1195,20 @@ fn full_foot_entry<'a>(
                     obj,
                     &combat_weapon::attacker_facts(e, obj),
                     Some(&combat_weapon::TargetFacts::Terrain),
+                    |index| {
+                        combat_weapon::get_weapon(
+                            e,
+                            obj,
+                            index,
+                            &live.sim.substrate.entities,
+                            live.rules,
+                            &live.sim.interner,
+                        )
+                    },
                 );
                 let weapon = combat_weapon::weapon_for_index(obj, e.veterancy.rank(), selected)
-                    .and_then(|(name, _)| live.rules.weapon(name));
+                    .and_then(|record| record.weapon_id)
+                    .and_then(|name| live.rules.weapon(name));
                 if !weapon
                     .and_then(|w| w.warhead.as_deref())
                     .and_then(|name| live.rules.warhead(name))
@@ -1323,7 +1347,15 @@ fn full_foot_entry<'a>(
                     continue;
                 }
                 let allied = mover.is_ally_of(live, b.owner);
-                if !allied && !combat_weapon::is_armed(e, obj) {
+                if !allied
+                    && !combat_weapon::is_armed(
+                        e,
+                        obj,
+                        &live.sim.substrate.entities,
+                        live.rules,
+                        &live.sim.interner,
+                    )
+                {
                     return Ok(7);
                 }
                 entry_result = entry_result.max(if allied { 3 } else { 5 });

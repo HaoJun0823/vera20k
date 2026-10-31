@@ -253,6 +253,16 @@ pub(crate) fn retaliation_weapon_index(
         victim_type,
         &attacker_facts(victim, victim_type),
         Some(&source_as_target),
+        |index| {
+            super::combat_weapon::get_weapon(
+                victim,
+                victim_type,
+                index,
+                &world.substrate.entities,
+                rules,
+                &world.interner,
+            )
+        },
     )
 }
 
@@ -312,10 +322,7 @@ pub(crate) fn should_retaliate(
     // `0x0070882F` a full CaptureManager (being controlled is no gate);
     // `0x0070883C` a SpawnManager; `0x0070884A` a human's object that already
     // has a Target; `0x00708867` the mission's `Retaliate=`.
-    if victim
-        .capture_manager
-        .as_ref()
-        .is_some_and(|manager| manager.is_full())
+    if world.capture_manager_is_full(victim.stable_id(), rules)
         || victim.spawn_manager.is_some()
         || (human && victim.attack_target.target().is_some())
         || crate::sim::mission::control::current_control(rules, &victim.mission)
@@ -357,7 +364,15 @@ pub(crate) fn should_retaliate(
     // `0x007088A7` GetWeaponDamageValue(-1) > 0 (a healer never retaliates);
     // `0x007088BC` Is_Armed (`BuildingClass::Is_Armed @ 0x00458DB0` answers
     // true for an occupied building).
-    if subject.weapon_damage_value() <= 0 || !super::combat_weapon::is_armed(victim, victim_type) {
+    if subject.weapon_damage_value() <= 0
+        || !super::combat_weapon::is_armed(
+            victim,
+            victim_type,
+            &world.substrate.entities,
+            rules,
+            interner,
+        )
+    {
         return false;
     }
     // `0x007088CA..0x007088FF`: SelectWeapon(source), then GetFireError

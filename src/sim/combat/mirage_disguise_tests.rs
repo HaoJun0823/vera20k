@@ -231,6 +231,7 @@ fn damage_receiver_matches_original_packet_result_and_disguise_consequence() {
             false,
             u64::from(frame),
             None,
+            None,
         )
         .expect("physical MGTK/AP receiver resolves");
         let receipt = receiver_health::commit_receiver_health(

@@ -182,12 +182,16 @@ impl Filter {
                     .is_none_or(|prefix| target.starts_with(prefix))
             })
             .map_or(LevelFilter::Off, |&(_, level)| level);
-        // ureq TRACE includes unredacted HTTP wire data. This logger owns
+        // ureq and tungstenite TRACE include unredacted HTTP and WebSocket
+        // wire data (the lobby stream's bearer and frames). This logger owns
         // every destination (including telemetry); RUST_LOG must never expose
         // account passwords, bearer tokens or relay grants. Keep diagnostic
         // errors without accepting dependency wire/debug logs.
         // https://docs.rs/ureq/3.5.0/ureq/#unversioned
-        if matches!(target.split("::").next(), Some("ureq" | "ureq_proto")) {
+        if matches!(
+            target.split("::").next(),
+            Some("ureq" | "ureq_proto" | "tungstenite")
+        ) {
             level.min(LevelFilter::Info)
         } else {
             level
@@ -356,9 +360,13 @@ mod tests {
 
     #[test]
     fn http_wire_logging_cannot_expose_credentials_even_with_explicit_trace() {
-        let filter = Filter::parse("trace,ureq=trace,ureq_proto::client=trace");
+        let filter = Filter::parse("trace,ureq=trace,ureq_proto::client=trace,tungstenite=trace");
         assert_eq!(filter.level_for("ureq::request"), LevelFilter::Info);
         assert_eq!(filter.level_for("ureq_proto::client"), LevelFilter::Info);
+        assert_eq!(
+            filter.level_for("tungstenite::handshake::client"),
+            LevelFilter::Info
+        );
         assert_eq!(filter.level_for("vera20k::app"), LevelFilter::Trace);
         assert_eq!(Filter::parse("off").level_for("ureq"), LevelFilter::Off);
     }

@@ -123,11 +123,16 @@ pub(crate) struct RetailOptionsProfile {
     pub(crate) original_shape: bool,
     /// The Options page's battle sidebar size.
     pub(crate) sidebar: crate::ui::main_menu_dialogs::options::SidebarSize,
-    /// `[VERA] YROriginalStyle=`: whether the startup splash and the menu
-    /// movie use Yuri's Revenge's art. Off by default, so new profiles show
-    /// Red Alert 2's. Only those two read it; see
+    /// `[VERA] YROriginalStyle=`: whether the startup splash, the menu movie,
+    /// the offline Skirmish background and the LAN/WOL lobby backgrounds use
+    /// Yuri's Revenge's art. Off by default, so new profiles show Red Alert
+    /// 2's. Only those surfaces read it; see
     /// [`LauncherCheckboxId::YrOriginalStyle`](crate::ui::main_menu_dialogs::options::LauncherCheckboxId::YrOriginalStyle).
     pub(crate) yr_original_style: bool,
+    /// `[VERA] SkipStartupLogo=`: start without the logo movie `Init_Game`
+    /// plays before its splash. Off by default, so new profiles play it like
+    /// gamemd; the splash and the first-run intro play either way.
+    pub(crate) skip_startup_logo: bool,
     /// `[VERA] RenderInterpolation=`: client-only motion smoothing. Off by
     /// default, so new profiles draw the original tick-stepped motion; it never
     /// changes the simulation rate or saves.
@@ -135,6 +140,11 @@ pub(crate) struct RetailOptionsProfile {
     /// `[VERA] MouseWheelZoom=`: let the mouse wheel change the battle's
     /// view distance. Off by default; this is a local camera preference.
     pub(crate) mouse_wheel_zoom: bool,
+    /// `[VERA] HouseColorStrength=`: how strongly VERA boosts the `[Colors]`
+    /// team-color bands, 1 (gamemd's own ramps) through 10. Presentation only:
+    /// it never reaches simulation state, and a battle reads it when its
+    /// colours are built. Clamped by `STRENGTH_MIN..=STRENGTH_MAX`.
+    pub(crate) house_color_strength: u8,
     /// `[VERA] ShiftQueue=`: whether a Shift-click on a mobile strip queues
     /// [`Self::shift_queue_count`] builds: the Options page's Shift-Click
     /// Batch Queue. Off by default, so Shift + left click queues one copy as
@@ -149,14 +159,25 @@ pub(crate) struct RetailOptionsProfile {
     /// service instead of showing `TXT_APIMISSING`: the Options page's
     /// developer box. Off by default; no real service exists yet.
     pub(crate) wol_test_service: bool,
-    /// `[VERA] SoloSkirmish=`: Start accepts a skirmish whose AI rows are all
-    /// `None`, for an undisturbed test match. Off by default, so retail's
-    /// "at least two players" gate stays.
+    /// `[VERA] SoloSkirmish=`: Start accepts a skirmish that has fewer than two
+    /// sides for an undisturbed test match — either no AI row enabled, or every
+    /// enabled AI on the local player's own explicit team. Off by default, so
+    /// retail's "at least two players" and "more than one team" gates stay.
     pub(crate) solo_skirmish: bool,
+    /// `[VERA] CommanderFeedback=`: draw the computer opponents' skirmish
+    /// talking-head clips and their subtitles. On by default so a stock
+    /// profile shows them; it is a presentation switch only — the house keeps
+    /// its personality and its trigger weights either way, and the simulation
+    /// never reads it.
+    pub(crate) commander_feedback: bool,
     /// `[VERA] TranslateChat=`: the language received online chat is
     /// translated into, or `None`, the default, for off. Only the `/translate`
     /// chat command changes it ([`Self::commit_chat_translation`]).
     pub(crate) translate_chat: Option<crate::ui::chat_translation::ChatLanguage>,
+    /// `[VERA] SkipUpdate=`: the release the player chose to skip when the
+    /// updater offered it; empty, the default, offers every newer release.
+    /// Only the updater changes it ([`Self::commit_skipped_update`]).
+    pub(crate) skipped_update: String,
     /// `[VERA] Display=`: the screen the game opens on, by the window system's
     /// own name (`\\.\DISPLAY1`). Absent or empty means the system's choice,
     /// which is how every earlier build behaved. A name no longer attached
@@ -220,13 +241,17 @@ impl Default for RetailOptionsProfile {
             original_shape: false,
             sidebar: crate::ui::main_menu_dialogs::options::SidebarSize::Normal,
             yr_original_style: false,
+            skip_startup_logo: false,
             render_interpolation: false,
             mouse_wheel_zoom: false,
+            house_color_strength: crate::rules::house_colors::STRENGTH_RETAIL,
             shift_queue: false,
             shift_queue_count: DEFAULT_SHIFT_QUEUE_COUNT,
             wol_test_service: false,
             solo_skirmish: false,
+            commander_feedback: true,
             translate_chat: None,
+            skipped_update: String::new(),
             display: crate::ui::main_menu_dialogs::options::DisplayTarget::Auto,
         }
     }
@@ -244,7 +269,7 @@ pub(crate) struct FormattedProfileSections {
     pub(crate) audio: [(&'static str, String); 7],
     pub(crate) network: [(&'static str, String); 4],
     /// VERA's own section, written after the native ones.
-    pub(crate) vera: [(&'static str, String); 12],
+    pub(crate) vera: [(&'static str, String); 15],
 }
 
 impl RetailOptionsLoad {
@@ -264,7 +289,9 @@ impl RetailOptionsLoad {
     /// [`Self::without_settings`] so user profile state cannot contaminate sealed
     /// capture output.
     pub(crate) fn from_settings(ra2_dir: &Path, startup: &RetailStartupOptions) -> Self {
-        Self::from_settings_with(ra2_dir, startup, |path| crate::util::file_system::read(path))
+        Self::from_settings_with(ra2_dir, startup, |path| {
+            crate::util::file_system::read(path)
+        })
     }
 
     /// Injectable form of [`Self::from_settings`] used to prove that both
@@ -441,9 +468,15 @@ impl RetailOptionsProfile {
                 vera.read_int("Sidebar", self.sidebar.ini_value()),
             );
             self.yr_original_style = vera.read_bool("YROriginalStyle", self.yr_original_style);
+            self.skip_startup_logo = vera.read_bool("SkipStartupLogo", self.skip_startup_logo);
             self.render_interpolation =
                 vera.read_bool("RenderInterpolation", self.render_interpolation);
             self.mouse_wheel_zoom = vera.read_bool("MouseWheelZoom", self.mouse_wheel_zoom);
+            // A non-numeric value answers 0, which the clamp lifts to the
+            // retail strength rather than to a negative boost.
+            self.house_color_strength = crate::rules::house_colors::clamped_strength(
+                vera.read_int("HouseColorStrength", i32::from(self.house_color_strength)),
+            );
             self.shift_queue = vera.read_bool("ShiftQueue", self.shift_queue);
             // Absent keeps the current value; present-but-nonnumeric answers 0,
             // which the range lifts to 1 rather than a click that queues nothing.
@@ -452,8 +485,12 @@ impl RetailOptionsProfile {
             );
             self.wol_test_service = vera.read_bool("WolTestService", self.wol_test_service);
             self.solo_skirmish = vera.read_bool("SoloSkirmish", self.solo_skirmish);
+            self.commander_feedback = vera.read_bool("CommanderFeedback", self.commander_feedback);
             if let Some(value) = vera.read_name("TranslateChat", 16) {
                 self.translate_chat = crate::ui::chat_translation::ChatLanguage::from_tag(value);
+            }
+            if let Some(value) = vera.read_name("SkipUpdate", 16) {
+                self.skipped_update = value.to_owned();
             }
             if let Some(value) = vera.read_name("Display", DISPLAY_CAPACITY) {
                 self.display =
@@ -544,6 +581,10 @@ impl RetailOptionsProfile {
                     "YROriginalStyle",
                     format_bool(self.yr_original_style).to_string(),
                 ),
+                (
+                    "SkipStartupLogo",
+                    format_bool(self.skip_startup_logo).to_string(),
+                ),
                 ("ShiftQueue", format_bool(self.shift_queue).to_string()),
                 ("ShiftQueueCount", self.shift_queue_count.to_string()),
                 (
@@ -552,6 +593,10 @@ impl RetailOptionsProfile {
                 ),
                 ("SoloSkirmish", format_bool(self.solo_skirmish).to_string()),
                 (
+                    "CommanderFeedback",
+                    format_bool(self.commander_feedback).to_string(),
+                ),
+                (
                     "RenderInterpolation",
                     format_bool(self.render_interpolation).to_string(),
                 ),
@@ -559,6 +604,7 @@ impl RetailOptionsProfile {
                     "MouseWheelZoom",
                     format_bool(self.mouse_wheel_zoom).to_string(),
                 ),
+                ("HouseColorStrength", self.house_color_strength.to_string()),
                 ("Display", self.display.ini_value().to_owned()),
             ],
         }
@@ -625,6 +671,19 @@ impl RetailOptionsProfile {
     /// The `/translate` command's writer: `[VERA] TranslateChat=` alone.
     pub(crate) fn commit_chat_translation(&self, ra2_dir: &Path) -> io::Result<()> {
         profile_file::update(ra2_dir, |input| self.transform_chat_translation(input))
+    }
+
+    /// The updater's Skip This Version writer: `[VERA] SkipUpdate=` alone.
+    pub(crate) fn commit_skipped_update(&self, settings_dir: &Path) -> io::Result<()> {
+        profile_file::update(settings_dir, |input| self.transform_skipped_update(input))
+    }
+
+    fn transform_skipped_update(&self, input: &[u8]) -> Vec<u8> {
+        set_ini_values(
+            input,
+            VERA_SECTION,
+            &[("SkipUpdate", self.skipped_update.as_str())],
+        )
     }
 
     fn transform_chat_translation(&self, input: &[u8]) -> Vec<u8> {
@@ -1342,6 +1401,7 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
         assert!(load.retained_profile.original_shape);
         assert_eq!(load.retained_profile.sidebar, SidebarSize::Large);
         assert!(!load.retained_profile.yr_original_style);
+        assert!(!load.retained_profile.skip_startup_logo);
         assert!(load.retained_profile.shift_queue);
         assert!(load.retained_profile.wol_test_service);
         assert!(load.retained_profile.solo_skirmish);
@@ -1356,6 +1416,7 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
             original_shape: true,
             sidebar: SidebarSize::ExtraLarge,
             yr_original_style: true,
+            skip_startup_logo: true,
             shift_queue: true,
             shift_queue_count: 7,
             wol_test_service: true,
@@ -1367,7 +1428,7 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
                 .unwrap();
         assert!(
             output.contains(
-                "[VERA]\r\nFullScreen=yes\r\nZoom=150\r\nOriginalShape=yes\r\nSidebar=200\r\nYROriginalStyle=yes\r\nShiftQueue=yes\r\nShiftQueueCount=7\r\nWolTestService=yes\r\nSoloSkirmish=yes\r\n"
+                "[VERA]\r\nFullScreen=yes\r\nZoom=150\r\nOriginalShape=yes\r\nSidebar=200\r\nYROriginalStyle=yes\r\nSkipStartupLogo=yes\r\nShiftQueue=yes\r\nShiftQueueCount=7\r\nWolTestService=yes\r\nSoloSkirmish=yes\r\n"
             ),
             "{output}"
         );
@@ -1377,6 +1438,7 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
         assert!(reread.retained_profile.original_shape);
         assert_eq!(reread.retained_profile.sidebar, SidebarSize::ExtraLarge);
         assert!(reread.retained_profile.yr_original_style);
+        assert!(reread.retained_profile.skip_startup_logo);
         assert!(reread.retained_profile.shift_queue);
         assert!(reread.retained_profile.wol_test_service);
         assert!(reread.retained_profile.solo_skirmish);
@@ -1459,6 +1521,27 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
     }
 
     #[test]
+    fn skipped_update_round_trips_and_survives_the_quit_writer() {
+        let startup = RetailStartupOptions::default();
+        let input = b"[VERA]\nTranslateChat=off\n";
+        let mut profile = load_snapshot(&startup, input).retained_profile;
+        assert_eq!(profile.skipped_update, "");
+        profile.skipped_update = "0.2.4".to_owned();
+        let written = profile.transform_skipped_update(input);
+        assert!(String::from_utf8_lossy(&written).contains("TranslateChat=off"));
+        // Quit writes the profile loaded at startup, which predates the skip.
+        let quit = load_snapshot(&startup, input)
+            .retained_profile
+            .transform_settings(&written);
+        assert_eq!(
+            load_snapshot(&startup, &quit)
+                .retained_profile
+                .skipped_update,
+            "0.2.4"
+        );
+    }
+
+    #[test]
     fn mouse_wheel_zoom_preference_round_trips_in_the_existing_vera_section() {
         let startup = RetailStartupOptions::default();
         assert!(
@@ -1506,6 +1589,33 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
         }
     }
 
+    /// `[VERA] CommanderFeedback=` is the talking-head switch. It defaults to
+    /// on and lives in the existing profile transaction, so a player can turn
+    /// the layer off without touching the personality data.
+    #[test]
+    fn commander_feedback_switch_defaults_on_and_round_trips() {
+        let startup = RetailStartupOptions::default();
+        assert!(
+            load_snapshot(&startup, b"")
+                .retained_profile
+                .commander_feedback,
+            "a stock profile shows the clips"
+        );
+        for (value, expected) in [("no", false), ("yes", true)] {
+            let input = format!("[VERA]\nCommanderFeedback={value}\nUnowned=keep\n");
+            let profile = load_snapshot(&startup, input.as_bytes()).retained_profile;
+            assert_eq!(profile.commander_feedback, expected);
+            let written = profile.transform_settings(input.as_bytes());
+            assert!(String::from_utf8_lossy(&written).contains("Unowned=keep"));
+            assert_eq!(
+                load_snapshot(&startup, &written)
+                    .retained_profile
+                    .commander_feedback,
+                expected
+            );
+        }
+    }
+
     #[test]
     fn original_yr_style_and_render_interpolation_round_trip_independently() {
         let startup = RetailStartupOptions::default();
@@ -1535,7 +1645,7 @@ ScoreVolume=0.3\nIsScoreShuffle=yes\nSoundLatency=4\nInGameMusic=no\n[VERA]\nZoo
         let defaults = load_snapshot(&RetailStartupOptions::default(), b"[VERA]\n");
         assert!(
             !defaults.retained_profile.yr_original_style,
-            "unchecked YR Loading & Menu Movie selects the default RA2 look"
+            "unchecked Original YR Style selects the default RA2 look"
         );
 
         for value in ["yes", "no"] {

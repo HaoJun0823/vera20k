@@ -25,6 +25,10 @@ pub(crate) struct MatchState {
     /// Input state for ExecuteDoList's blocking checksum-error message box.
     /// The suspended frame and mismatch remain owned by Simulation.
     pub(crate) network_failure: Option<super::network_failure::NetworkFailureModal>,
+    /// VERA-only: a network frame failed before commit (`FrameAdvanceError`).
+    /// The world keeps partial writes, so it never advances again; the same
+    /// checksum box ends the match instead of resuming a suspended frame.
+    pub(crate) frame_stopped: bool,
     /// Physical byte transport and packet progress for an installed match.
     /// Session owns the accepted participant roster and checksum history.
     pub(crate) live_network: Option<crate::net::live_commands::LiveCommandSession>,

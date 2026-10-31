@@ -155,7 +155,15 @@ impl Simulation {
             if is_moving(entity) == Some(false)
                 && self
                     .object_type(entity.type_ref(), rules)
-                    .is_some_and(|object| is_armed(entity, object))
+                    .is_some_and(|object| {
+                        is_armed(
+                            entity,
+                            object,
+                            &self.substrate.entities,
+                            rules,
+                            &self.interner,
+                        )
+                    })
                 && entity.mission.effective() == MissionId::from_known(MissionType::Guard)
             {
                 // Queue only, not Commence: the ordinary mission owner

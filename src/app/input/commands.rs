@@ -503,7 +503,10 @@ pub(crate) fn place_ready_building_at_cell(
     );
     // Clear placement mode immediately so the foundation preview stops following
     // the cursor after the order is issued.
-    state.match_state.input.submit_building_placement();
+    state
+        .match_state
+        .input
+        .submit_building_placement(&mut state.match_state.match_presentation.sidebar_projection);
     log::info!(
         "Ready building placement queued: owner={} type={} cell=({}, {}) execute_tick=current",
         owner,

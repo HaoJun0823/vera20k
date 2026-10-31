@@ -43,7 +43,10 @@ pub(crate) mod campaign_defeat;
 pub(crate) mod campaign_victory;
 pub(crate) mod chrono_screen;
 mod cncnet;
-pub(crate) use cncnet::{BrowserSpawnGate, BrowserSpawnStart, SpawnAction};
+#[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+mod browser_lifecycle;
+pub(crate) use cncnet::SpawnAction;
+pub(crate) mod commander_feedback;
 mod cooperative_round;
 #[cfg(feature = "debug-tools")]
 pub(crate) mod debug_tools;
@@ -102,6 +105,8 @@ pub(crate) mod telemetry_capture;
 #[cfg(feature = "telemetry-dashboard")]
 pub(crate) mod telemetry_server;
 pub(crate) mod types;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) mod updater;
 mod window_icon;
 
 /// Main window title. The single-instance gate finds a running copy's window by
@@ -111,15 +116,24 @@ pub const WINDOW_TITLE: &str = match (
     crate::rules::ARES_ENABLED,
     crate::rules::PHOBOS_ENABLED,
     crate::rules::NPATCH_ENABLED,
+    crate::rules::NPBUG_ENABLED,
 ) {
-    (true, true, true) => "VERA20K [Ares+Phobos+NPatch]",
-    (true, true, false) => "VERA20K [Ares+Phobos]",
-    (true, false, true) => "VERA20K [Ares+NPatch]",
-    (true, false, false) => "VERA20K [Ares]",
-    (false, true, true) => "VERA20K [Phobos+NPatch]",
-    (false, true, false) => "VERA20K [Phobos]",
-    (false, false, true) => "VERA20K [NPatch]",
-    (false, false, false) => "VERA20K",
+    (true, true, true, false) => "VERA20K [Ares+Phobos+NPatch]",
+    (true, true, false, false) => "VERA20K [Ares+Phobos]",
+    (true, false, true, false) => "VERA20K [Ares+NPatch]",
+    (true, false, false, false) => "VERA20K [Ares]",
+    (false, true, true, false) => "VERA20K [Phobos+NPatch]",
+    (false, true, false, false) => "VERA20K [Phobos]",
+    (false, false, true, false) => "VERA20K [NPatch]",
+    (false, false, false, false) => "VERA20K",
+    (true, true, true, true) => "VERA20K [Ares+Phobos+NPatch+NPBug]",
+    (true, true, false, true) => "VERA20K [Ares+Phobos+NPBug]",
+    (true, false, true, true) => "VERA20K [Ares+NPatch+NPBug]",
+    (false, true, true, true) => "VERA20K [Phobos+NPatch+NPBug]",
+    (true, false, false, true) => "VERA20K [Ares+NPBug]",
+    (false, true, false, true) => "VERA20K [Phobos+NPBug]",
+    (false, false, true, true) => "VERA20K [NPatch+NPBug]",
+    (false, false, false, true) => "VERA20K [NPBug]",
 };
 
 /// Identity stamp shared by the status screen and the telemetry capture. Not a

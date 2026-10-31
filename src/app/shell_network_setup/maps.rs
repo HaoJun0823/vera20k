@@ -159,6 +159,7 @@ mod tests {
         let dialog = crate::ui::multiplayer_setup::SetupDialog {
             host: false,
             flavor: crate::ui::multiplayer_setup::SetupFlavor::Lan,
+            modern: false,
         };
         let mut local = super::super::NetworkSetupProtocol::new(dialog, false);
         local.local_map_verified = true;
@@ -206,7 +207,7 @@ mod tests {
         let mut session = MatchSession::default();
         session.enter_network(NetworkReturnContext::Wol);
         session
-            .accept_network_setup(launch.clone(), true, None)
+            .accept_network_setup(launch.clone(), true, None, false)
             .unwrap();
         let mut metadata = NetworkMapMetadata {
             display_name: "Authored map".into(),
@@ -231,6 +232,7 @@ mod tests {
             crate::ui::multiplayer_setup::SetupDialog {
                 host: true,
                 flavor: crate::ui::multiplayer_setup::SetupFlavor::Wol,
+                modern: false,
             },
             false,
         );

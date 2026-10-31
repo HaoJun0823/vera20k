@@ -71,13 +71,11 @@ impl NativeStartBounds {
     /// Construct the post-Resize cell-array rectangle directly from parsed
     /// `[Map] Size`, before Fill has produced a resolved terrain grid.
     pub fn from_map_header(header: &MapHeader) -> Option<Self> {
-        if header.width == 0 || header.height == 0 {
+        // Keep pre-Fill admission with the map owner's selected grid capacity.
+        if !header.fits_cell_grid() {
             return None;
         }
         let extent = header.width.checked_add(header.height)?;
-        if extent > 512 {
-            return None;
-        }
         let extent = u16::try_from(extent).ok()?;
         (extent > 1).then_some(Self {
             min_rx: 1,
@@ -1146,6 +1144,14 @@ pub struct NormalizedSkirmishSlot {
     /// A human node's handle, CreateHouses' source for House+0x1602A.
     pub handle: Option<String>,
     pub(crate) difficulty: HouseDifficulty,
+    /// The commander this house must get, if any.
+    ///
+    /// Reserved seam: no UI offers it yet, so every launch path passes `None`
+    /// and no house gets a commander at all. A selector, `spawn.ini`, or a map
+    /// with preset AI sets it to a `[AIPersonalities]` name, to `Standard`
+    /// (native behaviour, no clips) or to `none`, and
+    /// [`crate::rules::personality::personality_for_house`] does the rest.
+    pub commander: Option<String>,
 }
 
 /// Sim-owned behavioral launch descriptor (F09).
@@ -1313,13 +1319,13 @@ pub fn initialize_skirmish_launch_houses(
         })
         .unwrap_or(0);
     sim.session.install_scenario_side(scenario_side);
-    let observer = slots
+    let observers = slots
         .iter()
-        .rev()
-        .find(|slot| slot.observer)
-        .and_then(|slot| sim.interner.get(&slot.owner_name));
+        .filter(|slot| slot.observer)
+        .filter_map(|slot| sim.interner.get(&slot.owner_name))
+        .collect();
     sim.session
-        .install_multiplayer_house_identity(session.mode.class, observer);
+        .install_multiplayer_house_identity(session.mode.class, observers);
     // 688109..10F sets player-control only for the local source node;
     // remote human Houses remain human without acquiring local control.
     for slot in &slots {
@@ -1732,6 +1738,7 @@ pub fn normalized_launch_slots(session: &SkirmishLaunchSession) -> Vec<Normalize
             source_human_index: Some(index),
             handle: Some(human.name.clone()),
             difficulty: HouseDifficulty::Normal,
+            commander: None,
         });
     }
     for (index, opponent) in session.opponents.iter().enumerate() {
@@ -1747,6 +1754,7 @@ pub fn normalized_launch_slots(session: &SkirmishLaunchSession) -> Vec<Normalize
             handle: None,
             difficulty: HouseDifficulty::from_native(opponent.difficulty.as_i32())
                 .expect("native AI difficulty"),
+            commander: None,
         });
     }
     slots
@@ -1808,6 +1816,9 @@ pub fn populate_launch_houses(
     rules: &RuleSet,
 ) {
     let human_count = slots.iter().filter(|slot| slot.is_human).count();
+    // Resolved once: the catalog and these switches are the same for every
+    // slot, and the base plan is built before the loop.
+    let feedback = rules.commander_feedback();
     for slot in slots {
         let name_id = sim.interner.intern(&slot.owner_name);
         let country_name = rules
@@ -1892,6 +1903,40 @@ pub fn populate_launch_houses(
         }
         house.resolve_multiplay_passive(rules, Some(country_name));
         house.project_country_mults(rules, &sim.interner);
+        // Product extension: a computer house may carry a commander
+        // personality, but only when something asked for one. The launch slot's
+        // own `commander` wins; `[CommanderFeedback] Assign.<owner_name>=` is
+        // the test seam underneath it. With neither, the house stays `None` and
+        // its AI is retail's own — no trigger deny, no weights, no re-pacing.
+        //
+        // `[CommanderFeedback] Personalities=no` removes the feature for every
+        // house at once: a map that ships preset AI (tower defence, a scripted
+        // mission) writes it and keeps the native skirmish brain.
+        if !slot.is_human && feedback.personalities {
+            let requested = slot
+                .commander
+                .as_deref()
+                .or_else(|| feedback.assigned(&slot.owner_name));
+            let personality = crate::rules::personality::personality_for_house(
+                rules.personalities(),
+                country_name,
+                requested,
+            );
+            house.set_personality(personality);
+            if let Some(definition) = personality
+                .and_then(|index| rules.personalities().get(index))
+                .filter(|definition| !definition.reserved)
+            {
+                // The strategy tilt is the second half of a commander: the
+                // same person who talks must also fight differently.
+                house.apply_commander_strategy(
+                    definition,
+                    &rules.general,
+                    sim.houses.order().len() as i32,
+                    sim.session.binary_frame() as i32,
+                );
+            }
+        }
         sim.houses.register(house);
     }
 }
@@ -3807,7 +3852,7 @@ mod tests {
             (viewers.len(), viewers[28], viewers[29]),
             (30, last, observer)
         );
-        assert_eq!(left.simulation.session.observer_house(), Some(observer));
+        assert_eq!(left.simulation.session.observer_houses(), [observer]);
         let ids = [&mut left, &mut right].map(|runtime| {
             runtime
                 .simulation
@@ -4334,6 +4379,43 @@ mod tests {
         let mut unresolved_remote = session;
         unresolved_remote.humans[0].slot.country_random = true;
         assert!(MatchLaunchDescriptor::from_resolved(unresolved_remote).is_err());
+    }
+
+    /// `[0xAC1198]` holds the last observer; a VERA room's every observer
+    /// House gets its treatment.
+    #[test]
+    fn every_observer_house_takes_the_observer_identity() {
+        let mut session = one_player_battle_launch("multiplayer.map")
+            .session()
+            .clone();
+        session.humans[0].name = "Host".into();
+        let mut guest = session.humans[0].clone();
+        guest.name = "Guest".into();
+        guest.raw_slot_index = Some(1);
+        guest.slot.color_index = 1;
+        session.humans.push(guest);
+        for (row, name) in [(2, "Observer"), (3, "Spectator")] {
+            let mut observer = session.humans[0].clone();
+            observer.name = name.into();
+            observer.raw_slot_index = Some(row);
+            observer.set_observer(true);
+            observer.slot.color_index = 8;
+            observer.slot.start_position = LaunchStartPosition::Auto;
+            session.humans.push(observer);
+        }
+        session.rebuild_house_roster();
+        let descriptor = MatchLaunchDescriptor::from_resolved(session).unwrap();
+        let mut sim = Simulation::new();
+        initialize_skirmish_launch_houses(
+            &mut sim,
+            &HouseRoster::default(),
+            &techno_constructor_start_rules(),
+            &descriptor,
+        );
+        let [host, guest, observer, spectator] =
+            ["Host", "Guest", "Observer", "Spectator"].map(|name| sim.interner.get(name).unwrap());
+        assert_eq!(sim.session.observer_houses(), [observer, spectator]);
+        assert!(!sim.session.is_observer_house(host) && !sim.session.is_observer_house(guest));
     }
 
     #[test]
@@ -5121,6 +5203,7 @@ mod tests {
             source_human_index: Some(0),
             handle: None,
             difficulty: HouseDifficulty::Normal,
+            commander: None,
         }];
         let mut expected = SimRng::new(seed);
         let blocker_word = (expected.next_u32() & 0xFFFF) as u16;
@@ -5607,7 +5690,7 @@ mod tests {
     #[test]
     fn scenario_prefix_rejects_invalid_map_cell_extents() {
         let launch = one_player_battle_launch("invalid-size.mmx");
-        for (width, height) in [(0, 64), (64, 0), (400, 200), (u32::MAX, 1)] {
+        for (width, height) in [(0, 64), (64, 0), (513, 512), (u32::MAX, 1)] {
             let mut map = one_start_prefix_map(Waypoint {
                 index: 0,
                 rx: 30,
@@ -5682,6 +5765,7 @@ mod tests {
             recruitable_a: true,
             recruitable_b: true,
             group: -1,
+            follows: None,
             structure_upgrades: [None, None, None],
             structure_ai_sellable: false,
             structure_ai_repairable: false,

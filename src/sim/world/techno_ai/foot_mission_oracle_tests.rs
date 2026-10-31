@@ -249,7 +249,7 @@ fn assert_weapon_reader_projection(rules: &RuleSet, expected: &Value, family: &s
             tier => panic!("unrepresented native weapon tier {tier}"),
         };
         let index = signed(&slot["index"]);
-        let name = weapon_for_index(object, tier, index).map(|(name, _)| name);
+        let name = weapon_for_index(object, tier, index).and_then(|record| record.weapon_id);
         let receipt = &slot["weapon"];
         if receipt.is_null() {
             assert_eq!(name, None, "native type slot {slot}");

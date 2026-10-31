@@ -272,6 +272,12 @@ fn show_modal(state: &mut AppState, key: &'static str) {
 /// Select the active LAN dialog's transcript; the shared chat owner retains
 /// all wrapping, row retention and scroll behavior for BB, BC and BD.
 pub(crate) fn append_chat(state: &mut AppState, line: LanChatLine) {
+    append_chat_sent_at(state, line, None);
+}
+
+/// [`append_chat`] for a line the WOL service sent at `sent_at` (Unix
+/// seconds): VERA20K Online's chat lobby shows that time, not the current one.
+pub(crate) fn append_chat_sent_at(state: &mut AppState, line: LanChatLine, sent_at: Option<u64>) {
     let route = state.frontend.shell_route;
     // WOL Quick Match's 0x117 is the top dialog with a 0x53F.
     if route.wol() && crate::app::shell_wol::quick_match::page_open(state) {
@@ -279,16 +285,37 @@ pub(crate) fn append_chat(state: &mut AppState, line: LanChatLine) {
         return;
     }
     let setup = route == crate::app::shell_route::ShellRoute::NetworkSetup;
-    append_chat_to(state, setup, !setup && route.wol_lobby(), line);
+    append_chat_to(state, setup, !setup && route.wol_lobby(), line, sent_at);
 }
 
 /// The WOL lobby `0x113`'s transcript even while C2/C9 cover it: native
 /// keeps it in the shell stack, hidden, and its sinks still write to it.
 pub(crate) fn append_wol_lobby_chat(state: &mut AppState, line: LanChatLine) {
-    append_chat_to(state, false, true, line);
+    append_chat_to(state, false, true, line, None);
 }
 
-fn append_chat_to(state: &mut AppState, setup: bool, wol_lobby: bool, line: LanChatLine) {
+fn append_chat_to(
+    state: &mut AppState,
+    setup: bool,
+    wol_lobby: bool,
+    mut line: LanChatLine,
+    sent_at: Option<u64>,
+) {
+    // Only the modern chat lobby's lines show a time (the native shell UI
+    // stays as gamemd draws it).
+    if wol_lobby
+        && state
+            .frontend
+            .wol
+            .as_ref()
+            .is_some_and(|visit| visit.modern_ui())
+    {
+        let now = crate::util::time::SystemTime::now()
+            .duration_since(crate::util::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        line.text = crate::ui::wol_chat::timed_line(line.text, sent_at, now);
+    }
     let (rect, scale) = if setup {
         let layout = crate::app::input::multiplayer_setup::layout(state);
         (layout.chat_log, layout.page.scale)

@@ -88,7 +88,15 @@ fn custom_armor_selection_preserves_numeric_zero_and_secondary_first_order() {
                 &rules,
                 object,
                 &attacker_facts(actor, object),
-                Some(&target)
+                Some(&target),
+                |index| super::combat_weapon::get_weapon(
+                    actor,
+                    object,
+                    index,
+                    &sim.substrate.entities,
+                    &rules,
+                    &sim.interner
+                ),
             ),
             expected,
             "primary={primary}, secondary={secondary}",
@@ -179,6 +187,7 @@ fn custom_armor_positive_receive_and_estimate_share_the_effective_record() {
         false,
         0,
         sim.resolved_terrain.as_ref(),
+        None,
     )
     .unwrap();
     assert_eq!(resolved.outcome.hp_delta, 25);

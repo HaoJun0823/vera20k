@@ -279,6 +279,9 @@ impl NetworkCommandBoundary for FrameClientBoundary<'_> {
                 LiveCommandError::Sequenced(
                     crate::net::live_commands::SequencedError::QueueFull,
                 ) => NetworkInterruption::QueueFull.into(),
+                LiveCommandError::Sequenced(
+                    crate::net::live_commands::SequencedError::NewerClientRequired,
+                ) => NetworkInterruption::NewerClientRequired.into(),
                 LiveCommandError::Sequenced(_) => NetworkInterruption::ConnectionFailed.into(),
                 LiveCommandError::Startup(crate::net::live_commands::StartupError::Aborted) => {
                     NetworkInterruption::ConnectionFailed.into()

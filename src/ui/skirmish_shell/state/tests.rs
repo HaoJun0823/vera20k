@@ -1111,6 +1111,24 @@ fn solo_skirmish_option_accepts_no_opponent_and_no_team_split() {
 }
 
 #[test]
+fn solo_skirmish_option_accepts_every_opponent_on_the_local_team() {
+    let mut shell = controlled_country_shell();
+    shell.player_team = 0;
+    shell.opponents[0].team = 0;
+
+    let session = launch_session(
+        &shell,
+        &[test_map_entry("allied.mmx")],
+        &stock_skirmish_modes(),
+        true,
+    )
+    .expect("one team starts the game when SoloSkirmish= is on");
+    assert_eq!(session.humans.len(), 1);
+    assert_eq!(session.opponents.len(), 1);
+    assert_eq!(session.opponents[0].team, LaunchTeam::Team(0));
+}
+
+#[test]
 fn raw_pack_retains_sparse_ai_house_slots_before_compaction() {
     let mut shell = controlled_country_shell();
     for opponent in &mut shell.opponents {

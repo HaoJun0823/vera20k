@@ -991,8 +991,16 @@ pub(crate) fn wheel_action(delta_lines: f32) -> WheelAction {
 ///
 /// The native scroll refuses to move above row 0 or past the strip's computed
 /// visible capacity, so both ends saturate rather than wrap.
-pub(crate) fn wheel_scrolled_row(current: usize, max_rows: usize, action: WheelAction) -> usize {
-    match action {
+pub(crate) fn wheel_scrolled_row(current: usize, max_rows: usize, delta_lines: f32) -> usize {
+    // Winit also forwards touchpad phase boundaries and horizontal-only events.
+    // Their zero vertical delta is no wheel notch, so it must not reach the
+    // native sign mapping (which would interpret zero as SidebarUp).
+    // winit 0.30.13, macOS View::scroll_wheel:
+    // https://github.com/rust-windowing/winit/blob/v0.30.13/src/platform_impl/macos/view.rs#L663-L701
+    if delta_lines == 0.0 {
+        return current;
+    }
+    match wheel_action(delta_lines) {
         WheelAction::SidebarUp => current.saturating_sub(1),
         WheelAction::SidebarDown => (current + 1).min(max_rows),
     }
@@ -1011,11 +1019,7 @@ pub(crate) fn sidebar_wheel_scroll(state: &mut AppState, delta_lines: f32) {
     let Some(view) = current_sidebar_view(state).cloned() else {
         return;
     };
-    let row = wheel_scrolled_row(
-        view.scroll_rows,
-        view.max_scroll_rows,
-        wheel_action(delta_lines),
-    );
+    let row = wheel_scrolled_row(view.scroll_rows, view.max_scroll_rows, delta_lines);
     let presentation = &mut state.match_state.match_presentation;
     presentation
         .sidebar_projection
@@ -1732,25 +1736,17 @@ fn place_ready_building_for_tab(state: &mut AppState, tab: SidebarTab) {
         let Some(owner_id) = sim.interner().get(&owner_name) else {
             return;
         };
-        crate::sim::production::ready_buildings_for_owner(sim, rules, &owner_name)
-            .into_iter()
-            .find(|ready| SidebarTab::for_category(ready.queue_category) == tab)
-            .and_then(|ready| {
-                let held = crate::sim::production::ready_building_entity_for_owner(
-                    sim,
-                    rules,
-                    owner_id,
-                    ready.type_id,
-                )?;
+        state
+            .match_state
+            .match_presentation
+            .sidebar_projection
+            .ready_building_for_tab(sim, owner_id, tab)
+            .and_then(|(type_id, held)| {
                 // Native hands Manual_Place4FB840 the object's Factory
                 // 5F5C20(0,0), and 4FB840 refuses a null one. VERA's placement
                 // owner takes no factory, so this lookup is admission only.
                 crate::sim::production::object_find_factory(sim, rules, held, false, false)?;
-                Some((
-                    owner_id,
-                    held,
-                    sim.interner().resolve(ready.type_id).to_string(),
-                ))
+                Some((owner_id, held, sim.interner().resolve(type_id).to_string()))
             })
     };
     let Some((owner_id, held, held_type)) = ready_target else {
@@ -2240,6 +2236,16 @@ fn handle_dev_hotkey_pressed(state: &mut AppState, code: winit::keyboard::KeyCod
         KeyCode::Period if state.match_state.paused() => {
             request_debug_frame_step(state);
         }
+        KeyCode::Equal | KeyCode::NumpadAdd | KeyCode::Minus | KeyCode::NumpadSubtract
+            if crate::app::match_runtime::sim_tick::debug_speed_allowed(state) =>
+        {
+            let faster = matches!(code, KeyCode::Equal | KeyCode::NumpadAdd);
+            let speed = state.platform.frame_pacer.change_debug_speed(faster);
+            crate::app::input::messages::post_selection_navigation_text(
+                state,
+                &format!("Debug speed {speed}x"),
+            );
+        }
         _ => {}
     }
 }
@@ -2261,24 +2267,27 @@ mod wheel_tests {
         }
     }
 
-    /// The native test is a signed less-than against zero, so a zero delta goes
-    /// up rather than doing nothing.
+    /// The native sign test maps zero to up; the Winit adapter filters
+    /// zero-motion events before that mapping.
     #[test]
-    fn zero_delta_scrolls_up() {
+    fn native_sign_test_maps_zero_to_up() {
         assert_eq!(wheel_action(0.0), WheelAction::SidebarUp);
     }
 
     #[test]
     fn rows_move_one_at_a_time_and_saturate_at_both_ends() {
-        assert_eq!(wheel_scrolled_row(0, 4, WheelAction::SidebarDown), 1);
-        assert_eq!(wheel_scrolled_row(3, 4, WheelAction::SidebarDown), 4);
+        assert_eq!(wheel_scrolled_row(0, 4, -1.0), 1);
+        assert_eq!(wheel_scrolled_row(3, 4, -1.0), 4);
         // Refuses to move past the strip's computed capacity.
-        assert_eq!(wheel_scrolled_row(4, 4, WheelAction::SidebarDown), 4);
-        assert_eq!(wheel_scrolled_row(2, 4, WheelAction::SidebarUp), 1);
+        assert_eq!(wheel_scrolled_row(4, 4, -1.0), 4);
+        assert_eq!(wheel_scrolled_row(2, 4, 1.0), 1);
         // Refuses to move above row 0.
-        assert_eq!(wheel_scrolled_row(0, 4, WheelAction::SidebarUp), 0);
+        assert_eq!(wheel_scrolled_row(0, 4, 1.0), 0);
         // A strip that fits entirely on screen cannot scroll at all.
-        assert_eq!(wheel_scrolled_row(0, 0, WheelAction::SidebarDown), 0);
+        assert_eq!(wheel_scrolled_row(0, 0, -1.0), 0);
+        // Gesture boundaries and horizontal-only events keep the current row.
+        assert_eq!(wheel_scrolled_row(1, 4, 0.0), 1);
+        assert_eq!(wheel_scrolled_row(1, 4, -0.0), 1);
     }
 }
 
@@ -3338,6 +3347,133 @@ mod item83_selection_order_tests {
     /// selected enemy is current-objects `[0]`, so the first Select runs
     /// Unselect_All (`0x005F45F8`), whose Deselect also releases Follow.
     #[test]
+    fn undeployable_building_band_commits_and_tracks_bunker_occupancy() {
+        use super::resolve_selection_mutation;
+        use crate::app::input::entity_pick::compute_box_selection_snapshot;
+        use crate::rules::retail_ini_fixture::retail_battle_rules_for_map_with_patch;
+        use crate::sim::command::Command;
+        use crate::sim::docking::bunker_link::{can_auto_deploy_here, install_bunker_link};
+
+        let Some(retail) = retail_battle_rules_for_map_with_patch(
+            "Hills.mmx",
+            &IniFile::from_str(
+                "[GAPILL]\nUndeploysInto=AMCV\nBunker=yes\nNumberImpassableRows=0\n",
+            ),
+        ) else {
+            return;
+        };
+        let rules = &retail.rules;
+        assert!(rules.object("GAPILL").unwrap().is_1x1_with_undeploy());
+        let mut sim = crate::sim::arena_fixture::rival_arena(rules, 1);
+        let owner = sim.interner().get("Americans").unwrap();
+        sim.session_mut_for_test()
+            .set_current_house_for_test(Some(owner));
+        sim.intern_rule_type_ids(rules);
+        sim.resolve_type_handles(rules);
+        let pill = sim
+            .spawn_object("GAPILL", "Americans", 16, 16, 0, rules)
+            .unwrap();
+        let tank = sim
+            .spawn_object("MTNK", "Americans", 12, 16, 0, rules)
+            .unwrap();
+        assert!(can_auto_deploy_here(&sim, tank, rules));
+        assert_eq!(
+            sim.unit_building_click_action(tank, pill, rules),
+            Some(crate::sim::world::EntryClickAction::Enter)
+        );
+        // Encounter order is supplied here; helpers' companion regression
+        // obtains it from the production Display/screen-registration owner.
+        let band = |sim: &Simulation, prior: &[u64]| {
+            compute_box_selection_snapshot(
+                sim.entities(),
+                &[pill],
+                &[pill],
+                prior,
+                None,
+                Some("Americans"),
+                -1.0e6,
+                -1.0e6,
+                1.0e6,
+                1.0e6,
+                false,
+                Some(rules),
+                Some(sim.houses()),
+                Some(sim.interner()),
+            )
+            .unwrap()
+        };
+        let mut prior = Vec::new();
+        for (phase, admitted) in [(0, true), (1, false), (2, true)] {
+            if phase == 1 {
+                // Production install-end seam, after real CAN_LOAD admission;
+                // this control does not claim the custom tank's walk to the pad.
+                install_bunker_link(&mut sim, pill, tank, rules);
+                let building = sim.entities().get(pill).unwrap();
+                assert_eq!(building.bunker.occupant(), Some(tank));
+                assert_eq!(building.bunker.link().installed_in(), None);
+                assert_eq!(
+                    sim.entities()
+                        .get(tank)
+                        .unwrap()
+                        .bunker
+                        .link()
+                        .installed_in(),
+                    Some(pill)
+                );
+            } else if phase == 2 {
+                assert!(sim.apply_command(
+                    "Americans",
+                    &Command::EjectBunker { bunker_id: pill },
+                    Some(rules)
+                ));
+                assert_eq!(sim.entities().get(pill).unwrap().bunker.occupant(), None);
+                assert_eq!(
+                    sim.entities()
+                        .get(tank)
+                        .unwrap()
+                        .bunker
+                        .link()
+                        .installed_in(),
+                    None
+                );
+            }
+            let mutation = band(&sim, &prior);
+            assert_eq!(mutation.select.contains(&pill), admitted, "phase {phase}");
+            if phase == 0 {
+                let refused = resolve_selection_mutation(
+                    &sim,
+                    Some(rules),
+                    vec![],
+                    None,
+                    true,
+                    false,
+                    &mutation,
+                );
+                assert!(
+                    refused.ordered.is_empty(),
+                    "pending placement retains final refusal"
+                );
+            }
+            let effects =
+                resolve_selection_mutation(&sim, Some(rules), prior, None, false, false, &mutation);
+            prior = effects.ordered;
+            assert_eq!(prior.contains(&pill), admitted);
+            sim.apply_command(
+                "Americans",
+                &Command::Select {
+                    entity_ids: prior.clone(),
+                    additive: false,
+                },
+                Some(rules),
+            );
+            assert_eq!(
+                sim.entities().get(pill).unwrap().selection.is_selected(),
+                admitted
+            );
+        }
+    }
+
+    #[test]
     fn a_shift_band_over_own_units_drains_a_selected_enemy() {
         use super::{SelectionMutation, resolve_selection_mutation};
         let (sim, rules) = two_house_fixture(&[50]);
@@ -4007,7 +4143,8 @@ fn control_group_action_for_input(
 
 /// CreateTeamCommand535CC0 passes its one-based parameter to TeamAssign731060;
 /// TeamClear7310D0 (command bar6D0990) performs its clear without setting any
-/// selected fields. The simulation owns both effects on Techno+214. Registered
+/// selected fields. The simulation owns both effects on Techno+214, or in a
+/// network game on the local player's slot (`GameEntity::control_group`). Registered
 /// digit0 is parameter10, hence raw group9; digits1..9 map to raw0..8.
 fn schedule_control_group_assignment(
     sim: &mut crate::sim::world::Simulation,

@@ -110,6 +110,9 @@ impl App {
         event_loop: &ActiveEventLoop,
         simulation_allowed: bool,
     ) -> RuntimeServiceResult {
+        if state.persistence.pending_load.is_some() {
+            return RuntimeServiceResult::default();
+        }
         let started = Instant::now();
         let mut result = RuntimeServiceResult::default();
         let mut attempts = 0;
@@ -284,18 +287,23 @@ impl App {
             // while Main_Tick's terminal tests and frame tail wait for Stop.
             crate::app::match_runtime::network_failure::show(state);
             crate::app::match_runtime::sim_tick::pump_audio_service(state, scenario_now_ms);
+            let frame_stopped = state.match_state.frame_stopped;
             if crate::app::match_runtime::network_failure::take_acknowledged(state) {
-                main_tick_admitted =
-                    crate::app::match_runtime::sim_tick::resume_after_network_failure(state);
-                // Main_Tick55DE4F..55DE71 and Main_Game55CFD0 retain their
-                // independent restart/EXIT/outcome priority after the modal.
-                Self::consume_scenario_restart_request(state);
-                Self::consume_executed_abort_exit(state, scenario_now_ms);
-                crate::app::match_runtime::sim_tick::drive_local_player_outcome_exit(
-                    state,
-                    scenario_now_ms,
-                );
-                Self::drive_scenario_exit(state, scenario_now_ms);
+                // A stopped frame has no suspended native frame to finish and
+                // its world must not run again: Stop goes straight to the shell.
+                if !frame_stopped {
+                    main_tick_admitted =
+                        crate::app::match_runtime::sim_tick::resume_after_network_failure(state);
+                    // Main_Tick55DE4F..55DE71 and Main_Game55CFD0 retain their
+                    // independent restart/EXIT/outcome priority after the modal.
+                    Self::consume_scenario_restart_request(state);
+                    Self::consume_executed_abort_exit(state, scenario_now_ms);
+                    crate::app::match_runtime::sim_tick::drive_local_player_outcome_exit(
+                        state,
+                        scenario_now_ms,
+                    );
+                    Self::drive_scenario_exit(state, scenario_now_ms);
+                }
                 if matches!(state.frontend.screen, GameScreen::InGame)
                     && state.match_state.scenario_exit.is_none()
                     && state.match_state.scenario_outcome.is_none()
@@ -304,11 +312,7 @@ impl App {
                     // Main_Game55D347 returns directly to shell cleanup.
                     // This is the same route as WaitPass::Leave, without an
                     // EXIT command or BattleControlTerminated686570.
-                    Self::record_external_match_result(
-                        state,
-                        super::cncnet::ExternalMatchResult::Disconnected,
-                    );
-                    Self::return_to_main_menu(state);
+                    Self::return_disconnected_to_main_menu(state);
                 }
             }
             return RuntimeServiceResult {
@@ -381,13 +385,14 @@ impl App {
                 // `Stop(1)` that began the wait; the exit ends any fade tail.
                 state.audio.stop_theme();
                 state.frontend.quit_cascade = None;
-                // docs/spawn.md: the browser host learns that the external
-                // launch is over and the page may start another; desktop
-                // exits the process instead and writes its result file.
+                // Browser launchers receive the report after network cleanup,
+                // immediately before their engine exits.
                 #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
                 if state.frontend.external_launch {
                     Self::finish_browser_external_launch(state, None);
+                    Self::poll_browser_exit(state, event_loop);
                     return RuntimeServiceResult {
+                        quit_requested: true,
                         main_tick_admitted,
                         screen_shake_offset,
                         ..Default::default()
@@ -424,6 +429,7 @@ impl App {
             crate::app::match_runtime::sim_tick::pump_audio_service(state, scenario_now_ms);
         }
         crate::app::radar_movie::service(state, scenario_now_ms);
+        crate::app::commander_feedback::service(state, scenario_now_ms);
 
         // Deactivated windows do not simulate when `pause_on_focus_loss` is
         // configured. gamemd parks its main tick in a sleep-and-network-only
@@ -450,22 +456,7 @@ impl App {
             if crate::app::match_runtime::network_match::service_wait(state, now_ms)
                 == crate::app::match_runtime::network_match::WaitPass::Leave
             {
-                if state
-                    .match_state
-                    .sim_runtime
-                    .as_ref()
-                    .is_some_and(|rt| rt.simulation.pending_network_wait())
-                {
-                    sim_tick::leave_network_wait(state);
-                }
-                // Result 8 clears GameActive without an EXIT event, so
-                // Main_Game returns past the router without 0x00686570's
-                // EVA and fades (0x0064806C..0x006482A6, 0x0055D347).
-                Self::record_external_match_result(
-                    state,
-                    super::cncnet::ExternalMatchResult::Disconnected,
-                );
-                Self::return_to_main_menu(state);
+                Self::leave_network_wait_to_main_menu(state);
                 return RuntimeServiceResult {
                     main_tick_admitted,
                     screen_shake_offset,
@@ -625,6 +616,13 @@ impl App {
             &mut crate::app::diagnostics::tactical_capture::session::TacticalCaptureSession,
         >,
     ) -> Result<FrameRenderOutcome> {
+        if let Some(presented) = crate::app::persistence::commands::pump_saved_game_load(state) {
+            return Ok(if presented {
+                FrameRenderOutcome::Presented
+            } else {
+                FrameRenderOutcome::Deferred
+            });
+        }
         anyhow::ensure!(
             shell_capture.is_none() || tactical_capture.is_none(),
             "shell and tactical capture cannot share a render"
@@ -651,11 +649,16 @@ impl App {
             .begin_presentation_observation();
         crate::app::presentation::interpolation::prepare(state, tactical_capture.is_some());
         let tooltip_ms = crate::app::input::tooltips::update(state);
-        if state
-            .frontend
-            .startup_splash
-            .as_ref()
-            .is_some_and(|splash| splash.is_active(Instant::now()))
+        // `Init_Game` plays the startup logo (`0x0052C5E2`) before it presents
+        // the splash (`0x0052C5F3`): the splash waits while a movie owns the
+        // screen through the ordinary FullscreenMovie page below.
+        let startup_movie_playing = state.frontend.fullscreen_movie.is_some();
+        if !startup_movie_playing
+            && state
+                .frontend
+                .startup_splash
+                .as_ref()
+                .is_some_and(|splash| splash.is_active(Instant::now()))
         {
             state.diag.frame_timer.sample(Instant::now());
             let splash = state
@@ -669,7 +672,7 @@ impl App {
                 &state.renderer.shell_surface_presenter,
                 &state.renderer.depth_view,
                 &state.renderer.fps_overlay,
-                splash,
+                Some(splash),
             )?;
             if presented {
                 state
@@ -691,7 +694,18 @@ impl App {
                 FrameRenderOutcome::Unavailable
             });
         }
-        state.frontend.startup_splash = None;
+        if !startup_movie_playing {
+            state.frontend.startup_splash = None;
+            // `0x0052CB50` (from `0x0052CA65`) plays the first-run intro after
+            // the splash and before the shell's first paint.
+            if std::mem::take(&mut state.frontend.startup_intro_pending) {
+                Self::start_fullscreen_movie(
+                    state,
+                    crate::app::frontend::fullscreen_movie::STARTUP_INTRO_MOVIE,
+                    crate::app::frontend::fullscreen_movie::MovieReturn::StartupIntro,
+                );
+            }
+        }
 
         // Outcome gates, exit cascades, the audio pump and the simulation
         // advance, shared with the hidden-window service loop.
@@ -1338,7 +1352,7 @@ impl App {
             .gpu
             .queue
             .submit(std::iter::once(encoder.finish()));
-        output.present();
+        output.present(&state.renderer.gpu.queue);
         state
             .platform
             .frame_pacer

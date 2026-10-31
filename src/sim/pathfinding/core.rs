@@ -531,7 +531,7 @@ fn next_node(held: Option<AStarNode>, open: &mut OpenList) -> Option<AStarNode> 
 const BRIDGE_HEIGHT_THRESHOLD: u16 = 2;
 
 /// Encode source cell index + bridge flag into came_from value.
-/// Max map = 512x512 = 262,144 cells -> fits in 18 bits, leaving bit 20 free.
+/// The experimental 1024-square grid still fits below bit 20 (index <= 0xFFFFF).
 const CAME_FROM_BRIDGE: u32 = 1 << 20;
 
 /// AStar429E54 selects its closed list from the candidate's raw0x100 and

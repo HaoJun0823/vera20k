@@ -42,6 +42,8 @@ pub mod single_instance;
 pub mod version;
 pub mod rect;
 pub mod save_codec;
+// Portable state hashing; `rules` and `sim` both fold identities through it.
+pub(crate) mod state_hasher;
 // pub mod color;
 
 pub mod native_file_time;

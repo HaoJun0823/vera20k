@@ -12,8 +12,8 @@ pub(crate) mod maps;
 mod service;
 pub(crate) use service::{
     HostOptions, NetworkSetupEvent, accept_network_map_source, accept_network_random_map_preview,
-    fail_go_handoff, invalidate_network_agreement, poll, prepare_lan_guest_handoff, service_event,
-    set_network_map_progress,
+    fail_go_handoff, invalidate_network_agreement, poll, prepare_lan_guest_handoff,
+    refuse_local_acceptance, service_event, set_network_map_progress,
 };
 pub(crate) mod view;
 mod wol;
@@ -529,7 +529,7 @@ pub(crate) fn accept_external_session(
 ) -> anyhow::Result<()> {
     let host = launch.local_player_index == 0;
     session.enter_network(context);
-    session.accept_network_setup(launch, host, None)
+    session.accept_network_setup(launch, host, None, false)
 }
 
 /// Install an external launch's setup without a dialog, its online start
@@ -598,14 +598,29 @@ fn chat_notice(state: &mut AppState, key: &str, args: &[crate::assets::csf_file:
 }
 
 pub(crate) fn dialog(state: &AppState) -> SetupDialog {
-    let session = &state.match_state.session;
+    let flavor = if state.match_state.session_mode() == SessionMode::Wol {
+        SetupFlavor::Wol
+    } else {
+        SetupFlavor::Lan
+    };
+    setup_dialog(state, state.match_state.session.host(), flavor)
+}
+
+/// The setup dialog this process presents. Only native diagnostics keep the
+/// guest's Accept and the WOL Page buttons (`SetupDialog::modern`).
+pub(crate) fn setup_dialog(state: &AppState, host: bool, flavor: SetupFlavor) -> SetupDialog {
+    let modern = match flavor {
+        SetupFlavor::Wol => state
+            .frontend
+            .wol
+            .as_ref()
+            .is_some_and(|visit| visit.modern_ui()),
+        SetupFlavor::Lan => !state.frontend.native_shell_ui,
+    };
     SetupDialog {
-        host: session.host(),
-        flavor: if state.match_state.session_mode() == SessionMode::Wol {
-            SetupFlavor::Wol
-        } else {
-            SetupFlavor::Lan
-        },
+        host,
+        flavor,
+        modern,
     }
 }
 
@@ -738,13 +753,11 @@ impl App {
         launch.rebuild_house_roster();
         // The packet7 peer's identity belongs to the service envelope until
         // the original type3 roster admission; it is not a fabricated node.
+        let dialog = setup_dialog(state, false, SetupFlavor::Lan);
         if let Err(error) = install_setup(
             state,
             launch,
-            SetupDialog {
-                host: false,
-                flavor: SetupFlavor::Lan,
-            },
+            dialog,
             [NetworkVacancy::Open; crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT],
             acceptance.observer_row,
         ) {
@@ -783,7 +796,7 @@ fn install_setup(
     state
         .match_state
         .session
-        .accept_network_setup(launch, host, observer_row)?;
+        .accept_network_setup(launch, host, observer_row, dialog.modern)?;
     let quick_match = dialog.wol() && crate::app::shell_wol::quick_match::mode_active(state);
     if dialog.wol() {
         let room = crate::app::shell_wol::lobby::room(state);
@@ -863,6 +876,11 @@ fn install_setup(
                     .set_network_vacancy(row as u8, vacancy)?;
             }
         }
+        // A VERA room opens its spectator row, but for Quick Match's
+        // matchbot game.
+        if dialog.modern && !quick_match {
+            state.match_state.session.set_network_spectators(true)?;
+        }
         if let Some(file) = state
             .match_state
             .session
@@ -884,7 +902,7 @@ fn install_setup(
         .network_setup()
         .and_then(|launch| launch.local_player().raw_slot_index)
     {
-        setup_ui.show_row(usize::from(row));
+        setup_ui.show_row(usize::from(row), dialog.rows_per_page());
     }
     state.frontend.multiplayer_setup = Some(setup_ui);
     state.frontend.network_setup_protocol = Some(NetworkSetupProtocol::new(dialog, quick_match));
@@ -955,7 +973,7 @@ pub(crate) fn remember_setup(state: &mut AppState) {
     if session.host()
         && let Some(launch) = session.network_setup()
     {
-        let vacancies = std::array::from_fn(|row| session.network_vacancy(row as u8));
+        let vacancies = session.network_remembered_vacancies();
         let choices = std::array::from_fn(|row| session.network_row_choices(row as u8));
         state
             .frontend
@@ -1127,6 +1145,7 @@ mod tests {
             SetupDialog {
                 host: true,
                 flavor: SetupFlavor::Wol,
+                modern: false,
             },
             false,
         );
@@ -1148,6 +1167,7 @@ mod tests {
             SetupDialog {
                 host: false,
                 flavor: SetupFlavor::Wol,
+                modern: false,
             },
             false,
         );

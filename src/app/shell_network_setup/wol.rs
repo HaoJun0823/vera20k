@@ -64,10 +64,7 @@ impl App {
                 .clone(),
         };
         launch.rebuild_house_roster();
-        let dialog = SetupDialog {
-            host: false,
-            flavor: SetupFlavor::Wol,
-        };
+        let dialog = super::setup_dialog(state, false, SetupFlavor::Wol);
         if let Err(error) = install_setup(
             state,
             launch,

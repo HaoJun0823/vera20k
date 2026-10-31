@@ -854,7 +854,7 @@ pub(super) fn build_ui_instances(state: &AppState, wall_ms: u32) -> UiInstances 
 
     let input = &state.match_state.input;
     let (x, y, width, height) = crate::app::input::camera::tactical_viewport_px(state);
-    let view = tactical_line_viewport(
+    let view = tactical_world_viewport(
         [input.camera_x, input.camera_y],
         [x, y, width, height],
         state.renderer.world_zoom_pass.as_ref(),
@@ -889,7 +889,13 @@ pub(super) fn build_ui_instances(state: &AppState, wall_ms: u32) -> UiInstances 
                         .coord;
                     *coord = crate::sim::components::DriveCoord { x, y, z };
                 }
-                designations.insert(id, coords);
+                let style = crate::app::presentation::airstrike_lines::FlareStyle {
+                    #[cfg(feature = "phobos")]
+                    color: sim.airstrike_line_color(id, &runtime.resources.rules),
+                    #[cfg(feature = "phobos")]
+                    z_adjust: runtime.resources.rules.general.airstrike_line_z_adjust,
+                };
+                designations.insert(id, (coords, style));
             }
         }
     }
@@ -918,8 +924,8 @@ pub(super) fn build_ui_instances(state: &AppState, wall_ms: u32) -> UiInstances 
     let mut after_entity = |id, instances: &mut Vec<SpriteInstance>| {
         use crate::app::presentation::airstrike_lines::{TacticalLineCall, drain_opaque};
         drain_opaque(&mut tactical_line_calls, instances, camera);
-        if let Some(coords) = designations.remove(&id) {
-            tactical_line_calls.push(TacticalLineCall::Designation(coords));
+        if let Some((coords, style)) = designations.remove(&id) {
+            tactical_line_calls.push(TacticalLineCall::Designation { coords, style });
         }
     };
     let (mut target_line, planning_highlights) = planning_lines::build(state, view);
@@ -990,9 +996,9 @@ pub(super) fn build_ui_instances(state: &AppState, wall_ms: u32) -> UiInstances 
     }
 }
 
-/// The one world-surface viewport for planning, action and rally producers.
+/// The one world-surface viewport for object admission, planning, action and rally producers.
 /// Wheel zoom changes its clip, while the native raster keeps one-pixel spans.
-fn tactical_line_viewport(
+pub(crate) fn tactical_world_viewport(
     camera: [f32; 2],
     tactical: [u32; 4],
     zoom: Option<&crate::render::upscale_pass::WorldZoomPass>,

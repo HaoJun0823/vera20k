@@ -380,3 +380,38 @@ fn real_garrison_append_and_complete_ejection_refresh_the_existing_building_cach
         "ejection tail refreshes after the complete occupant mutation"
     );
 }
+
+#[test]
+fn large_map_house_threat_keeps_high_coordinate_kernel_and_cleanup() {
+    let mut grid = HouseSpatialThreat::default();
+    grid.configure(crate::map::cell_index::CellGrid::Extended);
+    grid.adjust((642, 559), 100).unwrap();
+    assert!(grid.at((642, 559)).unwrap() > 0);
+    assert_eq!(grid.at((130, 560)).unwrap(), 0, "no old-stride alias");
+    grid.adjust((642, 559), -100).unwrap();
+    assert!(grid.values().iter().all(|value| *value == 0));
+    grid.adjust((1023, 1023), 100).unwrap();
+    assert!(grid.at((1023, 1023)).unwrap() > 0);
+    assert!(grid.adjust((1024, 1024), 100).is_err());
+    let bytes = crate::util::save_codec::serialize(&grid).unwrap();
+    let restored: HouseSpatialThreat = crate::util::save_codec::deserialize(&bytes).unwrap();
+    assert_eq!(restored.values(), grid.values());
+
+    let mut interner = StringInterner::default();
+    let owner = interner.intern("Large");
+    let mut houses = Houses::default();
+    houses.configure_cell_grid(crate::map::cell_index::CellGrid::Extended);
+    houses.register(HouseState::new(owner, 0, None, false, 0, 10));
+    houses
+        .get_mut(&owner)
+        .unwrap()
+        .adjust_spatial_threat((642, 559), 100)
+        .unwrap();
+    let saved = crate::util::save_codec::serialize(&houses).unwrap();
+    let mut loaded: Houses = crate::util::save_codec::deserialize(&saved).unwrap();
+    loaded.configure_cell_grid(crate::map::cell_index::CellGrid::Extended);
+    assert!(loaded[&owner].spatial_threat_at((642, 559)).unwrap() > 0);
+    let late = interner.intern("Late");
+    loaded.register(HouseState::new(late, 0, None, false, 0, 10));
+    assert_eq!(loaded[&late].spatial_threat_at((642, 559)).unwrap(), 0);
+}

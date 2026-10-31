@@ -66,9 +66,9 @@ pub(crate) const FULL_SCREEN_HELP: &str = "Fill the whole screen. Untick it to p
 pub(crate) const ORIGINAL_SHAPE_LABEL: &str = "Original 4:3 Shape";
 pub(crate) const ORIGINAL_SHAPE_HELP: &str =
     "Battles keep the original 4:3 shape, with bars on wide screens.";
-pub(crate) const YR_ORIGINAL_STYLE_LABEL: &str = "YR Loading & Menu Movie";
+pub(crate) const YR_ORIGINAL_STYLE_LABEL: &str = "Original YR Style";
 pub(crate) const YR_ORIGINAL_STYLE_HELP: &str =
-    "Show the Yuri's Revenge loading screen and menu movie.";
+    "Use Yuri's Revenge's loading screen and menu movie, plus the Skirmish and multiplayer lobby backgrounds.";
 pub(crate) const RENDER_INTERPOLATION_LABEL: &str = "Render Interpolation";
 pub(crate) const RENDER_INTERPOLATION_HELP: &str = "Smooth motion between simulation frames. Adds one frame of visual latency; does not increase simulation speed.";
 pub(crate) const MOUSE_WHEEL_ZOOM_LABEL: &str = "Mouse Wheel Zoom";
@@ -78,18 +78,34 @@ pub(crate) const DEVELOPER_OPTIONS_LABEL: &str = "Developer Options";
 pub(crate) const WOL_TEST_SERVICE_LABEL: &str = "Offline Internet Test Service";
 pub(crate) const WOL_TEST_SERVICE_HELP: &str =
     "Internet opens with stand-in servers, lobbies and players, for testing its screens.";
+pub(crate) const SKIP_STARTUP_LOGO_LABEL: &str = "Skip Startup Logo";
+pub(crate) const SKIP_STARTUP_LOGO_HELP: &str =
+    "Start without the logo movie; the loading screen still shows. Applies at the next start.";
 pub(crate) const FPS_COUNTER_LABEL: &str = "FPS Counter";
 pub(crate) const FPS_COUNTER_HELP: &str = "Show frames per second in the top-left corner. Off at every start; Ctrl+Alt+F also switches it.";
 pub(crate) const SHIFT_QUEUE_HELP: &str =
     "Shift-click an infantry, vehicle or aircraft cameo to queue several at once.";
 pub(crate) const DISPLAY_LABEL: &str = "Display";
 pub(crate) const DISPLAY_HELP: &str = "Which screen the game opens on. Auto follows the system.";
+/// VERA's Accessibility band on its page: the first accessibility control, the
+/// strength of the `[Colors]` team-colour bands. Retail's string table has
+/// nothing for either.
+pub(crate) const ACCESSIBILITY_LABEL: &str = "Accessibility";
+pub(crate) const HOUSE_COLOR_STRENGTH_LABEL: &str = "Team Color Strength";
+pub(crate) const HOUSE_COLOR_STRENGTH_HELP: &str = "How strongly team colours stand out, from 1 for the original bands to 10 for the boldest. The next battle uses it.";
 /// The Display list's first row: the window system's own choice.
 pub(crate) const DISPLAY_AUTO_LABEL: &str = "Auto";
 /// The main page's button to VERA's page, and that page's heading.
 pub(crate) const VERA_OPTIONS_LABEL: &str = "Vera Options";
 pub(crate) const VERA_OPTIONS_HELP: &str =
     "Settings VERA20K adds: full screen, sidebar size, smooth motion and more.";
+/// VERA's page's Check for Updates: the desktop updater (`app::updater`)
+/// checks once the page has slid out. The browser build has no updater.
+pub(crate) const HAS_CHECK_FOR_UPDATES: bool =
+    !cfg!(all(target_arch = "wasm32", target_os = "unknown"));
+pub(crate) const CHECK_FOR_UPDATES_LABEL: &str = "Check for Updates";
+pub(crate) const CHECK_FOR_UPDATES_HELP: &str =
+    "Check for a newer VERA20K now, even one you skipped.";
 /// The VERA page's Back reuses retail's caption; its status help is the
 /// Keyboard page's Back help, "Return to the Options Menu."
 /// (`STT:KeyboardButtonBack`).
@@ -113,6 +129,8 @@ pub(crate) enum LauncherButton {
     Exit(LauncherParentResult),
     /// Vera Options on the main page, Back on VERA's: shows that page.
     Page(OptionsPage),
+    /// Check for Updates on VERA's page.
+    CheckForUpdates,
 }
 
 /// VERA's battle zoom: the Options combo that took the place of gamemd's
@@ -413,6 +431,11 @@ pub(crate) enum LauncherTrackbarId {
     Score,
     Sound,
     Voice,
+    /// VERA's own slider: how strongly the `[Colors]` team-colour bands are
+    /// boosted, on the [`crate::rules::house_colors`] scale. Its position is
+    /// the level minus [`crate::rules::house_colors::STRENGTH_MIN`], so the
+    /// retail strength is position 0 and the strongest is position 9.
+    HouseColorStrength,
 }
 
 impl LauncherTrackbarId {
@@ -422,6 +445,9 @@ impl LauncherTrackbarId {
             Self::Difficulty => 2,
             Self::Scroll => 6,
             Self::Score | Self::Sound | Self::Voice => 10,
+            Self::HouseColorStrength => {
+                crate::rules::house_colors::STRENGTH_MAX - crate::rules::house_colors::STRENGTH_MIN
+            }
         }
     }
 
@@ -430,7 +456,7 @@ impl LauncherTrackbarId {
     pub(crate) const fn plaque_reserve(self) -> i32 {
         match self {
             Self::Detail | Self::Difficulty | Self::Scroll => 0,
-            Self::Score | Self::Sound | Self::Voice => 50,
+            Self::Score | Self::Sound | Self::Voice | Self::HouseColorStrength => 50,
         }
     }
 
@@ -450,13 +476,13 @@ pub(crate) enum LauncherCheckboxId {
     /// VERA's own box: battles keep gamemd's 4:3 screen shape instead of the
     /// window's. Like Full Screen, it applies at once.
     OriginalShape,
-    /// VERA's own box: the startup splash and the menu movie use Yuri's
-    /// Revenge's art instead of Red Alert 2's. The movie changes at once; the
-    /// splash, drawn before any menu, at the next launch.
+    /// VERA's own box: the startup splash, the menu movie, the offline
+    /// Skirmish background and the LAN/WOL lobby backgrounds use Yuri's
+    /// Revenge's art instead of Red Alert 2's. The movie and the shell atlas
+    /// change at once; the splash, drawn before any menu, at the next launch.
     ///
-    /// User-set scope: this box switches only those two. Every other shell
-    /// screen follows gamemd's ordinary asset lookup, and the Skirmish, LAN and
-    /// WOL setup backgrounds keep their fixed RA2 art (see
+    /// User-set scope: this box switches only those surfaces. Every other
+    /// shell screen follows gamemd's ordinary asset lookup (see
     /// `render::skirmish_shell_chrome`), whatever the box says. Widening it
     /// needs the user's explicit request.
     YrOriginalStyle,
@@ -475,6 +501,9 @@ pub(crate) enum LauncherCheckboxId {
     /// shows and changes live state at once, and is never saved: the readout
     /// starts hidden at every launch.
     FpsCounter,
+    /// VERA's developer box: the next launch skips `Init_Game`'s logo movie
+    /// (`0x0052C5E2`); the splash and the first-run intro still play.
+    SkipStartupLogo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -513,6 +542,9 @@ pub(crate) enum LauncherOptionsEvent {
     RenderInterpolationChanged(bool),
     MouseWheelZoomChanged(bool),
     FpsCounterChanged(bool),
+    SkipStartupLogoChanged(bool),
+    /// VERA's team-colour strength, as the level the profile stores.
+    HouseColorStrengthChanged(u8),
     ScorePreview(f32),
     SoundPreview(f32),
     VoicePreview(f32),
@@ -535,6 +567,8 @@ pub(crate) struct LauncherOptionsFrameOutput {
     pub(crate) result: Option<LauncherParentResult>,
     /// The page a button asked for: the showing page slides out first.
     pub(crate) page: Option<OptionsPage>,
+    /// Check for Updates: VERA's page slides out, then the updater checks.
+    pub(crate) check_for_updates: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -555,8 +589,13 @@ pub(crate) struct LauncherOptionsValues {
     pub(crate) wol_test_service: bool,
     /// The FPS readout's live state when the page opened, then each toggle.
     pub(crate) fps_counter: bool,
+    pub(crate) skip_startup_logo: bool,
     /// The Sidebar list's choice; like Zoom, it applies at once.
     pub(crate) sidebar: SidebarSize,
+    /// VERA's team-colour strength as the slider's position,
+    /// [`crate::rules::house_colors::STRENGTH_MIN`] less than the level the
+    /// profile stores. Position 0 is gamemd's own bands.
+    pub(crate) house_color_position: u8,
     pub(crate) score_position: u8,
     pub(crate) sound_position: u8,
     pub(crate) voice_position: u8,
@@ -579,7 +618,9 @@ impl Default for LauncherOptionsValues {
             shift_queue: false,
             wol_test_service: false,
             fps_counter: false,
+            skip_startup_logo: false,
             sidebar: SidebarSize::Normal,
+            house_color_position: 0,
             score_position: 4,
             sound_position: 7,
             voice_position: 7,
@@ -672,6 +713,7 @@ pub(crate) struct OptionsDialogState {
     pending_result: Option<LauncherParentResult>,
     page: OptionsPage,
     pending_page: Option<OptionsPage>,
+    pending_update_check: bool,
     shell_interaction: shell::ShellInteraction,
 }
 
@@ -711,6 +753,12 @@ impl OptionsDialogState {
         values.score_position = admitted_initial_position(i64::from(values.score_position), 10);
         values.sound_position = admitted_initial_position(i64::from(values.sound_position), 10);
         values.voice_position = admitted_initial_position(i64::from(values.voice_position), 10);
+        // VERA's own slider takes the top level for a position past its range:
+        // there is no boost above it to ask for, and the profile never holds
+        // one either.
+        values.house_color_position = values
+            .house_color_position
+            .min(LauncherTrackbarId::HouseColorStrength.maximum());
         // The 0x497 init sets each trackbar's range and position; every change
         // sends WM_HSCROLL (0x0061E609..0x0061E6AF), whose handler
         // (0x0055FF68) names the position (tables 0x0082A248 / 0x0082A254 /
@@ -734,6 +782,7 @@ impl OptionsDialogState {
             pending_result: None,
             page: OptionsPage::Main,
             pending_page: None,
+            pending_update_check: false,
             shell_interaction: shell::ShellInteraction::default(),
         }
     }
@@ -781,6 +830,24 @@ impl OptionsDialogState {
             LauncherTrackbarId::Score => self.values.score_position,
             LauncherTrackbarId::Sound => self.values.sound_position,
             LauncherTrackbarId::Voice => self.values.voice_position,
+            LauncherTrackbarId::HouseColorStrength => self.values.house_color_position,
+        }
+    }
+
+    /// VERA's team-colour strength as the level the profile stores: the
+    /// slider's position lifted onto the
+    /// [`crate::rules::house_colors`] scale.
+    pub(crate) const fn house_color_strength(&self) -> u8 {
+        self.values.house_color_position + crate::rules::house_colors::STRENGTH_MIN
+    }
+
+    /// What a plaque trackbar's plaque reads. Retail's sliders show their
+    /// position; VERA's strength shows the level that position stands for, so
+    /// the player never sees a 0 for gamemd's own colours.
+    pub(crate) fn trackbar_plaque_text(&self, id: LauncherTrackbarId) -> String {
+        match id {
+            LauncherTrackbarId::HouseColorStrength => self.house_color_strength().to_string(),
+            _ => self.trackbar_position(id).to_string(),
         }
     }
 
@@ -798,6 +865,7 @@ impl OptionsDialogState {
             LauncherTrackbarId::Score => &mut self.values.score_position,
             LauncherTrackbarId::Sound => &mut self.values.sound_position,
             LauncherTrackbarId::Voice => &mut self.values.voice_position,
+            LauncherTrackbarId::HouseColorStrength => &mut self.values.house_color_position,
         };
         if *slot == position {
             return;
@@ -828,6 +896,19 @@ impl OptionsDialogState {
             LauncherTrackbarId::Voice => self.pending_events.push(
                 LauncherOptionsEvent::VoicePreview(f32::from(position) * 0.1),
             ),
+            // A once-per-drag setting rather than a live preview: the battle
+            // this applies to is loaded later, and the accept writes it out.
+            // With no audible preview to audition, the retail notch click is
+            // the drag's only feedback, as on the detail, difficulty and
+            // scroll sliders.
+            LauncherTrackbarId::HouseColorStrength => {
+                self.pending_events
+                    .push(LauncherOptionsEvent::Cue(LauncherCue::GenericClick));
+                self.pending_events
+                    .push(LauncherOptionsEvent::HouseColorStrengthChanged(
+                        position + crate::rules::house_colors::STRENGTH_MIN,
+                    ))
+            }
         }
     }
 
@@ -901,6 +982,7 @@ impl OptionsDialogState {
             LauncherCheckboxId::RenderInterpolation => &mut self.values.render_interpolation,
             LauncherCheckboxId::MouseWheelZoom => &mut self.values.mouse_wheel_zoom,
             LauncherCheckboxId::FpsCounter => &mut self.values.fps_counter,
+            LauncherCheckboxId::SkipStartupLogo => &mut self.values.skip_startup_logo,
         };
         *slot = !*slot;
         let checked = *slot;
@@ -931,6 +1013,9 @@ impl OptionsDialogState {
             LauncherCheckboxId::FpsCounter => self
                 .pending_events
                 .push(LauncherOptionsEvent::FpsCounterChanged(checked)),
+            LauncherCheckboxId::SkipStartupLogo => self
+                .pending_events
+                .push(LauncherOptionsEvent::SkipStartupLogoChanged(checked)),
             LauncherCheckboxId::Tooltips
             | LauncherCheckboxId::TargetLines
             | LauncherCheckboxId::ShowHidden => {}
@@ -1012,7 +1097,7 @@ impl OptionsDialogState {
     /// Back, Network, Keyboard, and terminal completion distinct parent
     /// results; the first admitted result owns the frame's teardown path.
     pub(crate) fn request_result(&mut self, result: LauncherParentResult) {
-        if self.pending_result.is_none() && self.pending_page.is_none() {
+        if !self.requested() {
             self.pending_result = Some(result);
         }
     }
@@ -1023,9 +1108,20 @@ impl OptionsDialogState {
 
     /// Ask for `page`; like a parent result, the first request wins.
     pub(crate) fn request_page(&mut self, page: OptionsPage) {
-        if self.pending_result.is_none() && self.pending_page.is_none() {
+        if !self.requested() {
             self.pending_page = Some(page);
         }
+    }
+
+    /// Ask for Check for Updates; the first request wins here too.
+    pub(crate) fn request_update_check(&mut self) {
+        if !self.requested() {
+            self.pending_update_check = true;
+        }
+    }
+
+    fn requested(&self) -> bool {
+        self.pending_result.is_some() || self.pending_page.is_some() || self.pending_update_check
     }
 
     /// Show `page` once the other has slid out. Nothing is applied or saved;
@@ -1045,6 +1141,7 @@ impl OptionsDialogState {
             events: std::mem::take(&mut self.pending_events),
             result: self.pending_result.take(),
             page: self.pending_page.take(),
+            check_for_updates: std::mem::take(&mut self.pending_update_check),
         }
     }
 }
@@ -1114,6 +1211,40 @@ mod tests {
         assert_eq!(labels.options, "Localized Options");
         assert_eq!(labels.main_menu, "Main Menu");
         assert_eq!(csf.text("GUI:MainMenu"), "MISSING:'GUI:MainMenu'");
+    }
+
+    /// VERA's strength slider holds positions 0..=9 and nothing else, and the
+    /// level it publishes is the profile's own 1..=10 scale.
+    #[test]
+    fn house_color_strength_stays_on_the_supported_range() {
+        use crate::rules::house_colors::{STRENGTH_MAX, STRENGTH_RETAIL};
+        let mut state = OptionsDialogState::new(
+            labels(),
+            LauncherOptionsValues {
+                // A hand-edited profile or a stale caller can ask for more.
+                house_color_position: 200,
+                ..Default::default()
+            },
+            Zoom::Auto,
+            true,
+            Vec::new(),
+            DisplayTarget::Auto,
+        );
+        assert_eq!(state.house_color_strength(), STRENGTH_MAX);
+        state.set_trackbar_position(LauncherTrackbarId::HouseColorStrength, 4);
+        assert_eq!(state.house_color_strength(), STRENGTH_RETAIL + 4);
+        // Past the control's range the native guard rejects the set outright.
+        state.set_trackbar_position(LauncherTrackbarId::HouseColorStrength, 10);
+        assert_eq!(state.house_color_strength(), STRENGTH_RETAIL + 4);
+        // A real change publishes one notch click and one level: the click is
+        // the drag's only feedback, since a strength has nothing to audition.
+        assert_eq!(
+            state.drain_output().events,
+            [
+                LauncherOptionsEvent::Cue(LauncherCue::GenericClick),
+                LauncherOptionsEvent::HouseColorStrengthChanged(STRENGTH_RETAIL + 4),
+            ]
+        );
     }
 
     #[test]
@@ -1468,6 +1599,14 @@ mod tests {
         assert_eq!(
             (output.result, output.page),
             (Some(LauncherParentResult::Keyboard), None)
+        );
+        state.request_update_check();
+        state.request_page(OptionsPage::Main);
+        state.request_result(LauncherParentResult::Back);
+        let output = state.drain_output();
+        assert_eq!(
+            (output.result, output.page, output.check_for_updates),
+            (None, None, true)
         );
     }
 

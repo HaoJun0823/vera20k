@@ -467,6 +467,16 @@ impl EntityStore {
         self.techno_registry.len()
     }
 
+    /// UnitClass::Array8B410C is the Unit subset of constructor registration
+    /// order. Derive this one-shot reader view from the existing registry;
+    /// there is no second class list to save or keep in sync.
+    pub(crate) fn unit_registry_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.techno_registry
+            .iter()
+            .copied()
+            .filter(|&id| self.category_of(id) == Some(EntityCategory::Unit))
+    }
+
     pub(crate) fn building_registry_at(&self, index: usize) -> Option<u64> {
         self.building_registry.get(index).copied()
     }

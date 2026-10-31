@@ -23,9 +23,9 @@ pub(crate) struct FrontendState {
     pub(crate) external_match_result: Option<crate::app::cncnet::ExternalMatchResult>,
     /// Frames, duration and opponent departure for the launch report.
     pub(crate) external_progress: crate::app::cncnet::ExternalLaunchProgress,
-    /// Browser only: an ended external launch waits on the menu backdrop,
-    /// without shell input, for the host's next `start_spawn` (docs/spawn.md).
-    pub(crate) external_idle: bool,
+    /// Browser launch is closing its network owners before engine exit.
+    #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+    pub(crate) browser_exit_pending: bool,
     /// The Skirmish setup dialog's state.
     pub(crate) skirmish_shell_state: crate::ui::skirmish_shell::SkirmishShellState,
     /// Choose Map's last clicked game-type row `[0x008316FC]`: starts at -1,
@@ -97,6 +97,9 @@ pub(crate) struct FrontendState {
     pub(crate) quit_cascade: Option<crate::app::frontend::quit_cascade::QuitCascade>,
     /// Retail process-start splash, held until its post-present deadline.
     pub(crate) startup_splash: Option<startup_splash::StartupSplashPresentation>,
+    /// WinMain's `[Intro] Play=` bit (`[0xA8E960] & 4`), consumed at launch:
+    /// the first-run intro starts once the splash hold ends (`0x0052CA65`).
+    pub(crate) startup_intro_pending: bool,
     /// The two-button shell message box `0x120` over the empty backdrop:
     /// main-menu Exit Game (the app only exits on its OK, never on the first
     /// Exit click) or campaign defeat's retry prompt.
@@ -130,6 +133,10 @@ pub(crate) struct FrontendState {
     /// The offline WOL test service's credential store, standing in for the
     /// WOLAPI one for the process.
     pub(crate) wol_test_credentials: Vec<crate::ui::wol_login::WolCredential>,
+    /// Explicit native diagnostics only: WOL visits keep the retail welcome
+    /// `0x10E` and full controls instead of opening at the online sign-in,
+    /// and a LAN guest's BD keeps Accept (`SetupDialog::modern`).
+    pub(crate) native_shell_ui: bool,
     /// LAN lobby interaction/discovery; admitted participants belong to MatchSession.
     pub(crate) lan: Option<crate::app::shell_lan::LanShellRuntime>,
     pub(crate) network_setup_protocol:
@@ -237,6 +244,9 @@ pub(crate) struct FrontendState {
     /// persistence of the old app field. Match paths read the runtime-bound
     /// copy via `overlay_registry()`.
     pub(crate) shell_preview_overlay_registry: Option<OverlayTypeRegistry>,
+    /// The release check, its main-menu offer and the download (desktop only).
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    pub(crate) updater: crate::app::updater::Updater,
 }
 
 /// One open shell message box `0x120` and the caller its result returns to.
@@ -255,4 +265,18 @@ pub(crate) enum ShellMessageBoxPurpose {
     CampaignReplay(Option<Box<crate::app::match_bootstrap::PreparedCampaignStartup>>),
     /// MapSelect's failed Init message returns to the victory continuation.
     CampaignVictory(Box<crate::app::campaign_victory::CampaignVictory>),
+    /// The updater's offer (`0x121`): Update, Skip Version or Later, over
+    /// the release's change list.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    UpdateOffer(crate::app::updater::notes::ReleaseNotes),
+    /// The updater's download progress (`0xCE`); its button cancels.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    UpdateProgress,
+    /// Vera Options' Check for Updates waiting for its check (`0xCE`); its
+    /// button stops waiting.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    UpdateCheck,
+    /// The updater's notice (`0xCE`): a failure, or what a check found.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    UpdateNotice,
 }

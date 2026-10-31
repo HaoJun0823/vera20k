@@ -42,6 +42,11 @@ use winit::keyboard::KeyCode;
 const LIST_WAIT: Duration = Duration::from_millis(30_000);
 // The initial VERA public lobby; native diagnostic catalogs keep their rooms.
 const PUBLIC_LOBBY_NAME: &str = "Lob_41_2";
+/// The modern UI's name for `PUBLIC_LOBBY_NAME` in place of its base name
+/// `TXT_LOB_3` (index `2 % 8`, retail "German Bunker"); the legacy UI keeps
+/// the retail names.
+const PUBLIC_LOBBY_TITLE: &str = "VERA20K Online";
+const PUBLIC_LOBBY_BASE: usize = 2;
 /// `0x00788800`/`0x00789B60`: at most 150 x 100 ms for the leave.
 const LEAVE_WAIT: Duration = Duration::from_millis(15_000);
 /// `SetTimer(0, 30000)`: the game list; `SetTimer(1, 53000)`: the lobbies.
@@ -49,7 +54,9 @@ const GAMES_PERIOD: Duration = Duration::from_millis(30_000);
 const LOBBIES_PERIOD: Duration = Duration::from_millis(53_000);
 /// Refresh `0x55D` disables itself for `SetTimer(0x55D, 3000)`.
 const REFRESH_HOLD: Duration = Duration::from_millis(3000);
-/// `0x00789B60`: `[0xB77DC4] = 7` players.
+/// RESIDUAL: a custom game's channel takes 7 users natively (`0xC3`'s proc
+/// `0x0078DB70` sets `[0xB77DC4] = 7` at `0x0078DC57`, which `0x00789B60`
+/// copies into the record); VERA's takes every network slot, for 30 players.
 const CREATE_MAX_USERS: i32 = crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT as i32;
 /// The create result `0x800401F8` shows `TXT_BAD_CHANKEY`.
 const BAD_CHANNEL_KEY: u32 = 0x8004_01F8;
@@ -794,8 +801,21 @@ pub(super) fn options_screen(state: &AppState) -> (i32, i32) {
     }
 }
 
-pub(super) fn base_names(state: &AppState) -> [String; 8] {
-    std::array::from_fn(|index| csf(state, &format!("TXT_LOB_{}", index + 1)))
+/// The `Lob_41_<n>` base names `TXT_LOB_1..8` as this visit shows them.
+pub(crate) fn base_names(state: &AppState) -> [String; 8] {
+    let modern = state
+        .frontend
+        .wol
+        .as_ref()
+        .is_some_and(|visit| visit.modern_ui());
+    lobby_base_names(modern, |key| csf(state, key))
+}
+
+fn lobby_base_names(modern: bool, text: impl Fn(&str) -> String) -> [String; 8] {
+    std::array::from_fn(|index| match index {
+        PUBLIC_LOBBY_BASE if modern => PUBLIC_LOBBY_TITLE.into(),
+        _ => text(&format!("TXT_LOB_{}", index + 1)),
+    })
 }
 
 /// `0x00780110`'s view of the runner's wait box `0x792BE0(0)`; an open one
@@ -1619,10 +1639,11 @@ fn send_create(state: &mut AppState, channel: WolChannel, key: String, observe: 
 }
 
 /// `0x00789B60`'s record (`0x10C` bytes): type `0x29`, `"%s's_game"` of the
-/// nickname, 7 users, the 0x629 byte (absent, 0) as tournament, the clan
-/// and resolution bits plus the chat-lobby number `[0xB77DD4]` as game
-/// flags. `width` is Options' ScreenWidth `[0xA8EB84]`; `ex_info` is
-/// `0x0077E7A0`'s text (`0x00789D05`). `+0x04 = 1` has no field here.
+/// nickname, [`CREATE_MAX_USERS`] users, the 0x629 byte (absent, 0) as
+/// tournament, the clan and resolution bits plus the chat-lobby number
+/// `[0xB77DD4]` as game flags. `width` is Options' ScreenWidth
+/// `[0xA8EB84]`; `ex_info` is `0x0077E7A0`'s text (`0x00789D05`).
+/// `+0x04 = 1` has no field here.
 fn created_channel(
     nickname: &str,
     clan: bool,
@@ -1683,7 +1704,8 @@ fn ex_info(state: &AppState) -> String {
 
 /// The slot words of [`ex_info`]: the AI rows (`0x005E94D0`), a human
 /// observer on the observer row `[0x8316A4]` (`0x005E9580`) and an open
-/// observer row (`!0x005E9560`).
+/// observer row (`!0x005E9560`). A VERA room with several observers counts
+/// its observers and its open observer rows instead.
 fn slot_ex_info(session: &crate::app::match_runtime::session::MatchSession) -> (i32, i32, i32) {
     use crate::app::match_runtime::session::NetworkVacancy;
     let Some(launch) = session.network_setup() else {
@@ -1694,16 +1716,20 @@ fn slot_ex_info(session: &crate::app::match_runtime::session::MatchSession) -> (
         .clone()
         .filter(|row| session.network_display_ai(*row).is_some())
         .count();
-    let observer_row = session.network_observer_row();
-    let taken = observer_row.is_some()
-        && launch
-            .humans
-            .iter()
-            .any(|human| human.is_observer() && human.raw_slot_index == observer_row);
     let open = rows
         .clone()
-        .any(|row| session.network_vacancy(row) == Some(NetworkVacancy::OpenObserver));
-    (ai as i32, i32::from(taken), i32::from(open))
+        .filter(|row| session.network_vacancy(*row) == Some(NetworkVacancy::OpenObserver))
+        .count();
+    let observers = launch.humans.iter().filter(|human| human.is_observer());
+    if session.network_several_observers() {
+        return (ai as i32, observers.count() as i32, open as i32);
+    }
+    let observer_row = session.network_observer_row();
+    let taken = observer_row.is_some()
+        && observers
+            .clone()
+            .any(|human| human.raw_slot_index == observer_row);
+    (ai as i32, i32::from(taken), i32::from(open != 0))
 }
 
 /// `0x0078F000`'s channel limit (`"mode #%s +l %d"`, API+0x9C): the host,
@@ -2855,6 +2881,7 @@ pub(super) struct ReceivedMessage {
     pub(super) action: bool,
     pub(super) ansi: bool,
     pub(super) options: Option<Box<setup::HostOptions>>,
+    pub(super) sent_at: Option<u64>,
 }
 
 /// The chat sinks (`0x007A8DA0`, `0x007A8FC0`, `0x007AB170`, `0x007AAFB0`
@@ -2873,6 +2900,7 @@ pub(super) fn message_received(state: &mut AppState, message: ReceivedMessage) {
         action,
         ansi,
         options,
+        sent_at,
     } = message;
     let in_game = state
         .frontend
@@ -2895,7 +2923,7 @@ pub(super) fn message_received(state: &mut AppState, message: ReceivedMessage) {
         return;
     }
     let (line, color) = wol_chat::received_line(&sender(&from), &text, private, action);
-    echo(state, line, color);
+    crate::app::shell_lan::append_chat_sent_at(state, LanChatLine { text: line, color }, sent_at);
     let (prefix, _) = wol_chat::received_line(&sender(&from), &[], private, action);
     super::translation::received(
         state,
@@ -3275,6 +3303,7 @@ pub(crate) fn update_geometry(state: &mut AppState) {
         .scroll_to_caret((scale.base_rect(layout.chat).w - 3).max(0) as u32, |text| {
             font.text_width(text)
         });
+    let modern = ui.is_modern();
     if let Some(popup) = ui.popup.as_mut() {
         let (width, height) = (
             state.renderer.gpu.config.width as i32,
@@ -3282,7 +3311,7 @@ pub(crate) fn update_geometry(state: &mut AppState) {
         );
         let rect = match popup.kind {
             WolPopupKind::Create(_) => {
-                crate::ui::shell::modal::wol_create_game_layout(width, height).password
+                crate::ui::shell::modal::wol_create_game_layout(width, height, modern).password
             }
             WolPopupKind::Password(_) => {
                 crate::ui::shell::modal::wol_channel_password_layout(width, height).password
@@ -3357,15 +3386,19 @@ fn popup_control(state: &AppState, popup: &WolLobbyPopup) -> Option<u16> {
     );
     let controls = match popup.kind {
         WolPopupKind::Create(_) => {
-            let layout = crate::ui::shell::modal::wol_create_game_layout(width, height);
-            vec![
-                (POPUP_OK, layout.ok),
-                (POPUP_CANCEL, layout.cancel),
-                (CREATE_CLAN, layout.clan),
-                (CREATE_LIMIT, layout.limit),
-                (CREATE_OBSERVE, layout.observe),
-                (POPUP_PASSWORD, layout.password),
+            let layout =
+                crate::ui::shell::modal::wol_create_game_layout(width, height, modern_lobby(state));
+            [
+                Some((POPUP_OK, layout.ok)),
+                Some((POPUP_CANCEL, layout.cancel)),
+                layout.clan.map(|rect| (CREATE_CLAN, rect)),
+                Some((CREATE_LIMIT, layout.limit)),
+                layout.observe.map(|rect| (CREATE_OBSERVE, rect)),
+                Some((POPUP_PASSWORD, layout.password)),
             ]
+            .into_iter()
+            .flatten()
+            .collect()
         }
         WolPopupKind::Password(_) => {
             let layout = crate::ui::shell::modal::wol_channel_password_layout(width, height);
@@ -3437,6 +3470,7 @@ pub(super) fn mouse(state: &mut AppState, pressed: bool) {
             state.renderer.gpu.config.height as i32,
         );
         let lobby = lobby_mut(state).expect("checked");
+        let modern = lobby.ui.is_modern();
         let popup = lobby.ui.popup.as_mut().expect("checked");
         if !pressed {
             let action = popup
@@ -3451,18 +3485,19 @@ pub(super) fn mouse(state: &mut AppState, pressed: bool) {
         }
         let press = match over {
             Some(control @ (CREATE_CLAN | CREATE_LIMIT | CREATE_OBSERVE)) => {
-                let rect = crate::ui::shell::modal::wol_create_game_layout(width, height);
+                let rect = crate::ui::shell::modal::wol_create_game_layout(width, height, modern);
                 let window = match control {
                     CREATE_CLAN => rect.clan,
-                    CREATE_LIMIT => rect.limit,
+                    CREATE_LIMIT => Some(rect.limit),
                     _ => rect.observe,
                 };
-                if crate::ui::skirmish_shell::checkbox_icon_rect(
-                    window,
-                    crate::ui::shell::geom::ShellScale::RETAIL,
-                )
-                .contains(x, y)
-                    && popup.toggle(control)
+                if window.is_some_and(|window| {
+                    crate::ui::skirmish_shell::checkbox_icon_rect(
+                        window,
+                        crate::ui::shell::geom::ShellScale::RETAIL,
+                    )
+                    .contains(x, y)
+                }) && popup.toggle(control)
                 {
                     Press::Cue(LauncherCue::Checkbox)
                 } else {
@@ -3906,7 +3941,7 @@ mod tests {
         let mut session = MatchSession::default();
         session.enter_network(NetworkReturnContext::Wol);
         session
-            .accept_network_setup(launch.clone(), false, None)
+            .accept_network_setup(launch.clone(), false, None, false)
             .unwrap();
         session
             .accept_network_host_setup(launch, vacancies, 3, None, false)
@@ -3935,10 +3970,10 @@ mod tests {
     }
 
     #[test]
-    fn normal_test_service_keeps_the_simplified_ui_and_only_german_bunker() {
+    fn normal_test_service_keeps_the_simplified_ui_and_only_vera20k_online() {
         let mut visit = crate::app::shell_wol::WolVisit::open(false);
         visit.set_provider(service::WolProvider::TestService);
-        assert_eq!(visit.welcome_page_spec().stacked.len(), 1);
+        assert!(visit.modern_ui());
         let channels: Vec<_> = ["Lob_41_0", "Lob_41_1", "Lob_41_2"]
             .into_iter()
             .map(|name| WolChannel {
@@ -3957,6 +3992,8 @@ mod tests {
         assert_eq!(lobby.lobbies.len(), 1);
         assert_eq!(lobby.lobbies[0].name, "Lob_41_2");
         assert_eq!(lobby.ui.page_spec().stacked.len(), 3);
+        let names = lobby_base_names(visit.modern_ui(), str::to_owned);
+        assert_eq!(WolLobbyRow::joined_name(2, &names), "VERA20K Online");
         visit.set_legacy_ui(true);
         let mut legacy = new_runner(
             Runner::Lobby,
@@ -3967,6 +4004,8 @@ mod tests {
         );
         legacy.set_lobbies(channels);
         assert_eq!(legacy.lobbies.len(), 3);
+        let names = lobby_base_names(visit.modern_ui(), str::to_owned);
+        assert_eq!(WolLobbyRow::joined_name(2, &names), "TXT_LOB_3");
         assert_eq!(legacy.ui.page_spec().stacked.len(), 8);
     }
 

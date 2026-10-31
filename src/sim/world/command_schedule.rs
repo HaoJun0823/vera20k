@@ -386,16 +386,17 @@ impl Simulation {
         })
     }
 
-    /// Read-only keyboard-slot projection of the one Techno+214 owner and
-    /// accepted local assignment queue. It preserves immediate assign/recall
-    /// input before the next ingress without retaining a second membership
-    /// list. Native731060 stores parameter-1; digit0 registers parameter10.
+    /// Read-only keyboard-slot projection of each object's control group
+    /// (Techno+214, or a network game's local slot) and the accepted local
+    /// assignment queue. It preserves immediate assign/recall input before the
+    /// next ingress without retaining a second membership list.
+    /// Native731060 stores parameter-1; digit0 registers parameter10.
     pub fn projected_control_groups(&self) -> [Vec<u64>; 10] {
         let mut objects: Vec<_> = self
             .substrate
             .entities
             .iter_sorted()
-            .map(|(_, entity)| (entity, entity.object_group()))
+            .map(|(_, entity)| (entity, entity.control_group()))
             .collect();
         for command in self.queued_commands() {
             if let Command::AssignControlGroup { group, entity_ids } = command.payload {

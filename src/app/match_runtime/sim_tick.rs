@@ -410,7 +410,7 @@ fn build_score_screen_model(
     // 0x0082FEBC "SCORE". It keeps that literal when the local player is the
     // Observer house (`Player [0xA83D4C] == Observer [0xAC1198]`,
     // 0x1002F4B8..0x1002F4C7).
-    let observing = local_owner.is_some() && local_owner == sim.session().observer_house();
+    let observing = local_owner.is_some_and(|owner| sim.session().is_observer_house(owner));
     let theme = (!observing)
         .then(|| {
             state.process_assets.side_score_theme(
@@ -1009,7 +1009,22 @@ fn advance_in_game_runtime_mode(
             // Wait_For_Players must not restart that interval on completion.
             state.platform.frame_pacer.record_admitted_frame(wall_ms);
         }
-        let frame_committed = advance_one_simulation_frame(state, tick_lane, mouse_scroll, resume);
+        let mut frame_committed =
+            advance_one_simulation_frame(state, tick_lane, mouse_scroll, resume);
+        // Debug speed runs further frames in this paced pass, each through
+        // the same frame transaction; the pacer interval is unchanged.
+        if !frame_stepping && !replaying && debug_speed_allowed(state) {
+            for _ in 1..state.platform.frame_pacer.debug_speed() {
+                if state.match_state.scenario_outcome.is_some()
+                    || state.match_state.scenario_exit.is_some()
+                    || crate::app::App::house_outcome_wait_pending(state)
+                {
+                    break;
+                }
+                frame_committed |=
+                    advance_one_simulation_frame(state, tick_lane, None, FrameResume::None);
+            }
+        }
         state
             .match_state
             .sync_multiplayer_pause_clock(crate::app::match_runtime::frame_pacer::wall_clock_ms());
@@ -1131,6 +1146,13 @@ fn advance_in_game_runtime_mode(
     decision.run_sim
 }
 
+/// Debug speed is limited to an offline Skirmish; online, LAN and campaign
+/// play keep one frame per paced pass.
+pub(crate) fn debug_speed_allowed(state: &AppState) -> bool {
+    state.match_state.session_mode() == super::session::SessionMode::Skirmish
+        && state.match_state.live_network.is_none()
+}
+
 /// Tick simulation: advance movement and animation systems.
 fn should_record_replay_tick(
     tick_result: &crate::sim::world::TickResult,
@@ -1160,6 +1182,38 @@ enum FrameResume {
     NetworkWait,
     NetworkLeave,
     OutcomeWait,
+}
+
+/// House+56FC, the laser color a `LaserColor::House` or `Beam.IsHouseColor`
+/// birth resolves through.
+fn house_laser_rgb(
+    runtime: Option<&crate::sim::runtime::SimRuntime>,
+    colors: &crate::map::houses::HouseColorMap,
+    owner: crate::sim::intern::InternedId,
+) -> [u8; 3] {
+    let Some(runtime) = runtime else {
+        return [0; 3];
+    };
+    let name = runtime.simulation.interner().resolve(owner);
+    // CreateHouses initializes the two literal special houses without
+    // ComputeRemap; their +56FC stays0.
+    if runtime.simulation.session().game_mode_nonzero()
+        && (name.eq_ignore_ascii_case("Neutral") || name.eq_ignore_ascii_case("Special"))
+    {
+        return [0; 3];
+    }
+    let index = colors.get(name).copied().or_else(|| {
+        colors
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, &color)| color)
+    });
+    index.map_or([0; 3], |index| {
+        crate::render::palette_light::house_laser_rgb(
+            &runtime.resources.rules.house_color_ramps,
+            index,
+        )
+    })
 }
 
 fn advance_one_simulation_frame(
@@ -1396,11 +1450,12 @@ fn advance_one_simulation_frame(
                 #[cfg(feature = "ares")]
                 let flying_credits = &state.match_state.match_presentation.flying_credits;
                 #[cfg(feature = "ares")]
-                let queue_bounty = |sim: &crate::sim::world::Simulation,
-                                    rules: &crate::rules::ruleset::RuleSet,
-                                    text: crate::sim::bounty::BountyText| {
-                    flying_credits.borrow_mut().admit(sim, rules, text);
-                };
+                let queue_bounty =
+                    |sim: &crate::sim::world::Simulation,
+                     rules: &crate::rules::ruleset::RuleSet,
+                     text: crate::sim::bounty::BountyText| {
+                        flying_credits.borrow_mut().admit(sim, rules, text);
+                    };
                 let boundary = super::frame_effects::FrameClientBoundary::new(
                     playback,
                     local_owner_name.as_deref(),
@@ -1454,7 +1509,8 @@ fn advance_one_simulation_frame(
                         }
                     }
                 } else {
-                    match resume {
+                    let network = rt.simulation.session().game_mode().is_network();
+                    let advanced = match resume {
                         FrameResume::ChecksumModal => rt.resume_after_network_failure(effects),
                         FrameResume::NetworkWait => rt.resume_network_wait(effects),
                         FrameResume::NetworkLeave => rt.leave_network_wait(effects),
@@ -1462,8 +1518,18 @@ fn advance_one_simulation_frame(
                         FrameResume::None => {
                             rt.advance_frame(&due_commands, SIM_TICK_MS, tick_lane, effects)
                         }
+                    };
+                    // VERA-only: a peer's malformed event or a failed checksum
+                    // must not crash a LAN/online match. The frame did not
+                    // commit, so this timeline never runs again; the checksum
+                    // box's Stop returns to the shell. Offline, only internal
+                    // defects reach here, so they stay a loud panic.
+                    if network && let Err(error) = &advanced {
+                        log::error!("{error}");
+                        state.match_state.frame_stopped = true;
+                        return false;
                     }
-                    .expect("simulation frame failed; prior world mutations remain")
+                    advanced.expect("simulation frame failed; prior world mutations remain")
                 }
             };
             state
@@ -1780,6 +1846,7 @@ fn advance_one_simulation_frame(
                 | LifecycleOutput::SidebarRecalculated { .. }
                 | LifecycleOutput::ProductionBeginAttempted { .. }
                 | LifecycleOutput::ProductionFactoryLinked { .. }
+                | LifecycleOutput::ProductionBuildingReady { .. }
                 | LifecycleOutput::ProductionFactoryAbandoning { .. }
                 | LifecycleOutput::ProductionFactoryUnlinked { .. }
                 | LifecycleOutput::BuildingPlacementRetry { .. }
@@ -1809,32 +1876,9 @@ fn advance_one_simulation_frame(
                     let runtime = state.match_state.sim_runtime.as_ref();
                     let presentation = &mut state.match_state.match_presentation;
                     let colors = &presentation.house_color_map;
-                    presentation.lasers.create(birth, |owner| {
-                        let Some(runtime) = runtime else {
-                            return [0; 3];
-                        };
-                        let name = runtime.simulation.interner().resolve(owner);
-                        // CreateHouses initializes the two literal special
-                        // houses without ComputeRemap; their +56FC stays0.
-                        if runtime.simulation.session().game_mode_nonzero()
-                            && (name.eq_ignore_ascii_case("Neutral")
-                                || name.eq_ignore_ascii_case("Special"))
-                        {
-                            return [0; 3];
-                        }
-                        let index = colors.get(name).copied().or_else(|| {
-                            colors
-                                .iter()
-                                .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-                                .map(|(_, &color)| color)
-                        });
-                        index.map_or([0; 3], |index| {
-                            crate::render::palette_light::house_laser_rgb(
-                                &runtime.resources.rules.house_color_ramps,
-                                index,
-                            )
-                        })
-                    });
+                    presentation
+                        .lasers
+                        .create(birth, |owner| house_laser_rgb(runtime, colors, owner));
                 }
                 LifecycleOutput::ElectricBoltCreated(birth) => {
                     state
@@ -1844,11 +1888,12 @@ fn advance_one_simulation_frame(
                         .create(birth);
                 }
                 LifecycleOutput::RadiationBeamCreated(birth) => {
-                    state
-                        .match_state
-                        .match_presentation
+                    let runtime = state.match_state.sim_runtime.as_ref();
+                    let presentation = &mut state.match_state.match_presentation;
+                    let colors = &presentation.house_color_map;
+                    presentation
                         .radiation_beams
-                        .create(birth);
+                        .create(birth, |owner| house_laser_rgb(runtime, colors, owner));
                 }
                 LifecycleOutput::LineTrailConstructed { stable_id, style } => {
                     let presentation = &mut state.match_state.match_presentation;
@@ -2068,7 +2113,8 @@ pub(crate) fn apply_trigger_effects(state: &mut AppState, effects: &[TriggerEffe
                 }
             }
             TriggerEffect::FlashSidebarCameo {
-                type_id,
+                category,
+                type_index,
                 duration,
                 frame,
             } => {
@@ -2079,7 +2125,8 @@ pub(crate) fn apply_trigger_effects(state: &mut AppState, effects: &[TriggerEffe
                         .match_presentation
                         .sidebar_projection
                         .flash_cameo(
-                            *type_id,
+                            *category,
+                            *type_index,
                             *duration,
                             *frame,
                             runtime.simulation.interner(),

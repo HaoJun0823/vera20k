@@ -357,6 +357,7 @@ impl App {
                             .replay
                             .standalone_startup()
                             .expect("validated replay request"),
+                        request.map_beside.as_deref(),
                     );
                     state.match_state.match_diagnostics.begin_playback(
                         request.replay,
@@ -426,7 +427,10 @@ impl App {
             }
             Err(err) => {
                 #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
-                crate::web::status(&format!("Startup failed: {err:#}"));
+                {
+                    crate::web::request_exit(Some(&format!("Startup failed: {err:#}")));
+                    crate::web::status(&format!("Startup failed: {err:#}"));
+                }
                 log::error!("Failed to initialize: {:#}", err);
                 if self.spawn_request.is_some() || self.replay_request.is_some() {
                     self.startup_failure = Some(format!("CnCNet initialization failed: {err:#}"));
@@ -533,6 +537,9 @@ impl ApplicationHandler for App {
                 let Some(state) = self.state.as_mut() else {
                     return;
                 };
+                if state.persistence.pending_load.is_some() {
+                    return;
+                }
                 let in_game = state.frontend.screen == GameScreen::InGame;
                 let scale = state.platform.window.scale_factor();
                 let output = state.match_state.input.touch_mapper.translate(
@@ -762,12 +769,14 @@ impl ApplicationHandler for App {
 
         // Native does not expose menu/game input while its process-start splash
         // owns the display. Keep close/resize/redraw operational, but discard
-        // player input until the post-present deadline has elapsed.
-        if state
-            .frontend
-            .startup_splash
-            .as_ref()
-            .is_some_and(|splash| splash.is_active(Instant::now()))
+        // player input until the post-present deadline has elapsed. The startup
+        // logo plays before the splash and takes Play_Movie's own input.
+        if state.frontend.fullscreen_movie.is_none()
+            && state
+                .frontend
+                .startup_splash
+                .as_ref()
+                .is_some_and(|splash| splash.is_active(Instant::now()))
             && matches!(
                 &event,
                 WindowEvent::KeyboardInput { .. }
@@ -805,6 +814,22 @@ impl ApplicationHandler for App {
                 event.state.is_pressed(),
                 paused,
             );
+        }
+        // Keep physical button/modifier releases above alive while the modal
+        // load owns input, so a key released here cannot stick after restore.
+        if state.persistence.pending_load.is_some() {
+            match &event {
+                WindowEvent::CloseRequested => state.persistence.pending_load = None,
+                WindowEvent::KeyboardInput { event, .. } if !event.state.is_pressed() => {}
+                WindowEvent::RedrawRequested
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Focused(_)
+                | WindowEvent::Occluded(_)
+                | WindowEvent::CursorEntered { .. }
+                | WindowEvent::CursorLeft { .. } => {}
+                _ => return,
+            }
         }
         if crate::app::frontend::status_screen::handle_event(state, &event, event_loop) {
             return;
@@ -1426,8 +1451,13 @@ impl ApplicationHandler for App {
                     ScreenPage::MainMenu if state.frontend.shell_message_box.is_none() => {
                         Self::handle_main_menu_shell_mouse_move(state);
                     }
-                    ScreenPage::MainMenu
-                    | ScreenPage::FullscreenMovie
+                    // The open message box takes the move; the update offer's
+                    // change list follows it.
+                    ScreenPage::MainMenu => {
+                        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+                        crate::app::updater::notes::cursor_moved(state);
+                    }
+                    ScreenPage::FullscreenMovie
                     | ScreenPage::CreditsRoll
                     | ScreenPage::Loading
                     | ScreenPage::InGameCard
@@ -1621,6 +1651,11 @@ impl ApplicationHandler for App {
                         | ModalPage::NetworkOptions,
                     ) => return,
                 };
+                #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+                if screen == ScreenPage::MainMenu && crate::app::updater::notes::wheel(state, lines)
+                {
+                    return;
+                }
                 if screen == ScreenPage::Skirmish
                     && Self::handle_skirmish_shell_mouse_wheel(state, lines)
                 {
@@ -1631,6 +1666,10 @@ impl ApplicationHandler for App {
                     && !state.match_state.paused()
                     && !crate::app::input::campaign_input::is_locked(state)
                 {
+                    if crate::app::presentation::super_timers::wheel(state, lines) {
+                        state.platform.window.request_redraw();
+                        return;
+                    }
                     // Optional player setting: over the battlefield the wheel changes the view
                     // distance tier, anchored on the tactical centre. Over the
                     // sidebar and the bottom strip it keeps gamemd's native
@@ -1693,9 +1732,10 @@ impl ApplicationHandler for App {
             return;
         }
         let shell_scroll_wake = if let Some(state) = self.state.as_mut() {
-            // docs/spawn.md: a browser page's next launch after the last ended.
             #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
-            Self::poll_queued_spawn(state);
+            if Self::poll_browser_exit(state, event_loop) {
+                return;
+            }
             Self::follow_window_full_screen(state);
             // cursor lock: the OS drops the clip on focus loss /
             // Windows key, so re-assert the player's choice every frame while
@@ -1722,6 +1762,11 @@ impl ApplicationHandler for App {
                 Self::poll_choose_map_scroll(state),
                 Self::poll_campaign(state),
                 Self::campaign_score_animation_deadline(state),
+                // Captures replay sealed input; they never check or ask.
+                #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+                (self.shell_capture.is_none() && self.tactical_capture.is_none())
+                    .then(|| crate::app::updater::poll(state))
+                    .flatten(),
             ]
             .into_iter()
             .flatten()
@@ -1877,6 +1922,10 @@ impl ApplicationHandler for App {
             crate::app::match_runtime::sim_tick::flush_replay_log(state);
         }
         log::logger().flush();
+        // A confirmed quit (its cascade's Theme Stop(0), 0x0052E7EC, has run)
+        // or a page unload tears down a running game.
+        #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
+        self.browser_exiting();
     }
 }
 

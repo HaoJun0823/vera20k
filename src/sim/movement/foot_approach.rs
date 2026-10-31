@@ -548,6 +548,7 @@ impl Simulation {
                 &self.interner,
                 terrain,
                 &los,
+                Some(&self.substrate.entities),
             )
             .ok_or("Approach CanFireAt coordinate failed")?,
             (Some(_), None) => combat::can_fire_at_target_in_query(

@@ -26,6 +26,7 @@ pub(crate) mod ai_base_defense;
 pub(crate) mod ai_base_site;
 pub mod ammo;
 pub mod anim_class;
+pub mod attach_effect;
 pub(crate) mod object_fall;
 #[cfg(any(test, feature = "test-support"))]
 pub mod arena_fixture;
@@ -81,10 +82,8 @@ pub(crate) mod powered_unit; // Robot Tanks offline without a PowersUnit= buildi
 pub mod light_sources;
 pub mod multiplayer_checksum;
 pub mod native_identity;
-#[cfg_attr(
-    all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"),
-    path = "parallel_web.rs"
-)]
+// A wasm build has no threads (the browser package, the headless WASI run).
+#[cfg_attr(target_arch = "wasm32", path = "parallel_web.rs")]
 pub(crate) mod parallel; // order-preserving work over scoped threads
 #[cfg(all(test, feature = "wasm", not(target_arch = "wasm32")))]
 #[path = "parallel_web.rs"]
@@ -99,7 +98,7 @@ pub mod sensor_lifecycle;
 pub mod spy_infiltration; // BuildingClass::Infiltrate (a spy's effects on the building it enters)
 pub(crate) mod stage;
 pub use stage::StageClass;
-pub(crate) mod state_hasher;
+pub(crate) mod state_hasher; // parallel digests over util::state_hasher
 pub mod temporal;
 pub(crate) mod tesla_charging;
 pub mod timer; // signed frame-anchored countdown primitive
@@ -143,6 +142,8 @@ pub mod house_eva; // HouseClass::Update EVA advice timers (funds nag, low power
 pub mod power_system;
 pub mod superweapon;
 pub mod vision;
+#[cfg(feature = "phobos")]
+pub mod warhead_anim;
 
 // --- Animation, building overlays, bridge state ---
 pub mod animation;

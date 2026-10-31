@@ -50,6 +50,9 @@ const TEXT = {
         storage: 'Settings and saves are stored in this browser for this site.',
         saving: 'Saving user data…', saved: 'User data saved in this browser.',
         storageFailed: error => `User data could not be saved in this browser: ${error}`,
+        exiting: 'Game exited. Finishing pending saves…',
+        exited: 'Game exited and user data saved. You can close this tab.',
+        exitSaveFailed: 'Game exited, but user data could not be saved. Keep this tab open; closing it may lose changes.',
         language: '中文',
         resume: folder => `Continue with “${folder}”`,
         resumeDenied: 'The browser was not allowed to read that folder. Choose it again.',
@@ -84,6 +87,9 @@ const TEXT = {
         storage: '设置和存档保存在此浏览器中（仅限本站）。',
         saving: '正在保存用户数据…', saved: '用户数据已保存到此浏览器。',
         storageFailed: error => `无法在此浏览器中保存用户数据：${error}`,
+        exiting: '游戏已退出，正在完成存档写入…',
+        exited: '游戏已退出，用户数据已保存。可以关闭此标签页。',
+        exitSaveFailed: '游戏已退出，但用户数据未能保存。请保留此标签页，关闭可能丢失更改。',
         language: 'English',
         modeSingle: '单人游戏。资源只在本机读取，不会上传。',
         modeOnline: '联机时可能共享所选地图，其它资源只在本机读取。',
@@ -202,6 +208,7 @@ function ready(canStart) {
 let started = false;
 let hudTimer;
 const show = message => {
+    if (message === 'Exited') { void finishExit(); return; }
     if (!started) {
         live.delete(status);
         status.textContent = message;
@@ -218,6 +225,21 @@ let database;
 let storageFailed = false;
 let pending = 0;
 let saveQueue = Promise.resolve();
+let exiting = false;
+async function finishExit() {
+    if (exiting) return;
+    exiting = true;
+    clearTimeout(hudTimer);
+    canvas.hidden = true;
+    hud.hidden = false;
+    hud.classList.remove('fade');
+    say(hud, 'exiting');
+    await saveQueue;
+    if (storageFailed) { say(hud, 'exitSaveFailed'); return; }
+    // Ordinary tabs may refuse close(); the saved, exited state stays visible.
+    say(hud, 'exited');
+    window.close();
+}
 const storageError = error => {
     storageFailed = true;
     say(storageStatus, 'storageFailed', error.message || String(error));

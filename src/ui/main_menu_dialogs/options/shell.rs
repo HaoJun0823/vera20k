@@ -7,15 +7,17 @@
 //! VERA's page lays its controls out on the main page's bands and rows.
 
 use super::{
-    DEVELOPER_OPTIONS_LABEL, DISPLAY_AUTO_LABEL, DISPLAY_HELP, DISPLAY_LABEL, DisplayChoice,
-    DisplayTarget, FPS_COUNTER_HELP, FPS_COUNTER_LABEL, FULL_SCREEN_HELP, FULL_SCREEN_LABEL,
-    LauncherButton, LauncherCheckboxId, LauncherComboId, LauncherCue, LauncherOptionsEvent,
-    LauncherParentResult, LauncherTrackbarId, MOUSE_WHEEL_ZOOM_HELP, MOUSE_WHEEL_ZOOM_LABEL,
-    ORIGINAL_SHAPE_HELP, ORIGINAL_SHAPE_LABEL, OptionsDialogState, OptionsPage,
-    PhysicalControlFrame, RENDER_INTERPOLATION_HELP, RENDER_INTERPOLATION_LABEL, SHIFT_QUEUE_HELP,
-    SHIFT_QUEUE_LABEL, SIDEBAR_HELP, SIDEBAR_LABEL, SidebarSize, VERA_OPTIONS_HELP,
-    VERA_OPTIONS_LABEL, WOL_TEST_SERVICE_HELP, WOL_TEST_SERVICE_LABEL, YR_ORIGINAL_STYLE_HELP,
-    YR_ORIGINAL_STYLE_LABEL, ZOOM_HELP, ZOOM_LABEL, Zoom,
+    ACCESSIBILITY_LABEL, CHECK_FOR_UPDATES_HELP, CHECK_FOR_UPDATES_LABEL, DEVELOPER_OPTIONS_LABEL,
+    DISPLAY_AUTO_LABEL, DISPLAY_HELP, DISPLAY_LABEL, DisplayChoice, DisplayTarget,
+    FPS_COUNTER_HELP, FPS_COUNTER_LABEL, FULL_SCREEN_HELP, FULL_SCREEN_LABEL,
+    HAS_CHECK_FOR_UPDATES, HOUSE_COLOR_STRENGTH_HELP, HOUSE_COLOR_STRENGTH_LABEL, LauncherButton,
+    LauncherCheckboxId, LauncherComboId, LauncherCue, LauncherOptionsEvent, LauncherParentResult,
+    LauncherTrackbarId, MOUSE_WHEEL_ZOOM_HELP, MOUSE_WHEEL_ZOOM_LABEL, ORIGINAL_SHAPE_HELP,
+    ORIGINAL_SHAPE_LABEL, OptionsDialogState, OptionsPage, PhysicalControlFrame,
+    RENDER_INTERPOLATION_HELP, RENDER_INTERPOLATION_LABEL, SHIFT_QUEUE_HELP, SHIFT_QUEUE_LABEL,
+    SIDEBAR_HELP, SIDEBAR_LABEL, SKIP_STARTUP_LOGO_HELP, SKIP_STARTUP_LOGO_LABEL, SidebarSize,
+    VERA_OPTIONS_HELP, VERA_OPTIONS_LABEL, WOL_TEST_SERVICE_HELP, WOL_TEST_SERVICE_LABEL,
+    YR_ORIGINAL_STYLE_HELP, YR_ORIGINAL_STYLE_LABEL, ZOOM_HELP, ZOOM_LABEL, Zoom,
 };
 use crate::ui::shell::descriptor::DialogId;
 use crate::ui::shell::geom::{RectPx, ShellScale, center_offset, child_window, dlu_rect};
@@ -90,13 +92,29 @@ pub(crate) const OPTIONS_PAGE: MenuPageSpec = MenuPageSpec {
     },
 };
 
-/// VERA's page of `0xD5`: only Back in the column, in Main Menu's place, as
-/// on the Keyboard page `0xA3`, with the Keyboard page's Back help.
+/// VERA's Check for Updates on its page, in the column's first slot. Not a
+/// retail control: the id only names its rect in the page layout.
+pub(crate) const CHECK_FOR_UPDATES_BUTTON: u16 = 0x7FFE;
+
+/// VERA's page of `0xD5`: Check for Updates at the top of the column (not in
+/// the browser build), and Back in Main Menu's place, as on the Keyboard page
+/// `0xA3`, with the Keyboard page's Back help.
 pub(crate) const VERA_OPTIONS_PAGE: MenuPageSpec = MenuPageSpec {
     dialog: DialogId(0x00D5),
     // The heading is VERA's own text, VERA_OPTIONS_LABEL.
     title_key: "",
-    stacked: &[],
+    // Its caption and help are CHECK_FOR_UPDATES_LABEL and _HELP.
+    stacked: if HAS_CHECK_FOR_UPDATES {
+        &[MenuPageButtonSpec {
+            id: CHECK_FOR_UPDATES_BUTTON,
+            dlu_top: 122,
+            csf_key: "",
+            tooltip_key: "",
+            result: None,
+        }]
+    } else {
+        &[]
+    },
     back: MenuPageButtonSpec {
         id: MAIN_MENU_BUTTON,
         dlu_top: 346,
@@ -184,6 +202,14 @@ impl LauncherOptionsLayout {
         // caption 50..66, face 66..90, caption 94..110, face 110..134.
         let sidebar_combo = px(RectPx::new(351, 66, 180, COMBO_FACE_H));
         let display_combo = px(RectPx::new(351, 110, 180, COMBO_FACE_H));
+        // VERA's Accessibility band takes the main page's Audio Options place:
+        // its heading, then one caption row over one slider. The trackbar's
+        // border art is only authored for the nine windows in
+        // `skirmish_shell_chrome::TRACKBAR_FRAMES`, and a plaque slider is one
+        // of the 50-reserve ones, so this row takes the 226x22 window the main
+        // page's Generate Map slider uses rather than the plain 181x22 one:
+        // any other size paints the thumb and the plaque over no frame at all.
+        let house_color_slider = slider(82, 289, 150, 13);
         let (combos, trackbars, checkboxes, buttons) = match page {
             OptionsPage::Main => (
                 vec![(LauncherComboId::Zoom, combo)],
@@ -226,7 +252,7 @@ impl LauncherOptionsLayout {
                     (LauncherComboId::Sidebar, sidebar_combo),
                     (LauncherComboId::Display, display_combo),
                 ],
-                Vec::new(),
+                vec![(LauncherTrackbarId::HouseColorStrength, house_color_slider)],
                 vec![
                     // Display Options: the window and how battles draw.
                     (LauncherCheckboxId::FullScreen, dlu(93, 38, 130, 10)),
@@ -241,11 +267,21 @@ impl LauncherOptionsLayout {
                     (LauncherCheckboxId::MouseWheelZoom, dlu(93, 143, 130, 10)),
                     // Developer Options, in the main page's UI Options band.
                     (LauncherCheckboxId::FpsCounter, dlu(93, 188, 130, 10)),
+                    (LauncherCheckboxId::SkipStartupLogo, dlu(93, 203, 130, 10)),
                 ],
-                vec![(
-                    LauncherButton::Page(OptionsPage::Main),
-                    button(MAIN_MENU_BUTTON),
-                )],
+                HAS_CHECK_FOR_UPDATES
+                    .then(|| {
+                        (
+                            LauncherButton::CheckForUpdates,
+                            button(CHECK_FOR_UPDATES_BUTTON),
+                        )
+                    })
+                    .into_iter()
+                    .chain([(
+                        LauncherButton::Page(OptionsPage::Main),
+                        button(MAIN_MENU_BUTTON),
+                    )])
+                    .collect(),
             ),
         };
         Self {
@@ -412,6 +448,10 @@ impl OptionsDialogState {
                 (DISPLAY_LABEL, 234, 58, 120, 10, Left),
                 (&labels.ui_options, 20, 93, 298, 10, Left),
                 (DEVELOPER_OPTIONS_LABEL, 20, 168, 298, 10, Left),
+                // The Accessibility band, in the main page's Audio Options
+                // place, with its one caption over its one slider.
+                (ACCESSIBILITY_LABEL, 20, 254, 298, 10, Left),
+                (HOUSE_COLOR_STRENGTH_LABEL, 82, 274, 150, 10, Center),
                 (&labels.blank, 2, 355, 303, 12, Left),
             ],
         };
@@ -439,6 +479,7 @@ impl OptionsDialogState {
             LauncherCheckboxId::ShiftQueue => SHIFT_QUEUE_LABEL,
             LauncherCheckboxId::WolTestService => WOL_TEST_SERVICE_LABEL,
             LauncherCheckboxId::FpsCounter => FPS_COUNTER_LABEL,
+            LauncherCheckboxId::SkipStartupLogo => SKIP_STARTUP_LOGO_LABEL,
         }
     }
 
@@ -450,6 +491,7 @@ impl OptionsDialogState {
             LauncherButton::Exit(LauncherParentResult::Terminal) => "",
             LauncherButton::Page(OptionsPage::Vera) => VERA_OPTIONS_LABEL,
             LauncherButton::Page(OptionsPage::Main) => &self.labels.back,
+            LauncherButton::CheckForUpdates => CHECK_FOR_UPDATES_LABEL,
         }
     }
 
@@ -489,6 +531,7 @@ impl OptionsDialogState {
             LauncherCheckboxId::ShiftQueue => self.values.shift_queue,
             LauncherCheckboxId::WolTestService => self.values.wol_test_service,
             LauncherCheckboxId::FpsCounter => self.values.fps_counter,
+            LauncherCheckboxId::SkipStartupLogo => self.values.skip_startup_logo,
         }
     }
 
@@ -625,6 +668,9 @@ impl OptionsDialogState {
                 LauncherButton::Page(OptionsPage::Vera) => {
                     return Some(LauncherStatusHelp::Text(VERA_OPTIONS_HELP));
                 }
+                LauncherButton::CheckForUpdates => {
+                    return Some(LauncherStatusHelp::Text(CHECK_FOR_UPDATES_HELP));
+                }
                 LauncherButton::Page(OptionsPage::Main) => (&VERA_OPTIONS_PAGE, MAIN_MENU_BUTTON),
                 LauncherButton::Exit(LauncherParentResult::Keyboard) => {
                     (&OPTIONS_PAGE, KEYBOARD_BUTTON)
@@ -645,14 +691,20 @@ impl OptionsDialogState {
             .iter()
             .find(|(_, rect)| rect.contains(x, y))
         {
-            return Some(LauncherStatusHelp::Csf(match id {
-                LauncherTrackbarId::Detail => "STT:MainOptSliderVisual",
-                LauncherTrackbarId::Difficulty => "STT:MainOptSliderDifficulty",
-                LauncherTrackbarId::Scroll => "STT:MainOptSliderScroll",
-                LauncherTrackbarId::Score => "STT:MainOptSliderMusic",
-                LauncherTrackbarId::Sound => "STT:MainOptSliderSound",
-                LauncherTrackbarId::Voice => "STT:MainOptSliderVoice",
-            }));
+            return Some(match id {
+                LauncherTrackbarId::Detail => LauncherStatusHelp::Csf("STT:MainOptSliderVisual"),
+                LauncherTrackbarId::Difficulty => {
+                    LauncherStatusHelp::Csf("STT:MainOptSliderDifficulty")
+                }
+                LauncherTrackbarId::Scroll => LauncherStatusHelp::Csf("STT:MainOptSliderScroll"),
+                LauncherTrackbarId::Score => LauncherStatusHelp::Csf("STT:MainOptSliderMusic"),
+                LauncherTrackbarId::Sound => LauncherStatusHelp::Csf("STT:MainOptSliderSound"),
+                LauncherTrackbarId::Voice => LauncherStatusHelp::Csf("STT:MainOptSliderVoice"),
+                // VERA's own slider: retail has no string for it.
+                LauncherTrackbarId::HouseColorStrength => {
+                    LauncherStatusHelp::Text(HOUSE_COLOR_STRENGTH_HELP)
+                }
+            });
         }
         if let Some((id, _)) = layout
             .checkboxes
@@ -681,6 +733,9 @@ impl OptionsDialogState {
                     LauncherStatusHelp::Text(WOL_TEST_SERVICE_HELP)
                 }
                 LauncherCheckboxId::FpsCounter => LauncherStatusHelp::Text(FPS_COUNTER_HELP),
+                LauncherCheckboxId::SkipStartupLogo => {
+                    LauncherStatusHelp::Text(SKIP_STARTUP_LOGO_HELP)
+                }
             });
         }
         layout
@@ -796,6 +851,7 @@ impl OptionsDialogState {
             match id {
                 LauncherButton::Exit(result) => self.request_result(result),
                 LauncherButton::Page(page) => self.request_page(page),
+                LauncherButton::CheckForUpdates => self.request_update_check(),
             }
         }
     }
@@ -804,6 +860,7 @@ impl OptionsDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::house_colors::{STRENGTH_MAX, STRENGTH_RETAIL};
     use crate::ui::main_menu_dialogs::options::{
         LauncherCue, LauncherOptionsEvent, LauncherOptionsLabels, LauncherOptionsValues,
     };
@@ -848,6 +905,28 @@ mod tests {
         LauncherOptionsLayout::new(800, 600, OptionsPage::Vera)
     }
 
+    /// Every slider either page lays out must land on one of the chrome
+    /// atlas's nine authored trackbar windows. The frame lookup is an exact
+    /// size match, so a row sized like a plain track but painted with a value
+    /// plaque resolves to no frame at all: the page would draw the thumb and
+    /// the plaque over empty background.
+    #[test]
+    fn every_page_slider_lands_on_an_authored_trackbar_frame() {
+        use crate::render::skirmish_shell_chrome::trackbar_frame_slot;
+        for layout in [main_layout(), vera_layout()] {
+            for &(id, rect) in &layout.trackbars {
+                let base = layout.scale.base_rect(rect);
+                assert!(
+                    trackbar_frame_slot(id.plaque_reserve() > 0, base.w, base.h).is_some(),
+                    "{id:?} on the {:?} page is {}x{}, which no authored trackbar frame covers",
+                    layout.page,
+                    base.w,
+                    base.h
+                );
+            }
+        }
+    }
+
     fn checkbox(layout: &LauncherOptionsLayout, id: LauncherCheckboxId) -> RectPx {
         layout
             .checkboxes
@@ -864,6 +943,12 @@ mod tests {
             .find(|(candidate, _)| *candidate == id)
             .map(|(_, rect)| *rect)
             .unwrap_or_else(|| panic!("{id:?} on the {:?} page", layout.page))
+    }
+
+    /// The Accessibility slider's rect: the 226x22 plaque track, 150 DLUs wide
+    /// in the audio row's place.
+    fn slider_rect() -> RectPx {
+        RectPx::new(123, 470, 226, 22)
     }
 
     fn heading(state: &OptionsDialogState, layout: &LauncherOptionsLayout, text: &str) -> RectPx {
@@ -979,7 +1064,11 @@ mod tests {
     fn vera_page_holds_visible_controls_clear_of_the_others() {
         let state = vera_state();
         let layout = vera_layout();
-        assert!(layout.trackbars.is_empty());
+        // The Accessibility band's one slider, in the main page's audio row.
+        assert_eq!(
+            layout.trackbars,
+            [(LauncherTrackbarId::HouseColorStrength, slider_rect())]
+        );
         // The Sidebar and Display lists sit in the Display Options band's right
         // column, Sidebar above Display, each with its own caption.
         assert_eq!(
@@ -1003,7 +1092,7 @@ mod tests {
             .chain(&layout.checkboxes)
             .map(|(id, _)| *id)
             .collect();
-        assert_eq!(all.len(), 10);
+        assert_eq!(all.len(), 11);
         for id in &all {
             assert_eq!(all.iter().filter(|other| *other == id).count(), 1, "{id:?}");
         }
@@ -1014,6 +1103,7 @@ mod tests {
             .checkboxes
             .iter()
             .map(|(_, rect)| *rect)
+            .chain(layout.trackbars.iter().map(|(_, rect)| *rect))
             .chain(layout.combos.iter().map(|(_, rect)| *rect))
             .collect();
         rects.extend(
@@ -1032,6 +1122,7 @@ mod tests {
         let display = heading(&state, &layout, "Display Options");
         let ui = heading(&state, &layout, "UI Options");
         let developer = heading(&state, &layout, DEVELOPER_OPTIONS_LABEL);
+        let accessibility = heading(&state, &layout, ACCESSIBILITY_LABEL);
         use LauncherCheckboxId::*;
         for (id, top, bottom) in [
             (FullScreen, display, ui),
@@ -1040,7 +1131,8 @@ mod tests {
             (YrOriginalStyle, ui, developer),
             (ShiftQueue, ui, developer),
             (MouseWheelZoom, ui, developer),
-            (FpsCounter, developer, layout.status_help),
+            (FpsCounter, developer, accessibility),
+            (SkipStartupLogo, developer, accessibility),
         ] {
             let rect = checkbox(&layout, id);
             assert!(
@@ -1048,6 +1140,18 @@ mod tests {
                 "{id:?}"
             );
         }
+        // The Accessibility slider sits under its own caption, and the caption
+        // under the band's heading.
+        let caption = heading(&state, &layout, HOUSE_COLOR_STRENGTH_LABEL);
+        let slider = layout
+            .trackbar_rect(LauncherTrackbarId::HouseColorStrength)
+            .unwrap();
+        assert!(
+            caption.y >= accessibility.y + accessibility.h,
+            "{caption:?}"
+        );
+        assert!(slider.y >= caption.y + caption.h, "{slider:?}");
+        assert!(slider.y + slider.h <= layout.status_help.y, "{slider:?}");
         assert_eq!(state.shell_title_text(), VERA_OPTIONS_LABEL);
         assert_eq!(labels[0].text, VERA_OPTIONS_LABEL);
         assert_eq!(
@@ -1093,6 +1197,35 @@ mod tests {
         );
         state.show_page(OptionsPage::Main);
         assert_eq!(state.shell_title_text(), "Options");
+        assert_eq!(state.pack(), before);
+    }
+
+    #[test]
+    fn check_for_updates_tops_veras_column_and_only_asks() {
+        let mut state = state();
+        state.show_page(OptionsPage::Vera);
+        let layout = vera_layout();
+        let check = button(&layout, LauncherButton::CheckForUpdates);
+        // Keyboard's slot on the main page.
+        assert_eq!(
+            check,
+            button(
+                &main_layout(),
+                LauncherButton::Exit(LauncherParentResult::Keyboard)
+            )
+        );
+        assert_eq!(
+            state.shell_button_label(LauncherButton::CheckForUpdates),
+            "Check for Updates"
+        );
+        let before = state.pack();
+        state.shell_mouse_down(check.x + 5, check.y + 5, &layout);
+        state.shell_mouse_up(check.x + 5, check.y + 5, &layout);
+        let output = state.drain_output();
+        assert_eq!(
+            (output.result, output.page, output.check_for_updates),
+            (None, None, true)
+        );
         assert_eq!(state.pack(), before);
     }
 
@@ -1159,6 +1292,7 @@ mod tests {
             (ShiftQueue, SHIFT_QUEUE_HELP),
             (MouseWheelZoom, MOUSE_WHEEL_ZOOM_HELP),
             (FpsCounter, FPS_COUNTER_HELP),
+            (SkipStartupLogo, SKIP_STARTUP_LOGO_HELP),
         ] {
             assert_eq!(at(checkbox(&layout, id)), text(help), "{id:?}");
         }
@@ -1505,6 +1639,11 @@ mod tests {
                 FPS_COUNTER_LABEL,
                 LauncherOptionsEvent::FpsCounterChanged,
             ),
+            (
+                SkipStartupLogo,
+                SKIP_STARTUP_LOGO_LABEL,
+                LauncherOptionsEvent::SkipStartupLogoChanged,
+            ),
         ] {
             let mut state = vera_state();
             let rect = checkbox(&layout, id);
@@ -1524,6 +1663,53 @@ mod tests {
         }
     }
 
+    /// The Accessibility slider publishes the level it stops on, not the
+    /// position, so the profile never sees gamemd's bands as 0.
+    #[test]
+    fn house_color_strength_slider_publishes_the_level_it_stops_on() {
+        let mut state = vera_state();
+        let layout = vera_layout();
+        let slider = layout
+            .trackbar_rect(LauncherTrackbarId::HouseColorStrength)
+            .unwrap();
+        assert_eq!(state.house_color_strength(), STRENGTH_RETAIL);
+        assert_eq!(
+            state.trackbar_plaque_text(LauncherTrackbarId::HouseColorStrength),
+            "1"
+        );
+
+        // The strip admits from `bottom - 18`; the far right is the top level.
+        let retail_pack = state.pack();
+        state.shell_mouse_down(slider.x + slider.w - 2, slider.y + slider.h - 3, &layout);
+        state.shell_mouse_up(slider.x + slider.w - 2, slider.y + slider.h - 3, &layout);
+        assert_eq!(state.house_color_strength(), STRENGTH_MAX);
+        assert_eq!(
+            state.trackbar_plaque_text(LauncherTrackbarId::HouseColorStrength),
+            "10"
+        );
+        assert_eq!(
+            state.drain_output().events,
+            [
+                LauncherOptionsEvent::Cue(LauncherCue::GenericClick),
+                LauncherOptionsEvent::HouseColorStrengthChanged(STRENGTH_MAX),
+            ],
+            "the notch click leads the level it stands for"
+        );
+        assert_eq!(state.pack(), retail_pack, "the retail pack is untouched");
+
+        // Back to the left end: the original bands, and a level of 1.
+        state.shell_mouse_down(slider.x + 1, slider.y + slider.h - 3, &layout);
+        state.shell_mouse_up(slider.x + 1, slider.y + slider.h - 3, &layout);
+        assert_eq!(state.house_color_strength(), STRENGTH_RETAIL);
+        assert_eq!(
+            state.drain_output().events,
+            [
+                LauncherOptionsEvent::Cue(LauncherCue::GenericClick),
+                LauncherOptionsEvent::HouseColorStrengthChanged(STRENGTH_RETAIL),
+            ]
+        );
+    }
+
     #[test]
     fn normal_vera_page_cannot_toggle_the_diagnostic_wol_test_service() {
         let mut state = vera_state();
@@ -1535,19 +1721,24 @@ mod tests {
                 .iter()
                 .all(|(id, _)| *id != LauncherCheckboxId::WolTestService)
         );
-        // FPS takes the first developer row; the former second row is inert.
-        let fps = checkbox(&layout, LauncherCheckboxId::FpsCounter);
-        state.shell_mouse_down(fps.x + 5, fps.y + 5, &layout);
-        assert_eq!(
-            state.drain_output().events,
-            [
-                LauncherOptionsEvent::Cue(LauncherCue::Checkbox),
-                LauncherOptionsEvent::FpsCounterChanged(true)
-            ]
-        );
-        let old_fps = dlu_rect(93, 203, 130, 10);
-        state.shell_mouse_down(old_fps.x + 5, old_fps.y + 5, &layout);
-        assert!(state.drain_output().events.is_empty());
+        // The developer rows hold FPS and Skip Startup Logo only.
+        for (id, event) in [
+            (
+                LauncherCheckboxId::FpsCounter,
+                LauncherOptionsEvent::FpsCounterChanged(true),
+            ),
+            (
+                LauncherCheckboxId::SkipStartupLogo,
+                LauncherOptionsEvent::SkipStartupLogoChanged(true),
+            ),
+        ] {
+            let rect = checkbox(&layout, id);
+            state.shell_mouse_down(rect.x + 5, rect.y + 5, &layout);
+            assert_eq!(
+                state.drain_output().events,
+                [LauncherOptionsEvent::Cue(LauncherCue::Checkbox), event]
+            );
+        }
         assert!(state.shell_checkbox_checked(LauncherCheckboxId::WolTestService));
     }
 

@@ -73,9 +73,9 @@ pub(crate) enum Ra2tsDialogOwner {
 /// Identity of the one RA2TS session installed for a movie-bearing dialog.
 ///
 /// Owner and asset base change atomically because neither alone is sufficient
-/// to make the decoder/texture reusable. VERA's YR Loading & Menu Movie
-/// option picks which game's copy of the movie the session plays, so it is part
-/// of the identity.
+/// to make the decoder/texture reusable. VERA's Original YR Style option picks
+/// which game's copy of the movie the session plays, so it is part of the
+/// identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Ra2tsMovieSessionIdentity {
     owner: Ra2tsDialogOwner,
@@ -359,7 +359,7 @@ pub(crate) fn ensure_movie_for_current_layout(
 /// (MainMenuDialog0xE2__Run), selects Ra2ts_s at width 640 and Ra2ts_l
 /// otherwise, then gives that name to the movie control. Resolve through the
 /// shared first-match asset lookup, preserving loose-file and archive priority.
-/// VERA's YR Loading & Menu Movie option uses the ordinary first-match
+/// VERA's Original YR Style option uses the ordinary first-match
 /// lookup. The unchecked default requires the named member from
 /// [`RA2_MOVIE_ARCHIVE`]; a missing RA2 copy is reported instead of silently
 /// resolving the YR member with the same name.
@@ -837,19 +837,39 @@ const EXIT_CONFIRM_MODAL_DEPTHS: shell_paint::ModalDepths = shell_paint::ModalDe
     text: 0.00040,
 };
 
-/// Build the shell message box (0xCE/0x120) SHP modal overlay when it is open: the centered
+/// Build the shell message box (0xCE/0x120/0x121) SHP modal overlay when it is open: the centered
 /// PUDLGBGN panel + populated MNBTTN buttons and labels, sourced from
 /// the skirmish chrome atlas (the only atlas that loads PUDLGBGN/MNBTTN). The
 /// pressed button is read from the shared shell controller (its top dialog is the
 /// modal while open). Returns `None` when the modal is closed or its art is absent.
 fn build_shell_message_box_overlay(state: &AppState) -> Option<shell_paint::ModalDraw> {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    use crate::app::frontend::state::ShellMessageBoxPurpose;
     use crate::ui::shell::modal;
-    let modal_state = &state.frontend.shell_message_box.as_ref()?.labels;
+    let message_box = state.frontend.shell_message_box.as_ref()?;
+    let modal_state = &message_box.labels;
     let atlas = state.frontend.skirmish_shell_chrome.as_ref()?;
+    // VERA's updater boxes draw Red Alert 2's art, the others gamemd's.
+    let background = match message_box.purpose {
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        ShellMessageBoxPurpose::UpdateOffer(_)
+        | ShellMessageBoxPurpose::UpdateProgress
+        | ShellMessageBoxPurpose::UpdateCheck
+        | ShellMessageBoxPurpose::UpdateNotice => atlas.ra2_dialog_background,
+        _ => None,
+    }
+    .or_else(|| atlas.mode_two_dialog_background(None));
     let layout = shell_layout::shell_message_box_layout(state, modal_state.kind());
+    // The updater's offer lists what changed (`app::updater::notes`).
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    let notes = match &message_box.purpose {
+        ShellMessageBoxPurpose::UpdateOffer(notes) => {
+            notes.geometry(&layout).map(|geometry| (notes, geometry))
+        }
+        _ => None,
+    };
     let pressed = state.frontend.shell_controller.pressed();
     let ok_pressed = pressed == Some(modal::control::OK);
-    let cancel_pressed = pressed == Some(modal::control::CANCEL);
     let frames = crate::app::frontend::skirmish_shell_render::type3_button_frames(atlas);
     let mut buttons = vec![shell_paint::ModalButton {
         rect: layout.ok,
@@ -876,32 +896,68 @@ fn build_shell_message_box_overlay(state: &AppState) -> Option<shell_paint::Moda
             path_a_reveal: None,
         },
     ];
-    if let Some(rect) = layout.cancel {
+    for (rect, text, control) in [
+        (layout.third, &modal_state.third, modal::control::THIRD),
+        (layout.cancel, &modal_state.cancel, modal::control::CANCEL),
+    ] {
+        let Some(rect) = rect else { continue };
+        let pressed = pressed == Some(control);
         buttons.push(shell_paint::ModalButton {
             rect,
-            pressed: cancel_pressed,
+            pressed,
             enabled: true,
         });
         labels.push(PaintLabel {
-            text: (&modal_state.cancel).into(),
-            rect: layout.scale.derive_rect(rect, |rect| {
-                owner_draw_button_label_rect(rect, cancel_pressed)
-            }),
+            text: text.into(),
+            rect: layout
+                .scale
+                .derive_rect(rect, |rect| owner_draw_button_label_rect(rect, pressed)),
             align: ShellAlign::H_CENTER | ShellAlign::V_CENTER,
             rgb: SHELL_TEXT_RGB_ENABLED,
             path_a_reveal: None,
         });
     }
-    Some(shell_paint::paint_modal_shp(
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    if let Some((notes, geometry)) = &notes {
+        labels.extend(
+            notes
+                .texts(geometry, layout.scale.factor())
+                .into_iter()
+                .map(|(text, rect)| PaintLabel {
+                    text: text.into(),
+                    rect,
+                    align: ShellAlign::NONE,
+                    rgb: SHELL_TEXT_RGB_ENABLED,
+                    path_a_reveal: None,
+                }),
+        );
+    }
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), allow(unused_mut))]
+    let mut draw = shell_paint::paint_modal_shp(
         &state.renderer.bit_font,
-        atlas.mode_two_dialog_background(None),
+        background,
         frames,
         layout.dialog,
         &buttons,
         &labels,
         layout.scale,
         EXIT_CONFIRM_MODAL_DEPTHS,
-    ))
+    );
+    // The list lies on the dialog's picture, which has no list backing.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    if let Some((notes, geometry)) = notes {
+        crate::app::frontend::skirmish_shell_render::paint_list(
+            &mut draw.sprites,
+            atlas,
+            geometry,
+            notes.top(),
+            None,
+            notes.pressed_part(),
+            true,
+            layout.scale,
+        );
+    }
+    Some(draw)
 }
 
 #[cfg(test)]

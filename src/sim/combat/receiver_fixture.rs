@@ -38,6 +38,7 @@ pub(crate) fn observe_area_visit(
     impact: ProjectileCoord,
     damage: i32,
     warhead: &WarheadType,
+    affects_tiberium: bool,
     origin: (u64, Option<InternedId>, InternedId),
 ) {
     AREA_VISIT_TRACE.with_borrow_mut(|trace| {
@@ -47,6 +48,7 @@ pub(crate) fn observe_area_visit(
                 "coord": [impact.x, impact.y, impact.z],
                 "damage": damage,
                 "warhead": warhead.id,
+                "affects_tiberium": affects_tiberium,
                 "source_id": origin.0,
                 "no_source": origin.0 == RAD_NO_ATTACKER,
                 "no_source_house": origin.1.is_none(),

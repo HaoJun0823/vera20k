@@ -3,18 +3,25 @@
 HTTPS JSON only. Authentication is `Authorization: Bearer <token>`; tokens,
 relay tickets and packet keys must never be logged. Names are ASCII letters,
 digits, `_` or `-`, 1–24 bytes, unique without case among active sessions.
-Request bodies are at most 64 KiB and 64 nested containers; every JSON string and
-property name must be well-formed Unicode. Escaped unpaired surrogates are rejected,
-not replaced, before any event or persistent state is created.
+Request bodies are at most 64 KiB and 64 nested containers and arrive within 5
+seconds; one player may have 4 and one network 8 bodies arriving at once, and a
+further POST returns 429 `rate_limited`. Requests without a body never wait for
+arriving bodies. Every JSON string and property name must be well-formed Unicode.
+Escaped unpaired surrogates are rejected, not replaced, before any event or
+persistent state is created.
 
 `POST /v1/sessions` accepts exactly `{nickname,protocol:4}` and returns
-`{player_id,nickname,token,expires_at}`. Each entry receives a fresh random player
+`{player_id,nickname,token,expires_at}`, plus `motd` while an operator welcome is set:
+text the game prints in the chat lobby in place of its own welcome, one line per `\n`.
+Each entry receives a fresh random player
 UUID and bearer token. `expires_at` is a Unix timestamp in seconds. An active name
 returns 409 `name_unavailable`; entering its name never replaces that session.
 Guest locale, buddies and relay admission counters belong to this player identity
 and are removed with its session on logout or expiry. Idle lobby visits expire
-after 120 seconds without polling; admitted v4 players retain their session during
-a network outage until explicit finish/leave or the match/session lifetime.
+after 120 seconds without a request or stream ack; admitted v4 players retain their session during
+a network outage while another unfinished player of their match is online, and
+otherwise through 10 minutes of silence, until explicit finish/leave or the
+match/session lifetime.
 A later entry gets a new identity and empty preferences. No password account is
 created or consulted. Existing stored accounts and their current v3 sessions remain
 intact until their ordinary cleanup; active legacy sessions reserve their names too.
@@ -33,7 +40,8 @@ room/match cleanup and cannot renew grants.
 `GET /v1/stats` needs no bearer and returns `{online,in_game,open_games,games_24h,games_total}`:
 active sessions, those in a playing match, joinable game rooms, and games whose play
 began in the last 24 hours and ever. It names no player or room, is limited to 30
-requests a minute per address, and one answer serves every reader for 10 seconds.
+requests a minute per address (an IPv4 address or IPv6 /64), and one answer serves
+every reader for 10 seconds.
 
 `POST /v1/commands` accepts `{request_id,after,operation,payload}`. A request ID is unique
 within a session and retries are idempotent. Responses and
@@ -41,7 +49,21 @@ within a session and retries are idempotent. Responses and
 Sequences increase within a session. An event appears once logically even when
 responses are repeated. `GET /v1/channels?kind=0|41` returns `{kind,channels}`.
 Clients poll at most once per second. Responses contain at most 256 events and
-256 KiB of UTF-8 JSON. Critical history is bounded to 1,024 events/2 MiB per session;
+256 KiB of UTF-8 JSON.
+`GET /v1/events/stream?after=<cursor>` with a WebSocket upgrade and the bearer (protocol 4
+only; 400 without an upgrade) pushes the same replies as text frames, from `after` on,
+as soon as a request, ack or expiry adds events. Frames continue from the stream's last
+frame, so one can repeat events a command reply already delivered or arrive behind it;
+the game keeps the newer cursor and drops events it has. Its only message is
+`{"ack":<cursor>}`, every 15 seconds (at most 60 a minute): it counts as a request for
+idle expiry and is answered with a frame, empty when nothing is new. A newer stream of
+the session closes the older with 4000 `replaced`; a stream whose request would now fail
+closes with 4000 plus that status (4401, 4409, ...) and the error code as its reason.
+Games from 0.2.4 stream on native builds, poll whenever no stream is up and reconnect
+after 5 seconds, doubling to 5 minutes; older games and the browser build poll.
+A game an external launcher started never streams and polls once a minute after
+`timing_confirmed`, so its service answers `renew_relay` with `relay_renewed` in the reply.
+Critical history is bounded to 1,024 events/2 MiB per session;
 expired cursors fail explicitly rather than silently dropping state.
 Chat, locale and buddy observations have a separate best-effort 64-event/128 KiB
 retention budget and cannot evict critical events. Options and per-player
@@ -57,12 +79,14 @@ bearer before discarding a session whose history expired.
 Channel: `{id,kind,max_users,users,tournament,flags,game_flags,ping,name,ex_info}`.
 `kind` is 0 for chat and 41 for a game. The service sets `flags` from the room, never
 from the creator: 256 when a game has a password, which clients show as a lock and
-ask for before joining, otherwise 0. The other fields are presentation metadata,
-not authority. `name` identifies a channel uniquely for compatibility with the
+ask for before joining, otherwise 0. `max_users` (1–30) from `create` and the host's
+`advertise` is the room's join limit, never below its current members; a join past
+it fails with `room_full`. The other fields are presentation metadata, not authority. `name` identifies a channel uniquely for compatibility with the
 existing shell. Member: `{player_id,name,flags,squad,clan_name,clan_tag}`. Flags bit 0
 is the channel owner, bit 1 voice; the client adds its own local bit 32768. Servers
 set identity and flags from the authenticated membership, never from user payloads.
-The only public chat channel is German Bunker (`name:"Lob_41_2"`, `id:"public"`).
+The only public chat channel is `name:"Lob_41_2"` (`id:"public"`), which games from
+0.2.4 show as VERA20K Online and older games by its retail name, German Bunker.
 The service updates that stored room's name without replacing its membership or
 accounts. Other chat channels are neither listed nor joinable; game rooms remain
 available through `kind:41`.
@@ -127,7 +151,7 @@ Event kinds and payloads:
 | `choices` | `{from,row,slot,observer}` |
 | `ready` | `{from,ready,revision}` |
 | `map_status` | `{from,status,revision}` |
-| `chat` | `{from:<Member>,text,private,action}` |
+| `chat` | `{from:<Member>,text,private,action,sent_at}` |
 | `game_started` | `{match_id,revision,version,rules_digest,seed,users:[{player_id,name,flags,source_index}],relay:<RelayGrant>}` |
 | `start_confirmed` | `{match_id}` |
 | `timing_confirmed` | `{match_id,pings:[integer],relay:<RelayGrant>}` |
@@ -139,6 +163,9 @@ Event kinds and payloads:
 | `located` | `{channel:<Channel or null>}` |
 | `kicked` | `{channel:<Channel>,user:<Member>,by:<Member>}` |
 | `error` | `{code,message}` |
+
+A `chat` event's `sent_at` is the Unix time in seconds the service sent it. Games from
+0.2.4 show it, in the player's local time, before each line of the chat lobby.
 
 RelayGrant is `{address,ticket,packet_key,payload_key,source_index,ordering_certificate,federation?}`. Address is `IPv4:port`
 of the user's relay in the match. The service chooses it at start and every later grant for that match names it;
@@ -157,8 +184,11 @@ first34 bytes with domain `VERA20k relay ordering certificate v1\0`. The signed
 mask includes all human sources (including observers); AI has no source. FPS
 follows launch speed `[60,45,30,20,15,12,10]`. The certificate lasts24 hours;
 every UDP control still needs a live authenticated short-lived ticket. The relay
-binds the first matching startup agreement to this roster/clock and starts only
-when every signed source is ready. Renewals preserve the timeline and batch IDs.
+binds the first matching startup agreement to this roster/clock and starts once
+every remaining signed source is ready. A source that never becomes ready leaves
+in the first frame after 60 seconds of silence, or 3 minutes after the first
+Ready; a match federated over several relays is cancelled instead. Renewals
+preserve the timeline and batch IDs.
 `federation`, present only in a federated match, is the same base64url roster
 in every grant: `VO1F`, room UUID16, relay count (2–6), then per relay IPv4,
 LE port and LE source mask, then per relay nonce16, wrapped32 and tag32. The
@@ -176,8 +206,9 @@ rules digest and map metadata and are ready. The client still performs authentic
 UDP admission and validates its local map/rules/version before it admits the start.
 The client stages a Start click while it publishes the final assignments from
 its existing assignment owner. It does not send `start` with an earlier revision.
-A changed publication clears every prior ready/map acknowledgement, and guests
-explicitly accept the final displayed settings. Only after the matching options
+A changed publication clears every prior ready/map acknowledgement, and each
+guest's client accepts the final displayed settings by itself once it has the
+verified map; players never ready up by hand. Only after the matching options
 revision and every fresh acknowledgement arrive does the retained Start request
 reach the server. A local optimistic choice cannot be accepted before its host
 options echo. Later edits cancel the staged request; rejected or timed-out starts
@@ -192,11 +223,18 @@ Every `latency_ready` report contains each other canonical source exactly once;
 the service sends the same per-source maxima in `timing_confirmed` to everyone.
 For one human playing against AI, there are no remote peers: the latency report
 is `pings:[]` and the confirmed per-source timings are `pings:[0]`. AI players do
-not receive source indices or relay credentials.
-Only then does game loading start. Each barrier has a 30-second timeout.
+not receive source indices or relay credentials. Such a match runs its commands
+locally: its grant still carries an ordering certificate, which released clients
+require, but the relay refuses a one-source certificate.
+Only then does game loading start. Each barrier has a 30-second timeout. Within it,
+clients resend `relay_ready` and `latency_ready` under the same request ID after a
+429, a 5xx or no answer, and a UDP I/O error alone does not end admission.
 Initial tickets last 120 seconds; timing confirmation supplies a fresh 300-second
 ticket which the client must authenticate before loading. During play, clients
-renew before their remaining ticket lifetime falls below 30 seconds. The server
+renew once half of that lifetime has passed, so a lobby outage of up to 150 seconds
+cannot expire a running match's ticket. Renewal is timed from grant receipt on an
+uptime clock that keeps counting through sleep, rather than the ticket's expiry
+against the local wall clock, so a changed grant lifetime needs a client update. The server
 selects the source from authenticated frozen membership, issues a fresh 300-second
 grant and extends the private match lease. Clients authenticate the replacement
 on the existing socket before promoting it; game/reliable queues remain intact.
@@ -251,15 +289,22 @@ upload is hash-checked before `map_available`. Authenticated room members use
 only roster/settings revisions preserves the blob. A map change or room cleanup
 removes it. Uploads/downloads have a separate 600-request/minute/player budget;
 ordinary commands and events share 600/minute/player. Action limits additionally
-bound starts to 12 per 10 minutes, chat to 30/minute and 24 KiB/minute, and room chat
-to 120/minute. Control payloads are bounded to 4 MiB/minute/player and room fanout
-to 128 MiB/minute. Map upload/download bytes each have a 32 MiB/minute player budget.
+bound starts to 12 per 10 minutes, relay renewals to 12/minute, chat to 30/minute and
+24 KiB/minute, and room chat to 120/minute. Control payloads are bounded to
+4 MiB/minute/player and room fanout to 128 MiB/minute. Room chat, control and fanout limits bind guests, never the room's
+host. The public channel takes 120 joins/minute and each network 30 of them and 30 of its
+chats/minute; a game room takes 60 joins/minute. Re-joining the current room is free.
+Map upload/download bytes each have a 32 MiB/minute player budget, and so do the
+earlier chunks the service re-reads to check a finished upload.
 Canonical options are limited to 24 KiB, choice objects use the exact canonical
 slot schema, and unknown request/option fields are rejected. The actor also caps
 pending requests/parsed bodies at 128/4 MiB and individual events at 64 KiB. Active
-sessions, guest profiles and public-room membership are capped at 256. New guest
-entries are limited to 40/hour/IP and 256/hour globally, with the existing sign-in
-and ingress limits also applied. These are service admission limits, not gameplay timers.
+sessions, guest profiles and public-room membership are capped at 256. Per-address
+limits key on the client's network: an IPv4 address, or an IPv6 /64, with the
+enclosing /48 as the range. New guest entries are limited to 40/hour per address,
+64/hour per range and 256/hour globally, and one range holds at most 64 active
+sessions (503 `network_full`), with the existing sign-in and ingress limits also
+applied. One name can be taken 30 times in 5 minutes; refused entries do not count. These are service admission limits, not gameplay timers.
 Clients verify and install into a
 local cache, preserve existing installed maps, and still require user readiness.
 Generated maps transfer the `.SED` bytes as the map and the separate native PCX
@@ -277,15 +322,22 @@ this is a fresh match with fresh relay credentials. A channel owner leaving befo
 start closes the room and emits a failure/leave event to the guests. Membership,
 authorization, readiness, sequence history and idle expiration are server-owned.
 Idle lobby visits expire after 120 seconds. An unfinished v4 playing membership
-survives that idle interval until explicit finish/leave or the match/session
-lifetime; lost internet does not remove its gameplay source.
+survives that idle interval while another unfinished player of the match is online
+(a request or stream ack in the last 120 seconds), and otherwise through 10 minutes of silence, until
+explicit finish/leave or the match/session lifetime; lost internet does not remove
+its gameplay source. Names held by crashed clients therefore free once nobody else
+in their match is online. A lobby outage or overload is not player silence: these
+intervals count from the later of the player's last request and the lobby's first
+request after 30 seconds without any or its latest 429 `busy` refusal.
 
 `POST /v1/translate` accepts exactly `{text,target}` from a v4 bearer and returns
 `{text}`: `text` translated into `target`, a language tag such as `en` or `zh-Hans`.
 `text` is non-blank and at most 2048 UTF-8 bytes, the chat limit. Clients translate
 received chat only after the player opts in, and always keep the original visible.
-A deployment without a translator, a failed model call or the service's daily budget
-of 10,000 model calls returns 503 `translation_unavailable`; an unsupported target
+A deployment without a translator, a failed model call or one taking over 10 seconds,
+a new message while 8 others wait on the model, the service's daily budget
+of 10,000 model calls or one network's daily 2,500 of them returns 503
+`translation_unavailable`; an unsupported target
 returns 400 `invalid_request`. Each player may ask 60 times a minute. Successful
 replies are cached for 24 hours by `target` and `text`, and readers asking for the
 same message while it is translated share one model call. Translation never waits
@@ -304,10 +356,23 @@ deployment's `ADMIN_KEY`. Without a key of at least 32 characters it returns 404
 the sign-in ingress limit of 120 requests a minute per address. `{text,minutes}`
 sets the one current notice, replacing any earlier one: non-blank text of at most
 2048 UTF-8 bytes, kept for 1–10080 minutes. `{minutes:0}` alone clears it. Both
-return `{notice,delivered}`: the notice `{id,text,expires_at}` or `null`, and how
+return `{notice,delivered}`: the notice `{id,text,sent_at,expires_at}` or `null`, and how
 many sessions received it at once. A notice is an ordinary public `chat` event from
-`{player_id:"00000000-0000-0000-0000-000000000000",name:"VERA20k",flags:1,squad:0,clan_name:"",clan_tag:""}`.
-Sessions in German Bunker or a game room that has not started receive it when it is
-set; others receive it on their next German Bunker join until it expires. Each
+`{player_id:"00000000-0000-0000-0000-000000000000",name:"VERA20k",flags:1,squad:0,clan_name:"",clan_tag:""}`
+whose `sent_at` is the time it was set.
+Sessions in the public channel or a game room that has not started receive it when it is
+set; others receive it on their next public-channel join until it expires. Each
 session receives a notice once. Sign-in refuses `VERA20k` without case with 409
 `name_unavailable`.
+
+`POST /v1/admin/welcome` takes the same bearer, answers and ingress limit. `{text}`
+sets the welcome that sign-in responses carry as `motd`: non-blank text of at most
+2048 UTF-8 bytes. `{text:null}` clears it. Both return `{welcome}`, the text or `null`.
+
+Released clients sign in with `User-Agent: VERA20k/<MAJOR.MINOR.PATCH> multiplayer-client`.
+A session whose version is older than `version` in
+`https://downloads.vera20k.org/latest.json`, which the lobby reads at most every
+10 minutes, receives one such chat line per newer release, naming both versions,
+since a match starts only between equal versions (`ready`, `start`). It arrives
+as a notice does: at once in the public channel or a game room that has not started,
+otherwise on the next public-channel join.

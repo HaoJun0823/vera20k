@@ -615,6 +615,29 @@ impl DynamicTerrainCells {
         self.0.get(cell)
     }
 
+    /// Fold the records into the simulation state hash without what the
+    /// tile variant alone decides (the variant, its radar colours and draw
+    /// offsets). The variant comes from the process-lifetime selector table
+    /// ([`crate::map::tile_variant_selector`]), which each process builds
+    /// from its own first map's presentation draws, and no simulation code
+    /// reads it.
+    pub(crate) fn hash_simulation(&self, hasher: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.0.len().hash(hasher);
+        for (cell, state) in &self.0 {
+            cell.hash(hasher);
+            DynamicTerrainCellState {
+                variant: 0,
+                render_offset_x: 0,
+                render_offset_y: 0,
+                radar_left: [0; 3],
+                radar_right: [0; 3],
+                ..state.clone()
+            }
+            .hash(hasher);
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&(u16, u16), &DynamicTerrainCellState)> {
         self.0.iter()
     }

@@ -559,9 +559,18 @@ impl MatchInputState {
         }
     }
 
-    /// BandBoxLeftUp4ABBF5..4ABC5D transfers current placement to the one
-    /// saved transaction and drops the active cursor even if OutList is full.
-    pub(crate) fn submit_building_placement(&mut self) {
+    /// BandBoxLeftUp4ABBD7 clears the tab reference before4ABBF5..4ABC5D
+    /// transfers current placement to the one saved transaction and drops
+    /// the active cursor, even if OutList is full.
+    pub(crate) fn submit_building_placement(
+        &mut self,
+        sidebar: &mut crate::app::sidebar_projection::SidebarProjectionState,
+    ) {
+        if let Some(crate::app::types::TargetingMode::BuildingPlacement(target)) =
+            &self.targeting_mode
+        {
+            sidebar.clear_ready_building(target.product_id);
+        }
         let mode = self.targeting_mode.take();
         match mode {
             Some(crate::app::types::TargetingMode::BuildingPlacement(target)) => {

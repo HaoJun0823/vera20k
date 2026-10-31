@@ -87,6 +87,7 @@ impl Simulation {
                     overlay_registry: registry,
                     alliances: Some(self.house_alliances.as_map()),
                 },
+                Some(&self.substrate.entities),
             )
         })()
         .unwrap_or(false);

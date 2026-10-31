@@ -13,7 +13,6 @@ use super::{SimSoundEvent, Simulation, SimulationWallRuntimeHost};
 use crate::map::entities::EntityCategory;
 use crate::map::resolved_terrain::ResolvedTerrainGrid;
 use crate::rules::ruleset::RuleSet;
-use crate::sim::cell_rect::canonical_cell_coord;
 use crate::sim::combat;
 use crate::sim::command::{
     ArchiveRecord, BUILDING_OFF_LINE_OPCODE, BUILDING_ON_LINE_OPCODE, BuildingOnLineRecord,
@@ -344,7 +343,7 @@ impl Simulation {
                 target_rx,
                 target_ry,
             } => {
-                if target_rx >= 512 || target_ry >= 512 {
+                if target_rx >= self.cell_grid().side() || target_ry >= self.cell_grid().side() {
                     return None;
                 }
                 return SpecialPlaceRecord {
@@ -374,6 +373,11 @@ impl Simulation {
             }
             _ => return None,
         };
+        // As for SpecialPlace above, a target lies in this map's cell array.
+        let side = self.cell_grid().side();
+        if action != PaidSuperAction::Cancel && (cell.0 >= side || cell.1 >= side) {
+            return None;
+        }
         PaidSuperRecord {
             house_id: header.house_id(),
             frame: header.frame_stamp(),
@@ -403,7 +407,9 @@ impl Simulation {
                 .get(rules.super_weapon_order.get(usize::try_from(index).ok()?)?)
         };
         if let Some(event) = SpecialPlaceRecord::decode(record) {
-            if !(0..512).contains(&event.cell.0) || !(0..512).contains(&event.cell.1) {
+            if !(0..self.cell_grid().side() as i16).contains(&event.cell.0)
+                || !(0..self.cell_grid().side() as i16).contains(&event.cell.1)
+            {
                 return None;
             }
             return Some((
@@ -416,6 +422,12 @@ impl Simulation {
             ));
         }
         let event = PaidSuperRecord::decode(record)?;
+        let side = self.cell_grid().side() as i16;
+        if event.action != PaidSuperAction::Cancel
+            && (!(0..side).contains(&event.cell.0) || !(0..side).contains(&event.cell.1))
+        {
+            return None;
+        }
         let selection = crate::sim::superweapon::PaidSuperWeaponSelection {
             source: type_id(event.source)?,
             destination: type_id(event.destination)?,
@@ -1310,6 +1322,29 @@ impl Simulation {
         );
     }
 
+    /// The canonical cell and overlay a wall sale's signed CellStruct names.
+    fn wall_sale_cell(
+        &self,
+        x: i16,
+        y: i16,
+    ) -> Option<(u16, u16, crate::sim::overlay_grid::OverlayCell)> {
+        // EventClass rejects only the exact packed null CellStruct. Every
+        // other signed pair is resolved by the map's linear cell array (512
+        // wide on retail-size maps), so out-of-range components may alias a
+        // canonical slot.
+        if (x, y) == (0, 0) {
+            return None;
+        }
+        let (rx, ry) = self
+            .cell_grid()
+            .canonical_coord(i32::from(x), i32::from(y))?;
+        let grid = self.overlay_grid.as_ref()?;
+        if rx >= grid.width() || ry >= grid.height() {
+            return None;
+        }
+        Some((rx, ry, *grid.cell(rx, ry)))
+    }
+
     /// `HouseClass::Sell_Building_At_Cell @ 0x004FCE80` for house
     /// `command_owner` at cell `(x, y)`: the player's wall sale and the
     /// computer's in `AI_Manage_Build_Queue` (`sim::ai_build_need`). It sells
@@ -1327,22 +1362,9 @@ impl Simulation {
         overlays: &crate::rules::overlay_types::OverlayTypeRegistry,
         effects: FrameEffects<'_>,
     ) -> bool {
-        // EventClass rejects only the exact packed null CellStruct. Every
-        // other signed pair is resolved by MapClass' fixed 512-wide linear
-        // cell array, so out-of-range components may alias a canonical slot.
-        if (x, y) == (0, 0) {
-            return false;
-        }
-        let Some((rx, ry)) = canonical_cell_coord(i32::from(x), i32::from(y)) else {
+        let Some((rx, ry, cell)) = self.wall_sale_cell(x, y) else {
             return false;
         };
-        let Some(grid) = self.overlay_grid.as_ref() else {
-            return false;
-        };
-        if rx >= grid.width() || ry >= grid.height() {
-            return false;
-        }
-        let cell = *grid.cell(rx, ry);
         let (Some(overlay_id), Some(wall_owner)) = (cell.overlay_id, cell.wall_owner) else {
             return false;
         };
@@ -1647,6 +1669,9 @@ impl Simulation {
         } else {
             cmd
         };
+        if self.network_command_actor_foreign(command_owner, cmd) {
+            return false;
+        }
         let ordinary_actor = match cmd {
             Command::Stop { entity_id }
             | Command::Scatter { entity_id }
@@ -2196,7 +2221,7 @@ impl Simulation {
             // GoOffline 0x00452360. go_building_online/offline carry the native
             // semantics (idempotent latch, house power + tech-tree invalidation,
             // Stuff flag, factory queue refresh, EVA line for a human house). The
-            // dispatch has no owner check, and none is added here.
+            // dispatch has no owner check; only the VERA network gate above adds one.
             Command::SetBuildingOnLine { entity_id, on } => {
                 let Some(owner) = self.interner.get(command_owner) else {
                     return false;
@@ -2302,8 +2327,13 @@ impl Simulation {
                     self.quit_requested = true;
                 } else {
                     // A remote sender never reaches Execute (0x0064C91B):
-                    // the app runs DestroyConnection(house, 0) for it
-                    // (0x0064C9B1).
+                    // DestroyConnection(house, 0) runs for it (0x0064C9B1).
+                    // Its WOL tournament tail (0x005DA8F7..0x005DA90F) kills
+                    // the leaver's House here, where replays run it too; the
+                    // app runs the connection and message work.
+                    if self.session.wol_tournament_game() {
+                        self.flag_house_to_die(owner);
+                    }
                     self.departed_owners.push(owner);
                 }
                 true
@@ -2976,6 +3006,22 @@ impl Simulation {
     /// so any member answers as `[0]` would; they differ only if a selected
     /// object changed owner and stayed selected.
     ///
+    /// VERA-only: a network game (LAN or online) raises no Selected event.
+    /// Selection is client-local: no EventClass event carries it (the input
+    /// Select is frame ingress, never sent), and the game's own Selects
+    /// follow the local selected byte (crew, parasite and planning
+    /// reselects). Native raises event 33 here with no session test, and
+    /// `TagClass::RaiseEvent @ 0x006E53A0`, `TriggerClass::RegisterEvent @
+    /// 0x007264C0` and `TEventClass::HasOccurred @ 0x0071E940` (event 33
+    /// needs only the raised kind and a clear map-editor byte) add none, so
+    /// in a native network game only the selecting client springs the
+    /// trigger. `0x006FBFE2` is the program's only immediate push of 33.
+    /// Residual: trigger, a tag with event 33 on an object in a network game;
+    /// effect, its trigger never springs online, where native springs it on
+    /// the selecting client alone (a desync unless its actions are local
+    /// text or sound); frequency, rare, a map authoring Selected-by-player
+    /// triggers for multiplayer; downstream risk, only that trigger's actions.
+    ///
     /// [`LifecycleOutput::ObjectSelected`]: super::LifecycleOutput::ObjectSelected
     /// [`LifecycleOutput::FollowReleased`]: super::LifecycleOutput::FollowReleased
     fn object_select(
@@ -3016,7 +3062,9 @@ impl Simulation {
         }
         // Selection has already changed when the synchronous Tag actions run.
         // They may change ownership, remove the Tag, or retire the object.
-        self.dispatch_object_tag_event(stable_id, 33, Some(stable_id), None, context);
+        if !self.session.game_mode().is_network() {
+            self.dispatch_object_tag_event(stable_id, 33, Some(stable_id), None, context);
+        }
         true
     }
 
@@ -3055,14 +3103,69 @@ impl Simulation {
 
     /// Check ownership using stable_id via EntityStore.
     ///
-    /// Used only by receivers whose contract includes an owner gate. The
-    /// MEGAMISSION receiver4C71CA..4C74CA resolves its actor independently of
-    /// the event house; its admission checks lifetime and tokens instead.
+    /// Used by receivers whose contract includes an owner gate and by the
+    /// VERA network actor gate. The native MEGAMISSION receiver4C71CA..4C74CA
+    /// resolves its actor independently of the event house; its admission
+    /// checks lifetime and tokens instead.
     pub(crate) fn entity_owned_by_id(&self, command_owner: &str, stable_id: u64) -> bool {
         self.substrate
             .entities
             .get(stable_id)
             .is_some_and(|e| command_owner.eq_ignore_ascii_case(self.interner.resolve(e.owner())))
+    }
+
+    /// VERA-only network admission, not a native receiver test: refuse an
+    /// event whose acting object exists and belongs to another House.
+    ///
+    /// `EventClass::Execute @ 0x004C6CB0` trusts the sender for most object
+    /// orders (MEGAMISSION, IDLE, Deploy, Repair, Primary, On/Off-line,
+    /// Archive, wall sale @ 0x004FCE80, PlanMgr connect @ 0x00639800 and
+    /// append @ 0x00638120), so a modified client could retask, deploy, sell
+    /// or power down an opponent's objects. Ordinary input orders
+    /// `IsHumanPlayer @ 0x0050B6F0` actors, the sending House in every
+    /// network mode. Offline modes keep the native receivers unchanged
+    /// (campaign PlayerControl houses).
+    ///
+    /// Intended retail differences, all refused alike on every client:
+    /// * retail input quirks that order a selected enemy object — the Guard
+    ///   key's miner arm (`0x00730D60`) and Stop on an enemy building with a
+    ///   rally line — do nothing online;
+    /// * an order whose actor is captured or mind-controlled between issue
+    ///   and execution is dropped, including its planning detach, where
+    ///   retail runs it on the new owner's object. The flag-2 planning
+    ///   acknowledge stays ahead of this gate, so that actor's latch clears.
+    fn network_command_actor_foreign(&self, command_owner: &str, cmd: &Command) -> bool {
+        if !self.session.game_mode().is_network() {
+            return false;
+        }
+        let foreign = |id: u64| {
+            self.substrate.entities.get(id).is_some() && !self.entity_owned_by_id(command_owner, id)
+        };
+        match cmd {
+            Command::Stop { entity_id }
+            | Command::Scatter { entity_id }
+            | Command::DeployMcv { entity_id }
+            | Command::UndeployBuilding { entity_id }
+            | Command::ToggleRepair { entity_id }
+            | Command::SellBuilding { entity_id }
+            | Command::TogglePrimaryFactory { entity_id }
+            | Command::SetBuildingOnLine { entity_id, .. }
+            | Command::ArchiveObject { entity_id, .. } => foreign(*entity_id),
+            Command::SetRally { producer_ids, .. } => producer_ids.iter().any(|&id| foreign(id)),
+            Command::SynchronizedRecord { record } => ArchiveRecord::decode(record)
+                .and_then(|event| u64::try_from(event.entity_id).ok())
+                .is_some_and(foreign),
+            Command::PlanningRecord { record } => {
+                super::planning::planning_record_actor(record).is_some_and(foreign)
+            }
+            Command::SellWallAtCell { x, y } => self
+                .wall_sale_cell(*x, *y)
+                .and_then(|(_, _, cell)| cell.wall_owner)
+                .is_some_and(|owner| {
+                    !command_owner.eq_ignore_ascii_case(self.interner.resolve(owner))
+                }),
+            _ => cmd.megamission_actor().is_some_and(foreign),
+        }
     }
 
     /// The acting object's half of the native order-admission gate.
@@ -3512,6 +3615,128 @@ mod tests {
         // reads that byte, so the fixture must model a revealed object.
         entity.lifecycle.set_in_limbo_for_test(false);
         sim.substrate.entities.insert(entity);
+    }
+
+    #[test]
+    fn network_match_refuses_orders_for_another_houses_object() {
+        use crate::sim::house_state::HouseState;
+        use crate::sim::scenario_session::ScenarioGameMode;
+        let rules = amcv_move_rules();
+        let world = |mode| {
+            let mut sim = Simulation::new();
+            for (index, name) in [(0, "Americans"), (1, "British")] {
+                let owner = sim.intern(name);
+                sim.houses
+                    .register(HouseState::new(owner, index, None, true, 0, 10));
+            }
+            sim.session.set_game_mode(mode);
+            spawn_rule_backed_unit(&mut sim, 42, "AMCV", &rules);
+            sim
+        };
+        let move_order = Command::Move {
+            entity_id: 42,
+            target_rx: 25,
+            target_ry: 20,
+        };
+        let stop = Command::Stop { entity_id: 42 };
+
+        let mut sim = world(ScenarioGameMode::Wol);
+        assert!(!sim.apply_command("British", &move_order, Some(&rules)));
+        assert!(!sim.apply_command("British", &stop, Some(&rules)));
+        let actor = sim.substrate.entities.get(42).unwrap();
+        assert_eq!(actor.mission.queued(), MissionId::NONE);
+        assert!(actor.navigation.nav_com().is_none());
+        assert!(sim.apply_command("Americans", &move_order, Some(&rules)));
+        assert!(sim.apply_command("Americans", &stop, Some(&rules)));
+
+        // Offline receivers stay native: MEGAMISSION has no sender gate.
+        let mut sim = world(ScenarioGameMode::Skirmish);
+        assert!(sim.apply_command("British", &move_order, Some(&rules)));
+    }
+
+    /// `TechnoClass::Select @ 0x006FBFA0` raises event 33 (`0x006FBFE4`) for
+    /// a client-local selection. A network game raises none, so the clients
+    /// keep one trigger state; offline Selects still spring the trigger.
+    #[test]
+    fn network_match_selection_raises_no_selected_tag_event() {
+        use crate::sim::house_state::HouseState;
+        use crate::sim::scenario_session::ScenarioGameMode;
+        let rules = amcv_move_rules();
+        let map = crate::map::map_file::MapFile::from_bytes(
+            b"[Map]\nSize=0,0,32,32\nLocalSize=0,0,32,32\n\
+              [IsoMapPack5]\n1=DwALABwBAAIA/////wAAABEAAA==\n\
+              [Triggers]\nSEL=Americans,<none>,Sel,0,1,1,1,0\n\
+              [Events]\nSEL=1,33,0,0\n\
+              [Actions]\nSEL=1,28,0,9,0,0,0,0,A\n\
+              [Tags]\nSEL_TAG=0,Sel,SEL\n",
+        )
+        .unwrap();
+        let global_after_select = |mode| {
+            let mut sim = Simulation::new();
+            let owner = sim.intern("Americans");
+            sim.houses
+                .register(HouseState::new(owner, 0, None, true, 0, 10));
+            sim.session.set_game_mode(mode);
+            spawn_rule_backed_unit(&mut sim, 42, "AMCV", &rules);
+            sim.initialize_trigger_definitions(
+                &map,
+                &crate::rules::team_ai_ini::TeamAiIniRegistry::default(),
+                None,
+                None,
+                None,
+            );
+            sim.classify_map_triggers(&rules);
+            sim.attach_object_trigger_tag(42, Some("SEL_TAG"));
+            let select = Command::Select {
+                entity_ids: vec![42],
+                additive: false,
+            };
+            assert!(sim.apply_command("Americans", &select, Some(&rules)));
+            assert!(
+                sim.substrate
+                    .entities
+                    .get(42)
+                    .unwrap()
+                    .selection
+                    .is_selected()
+            );
+            sim.global_variables()[9]
+        };
+        assert!(!global_after_select(ScenarioGameMode::Lan));
+        assert!(global_after_select(ScenarioGameMode::Skirmish));
+    }
+
+    #[test]
+    fn network_match_refuses_selling_another_houses_wall() {
+        use crate::sim::house_state::HouseState;
+        let (rules, overlays) = crate::sim::world::tests::gsi_04_07_wall_sell_rules(false, false);
+        let mut sim = Simulation::new();
+        let owner = sim.intern("Americans");
+        for (index, house) in [(0, owner), (1, sim.intern("British"))] {
+            sim.houses
+                .register(HouseState::new(house, index, None, true, 0, 10));
+        }
+        sim.session
+            .set_game_mode(crate::sim::scenario_session::ScenarioGameMode::Wol);
+        let mut grid = crate::sim::overlay_grid::OverlayGrid::new(3, 3);
+        grid.place_owned_wall(1, 1, 2, 0, owner);
+        sim.overlay_grid = Some(grid);
+        let sale = Command::SellWallAtCell { x: 1, y: 1 };
+        let sell = |sim: &mut Simulation, house: &str| {
+            sim.apply_command_with_overlays(
+                house,
+                &sale,
+                &rules,
+                Some(&overlays),
+                FrameEffects::default(),
+            )
+        };
+        let wall = |sim: &Simulation| sim.overlay_grid.as_ref().unwrap().cell(1, 1).overlay_id;
+
+        assert!(!sell(&mut sim, "British"));
+        assert!(wall(&sim).is_some());
+        assert!(sell(&mut sim, "Americans"));
+        assert_eq!(wall(&sim), None);
     }
 
     #[test]

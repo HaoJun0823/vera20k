@@ -40,6 +40,7 @@ fn loading_job_publishes_the_same_index_pages_after_gpu_retirement() {
             make_frame_counts: HashMap::new(),
             active_anim_frame_counts: HashMap::new(),
             object_shp_frame_counts: HashMap::new(),
+            building_type_bounds: HashMap::new(),
             shp_files: HashMap::new(),
             projectile_files: HashMap::new(),
             new_objects: HashSet::new(),
@@ -823,6 +824,42 @@ fn building_body_without_new_theater_uses_theater_then_generic() {
             ShpImageKind::Object,
         );
         assert_eq!(source.as_ref().map(|s| s.found_name.as_str()), expected);
+    }
+}
+
+/// BuildingTypeClass::LoadVisualAssets @ 0x0045F856..0x0045F922 loads
+/// BibShape with the theater lookup even without a separate ART section.
+#[test]
+fn retail_yuri_factory_bib_uses_theater_then_generic() {
+    let Some(art_ini) = crate::rules::retail_ini_fixture::retail_ini("artmd.ini") else {
+        return;
+    };
+    let art = ArtRegistry::from_ini(&art_ini);
+    let bib = art.get("YAWEAP").unwrap().bib_shape.as_deref().unwrap();
+    assert_eq!(bib, "YAWEAPBB");
+    assert!(art.get(bib).is_none());
+    let directory = StoredFrameTestDirectory::new();
+    for name in ["YTWEAPBB.SHP", "YGWEAPBB.SHP", "YAWEAPBB.SHP"] {
+        directory.write_raw_and_rle_frames(name, [272, 242], [130, 160, 70, 40]);
+    }
+    let assets = AssetManager::from_loose_root_for_test(&directory.0);
+    for (theater, expected) in [
+        ("TEMPERATE", "YTWEAPBB.SHP"),
+        ("URBAN", "YGWEAPBB.SHP"),
+        ("SNOW", "YAWEAPBB.SHP"),
+    ] {
+        let source = load_shp_source(
+            &assets,
+            bib,
+            None,
+            "tem",
+            theater,
+            None,
+            Some(&art),
+            ShpImageKind::Object,
+        )
+        .expect("a declared bib loads without its own ART entry");
+        assert_eq!(source.found_name, expected);
     }
 }
 
@@ -3274,4 +3311,162 @@ fn custom_harvest_uses_bound_theater_shape_all_frames_and_own_placement() {
     )
     .unwrap();
     assert_eq!([ordinary.offset_x, ordinary.offset_y], [29.0, 39.0]);
+}
+
+#[test]
+fn building_type_bounds_match_native_header_recipe() {
+    // Inputs are supplied metadata from the original465570 execution, not
+    // a second rectangle calculator. This encoder writes only SHP headers.
+    fn header(value: &serde_json::Value) -> Vec<u8> {
+        let frames = value["frames"].as_array().unwrap();
+        let mut bytes = Vec::new();
+        for word in [
+            0,
+            value["canvas"][0].as_i64().unwrap(),
+            value["canvas"][1].as_i64().unwrap(),
+            frames.len() as i64,
+        ] {
+            bytes.extend_from_slice(&(word as i16).to_le_bytes());
+        }
+        for frame in frames {
+            for word in frame.as_array().unwrap() {
+                bytes.extend_from_slice(&(word.as_i64().unwrap() as i16).to_le_bytes());
+            }
+            bytes.resize(bytes.len() + 16, 0);
+        }
+        bytes
+    }
+    let native = crate::test_fixture::json("tools/spatial_oracle/building_render_bounds.json");
+    for row in native["cases"].as_array().unwrap() {
+        let bounds = if let Some(name) = row["physical_shp"].as_str() {
+            let Some((_, mut assets)) = crate::rules::retail_ini_fixture::retail_assets() else {
+                continue;
+            };
+            crate::map::theater::load_theater(&mut assets, "NEWURBAN").unwrap();
+            let bytes = assets.get_ref(name).expect("native physical image input");
+            assert_eq!(
+                crate::util::sha256::sha256_hex(bytes),
+                row["source_sha256"].as_str().unwrap()
+            );
+            building_type_render_bounds(Some(bytes), None, None).unwrap()
+        } else {
+            let main = header(&row["main"]);
+            let buildup = header(&row["buildup"]);
+            let bib = header(&row["bib"]);
+            if row["main"]["frames"].as_array().unwrap().is_empty() {
+                let source = ShpSource::decode(
+                    std::sync::Arc::<[u8]>::from(main.clone()).into(),
+                    "EMPTY.SHP".into(),
+                    (0, 0),
+                )
+                .unwrap();
+                assert!(
+                    render_shp_frame(
+                        &source,
+                        &Palette::from_rgb(|i| [i, i, i]),
+                        false,
+                        &make_shp_key("EMPTY", 0),
+                        None,
+                        &mut ShpPalettes::default(),
+                    )
+                    .is_none(),
+                    "a loaded empty canvas has bounds but no drawable frame"
+                );
+            }
+            assert_eq!(ShpFile::frame_bounds_from_bytes(&main, 2).unwrap(), [0; 4]);
+            building_type_render_bounds(Some(&main), Some(&buildup), Some(&bib)).unwrap()
+        };
+        let expected: Vec<i32> = row["bounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_i64().unwrap() as i32)
+            .collect();
+        assert_eq!(bounds.as_slice(), expected, "{}", row["name"]);
+    }
+    assert_eq!(
+        building_type_render_bounds(None, None, None).unwrap(),
+        [0; 4]
+    );
+}
+
+#[test]
+fn building_type_bounds_publish_with_color_growth_type_growth_and_abort() {
+    let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules_for_map("RushHr.map")
+    else {
+        return;
+    };
+    let Some((_, mut assets)) = crate::rules::retail_ini_fixture::retail_assets() else {
+        return;
+    };
+    let theater = crate::map::theater::load_theater(&mut assets, "NEWURBAN").unwrap();
+    let entities = crate::sim::entity_store::EntityStore::new();
+    let prepare = |colors: &HouseColorMap, types: &[&str], old: Option<SpriteAtlas>, limit| {
+        prepare_sprite_atlas(
+            limit,
+            &entities,
+            &assets,
+            &theater.unit_palette,
+            "ubn",
+            "NEWURBAN",
+            Some(&retail.rules),
+            Some(retail.rules.art()),
+            colors,
+            types,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            None,
+            old,
+            None,
+        )
+    };
+    // No GPU pages are needed to exercise the metadata publication owner.
+    // The physical source decoder and complete prepare transaction run above.
+    let publish = |prepared| match prepared {
+        PreparedSpriteAtlas::Upload(mut upload) => {
+            let initial = upload.previous_atlas.is_none();
+            let old = upload
+                .previous_atlas
+                .take()
+                .unwrap_or_else(|| SpriteAtlas::from_test_entries(Default::default()));
+            upload.publish(old, 0, initial)
+        }
+        PreparedSpriteAtlas::Ready(Some(atlas)) => atlas,
+        PreparedSpriteAtlas::Ready(None) => panic!("physical sprite metadata required"),
+    };
+    let mut colors =
+        HouseColorMap::from([("Neutral".to_owned(), crate::rules::house_colors::NO_REMAP)]);
+    let first = publish(prepare(&colors, &["CANEWY06"], None, 8192));
+    let native = crate::test_fixture::json("tools/spatial_oracle/building_render_bounds.json");
+    let control = native["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["physical_shp"] == "CNNEWY06.SHP")
+        .unwrap();
+    let bounds = first.building_type_bounds("CANEWY06").unwrap();
+    assert_eq!(serde_json::json!(bounds), control["bounds"]);
+    colors.insert("Americans".into(), HouseColorIndex(0));
+    let colored = publish(prepare(&colors, &["CANEWY06"], Some(first), 8192));
+    assert_eq!(colored.building_type_bounds("CANEWY06"), Some(bounds));
+    assert_eq!(
+        colored.building_type_bounds.len(),
+        1,
+        "house color does not own geometry"
+    );
+    let aborted = prepare(&colors, &["CANEWY06", "CANEWY01"], Some(colored), 0);
+    let PreparedSpriteAtlas::Ready(Some(old)) = aborted else {
+        panic!("palette overflow must retain the previous atlas");
+    };
+    assert_eq!(old.building_type_bounds("CANEWY06"), Some(bounds));
+    assert_eq!(
+        old.building_type_bounds("CANEWY01"),
+        None,
+        "failed refresh cannot publish new geometry"
+    );
+    let extended = publish(prepare(&colors, &["CANEWY06", "CANEWY01"], Some(old), 8192));
+    assert_eq!(extended.building_type_bounds("CANEWY06"), Some(bounds));
+    assert!(extended.building_type_bounds("CANEWY01").is_some());
+    assert_eq!(extended.building_type_bounds.len(), 2);
 }

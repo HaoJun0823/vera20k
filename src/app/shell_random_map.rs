@@ -894,8 +894,7 @@ impl App {
             )
             .map(|mode| mode.override_file.clone())
         };
-        let (manager, native_rules, tile_cache) =
-            state.process_assets.manager_and_rules_with_tile_cache();
+        let (manager, native_rules, _) = state.process_assets.manager_and_rules_with_tile_cache();
         let Some(asset_manager) = manager else {
             return false;
         };
@@ -926,12 +925,6 @@ impl App {
         else {
             return false;
         };
-        // Stock RMG preview publishes its resolved theater registry before the
-        // later ordinary map load, even if generation subsequently fails.
-        tile_cache.complete_theater_registry_load(
-            theater.rmg_tiles.clear_tile,
-            theater.rmg_tiles.water_set,
-        );
         let options = options.clone();
         let shared_cell_dummy = state.process_assets.shared_cell_dummy.clone();
         let map_storage_decision = state

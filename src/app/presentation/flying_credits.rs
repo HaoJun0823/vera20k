@@ -59,6 +59,7 @@ impl FlyingCredits {
         if actor.visual_character(
             observer.cloaking_stages,
             observer.invisible,
+            actor.discovery.owned_by_current_house(),
             VisualCharacterQuery::screen(
                 true,
                 observer.observer_present,

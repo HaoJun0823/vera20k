@@ -540,6 +540,15 @@ pub(crate) fn build_display_effect_instances(
             center_y,
             lift_px,
         );
+        // Phobos `AnimClass_DrawIt_DrawOffset` (`0x423122`, 6 bytes replaced):
+        // DrawIt's location takes the effect's accumulated
+        // `Animation.DrawOffsetN` after admission, so the sort row and the
+        // admission point keep the anim's own coordinate.
+        #[cfg(feature = "phobos")]
+        let (center_x, center_y) = {
+            let offset = attach_effect_draw_offset(sim, input.rules, anim);
+            (center_x + offset[0], center_y + offset[1])
+        };
         debug_assert!(!anim.terrain_attached() || anim.use_cell_drawer());
         // Prepare the ordinary body coordinate/material. The shared DrawIt
         // pass builder owns Flat's separate Z term and the optional shadow.
@@ -693,6 +702,34 @@ fn parachute_canopy_owner(
     (anim.type_id() == parachute_type)
         .then_some(anim.owner_entity())
         .flatten()
+}
+
+/// `UpdateConditionalAnimDrawingLogic`'s offset for one attach-effect
+/// animation: identify the effect instance that owns the anim, then sum every
+/// `Animation.DrawOffsetN` rule whose `RequiredTypes` set is satisfied. Zero
+/// for every other animation. Read only.
+#[cfg(feature = "phobos")]
+fn attach_effect_draw_offset(
+    sim: &crate::sim::world::Simulation,
+    rules: &crate::rules::ruleset::RuleSet,
+    anim: &crate::sim::anim_class::AnimObject,
+) -> [f32; 2] {
+    let Some(owner) = anim.owner_entity() else {
+        return [0.0, 0.0];
+    };
+    let Some(entity) = sim.entities().get(owner) else {
+        return [0.0, 0.0];
+    };
+    let list = entity.phobos_attach_effects();
+    let Some(index) = list
+        .instances()
+        .iter()
+        .position(|instance| instance.anim() == Some(anim.stable_id()))
+    else {
+        return [0.0, 0.0];
+    };
+    let [x, y] = list.draw_offset(index, rules.attach_effect_types().types());
+    [x as f32, y as f32]
 }
 
 /// Screen position, cell, height level and the exact pixel lift of an anim.
@@ -1315,6 +1352,73 @@ mod terrain_render_tests;
 
 #[cfg(test)]
 mod tests {
+    /// Phobos `UpdateConditionalAnimDrawingLogic` accumulates every
+    /// `Animation.DrawOffsetN` rule whose `RequiredTypes` is satisfied; the
+    /// renderer adds that offset only to an attach-effect animation.
+    #[cfg(feature = "phobos")]
+    #[test]
+    fn attach_effect_draw_offset_accumulates_the_matching_rules() {
+        use crate::rules::art_data::ArtRegistry;
+        use crate::rules::ini_parser::IniFile;
+        use crate::rules::ruleset::RuleSet;
+
+        let ini = IniFile::from_str(
+            "[InfantryTypes]\n[AircraftTypes]\n[BuildingTypes]\n[Animations]\n\
+             0=GLOW\n[VehicleTypes]\n0=TARGET\n\
+             [TARGET]\nStrength=1000\nSpeed=6\nAttachEffect.AttachTypes=MAIN,OTHER\n\
+             [AttachEffectTypes]\n0=MAIN\n1=OTHER\n\
+             [MAIN]\nDuration=100\nAnimation=GLOW\n\
+             Animation.DrawOffset0=4,-3\n\
+             Animation.DrawOffset1=10,10\nAnimation.DrawOffset1.RequiredTypes=OTHER\n\
+             [OTHER]\nDuration=100\n",
+        );
+        let art = IniFile::from_str("[GLOW]\nRate=900\nEnd=4\n");
+        let mut rules = RuleSet::from_ini_with_fixed_art_for_test(&ini, &art).expect("rules");
+        let mut registry = ArtRegistry::from_ini(&art);
+        registry.bind_anim_frame_count_for_test("GLOW", 4);
+        rules.install_art_data(registry);
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 17);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let target = sim
+            .spawn_object("TARGET", "Americans", 20, 20, 0, &rules)
+            .expect("spawn");
+        sim.advance_tick(&[], Some(&rules), None, Some(rules.overlay_registry()), 22);
+        let instances = sim
+            .entities()
+            .get(target)
+            .unwrap()
+            .phobos_attach_effects()
+            .instances();
+        let anim = instances
+            .iter()
+            .find_map(|instance| instance.anim())
+            .expect("MAIN animation");
+        assert_eq!(
+            super::attach_effect_draw_offset(&sim, &rules, sim.anim(anim).unwrap()),
+            [14.0, 7.0],
+            "the unconditional rule and the OTHER rule add"
+        );
+
+        let free_id = sim.interner().get("GLOW").expect("interned anim type");
+        let world = sim.anim_absolute_coord(anim).unwrap();
+        let (rx, ry, sub_x, sub_y, z) = world.to_cell_sub_z();
+        let free = sim
+            .spawn_anim_at_world(
+                &rules,
+                crate::sim::components::AnimClassSpawnDescriptor::new(
+                    free_id, rx, ry, sub_x, sub_y, z,
+                ),
+                world,
+            )
+            .expect("free anim");
+        assert_eq!(
+            super::attach_effect_draw_offset(&sim, &rules, sim.anim(free).unwrap()),
+            [0.0, 0.0],
+            "a free animation carries no effect offset"
+        );
+    }
+
     #[test]
     fn interpolated_wave_polygon_preserves_native_spans_when_an_edge_folds_back() {
         use crate::app::presentation::interpolation::RenderInterpolation;

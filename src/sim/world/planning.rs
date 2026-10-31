@@ -1807,6 +1807,24 @@ fn coord_cell(coord: DriveCoord) -> Option<(u16, u16)> {
     ))
 }
 
+/// The object a PlanMgr record attaches nodes to: 0x2A connect's target 0
+/// (639800) or the flag-1 MEGAMISSION append's source (638120). Commit
+/// 0x2B and delete 0x2C name none.
+pub(super) fn planning_record_actor(record: &CommandRecord) -> Option<u64> {
+    match record.opcode() {
+        0x2a => match read_target(record, 0)? {
+            MegaMissionTarget::Object { id } => u64::try_from(id).ok(),
+            _ => None,
+        },
+        4 if record.payload()[22] == 1 => {
+            let mut ordinary = record.clone();
+            ordinary.payload_mut()[22] = 0;
+            u64::try_from(MegaMissionRecord::decode(&ordinary)?.source_id).ok()
+        }
+        _ => None,
+    }
+}
+
 fn read_target(record: &CommandRecord, offset: usize) -> Option<MegaMissionTarget> {
     let payload = record.payload();
     MegaMissionTarget::from_token(

@@ -117,7 +117,14 @@
 //! - rules/ does NOT depend on (outside tests): sim/, render/, ui/, audio/, net/
 
 pub mod airstrike;
+#[cfg(feature = "phobos")]
+pub mod airstrike_targets;
+pub mod attach_effect;
+pub mod building_select_bracket;
 pub mod digital_display;
+pub mod insignia_type;
+#[cfg(feature = "phobos")]
+pub mod invulnerability_rules;
 pub mod phobos_parallel_ai_queues;
 #[cfg(all(test, feature = "phobos"))]
 #[path = "phobos_infantry_deploy_tests.rs"]
@@ -126,17 +133,23 @@ mod phobos_infantry_deploy_tests;
 #[path = "phobos_prone_speed_tests.rs"]
 mod phobos_prone_speed_tests;
 #[cfg(feature = "phobos")]
+pub mod phobos_airburst;
+#[cfg(feature = "phobos")]
 pub mod phobos_fly_wobble;
 #[cfg(feature = "phobos")]
 pub mod phobos_pause_menu;
 #[cfg(feature = "phobos")]
 pub mod phobos_placement_preview;
 #[cfg(feature = "phobos")]
+pub mod phobos_crit;
+#[cfg(feature = "phobos")]
 pub mod phobos_power_plant_enhancer;
 #[cfg(feature = "phobos")]
 pub mod phobos_selection_flash;
 #[cfg(feature = "phobos")]
 pub mod phobos_sw_sidebar;
+#[cfg(feature = "phobos")]
+pub mod phobos_warhead_anim;
 pub mod phobos_radiation;
 pub mod phobos_shields;
 /// Whether this binary includes the supported Ares extensions. INIs cannot change it.
@@ -148,6 +161,9 @@ pub const NPATCH_ENABLED: bool = cfg!(feature = "npatch");
 /// Whether this binary includes VERA20K's own extension behaviors. INIs cannot
 /// change it; builds without the feature keep every stock path.
 pub const VERAX_ENABLED: bool = cfg!(feature = "verax");
+/// Whether this binary includes the NPBUG bug-fix extension. INIs cannot
+/// change it; builds without the feature keep every native path.
+pub const NPBUG_ENABLED: bool = cfg!(feature = "npbug");
 pub(crate) mod ares_prerequisites;
 pub(crate) mod ares_armor;
 pub(crate) mod ares_emp;
@@ -222,6 +238,7 @@ pub mod overlay_types;
 pub mod particle_system_type;
 pub mod particle_type;
 pub mod personal_rules;
+pub mod personality;
 pub mod powerups;
 pub mod prerequisite;
 pub mod process_owner;

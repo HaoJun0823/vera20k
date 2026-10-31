@@ -3164,13 +3164,84 @@ fn sequenced_udp_paused_client_catches_up_without_stalling_healthy_commands() {
     std::fs::remove_dir_all(journal_dir).unwrap();
 }
 
+/// A record a newer relay keeps sending, which this build cannot read, ends
+/// the match through the session's service once repeated for five seconds;
+/// a lone earlier one does not start that window.
+#[test]
+fn sequenced_service_ends_a_match_a_newer_relay_keeps_stalling() {
+    use crate::net::udp::{
+        OrderingCertificate, RelayTicket, relay_peer_endpoint,
+        test_support::{SecretKey, derive_packet_key},
+    };
+    use vera20k_relay_protocol::OrderEvent;
+
+    let key = SecretKey::new([31; 32]);
+    let sink = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let std::net::SocketAddr::V4(address) = sink.local_addr().unwrap() else {
+        unreachable!()
+    };
+    let ticket = RelayTicket {
+        room: [27; 16],
+        player: [1; 16],
+        source: 0,
+        generation: 1,
+        expires: 300,
+        nonce: [3; 16],
+    }
+    .sign(&key)
+    .unwrap();
+    let certificate = OrderingCertificate {
+        room: [27; 16],
+        sources_mask: 3,
+        tick_hz: 30,
+        expires: 86_500,
+    }
+    .sign(&key)
+    .unwrap();
+    let mut wire = transport();
+    wire.enable_relay(
+        address,
+        &ticket,
+        *derive_packet_key(&key, &ticket).expose_for_https(),
+        [29; 32],
+    )
+    .unwrap();
+    wire.set_ordering_certificate(certificate.to_vec()).unwrap();
+    wire.connections_mut()
+        .add_peer(1, relay_peer_endpoint(1).unwrap())
+        .unwrap();
+    let agreement = StartupAgreement::new(
+        [(0, 0), (1, 1)],
+        [0, 1],
+        73,
+        10,
+        30,
+        NonZeroU32::new(1).unwrap(),
+        0,
+    )
+    .unwrap();
+    let mut session = sequenced::SequencedSession::new(&agreement, &wire, 0).unwrap();
+    // Before the start, no Status this build can read arrives.
+    let mut unreadable_at = |now: u32| {
+        wire.push_ordering_received_for_test(OrderEvent::Unrecognized);
+        session.service(&mut wire, now);
+        session.failed()
+    };
+    assert!(!unreadable_at(0));
+    assert!(!unreadable_at(6_000));
+    for now in (7_000..11_000).step_by(1_000) {
+        assert!(!unreadable_at(now));
+    }
+    assert!(unreadable_at(11_000));
+}
+
 #[test]
 fn sequenced_unsent_batch_retries_when_the_relay_route_recovers() {
     use crate::net::udp::{
-        OrderingCertificate, RelayTicket,
+        OrderingCertificate, RelayTicket, relay_peer_endpoint,
         test_support::{MAX_DATAGRAM, RelayServer, SecretKey, derive_packet_key},
     };
-    use vera20k_relay_protocol::OrderEvent;
+    use vera20k_relay_protocol::{ClientSession, OrderEvent, ServerEvent};
 
     let key = SecretKey::new([31; 32]);
     let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -3190,7 +3261,7 @@ fn sequenced_unsent_batch_retries_when_the_relay_route_recovers() {
     .unwrap();
     let certificate = OrderingCertificate {
         room: [27; 16],
-        sources_mask: 1,
+        sources_mask: 3,
         tick_hz: 30,
         expires: 86_500,
     }
@@ -3205,10 +3276,53 @@ fn sequenced_unsent_batch_retries_when_the_relay_route_recovers() {
     )
     .unwrap();
     wire.set_ordering_certificate(certificate.to_vec()).unwrap();
-    let agreement =
-        StartupAgreement::new([(0, 0)], [0], 73, 10, 30, NonZeroU32::new(1).unwrap(), 0).unwrap();
+    wire.connections_mut()
+        .add_peer(1, relay_peer_endpoint(1).unwrap())
+        .unwrap();
+    let agreement = StartupAgreement::new(
+        [(0, 0), (1, 1)],
+        [0, 1],
+        73,
+        10,
+        30,
+        NonZeroU32::new(1).unwrap(),
+        0,
+    )
+    .unwrap();
     let mut session = sequenced::SequencedSession::new(&agreement, &wire, 0).unwrap();
-    let mut relay = RelayServer::new(key, 1);
+    let mut relay = RelayServer::new(key.clone(), 1);
+    // The relay orders only matches of two or more sources. Source 1 readies
+    // in process and then stays silent.
+    let ticket = RelayTicket {
+        room: [27; 16],
+        player: [2; 16],
+        source: 1,
+        generation: 1,
+        expires: 300,
+        nonce: [4; 16],
+    }
+    .sign(&key)
+    .unwrap();
+    let packet_key = *derive_packet_key(&key, &ticket).expose_for_https();
+    let mut second = ClientSession::new(&ticket, packet_key, [29; 32]).unwrap();
+    let from = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 9);
+    let mut bytes = Vec::new();
+    second.probe(&mut bytes).unwrap();
+    let challenge = relay.process_at(from, &bytes, 116, 16_000).unwrap();
+    let Ok(ServerEvent::Challenge(cookie)) = second.receive(&challenge[0].bytes) else {
+        panic!("challenge");
+    };
+    second.confirm(&cookie.to_vec(), &mut bytes).unwrap();
+    let ready = relay.process_at(from, &bytes, 116, 16_000).unwrap();
+    assert!(matches!(
+        second.receive(&ready[0].bytes),
+        Ok(ServerEvent::Ready)
+    ));
+    let identity = agreement.sequencing_identity().unwrap().0;
+    second
+        .configure_ordering(&certificate, identity, &mut bytes)
+        .unwrap();
+    relay.process_at(from, &bytes, 116, 16_000).unwrap();
     let pump = |wire: &mut LanUdpTransport, relay: &mut RelayServer, now: u32| {
         wire.service(now >> 4);
         loop {
@@ -3432,6 +3546,57 @@ fn sequenced_pair() -> (
         })
         .collect();
     (worlds, rules, actor, boundaries, socket, relay)
+}
+
+#[test]
+fn sequenced_push_is_probed_again_after_three_lost_replies() {
+    use crate::net::udp::test_support::MAX_DATAGRAM;
+
+    let (mut worlds, rules, _, boundaries, socket, mut relay) = sequenced_pair();
+    let second_address = boundaries[1].live.borrow().primary_addr().unwrap();
+    let mut now_ms = 16_000;
+    for step in 0..900 {
+        now_ms += 16;
+        let unix = 100 + (now_ms - 16_000) / 1000;
+        relay.advance_clock(now_ms, unix);
+        for (world, boundary) in worlds.iter_mut().zip(&boundaries) {
+            boundary.now.set((now_ms >> 4) as u32);
+            boundary.live.borrow_mut().service_pending_commands(
+                &mut world.network_command_queues(),
+                (now_ms >> 4) as u32,
+            );
+        }
+        let mut replies = Vec::new();
+        let mut bytes = [0; MAX_DATAGRAM + 1];
+        while let Ok((length, std::net::SocketAddr::V4(source))) = socket.recv_from(&mut bytes) {
+            replies.extend(
+                relay
+                    .process_at(source, &bytes[..length], unix, now_ms)
+                    .unwrap_or_default(),
+            );
+        }
+        replies.extend(relay.drain_ordering_push(now_ms, unix));
+        for packet in replies {
+            // The first two seconds lose every push reply (CONTROL kind 4,
+            // payload event 7 after the 48-byte server header) to the second.
+            let push_reply = packet.bytes[4] == 4 && packet.bytes.get(48) == Some(&7);
+            if step >= 125 || packet.endpoint != second_address || !push_reply {
+                socket.send_to(&packet.bytes, packet.endpoint).unwrap();
+            }
+        }
+        for (world, boundary) in worlds.iter_mut().zip(&boundaries) {
+            production_frame(world, &rules, boundary);
+        }
+        if step == 124 {
+            assert!(boundaries[1].live.borrow().sequenced_timing().is_none());
+        }
+    }
+    assert!(
+        boundaries
+            .iter()
+            .all(|boundary| boundary.live.borrow().sequenced_timing().is_some()),
+        "a relay that answers a later probe delivers by push"
+    );
 }
 
 #[test]
@@ -3674,10 +3839,13 @@ fn sequenced_pause_stops_at_one_boundary_and_recovers_a_lost_resume() {
             for _ in 0..4 {
                 // Use the production app's canonical admission rule. A
                 // retained post-Logic transaction must finish, not be replayed.
+                // Local EXIT4C7917 skips MainTick55DE7E's frame commit; like
+                // the app, never run an exited world's Logic on that frame again.
                 let frame = world.session().binary_frame();
-                if !world.pending_network_wait()
-                    && frame != 0
-                    && frame > boundary.live.borrow().committed_frontier()
+                if world.quit_requested()
+                    || (!world.pending_network_wait()
+                        && frame != 0
+                        && frame > boundary.live.borrow().committed_frontier())
                 {
                     break;
                 }
@@ -3884,6 +4052,29 @@ fn sequenced_pause_stops_at_one_boundary_and_recovers_a_lost_resume() {
         );
         assert!(!boundary.live.borrow().multiplayer_pause().unwrap().paused);
     }
+    // Neither world has a local House, so each runs Alpha's EXIT as its own,
+    // possibly a step apart. Later relay frames must leave both on their
+    // uncommitted EXIT frame.
+    let ended = worlds
+        .each_ref()
+        .map(|world| world.session().binary_frame());
+    for _ in 0..5 {
+        now_ms += 16;
+        step(
+            &mut worlds,
+            &mut relay,
+            &mut committed,
+            now_ms,
+            false,
+            false,
+        );
+    }
+    assert_eq!(
+        worlds
+            .each_ref()
+            .map(|world| world.session().binary_frame()),
+        ended
+    );
 }
 
 #[test]

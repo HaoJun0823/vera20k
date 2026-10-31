@@ -258,86 +258,6 @@ pub(crate) fn write_spawn_result(
     Ok(())
 }
 
-/// The browser page's launch state machine (`web.rs`; docs/spawn.md,
-/// "Repeat launches"). `start_game` keeps its one-shot contract; an engine
-/// started by `start_spawn` accepts another launch, and new launch files,
-/// only after the previous launch reported `spawn:finished`.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")),
-    allow(dead_code)
-)]
-pub(crate) struct BrowserSpawnGate {
-    started: bool,
-    spawn_host: bool,
-    idle: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BrowserSpawnStart {
-    /// Create the engine for this launch.
-    StartEngine,
-    /// Queue the launch for the running, idle engine.
-    QueueNext,
-}
-
-#[cfg_attr(
-    not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")),
-    allow(dead_code)
-)]
-impl BrowserSpawnGate {
-    pub(crate) const fn started(self) -> bool {
-        self.started
-    }
-
-    /// A `start_spawn` launch is running (not yet `spawn:finished`).
-    pub(crate) const fn spawn_running(self) -> bool {
-        self.spawn_host && !self.idle
-    }
-
-    /// Retail files and saves are fixed once the engine runs.
-    pub(crate) const fn may_replace_resources(self) -> bool {
-        !self.started
-    }
-
-    /// Launch files may change before the first launch and between launches.
-    pub(crate) const fn may_replace_launch_files(self) -> bool {
-        !self.started || (self.spawn_host && self.idle)
-    }
-
-    pub(crate) fn start_game(&mut self) -> Result<(), &'static str> {
-        if self.started {
-            return Err("Game already started; reload to restart");
-        }
-        self.started = true;
-        Ok(())
-    }
-
-    /// What `start_spawn` may do now; nothing changes until [`Self::commit`].
-    pub(crate) fn start_spawn(self) -> Result<BrowserSpawnStart, &'static str> {
-        match (self.started, self.spawn_host, self.idle) {
-            (false, ..) => Ok(BrowserSpawnStart::StartEngine),
-            (true, true, true) => Ok(BrowserSpawnStart::QueueNext),
-            (true, true, false) => Err("A launch is running; wait for spawn:finished"),
-            (true, false, _) => Err("Game already started; reload to restart"),
-        }
-    }
-
-    /// `start_spawn` succeeded with the admitted [`BrowserSpawnStart`].
-    pub(crate) fn commit(&mut self, _start: BrowserSpawnStart) {
-        self.started = true;
-        self.spawn_host = true;
-        self.idle = false;
-    }
-
-    /// The launch reported `spawn:finished`.
-    pub(crate) fn finished(&mut self) {
-        if self.spawn_host {
-            self.idle = true;
-        }
-    }
-}
-
 struct SpawnSeedClock {
     seed: Option<u32>,
 }
@@ -651,13 +571,21 @@ impl App {
         Some(report.exit_code)
     }
 
-    /// Browser: the external launch ended (its quit cascade finished, or the
-    /// start failed). Report it through `spawn:finished:<json>`, release
-    /// its network owners as a return after a match does, and wait on the
-    /// menu backdrop for the page's next `start_spawn` (docs/spawn.md).
+    /// Browser: close the external launch through its existing network owners.
+    /// The host report is delivered by poll_browser_exit after they settle.
     #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
     pub(super) fn finish_browser_external_launch(state: &mut AppState, failure: Option<&str>) {
-        let report = Self::external_launch_report(Some(state), failure);
+        if state.frontend.browser_exit_pending {
+            return;
+        }
+        if let Some(error) = failure {
+            state
+                .frontend
+                .external_launch_error
+                .get_or_insert_with(|| error.to_owned());
+        }
+        Self::browser_match_ended(state, ExternalMatchResult::Quit);
+        crate::web::request_exit(state.frontend.external_launch_error.as_deref());
         crate::app::shell_wol::discard_spawned_visit(state);
         if state.match_state.lan_service.is_some() {
             crate::app::lan_service::close(state);
@@ -667,36 +595,7 @@ impl App {
         }
         state.frontend.network_setup_protocol = None;
         Self::destroy_current_shell_dialog(state);
-        state.frontend.external_idle = true;
-        log::info!("External launch result: {}", report.json());
-        crate::web::spawn_finished(&report.json());
-    }
-
-    /// Browser: start the launch the page queued with `start_spawn` once
-    /// the previous one has fully released its network owners.
-    #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
-    pub(super) fn poll_queued_spawn(state: &mut AppState) {
-        if !state.frontend.external_idle
-            || crate::app::shell_wol::online_cleanup_pending(state)
-            || state.match_state.lan_service.is_some()
-        {
-            return;
-        }
-        let Some(request) = crate::web::take_queued_spawn() else {
-            return;
-        };
-        state.frontend.external_idle = false;
-        state.frontend.external_launch_error = None;
-        state.frontend.external_match_result = None;
-        state.frontend.quit_cascade = None;
-        log::info!("External launch: starting the next queued spawn");
-        if let Err(error) = Self::start_spawn_session(state, request) {
-            let error = format!("CnCNet startup failed: {error:#}");
-            log::error!("{error}");
-            crate::web::status(&error);
-            Self::finish_browser_external_launch(state, Some(&error));
-        }
-        state.platform.window.request_redraw();
+        state.frontend.browser_exit_pending = true;
     }
 
     /// docs/spawn.md "Scripted leave and resign": run the external
@@ -1009,34 +908,5 @@ mod tests {
         assert!(opponents_left(&launch, &[0, 1]));
         // Only the ally remains with the local player: still opponents gone.
         assert!(opponents_left(&launch, &[0]));
-    }
-
-    #[test]
-    fn browser_gate_admits_repeat_spawns_only_after_finished() {
-        let mut gate = BrowserSpawnGate::default();
-        assert!(gate.may_replace_launch_files() && gate.may_replace_resources());
-        let start = gate.start_spawn().unwrap();
-        assert_eq!(start, BrowserSpawnStart::StartEngine);
-        gate.commit(start);
-        assert!(gate.started() && !gate.may_replace_resources());
-        assert!(!gate.may_replace_launch_files());
-        assert!(gate.start_spawn().is_err());
-        assert!(gate.start_game().is_err());
-        gate.finished();
-        assert!(gate.may_replace_launch_files() && !gate.may_replace_resources());
-        assert!(gate.start_game().is_err());
-        let next = gate.start_spawn().unwrap();
-        assert_eq!(next, BrowserSpawnStart::QueueNext);
-        gate.commit(next);
-        assert!(!gate.may_replace_launch_files());
-        assert!(gate.start_spawn().is_err());
-
-        // start_game keeps its one-shot contract and never becomes a host.
-        let mut game = BrowserSpawnGate::default();
-        game.start_game().unwrap();
-        game.finished();
-        assert!(game.start_spawn().is_err());
-        assert!(!game.may_replace_launch_files());
-        assert!(game.start_game().is_err());
     }
 }

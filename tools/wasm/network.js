@@ -70,7 +70,7 @@
       || !(url.protocol === 'wss:' || (url.protocol === 'ws:' && local))
       || url.username || url.password || url.pathname !== '/' || url.search || url.hash
       || !Number.isInteger(maxDatagram) || maxDatagram < 1 || maxDatagram > 2048) {
-      throw new Error('Invalid compiled WebSocket proxy configuration');
+      throw new Error('Invalid WebSocket proxy origin');
     }
     url.pathname = `/game/${channel}`;
     const state = {

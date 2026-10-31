@@ -1376,7 +1376,13 @@ mod tests {
             };
             for dialog in [SetupFlavor::Lan, SetupFlavor::Wol]
                 .into_iter()
-                .flat_map(|flavor| [false, true].map(|host| SetupDialog { host, flavor }))
+                .flat_map(|flavor| {
+                    [false, true].map(|host| SetupDialog {
+                        host,
+                        flavor,
+                        modern: false,
+                    })
+                })
             {
                 let layout =
                     MultiplayerSetupLayout::new(dialog, width as i32, height as i32, false);
@@ -1414,7 +1420,13 @@ mod tests {
         use crate::ui::multiplayer_setup::{SetupDialog, SetupFlavor};
         for dialog in [SetupFlavor::Lan, SetupFlavor::Wol]
             .into_iter()
-            .flat_map(|flavor| [false, true].map(|host| SetupDialog { host, flavor }))
+            .flat_map(|flavor| {
+                [false, true].map(|host| SetupDialog {
+                    host,
+                    flavor,
+                    modern: false,
+                })
+            })
         {
             for (width, height, responsive) in [
                 (640, 480, false),

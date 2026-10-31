@@ -38,7 +38,10 @@ fn stock_cloak_tick_facts(
     }
     let object = sim.interner.object_type(entity.type_ref(), rules)?;
     let rank_cloak = has_weapon_ability(entity.veterancy.rank_kind(), object, Ability::Cloak);
-    let intrinsic_cloak = entity.stealth_ability.active(object.cloakable);
+    // Phobos `TechnoClass_IsReadyToCloak_Wrapper` / `ShouldNotCloak_Wrapper`
+    // OR the active effects' `Cloakable` into the live Techno flag.
+    let intrinsic_cloak =
+        entity.stealth_ability.active(object.cloakable) || entity.phobos_cloakable();
     // vt+0x1D4 / vt+0x1D8 (`0x0070C5B0` / `0x0070C5C0`, reading
     // `TechnoClass+0x270`/`+0x271`): a Chrono teleport or a Temporal warp.
     let chrono_active = entity.is_warped_out() || entity.is_warping_in();
@@ -166,7 +169,10 @@ fn stock_cloak_tick_facts(
         && !(entity.lift.source().is_some() && entity.lift.swap_active())
         // 8. `GetHeight() < 1`.
         && ((crate::rules::ARES_ENABLED && active_cloak)
-            || crate::sim::movement::air_movement::current_fly_height(entity, sim.resolved_terrain.as_ref()) < 1);
+            || crate::sim::movement::air_movement::current_fly_height(entity, sim.resolved_terrain.as_ref()) < 1)
+        // `IsReadyToCloak_Wrapper`: a ready object still refuses while any
+        // active effect forces a decloak.
+        && !entity.phobos_force_decloak();
 
     // `TechnoClass::ShouldUncloak @ 0x006FBC90`:
     //   if ((IsCloakable() || +0x3D2) && !EMP && !vt+0x380 && !WarpIn && !WarpOut)
@@ -190,6 +196,9 @@ fn stock_cloak_tick_facts(
             !cloaked_by_own_house
         }
     };
+    // `ShouldNotBeCloaked_Wrapper`: a passing object still reports
+    // should-uncloak while an active effect forces the decloak.
+    let should_uncloak = should_uncloak || entity.phobos_force_decloak();
     Some(crate::sim::cloak_disguise::CloakTickFacts::new(
         current_frame,
         // CloakingTick6FB7FD..6FB823 applies this contact exclusion before
@@ -207,7 +216,7 @@ fn stock_cloak_tick_facts(
         rules.general.cloaking_stages,
         object.invisible
             || (entity.category() == EntityCategory::Structure && object.invisible_in_game),
-        entity.discovery.owned_by_current_house(),
+        sim.shared_owned_by_current_house(entity),
         entity.category() == EntityCategory::Structure,
     ))
 }
@@ -670,7 +679,7 @@ pub(super) fn tick_stock_cloak_producer(
     registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
     effects: FrameEffects<'_>,
 ) {
-    let Some((category, type_ref, veterancy, stealth_ability, active_transition)) =
+    let Some((category, type_ref, veterancy, stealth_ability, active_transition, phobos_cloakable)) =
         sim.substrate.entities.get(id).map(|entity| {
             (
                 entity.category(),
@@ -681,6 +690,7 @@ pub(super) fn tick_stock_cloak_producer(
                     .cloak
                     .as_ref()
                     .is_some_and(|cloak| cloak.state() != 0),
+                entity.phobos_cloakable(),
             )
         })
     else {
@@ -698,7 +708,11 @@ pub(super) fn tick_stock_cloak_producer(
     let rank_cloak = has_weapon_ability(rank_from_u16(veterancy), object, Ability::Cloak);
     // Native calls CloakingTick even after a temporary ability disappears.
     // Keep the existing clock alive until its uncloak transition finishes.
-    if !stealth_ability.active(object.cloakable) && !rank_cloak && !active_transition {
+    if !stealth_ability.active(object.cloakable)
+        && !rank_cloak
+        && !active_transition
+        && !phobos_cloakable
+    {
         return;
     }
 

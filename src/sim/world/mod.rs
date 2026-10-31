@@ -52,6 +52,8 @@ pub use frame_effects::{FrameEffects, LocalPlanningBoundary, NetworkCommandBound
 pub(crate) use type_tech_levels::TypeTechLevels;
 #[cfg(test)]
 mod unit_unlimbo_tests;
+#[cfg(test)]
+mod unit_follows_tests;
 pub(crate) use sinking::{LivingSinkTrigger, SinkingState};
 pub mod edge_cell;
 mod gap_generator;
@@ -450,13 +452,14 @@ pub struct SimFrameOutput {
     /// retained screen offset and applies these after Logic.
     pub screen_shake_updates: Vec<crate::sim::combat::ScreenShakeUpdate>,
     pub lighting_events: Vec<crate::sim::light_sources::LightingEvent>,
-    /// The retail sync checksum this frame's multiplayer `Queue_AI` computed
-    /// for the native history ring; `None` on single-player routes and on
+    /// The sync checksum this frame's multiplayer `Queue_AI` computed for
+    /// the native history ring (retail fold plus VERA's money, health and
+    /// trigger terms); `None` on single-player routes and on
     /// frames that terminated before the tail.
     pub multiplayer_checksum: Option<FrameSyncChecksum>,
 }
 
-/// One frame's retail multiplayer checksum, stamped with the pre-commit
+/// One frame's multiplayer sync checksum, stamped with the pre-commit
 /// native frame it describes (`Frame` when `0x00647684` runs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameSyncChecksum {
@@ -1299,6 +1302,12 @@ pub struct Simulation {
     /// bypass API; balanced at frame boundaries; not saved/hash state.
     #[serde(skip, default)]
     buildup_bypass: bool,
+    /// Phobos `WarheadTypeExt::Reflected`: the warhead whose own damage is
+    /// being reflected right now, so a reflected hit never reflects again.
+    /// Synchronous, never saved or hashed.
+    #[cfg(feature = "phobos")]
+    #[serde(skip, default)]
+    pub(crate) reflected_warhead: Option<crate::sim::intern::InternedId>,
     /// Scenario RNG — gamemd `Scenario->Random` (Scen+0x218). Drives in-object-tick
     /// sim draws: scatter, sub-cell placement, smudge/destruction, particles,
     /// wall/overlay damage, bridge collapse/destruction presentation, ore growth/spread, TIBTRE,
@@ -1432,6 +1441,10 @@ pub struct Simulation {
     /// the render-side fire-event approximation.
     #[serde(default)]
     pub(crate) projectiles: crate::sim::projectile::ProjectileStore,
+    /// Phobos per-warhead-type animation creation counters.
+    #[cfg(feature = "phobos")]
+    #[serde(default)]
+    pub(crate) warhead_anim_runtime: crate::sim::warhead_anim::WarheadAnimRuntime,
     /// Persistent WaveClass registrations. They have their own logic lifetime;
     /// this is not a one-frame weapon-fire presentation list.
     pub(crate) waves: crate::sim::wave::WaveStore,
@@ -2099,62 +2112,31 @@ impl Simulation {
             crate::sim::combat::FatalLifecycleStage::MaintainDamageSmoke { state } => {
                 self.maintain_damage_smoke_after_receive(stable_id, state, rules);
             }
-            crate::sim::combat::FatalLifecycleStage::BeforeDeathEffects { attacker } => {
-                // A building's occupants. A unit's passengers stay for its own
-                // arms: an exploding unit kills them before its death weapon
-                // (`world_receiver::handle_death`), and the rest leave or die
-                // in its UnitClass arm
-                // (`crew_survival::release_dying_unit_passengers`).
-                //
-                // RESIDUAL: this runs before the Techno death arm (sounds,
-                // debris, death weapon). Natively that arm returns first, and
-                // the Building NowDead block then ejects the occupants
-                // (`0x00442625`) and turns the light off (`0x0044264C`) just
-                // before DestructionEffects (`0x00442665`), so an ejected
-                // garrison's Scatter draws follow the debris and death-weapon
-                // draws there and precede them here.
+            crate::sim::combat::FatalLifecycleStage::BeforeBuildingDestruction => {
+                // Building442625..44264C, after Techno701900 has completed
+                // its debris and synchronous death weapon. Garrison Scatter
+                // draws belong here, before DestructionEffects442665 and its
+                // foundation marks and survivors. True Cargo is independent:
+                // DestructionEffects441F27 kills it after SpawnSurvivors.
+                // Native execution: tools/spatial_oracle/building_garrison_fatal.json.
                 if category != EntityCategory::Structure {
                     return;
                 }
-                let garrison = self.substrate.entities.get(stable_id).and_then(|entity| {
-                    let object = self.interner.object_type(entity.type_ref(), rules)?;
-                    if !object.can_be_occupied || entity.passenger_role.occupants().is_empty() {
-                        return None;
-                    }
-                    let (foundation_w, foundation_h) =
-                        object.foundation.dimensions();
-                    Some(
-                        crate::sim::passenger::garrison_eject::DestroyedGarrisonBuilding {
-                            building_id: stable_id,
-                            rx: entity.position.rx(),
-                            ry: entity.position.ry(),
-                            foundation_w,
-                            foundation_h,
-                        },
-                    )
-                });
-                // An absorbing building's passengers leave through
-                // SpawnSurvivors' Phase A; its KillPassengers (`0x00441F27`,
-                // crediting the attacker) runs after that and finds the list
-                // empty.
-                let absorbs = self
+                // 442625 gates SellBuilding(0,0) at 44263B on CanBeOccupied.
+                let object = self
                     .substrate
                     .entities
                     .get(stable_id)
-                    .is_some_and(|entity| {
-                        self.interner
-                            .object_type(entity.type_ref(), rules)
-                            .is_some_and(|object| object.absorbs_passengers())
-                    });
-                if let Some(event) = garrison {
-                    passenger::garrison_eject::eject_destruction_garrison_with_context(
+                    .and_then(|entity| self.interner.object_type(entity.type_ref(), rules));
+                if object.is_some_and(|object| object.can_be_occupied) {
+                    passenger::garrison_eject::sell_building_occupants(
                         self,
                         rules,
-                        &event,
-                        uninit_context,
+                        uninit_context.registry(),
+                        stable_id,
+                        passenger::garrison_eject::GarrisonEjectMode::Release,
+                        uninit_context.effects(),
                     );
-                } else if !absorbs {
-                    self.kill_passengers(stable_id, attacker, uninit_context);
                 }
                 //44264C precedes the recursive destruction effects.
                 self.lighting_sources
@@ -4115,6 +4097,9 @@ impl Simulation {
     /// Install a newly constructed map grid and capture the real CellClass
     /// `0x1180` value authority after row-major OverlayPack marking.
     pub fn install_resolved_terrain_for_new_map(&mut self, resolved_terrain: ResolvedTerrainGrid) {
+        let grid = resolved_terrain.cell_grid();
+        self.houses.configure_cell_grid(grid);
+        self.terrain_objects.configure_cell_grid(grid);
         self.bind_shared_cell_dummy(resolved_terrain.shared_cell_dummy());
         self.real_cell_bridge_flags_0x1180 =
             resolved_terrain.capture_real_cell_bridge_flags_0x1180();
@@ -4401,6 +4386,8 @@ impl Simulation {
             frame_profile: Default::default(),
             object_placement_scope_depth: 0,
             buildup_bypass: false,
+            #[cfg(feature = "phobos")]
+            reflected_warhead: None,
             scenario_rng: SimRng::new(seed),
             main_rng: MainRng::new(seed),
             mapgen_rng: SimRng::new(0),
@@ -4434,6 +4421,8 @@ impl Simulation {
             combat_light_requests: FrameChannel::default(),
             screen_shake_updates: FrameChannel::default(),
             projectiles: crate::sim::projectile::ProjectileStore::new(),
+            #[cfg(feature = "phobos")]
+            warhead_anim_runtime: Default::default(),
             waves: crate::sim::wave::WaveStore::new(),
             active_wave_links: BTreeMap::new(),
             object_custom_sounds: BTreeMap::new(),
@@ -5003,6 +4992,19 @@ impl Simulation {
         })
     }
 
+    /// The cell addressing of this map. The loaded terrain owns it; before
+    /// Fill the scenario's Size selects it.
+    pub(crate) fn cell_grid(&self) -> crate::map::cell_index::CellGrid {
+        self.resolved_terrain
+            .as_ref()
+            .map(|terrain| terrain.cell_grid())
+            .or_else(|| {
+                self.map_size_diamond()
+                    .map(|(w, h)| crate::map::cell_index::CellGrid::for_map_size(w, h))
+            })
+            .unwrap_or_default()
+    }
+
     /// `MapClass+0xF4/+0xF8`, the `In_Bounds` diamond's width and height.
     pub fn map_size_diamond(&self) -> Option<(i32, i32)> {
         self.playfield_bounds
@@ -5208,6 +5210,7 @@ impl Simulation {
         Self::construct_bullet_scheme(
             &self.interner,
             &self.substrate,
+            &self.houses,
             &mut self.projectiles,
             id,
             rules,
@@ -5262,6 +5265,7 @@ impl Simulation {
     pub(crate) fn construct_bullet_scheme(
         interner: &StringInterner,
         substrate: &ObjectSubstrate,
+        houses: &crate::sim::houses::Houses,
         projectiles: &mut ProjectileStore,
         bullet: u64,
         rules: &RuleSet,
@@ -5269,16 +5273,37 @@ impl Simulation {
         let Some(projectile) = projectiles.get(bullet) else {
             return;
         };
+        #[cfg(not(feature = "phobos"))]
+        let _ = houses;
+        let source_id = projectile.source_id();
         let firers_palette = projectile
             .payload()
             .projectile_type()
             .and_then(|id| rules.projectile(interner.resolve(id)))
             .is_some_and(|kind| kind.firers_palette);
         let house = firers_palette
-            .then(|| substrate.entities.get(projectile.source_id()))
+            .then(|| substrate.entities.get(source_id))
             .flatten()
             .map(|owner| owner.owner());
         projectiles.set_firer_house(bullet, house);
+        #[cfg(feature = "phobos")]
+        {
+            // `BulletExt::InitializeState` retains the Owner's House for
+            // every bullet, not only a `FirersPalette=` one. A re-Construct
+            // with no live owner keeps the saved value (native only writes
+            // inside `if (pThis->Owner)`).
+            let retained = substrate.entities.get(source_id).map(|owner| owner.owner());
+            if retained.is_some() {
+                projectiles.set_phobos_firer_house(bullet, retained);
+            }
+            if let Some(multiplier) =
+                crate::sim::combat::world_fire::bullet_init_firepower_multiplier(
+                    interner, substrate, houses, rules, source_id,
+                )
+            {
+                projectiles.set_phobos_firepower_multiplier_if_default(bullet, multiplier);
+            }
+        }
     }
 
     /// Admit the bullets a detonation spawned (`BulletClass::SpawnShrapnel
@@ -5316,6 +5341,7 @@ impl Simulation {
             Self::construct_bullet_scheme(
                 &self.interner,
                 &self.substrate,
+                &self.houses,
                 &mut self.projectiles,
                 stable_id,
                 rules,
@@ -6091,6 +6117,82 @@ impl Simulation {
         registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
         effects: FrameEffects<'_>,
     ) {
+        let Some(entity) = self.substrate.entities.get(stable_id) else {
+            return;
+        };
+        if entity.category() != EntityCategory::Unit {
+            self.change_owner_inherited(stable_id, new_owner, rules, registry, effects);
+            return;
+        }
+        // UnitClass::ChangeOwner7463A0..7463F2 (original gamemd instructions)
+        // clears its independent follower byte, recursively transfers its
+        // retained peer first, restores that link/peer byte, then calls Foot.
+        // An explicit continuation stack preserves this order for long chains
+        // without consuming one Rust stack frame per linked Unit.
+        let mut pending = Vec::new();
+        let mut visited = std::collections::BTreeSet::new();
+        let mut current = Some(stable_id);
+        while let Some(id) = current {
+            let Some(entity) = self.substrate.entities.get(id) else {
+                log::warn!("UnitChangeOwner7463A0 references missing follower {id}");
+                return;
+            };
+            if entity.category() != EntityCategory::Unit {
+                log::warn!("UnitChangeOwner7463A0 references non-Unit follower {id}");
+                return;
+            }
+            if entity.owner() == new_owner {
+                break;
+            }
+            if !visited.insert(id) {
+                // Native recursion has no completed result for this graph.
+                // Retain it in storage, but diagnose this unsupported call.
+                log::warn!("UnitChangeOwner7463A0 has a cyclic follower chain at {id}");
+                return;
+            }
+            current = entity.unit_follower();
+            pending.push((id, current));
+            self.substrate
+                .entities
+                .get_mut(id)
+                .unwrap()
+                .set_is_unit_follower(false);
+        }
+        for (id, peer) in pending.into_iter().rev() {
+            if !self.substrate.entities.contains(id)
+                || peer.is_some_and(|peer| !self.substrate.entities.contains(peer))
+            {
+                // A native retained pointer would now be dangling. Do not
+                // resurrect a retired object or invent its callback result.
+                log::warn!("UnitChangeOwner7463A0 receiver/follower retired during callbacks");
+                return;
+            }
+            if let Some(peer) = peer {
+                self.substrate
+                    .entities
+                    .get_mut(id)
+                    .unwrap()
+                    .set_unit_follower(Some(peer));
+                self.substrate
+                    .entities
+                    .get_mut(peer)
+                    .unwrap()
+                    .set_is_unit_follower(true);
+            }
+            self.change_owner_inherited(id, new_owner, rules, registry, effects);
+        }
+    }
+
+    /// The existing inherited and Building ownership authority. Unit's
+    /// subclass prefix enters here only after its follower callbacks finish.
+    fn change_owner_inherited(
+        &mut self,
+        stable_id: u64,
+        new_owner: InternedId,
+        rules: &RuleSet,
+        registry: Option<&crate::rules::overlay_types::OverlayTypeRegistry>,
+        effects: FrameEffects<'_>,
+    ) {
         let Some((old_owner, category, has_spawn_manager, build_const_eligible)) =
             self.substrate.entities.get(stable_id).map(|entity| {
                 (
@@ -6103,11 +6205,6 @@ impl Simulation {
         else {
             return;
         };
-        // UnitChangeOwner7463A8..7463AE refuses the same house before its
-        // Foot delegate. Infantry/Aircraft inherit Foot's failure receiver.
-        if category == EntityCategory::Unit && old_owner == new_owner {
-            return;
-        }
         // FootChangeOwner4DBEFB removes at the current cell before its
         // Techno delegate, including the same-owner refusal at7014A0.
         self.remove_unit_sensors_at_current(stable_id, rules, registry);
@@ -6345,6 +6442,8 @@ impl Simulation {
             UninitContext::new(rules, registry).with_effects(effects),
         );
         self.substrate.entities.change_owner(stable_id, new_owner);
+        #[cfg(feature = "phobos")]
+        self.phobos_attach_effects_on_owner_change(stable_id, old_owner, new_owner, rules);
         self.ownership_changed_since_output = true;
         self.spatial_threat_after_owner_change(stable_id, spatial_threat_cell, rules);
         if category == EntityCategory::Structure {
@@ -7190,13 +7289,27 @@ impl Simulation {
     /// AssignOrphanedCellZone (`0x0056D460`) and the local graph update
     /// (`0x00584550`): the per-cell tail `TerrainClass::Limbo` and
     /// `BuildingClass::AfterDestruction` share. `blocked` is the structure
-    /// presence already scanned for the caller's cells.
-    fn publish_cell_and_assign_orphaned_zone(
+    /// presence already scanned for the caller's cells, or calculated here for
+    /// a single native caller such as Anim::Start424EE8/424EF3.
+    pub(crate) fn publish_cell_and_assign_orphaned_zone(
         &mut self,
         rules: &RuleSet,
         cell: (u16, u16),
-        blocked: &BTreeSet<(u16, u16)>,
+        blocked: Option<&BTreeSet<(u16, u16)>>,
     ) {
+        let owned_blocked;
+        let blocked = match blocked {
+            Some(blocked) => blocked,
+            None => {
+                owned_blocked = navigation::structure_blocked_among(
+                    &self.substrate.entities,
+                    &self.interner,
+                    rules,
+                    &[cell],
+                );
+                &owned_blocked
+            }
+        };
         self.publish_recalculated_cells_with_presence(rules, &[cell], blocked);
         if let (Some(terrain), Some(path)) =
             (self.resolved_terrain.as_ref(), self.path_grid.as_deref())

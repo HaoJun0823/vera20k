@@ -1069,8 +1069,13 @@ fn infantry_idle_guard_pick(sim: &Simulation, id: u64, rules: &RuleSet) -> Missi
         house.is_some_and(|house| house.current_iq() >= rules.general.iq_guard_area)
             && entity.slave.owner().is_none()
             && object.is_some_and(|object| {
-                crate::sim::combat::combat_weapon::is_armed(entity, object)
-                    || object.engineer
+                crate::sim::combat::combat_weapon::is_armed(
+                    entity,
+                    object,
+                    &sim.substrate.entities,
+                    rules,
+                    &sim.interner,
+                ) || object.engineer
                     || object.vehicle_thief
             })
     } else {
