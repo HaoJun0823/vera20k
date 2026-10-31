@@ -67,9 +67,18 @@ struct Work {
     /// How many shots its weapon fires a cycle: the number that decides whether
     /// interrupting it is a thing worth doing.
     burst: i32,
+    /// Whether walking onto a crushable object flattens it: `Crusher=` or
+    /// `OmniCrusher=` on the type, the native cell-entry crush
+    /// (`UnitClass::PerCellProcess`, `0x0073B074`).
+    crusher: bool,
 }
 
-pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
+pub(super) fn run(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    out: &mut Outbox,
+) {
     let tick = obs.tick();
     // Snapshotted: the ledger and the teams are borrowed while they are read,
     // and the intent table is written below.
@@ -106,6 +115,14 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
         if super::orders::ordered_this_frame(out, item.entity_id) {
             continue;
         }
+        // A detour or a breach owns the walk until its term runs: re-aiming
+        // the unit at the thing it is walking around is the other half of the
+        // two-step shuffle, and the fight below still gets its say.
+        let route_owned = brain.tracked.stands(
+            tick,
+            item.entity_id,
+            &[TrackedKind::Avoid, TrackedKind::Breach],
+        );
         // What is in reach now outranks where the unit was going: this is the
         // whole reason the layer exists. "In reach" is reach and weapon
         // together, so a dog walks on past the tank to the infantry behind it
@@ -120,15 +137,34 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
             }),
             item.cell,
             item.reach,
-            |target| {
-                super::orders::admits(
+            |target| super::orders::admits(rules, obs, item.entity_id, &Goal::Attack { target }),
+        ) {
+            // A tank beside a soldier flattens him instead of trading shots:
+            // `Crusher=` on the tank, `Crushable=` on the infantry, and the
+            // walk onto his cell is the crush. One cell only — the step the
+            // next frame would take anyway — so a miss costs a cell of ground
+            // rather than a march, and the native approach arm is a computer
+            // house's, which is why nothing else was doing this.
+            if item.crusher
+                && !item.deployed
+                && crush_adjacent(item.cell, enemy.1)
+                && obs
+                    .entity_type(rules, enemy.0)
+                    .is_some_and(|ty| ty.category == ObjectCategory::Infantry)
+                && obs.crushes(rules, item.entity_id, enemy.0)
+            {
+                issue(
+                    out,
                     rules,
                     obs,
                     item.entity_id,
-                    &Goal::Attack { target },
-                )
-            },
-        ) {
+                    Goal::Move { cell: enemy.1 },
+                    item.reach,
+                    item.deployed,
+                );
+                issued += 1;
+                continue;
+            }
             // An attack on the target it already holds is not an order.
             //
             // The Engage cycle re-sends the attack every frame its term allows,
@@ -181,11 +217,19 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
         // factories' own lanes; a village the army walks past is not a
         // demolition order.
         if let Some((blocker, _)) = neutral_in_the_way(brain, rules, obs, item.cell) {
-            if super::orders::admits(rules, obs, item.entity_id, &Goal::Attack { target: blocker })
-                && !super::orders::already_attacking(obs, item.entity_id, blocker)
-                && brain
-                    .tracked
-                    .admits(tick, item.entity_id, TrackedKind::Engage, Some(blocker), None)
+            if super::orders::admits(
+                rules,
+                obs,
+                item.entity_id,
+                &Goal::Attack { target: blocker },
+            ) && !super::orders::already_attacking(obs, item.entity_id, blocker)
+                && brain.tracked.admits(
+                    tick,
+                    item.entity_id,
+                    TrackedKind::Engage,
+                    Some(blocker),
+                    None,
+                )
             {
                 brain.tracked.record(
                     tick,
@@ -230,12 +274,7 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
                 // has nothing for one: the units that can act on it go, this
                 // one holds its guard instead of standing at the wall it cannot
                 // touch for the whole term.
-                if !super::orders::admits(
-                    rules,
-                    obs,
-                    item.entity_id,
-                    &Goal::Attack { target },
-                ) {
+                if !super::orders::admits(rules, obs, item.entity_id, &Goal::Attack { target }) {
                     continue;
                 }
                 if !brain.tracked.admits(
@@ -271,21 +310,31 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
             // a harvester is worth the tank that was going to be bought with
             // the load it is carrying.
             Role::Harass => {
+                if route_owned {
+                    continue;
+                }
                 let Some((_, cell)) = enemy_economy(rules, obs, &brain.census, item.cell) else {
                     continue;
                 };
                 // Attack-move, not attack: the walk is the point, and what
                 // stands in the way on the way is dealt with by the engage
                 // branch above.
-                if !brain
-                    .tracked
-                    .admits(tick, item.entity_id, TrackedKind::AttackMove, None, Some(cell))
-                {
+                if !brain.tracked.admits(
+                    tick,
+                    item.entity_id,
+                    TrackedKind::AttackMove,
+                    None,
+                    Some(cell),
+                ) {
                     continue;
                 }
-                brain
-                    .tracked
-                    .record(tick, item.entity_id, TrackedKind::AttackMove, None, Some(cell));
+                brain.tracked.record(
+                    tick,
+                    item.entity_id,
+                    TrackedKind::AttackMove,
+                    None,
+                    Some(cell),
+                );
                 issue(
                     out,
                     rules,
@@ -307,6 +356,18 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
             // known hostile is only the fallback once there is nothing left to
             // find.
             Role::Scout => {
+                if route_owned {
+                    continue;
+                }
+                // A scout walks the leg it is on. The nearest unexplored cell
+                // changes sides as the dog moves — two cells at the same
+                // distance, and the tie-break follows the dog — so re-deciding
+                // every frame is a dog pacing between them instead of walking
+                // anywhere. It is re-aimed when the leg is finished, which is
+                // what the destination going away means.
+                if obs.destination(item.entity_id).is_some() {
+                    continue;
+                }
                 let Some(cell) = nearest_unexplored(obs, item.cell, item.zone).or_else(|| {
                     // The fallback is a hostile, and the reachability question
                     // the shroud grid answered above has to be asked here too:
@@ -340,6 +401,12 @@ pub(super) fn run(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_
             }
         }
     }
+}
+
+/// Whether one step from `here` lands on `victim`'s cell, which is what a
+/// crush is: the tank is beside him, not a march away.
+fn crush_adjacent(here: (u16, u16), victim: (u16, u16)) -> bool {
+    here.0.abs_diff(victim.0).max(here.1.abs_diff(victim.1)) <= 1
 }
 
 /// Whether this unit's gun is talking right now: it holds a target and the
@@ -399,7 +466,12 @@ fn issue(
 
 /// Every team member that may be told anything, with what the cycle needs to
 /// know about it.
-fn collect(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_>, tick: u64) -> Vec<Work> {
+fn collect(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    tick: u64,
+) -> Vec<Work> {
     let mut work = Vec::new();
     for squad in brain.squads.all() {
         let squad_target = squad.target.and_then(|target| {
@@ -444,6 +516,7 @@ fn collect(brain: &mut RetailBrain, rules: &RuleSet, obs: &Observation<'_>, tick
                 deployed,
                 zone: ty.map_or(MovementZone::Normal, |ty| ty.movement_zone),
                 burst: ty.map_or(1, |ty| super::advance::weapon_burst(rules, ty, deployed)),
+                crusher: ty.is_some_and(|ty| ty.crusher || ty.omni_crusher),
             });
         }
     }
@@ -476,9 +549,7 @@ fn in_reach(
         // that shoots back is the one that kills the unit while it shells a
         // wall. Within a kind the nearest wins, ties by id, so the answer does
         // not depend on the ledger's order.
-        .min_by_key(|(id, cell, structure)| {
-            (*structure, squared_distance(*cell, from), *id)
-        })
+        .min_by_key(|(id, cell, structure)| (*structure, squared_distance(*cell, from), *id))
         .map(|(id, cell, _)| (id, cell))
 }
 
@@ -707,10 +778,7 @@ mod tests {
     #[test]
     fn the_search_skips_what_the_weapon_cannot_take() {
         // 8 is the tank at one cell, 9 the rifleman at two.
-        let enemies = [
-            (8u64, (21u16, 20u16), false),
-            (9u64, (22u16, 20u16), false),
-        ];
+        let enemies = [(8u64, (21u16, 20u16), false), (9u64, (22u16, 20u16), false)];
         let can_hurt = |target: u64| target == 9;
         assert_eq!(
             in_reach(enemies.into_iter(), (20, 20), 2, can_hurt),
@@ -784,5 +852,37 @@ mod tests {
             None,
             "the far bank is not somewhere a dog can go and look"
         );
+    }
+
+    /// A tank beside a rifleman flattens him: `[MTNK] Crusher=yes` against
+    /// `[E1]`'s default `Crushable=yes`. The IFV cannot (`Crusher=no`), and the
+    /// native approach arm is the computer house's, so the brain has to ask the
+    /// world before it drives a tank anywhere.
+    #[test]
+    fn a_crusher_flattens_infantry_and_an_ifv_cannot() {
+        let Some(rules) = crate::rules::retail_ini_fixture::retail_unlayered_rules() else {
+            return;
+        };
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xA17);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let owner = sim.interner.intern("Americans");
+        let tank = sim
+            .spawn_object("MTNK", "Americans", 20, 20, 255, &rules)
+            .expect("a Grizzly");
+        let gi = sim
+            .spawn_object("E1", "Russians", 21, 20, 255, &rules)
+            .expect("a conscript");
+        let ifv = sim
+            .spawn_object("FV", "Americans", 24, 20, 255, &rules)
+            .expect("an IFV");
+        let other = sim
+            .spawn_object("E1", "Russians", 25, 20, 255, &rules)
+            .expect("a conscript");
+        let obs = Observation::new(&sim, owner);
+        assert!(obs.crushes(&rules, tank, gi), "a Grizzly crushes a soldier");
+        assert!(!obs.crushes(&rules, ifv, other), "an IFV has no Crusher=");
+        assert!(crush_adjacent((20, 20), (21, 20)));
+        assert!(!crush_adjacent((20, 20), (22, 20)));
     }
 }

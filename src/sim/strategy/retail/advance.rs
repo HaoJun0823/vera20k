@@ -38,8 +38,8 @@ use crate::sim::control::brain::Outbox;
 use crate::sim::control::observation::{EnemyEntity, Observation};
 use crate::sim::mission::{MissionId, MissionType};
 
-use super::census::{Census, Unit};
 use super::RetailBrain;
+use super::census::{Census, Unit};
 
 /// How large the army has to be before it is worth pushing with: the teams'
 /// own number ([`super::squads::ARMY_TO_ATTACK`]), because "how big is big
@@ -227,10 +227,23 @@ pub(super) fn advance(
         // The micro layer has this unit fighting something in reach, and the
         // fight outranks the march. Its mission cannot say so yet — the order
         // was issued this frame — so the intent table is what is asked.
-        if brain
-            .tracked
-            .stands(tick, unit.entity_id, &[super::tracked::TrackedKind::Engage])
-        {
+        //
+        // The same holds for the walk the unit is already on: a dodge, a kite
+        // step, a detour around a fight it would lose, and a breach it is
+        // shooting through are all routes this pass must not re-aim. A march
+        // sent over them is the ping-pong a unit shows at a gate: the shot
+        // opens the way, the march clears the shot, and neither finishes.
+        if brain.tracked.stands(
+            tick,
+            unit.entity_id,
+            &[
+                super::tracked::TrackedKind::Engage,
+                super::tracked::TrackedKind::Dodge,
+                super::tracked::TrackedKind::Kite,
+                super::tracked::TrackedKind::Avoid,
+                super::tracked::TrackedKind::Breach,
+            ],
+        ) {
             continue;
         }
         // A unit whose weapons have nothing for the target does not march at
@@ -248,10 +261,13 @@ pub(super) fn advance(
         let attack = Goal::Attack { target: target_id };
         let engagement = obs.engage(rules, unit.entity_id, target_id);
         if engagement == crate::sim::control::observation::Engage::Cannot {
-            if !brain
-                .tracked
-                .admits(tick, unit.entity_id, super::tracked::TrackedKind::Guard, None, None)
-            {
+            if !brain.tracked.admits(
+                tick,
+                unit.entity_id,
+                super::tracked::TrackedKind::Guard,
+                None,
+                None,
+            ) {
                 continue;
             }
             brain.tracked.record(
@@ -466,7 +482,11 @@ mod tests {
 
     fn ledger(rules: &RuleSet, sim: &Simulation, owner: crate::sim::intern::InternedId) -> Census {
         let mut census = Census::default();
-        census.refresh(&RoleTable::build(rules), rules, &Observation::new(sim, owner));
+        census.refresh(
+            &RoleTable::build(rules),
+            rules,
+            &Observation::new(sim, owner),
+        );
         census
     }
 
@@ -523,9 +543,21 @@ mod tests {
             .spawn_object("NAREFN", "Neutral", 20, 20, 255, &rules)
             .expect("a civilian refinery in the way");
         let mut census = ledger(&rules, &sim, owner);
-        assert_eq!(census.neutrals.len(), 1, "the ledger keeps what is nobody's");
-        census.refresh(&RoleTable::build(&rules), &rules, &Observation::new(&sim, owner));
-        assert_eq!(census.neutrals.len(), 1, "a refresh does not accumulate them");
+        assert_eq!(
+            census.neutrals.len(),
+            1,
+            "the ledger keeps what is nobody's"
+        );
+        census.refresh(
+            &RoleTable::build(&rules),
+            &rules,
+            &Observation::new(&sim, owner),
+        );
+        assert_eq!(
+            census.neutrals.len(),
+            1,
+            "a refresh does not accumulate them"
+        );
         assert_eq!(
             neutral_blocker(&census, (10, 20), (30, 20)).map(|(id, _)| id),
             Some(blocker),
@@ -606,9 +638,9 @@ mod tests {
             "ten fighters and a defended base is a push"
         );
         assert!(
-            out.orders
-                .iter()
-                .any(|order| order.actor == fighters[0] && matches!(order.goal, Goal::Attack { .. })),
+            out.orders.iter().any(
+                |order| order.actor == fighters[0] && matches!(order.goal, Goal::Attack { .. })
+            ),
             "the nearest fighter is inside its reach and shoots: {:?}",
             out.orders
         );
@@ -690,11 +722,7 @@ const NEUTRAL_SCAN_CELLS: i32 = 24;
 /// `census.enemies` — nobody owns it — so the ledger keeps it in
 /// `census.neutrals` (`Observation::neutral_structures`) and the line is tested
 /// against those, not against every cell of the map.
-fn neutral_blocker(
-    census: &Census,
-    from: (u16, u16),
-    to: (u16, u16),
-) -> Option<(u64, (u16, u16))> {
+fn neutral_blocker(census: &Census, from: (u16, u16), to: (u16, u16)) -> Option<(u64, (u16, u16))> {
     let span = i32::from(from.0)
         .abs_diff(i32::from(to.0))
         .max(i32::from(from.1).abs_diff(i32::from(to.1)));

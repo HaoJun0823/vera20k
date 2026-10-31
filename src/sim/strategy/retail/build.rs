@@ -163,11 +163,7 @@ fn place_finished(
         // — the defense queue stopped, and no pillbox came out again. The plan
         // has first refusal; when it has no segment the sweep answers, and the
         // warning says which happened.
-        if planned.is_none()
-            && obs
-                .object_type(rules, type_id)
-                .is_some_and(|ty| ty.wall)
-        {
+        if planned.is_none() && obs.object_type(rules, type_id).is_some_and(|ty| ty.wall) {
             log::warn!(
                 "auto play: wall plan has no segment for {type_id}; the outgoing sweep places it, which may sit off the ring"
             );
@@ -192,18 +188,17 @@ fn place_finished(
                 // native exit — it settles the held object the way a sale
                 // does and drops the factory — and it is the only thing that
                 // frees the slot. Emitted once, when the last attempt fails.
-                out.intent(Intent::CancelProduction {
-                    type_id,
-                    all: true,
-                });
+                out.intent(Intent::CancelProduction { type_id, all: true });
                 log::warn!(
                     "auto play: no cell for {} after {PLACEMENT_ATTEMPTS} tries; abandoning the build",
-                    obs.object_type(rules, type_id).map_or("?", |ty| ty.id.as_str())
+                    obs.object_type(rules, type_id)
+                        .map_or("?", |ty| ty.id.as_str())
                 );
             } else {
                 log::info!(
                     "auto play: no cell for {} (attempt {attempt})",
-                    obs.object_type(rules, type_id).map_or("?", |ty| ty.id.as_str())
+                    obs.object_type(rules, type_id)
+                        .map_or("?", |ty| ty.id.as_str())
                 );
             }
             continue;
@@ -211,7 +206,8 @@ fn place_finished(
         brain.stranded_sites.remove(&type_id);
         log::debug!(
             "auto play: place {} at {cell:?} (attempt {attempt})",
-            obs.object_type(rules, type_id).map_or("?", |ty| ty.id.as_str())
+            obs.object_type(rules, type_id)
+                .map_or("?", |ty| ty.id.as_str())
         );
         out.intent(Intent::PlaceBuilding { type_id, cell });
         let next = (attempt + 1) % PLACEMENT_ATTEMPTS;
@@ -321,17 +317,27 @@ fn build_next(
         || building
             .ready
             .is_some_and(|id| !brain.stranded_sites.contains(&id));
-    let defense_busy = defense
-        .ready
-        .is_some_and(|id| !brain.stranded_sites.contains(&id));
+    // The Defense line is busy while it is *working*, not only while it holds
+    // a finished piece: a tower in production answered the list every frame
+    // for the whole of its build — measured in a real match, 114 pillboxes
+    // queued in 110 frames once the midgame wallet stayed above their price.
+    let defense_busy = defense.product.is_some()
+        || defense.queued > 0
+        || defense
+            .ready
+            .is_some_and(|id| !brain.stranded_sites.contains(&id));
     if building_busy || defense_busy {
         return;
     }
     let tick = obs.tick();
     let held = brain.plan_hold.filter(|(_, until)| tick < *until);
-    let Some(chosen) =
-        next_building(rules, obs, &brain.census, budget, held.map(|(step, _)| step))
-    else {
+    let Some(chosen) = next_building(
+        rules,
+        obs,
+        &brain.census,
+        budget,
+        held.map(|(step, _)| step),
+    ) else {
         return;
     };
     // Power is spliced in ahead of the plan and held by nobody, so the entry
@@ -483,7 +489,6 @@ fn next_building<'r>(
     Some(chosen)
 }
 
-
 /// The type from `names` the house may build now, in list order.
 ///
 /// `can_build` is the production path's own test, so a type of another side,
@@ -501,7 +506,6 @@ pub(super) fn first_buildable<'r>(
     })
 }
 
-
 /// The house's own harvester: the first `ResourceGatherer=` Vehicle it may
 /// build. Ore delivered is the whole income, so this one is not a choice
 /// among equals, it is what pays for the rest.
@@ -509,8 +513,12 @@ pub(super) fn harvester<'r>(
     rules: &'r RuleSet,
     obs: &Observation<'_>,
 ) -> Option<(&'r ObjectType, InternedId)> {
-    class_types(rules, obs, crate::rules::object_type::ObjectCategory::Vehicle)
-        .find(|(ty, _)| ty.resource_gatherer)
+    class_types(
+        rules,
+        obs,
+        crate::rules::object_type::ObjectCategory::Vehicle,
+    )
+    .find(|(ty, _)| ty.resource_gatherer)
 }
 
 /// Every type of `category` the rules' array holds, in array order, with its
@@ -545,6 +553,20 @@ pub(super) fn class_types<'r>(
 pub(super) fn base_defenses<'r>(rules: &'r RuleSet, obs: &Observation<'_>) -> &'r [String] {
     obs.side_index()
         .map_or(&[], |side| rules.base_defense_types(side))
+}
+
+/// The `UnitRepair=` shed the house can build now (`[GADEPT]`
+/// `UnitRepair=yes`, `ini/rulesmd.ini`): the one building a damaged unit can
+/// enter, pay at, and leave repaired.
+///
+/// Read off the key rather than a name list, so a mod's depot is this same
+/// type: the retreat already clicks whatever building answers `UnitRepair=`
+/// (`census::repair_building`), and the build list has to buy that one.
+pub(super) fn unit_repair_building<'r>(
+    rules: &'r RuleSet,
+    obs: &Observation<'_>,
+) -> Option<(&'r ObjectType, InternedId)> {
+    class_types(rules, obs, ObjectCategory::Building).find(|(ty, _)| ty.unit_repair)
 }
 
 /// The lab, preferring the one that authorises a power the house can use.
@@ -632,9 +654,10 @@ pub(super) fn line_factory<'r>(
             return None;
         }
     };
-    let candidates: Vec<(&ObjectType, InternedId)> = class_types(rules, obs, ObjectCategory::Building)
-        .filter(|(ty, _)| ty.factory_type() == Some(factory))
-        .collect();
+    let candidates: Vec<(&ObjectType, InternedId)> =
+        class_types(rules, obs, ObjectCategory::Building)
+            .filter(|(ty, _)| ty.factory_type() == Some(factory))
+            .collect();
     if candidates
         .iter()
         .any(|(_, type_id)| census.type_count(*type_id) > 0)
@@ -806,8 +829,7 @@ mod tests {
         brain.census = ledger(&rules, &sim, owner);
         // The plant is built and standing in the yard, waiting for its cell.
         let plant = sim.interner().get("GAPOWR").expect("the power plant type");
-        brain.census.lines[crate::sim::strategy::retail::census::LINE_BUILDING].ready =
-            Some(plant);
+        brain.census.lines[crate::sim::strategy::retail::census::LINE_BUILDING].ready = Some(plant);
         let obs = Observation::new(&sim, owner);
         let budget = plan::budget(&rules, &obs, &brain.census, None);
         let mut out = Outbox::default();
@@ -882,8 +904,13 @@ mod tests {
             .expect("the plant");
         let census = ledger(&rules, &sim, owner);
         assert!(
-            line_factory(&rules, &Observation::new(&sim, owner), &census, ProductionCategory::Aircraft)
-                .is_none(),
+            line_factory(
+                &rules,
+                &Observation::new(&sim, owner),
+                &census,
+                ProductionCategory::Aircraft
+            )
+            .is_none(),
             "the line's plant already stands"
         );
     }

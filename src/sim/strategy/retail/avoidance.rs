@@ -437,7 +437,10 @@ struct FriendIndex {
 impl FriendIndex {
     fn insert(&mut self, cell: (u16, u16), points: i32) {
         if points > 0 {
-            self.buckets.entry(bucket_of(cell)).or_default().push((cell, points));
+            self.buckets
+                .entry(bucket_of(cell))
+                .or_default()
+                .push((cell, points));
         }
     }
 
@@ -532,7 +535,11 @@ pub(super) fn run(
     let grid = obs.has_ground_grid();
     let walkable = move |x: u16, y: u16| !grid || obs.is_ground_walkable(x, y);
     let total = brain.census.units.len();
-    let start = if total == 0 { 0 } else { brain.avoid_cursor % total };
+    let start = if total == 0 {
+        0
+    } else {
+        brain.avoid_cursor % total
+    };
     let scanned = total.min(AVOID_SCAN_PER_FRAME);
     let mut issued = 0;
     for offset in 0..scanned {
@@ -552,6 +559,11 @@ pub(super) fn run(
         }
         // The step that owns a specialist's walk owns its route too: an
         // engineer walking into a derrick is not routed around the derrick.
+        //
+        // A fight this unit is already in, and a step out from under a shell,
+        // own the next cell as well: the layers above this one decided where
+        // the unit goes this second, and a detour here is the second half of
+        // the left-right shuffle a unit shows when two passes disagree.
         if brain.tracked.stands(
             tick,
             unit.entity_id,
@@ -559,6 +571,9 @@ pub(super) fn run(
                 TrackedKind::Capture,
                 TrackedKind::Enter,
                 TrackedKind::Deploy,
+                TrackedKind::Engage,
+                TrackedKind::Dodge,
+                TrackedKind::Kite,
             ],
         ) {
             continue;
@@ -645,11 +660,8 @@ pub(super) fn run(
             // ground on the far side (a cliff six cells deep is not opened
             // by shooting at it), and the thing is not this house's own.
             let past = step_toward(heading, objective);
-            let armed = super::advance::weapon_range_cells(
-                rules,
-                ty,
-                obs.is_deployed(unit.entity_id),
-            ) > 0;
+            let armed =
+                super::advance::weapon_range_cells(rules, ty, obs.is_deployed(unit.entity_id)) > 0;
             if !walkable(past.0, past.1) {
                 continue;
             }
@@ -681,9 +693,12 @@ pub(super) fn run(
                 obs.structure_at(rules, heading)
                     .filter(|(id, mine)| {
                         !mine
-                            && !brain
-                                .tracked
-                                .claimed_by_other(tick, TrackedKind::Capture, *id, unit.entity_id)
+                            && !brain.tracked.claimed_by_other(
+                                tick,
+                                TrackedKind::Capture,
+                                *id,
+                                unit.entity_id,
+                            )
                     })
                     .map(|(id, _)| Goal::Attack { target: id })
             };
@@ -695,7 +710,10 @@ pub(super) fn run(
                 Goal::Attack { .. } => Some(heading),
                 _ => None,
             };
-            if !brain.tracked.admits(tick, unit.entity_id, TrackedKind::Breach, None, claim) {
+            if !brain
+                .tracked
+                .admits(tick, unit.entity_id, TrackedKind::Breach, None, claim)
+            {
                 continue;
             }
             brain
@@ -892,11 +910,20 @@ fn answer_breaches(
         {
             continue;
         }
+        // What stands there decides how it is opened: a wall is an overlay,
+        // and the forced click on the cell is the shot; a structure (a gate, a
+        // shed) is an object, and a cell click on it is an order the engine
+        // answers with nothing. The house's own structure is never opened.
+        let goal = match obs.structure_at(rules, cell) {
+            Some((_, true)) => continue,
+            Some((id, false)) => Goal::Attack { target: id },
+            None => Goal::AttackCell { cell },
+        };
         brain
             .tracked
             .record(tick, helper, TrackedKind::Avoid, None, Some(cell));
-        log::debug!("auto play: {helper} opens the wall at {cell:?} for the house's engineers");
-        if super::orders::issue(out, rules, obs, helper, Goal::AttackCell { cell }) {
+        log::debug!("auto play: {helper} opens {goal:?} at {cell:?} for the house's engineers");
+        if super::orders::issue(out, rules, obs, helper, goal) {
             // The engineer's own path is clear once the wall is gone; nothing
             // else is ordered here. The request is kept until the issue is
             // accepted, so a helper whose own order preempted the shot does
@@ -904,9 +931,7 @@ fn answer_breaches(
             answered.push(cell);
         }
     }
-    brain
-        .breaches
-        .retain(|(cell, _)| !answered.contains(cell));
+    brain.breaches.retain(|(cell, _)| !answered.contains(cell));
 }
 
 /// Where the unit is walking: what its team is aimed at, else what it is
@@ -962,8 +987,14 @@ mod tests {
         let unit = (10, 10);
         let objective = (24, 10);
         let threat = pillbox((16, 10));
-        let cell = detour_cell(unit, objective, &threat, (60, 60), detour_side(unit, objective, &threat))
-            .expect("a leg out of the band");
+        let cell = detour_cell(
+            unit,
+            objective,
+            &threat,
+            (60, 60),
+            detour_side(unit, objective, &threat),
+        )
+        .expect("a leg out of the band");
         assert!(
             !threat.covers(cell),
             "{cell:?} is still inside the guns at {:?}",
@@ -973,7 +1004,10 @@ mod tests {
             cell.0, unit.0,
             "the first leg does not advance while still in the band"
         );
-        assert!(cell.1.abs_diff(unit.1) >= 6, "six cells to clear a five-cell reach");
+        assert!(
+            cell.1.abs_diff(unit.1) >= 6,
+            "six cells to clear a five-cell reach"
+        );
     }
 
     /// Outside the band, the second leg walks past the threat at the clearance
@@ -983,8 +1017,14 @@ mod tests {
         let unit = (10, 4);
         let objective = (24, 10);
         let threat = pillbox((16, 10));
-        let cell = detour_cell(unit, objective, &threat, (60, 60), detour_side(unit, objective, &threat))
-            .expect("a leg past the threat");
+        let cell = detour_cell(
+            unit,
+            objective,
+            &threat,
+            (60, 60),
+            detour_side(unit, objective, &threat),
+        )
+        .expect("a leg past the threat");
         assert!(!threat.covers(cell), "{cell:?} is inside the guns");
         assert!(cell.0 > unit.0, "past the threat, towards the objective");
         assert_eq!(cell.1, unit.1, "the clearance is kept");
@@ -1041,7 +1081,13 @@ mod tests {
     /// is not entering is not a reason to turn.
     #[test]
     fn the_nearest_gun_on_the_way_is_the_one_that_blocks() {
-        let threats = [pillbox((16, 10)), Threat { entity_id: 9, ..pillbox((18, 10)) }];
+        let threats = [
+            pillbox((16, 10)),
+            Threat {
+                entity_id: 9,
+                ..pillbox((18, 10))
+            },
+        ];
         assert_eq!(
             blocker_at(&threats, (11, 10)).map(|threat| threat.entity_id),
             Some(7),
@@ -1089,7 +1135,11 @@ mod tests {
     #[test]
     fn the_detour_keeps_to_the_side_the_unit_is_already_on() {
         let threat = pillbox((16, 10));
-        assert_eq!(detour_side((10, 8), (24, 10), &threat), -1, "above the line");
+        assert_eq!(
+            detour_side((10, 8), (24, 10), &threat),
+            -1,
+            "above the line"
+        );
         assert_eq!(detour_side((10, 13), (24, 10), &threat), 1, "below it");
         assert_eq!(detour_side((10, 10), (24, 10), &threat), -1, "on it: fixed");
     }

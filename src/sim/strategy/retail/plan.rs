@@ -174,6 +174,10 @@ pub(super) enum Item {
     /// The plant an `Aircraft` line needs, read off `Factory=` rather than off
     /// a name list.
     Aircraft,
+    /// The `UnitRepair=` shed (`[GADEPT] UnitRepair=yes`): where a hurt vehicle
+    /// stops being a loss. Without one the retreat has nowhere to send a
+    /// damaged unit, and the army shrinks by every fight it survives.
+    Repair,
     /// What the yard maker's `Prerequisite=` list asks for: the way back from
     /// a lost yard.
     Support,
@@ -275,6 +279,23 @@ pub(super) const STEPS: &[Step] = &[
         want: 1,
         gate: Gate::Tech,
     },
+    // The shed that puts a damaged vehicle back in the line, once the tree is
+    // open: a fight the army survives is still a fight it cannot repeat while
+    // every hurt tank is parked for good. Ahead of the towers because a base
+    // with no repair is a base whose army only ever gets smaller.
+    Step {
+        item: Item::Repair,
+        want: 1,
+        gate: Gate::CanReplace,
+    },
+    // The second and third bays before the towers and the extra lines: the ore
+    // a bay unloads is what pays for everything below it, and a house that
+    // reaches the midgame on one bay earns a third of what it could.
+    Step {
+        item: Item::Refinery,
+        want: 3,
+        gate: Gate::HarvestersServed,
+    },
     // Ground to stand on, once the tree is open: before that the same money
     // unlocks the rest of the tree, which is worth more than a second tower.
     Step {
@@ -293,13 +314,6 @@ pub(super) const STEPS: &[Step] = &[
         item: Item::Barracks,
         want: 2,
         gate: Gate::Surplus,
-    },
-    // The second and third bays wait for the harvesters that fill them: past
-    // this the ore within reach of the base is the limit, not the bays.
-    Step {
-        item: Item::Refinery,
-        want: 3,
-        gate: Gate::HarvestersServed,
     },
     // The way back from a lost yard, bought while the yard still stands: last,
     // because it is insurance against a loss the house has not had.
@@ -497,6 +511,8 @@ fn owned(rules: &RuleSet, obs: &Observation<'_>, census: &Census, item: Item) ->
         // The support building is the yard maker's own prerequisite list, so
         // whether one is wanted is that list's answer, not a count's.
         Item::Support => 0,
+        // One shed is enough: it repairs a whole army, one unit at a time.
+        Item::Repair => usize::from(census.repair_building.is_some()),
     }
 }
 
@@ -517,6 +533,7 @@ fn pick<'r>(
         Item::Tech => build::tech_building(rules, obs),
         Item::Aircraft => build::line_factory(rules, obs, census, ProductionCategory::Aircraft),
         Item::Support => expand::yard_maker_support(rules, obs, census),
+        Item::Repair => build::unit_repair_building(rules, obs),
     }
 }
 
@@ -627,6 +644,70 @@ mod tests {
     /// A plant the yard is already paying for is output the base has, so the
     /// shortage it covers is covered: the deficit is what makes one plant one
     /// plant.
+
+    /// A `UnitRepair=` shed is what makes a hurt vehicle a unit again, and the
+    /// retreat has been clicking one since B1b. Without a step it only arrived
+    /// as the yard maker's prerequisite, late and by accident — the report of
+    /// a base with damaged tanks and no depot at all.
+    #[test]
+    fn the_service_depot_is_a_step_and_comes_before_the_towers() {
+        let repair = STEPS
+            .iter()
+            .position(|step| step.item == Item::Repair)
+            .expect("a repair depot is a step");
+        let towers = STEPS
+            .iter()
+            .position(|step| step.item == Item::Defense)
+            .expect("the towers are a step");
+        assert!(repair < towers, "repair {repair} before towers {towers}");
+        assert_eq!(STEPS[repair].want, 1, "one shed repairs a whole army");
+        assert_eq!(STEPS[repair].gate, Gate::CanReplace);
+    }
+
+    /// The second bay is income, and the towers and the extra lines are not:
+    /// a house that reaches the midgame on one bay earns a third of what its
+    /// harvesters could unload, which is the "no miners, no money" report.
+    #[test]
+    fn the_second_bay_comes_before_the_towers_and_the_extra_lines() {
+        let bays = STEPS
+            .iter()
+            .rposition(|step| step.item == Item::Refinery)
+            .expect("the extra bays are a step");
+        let towers = STEPS
+            .iter()
+            .position(|step| step.item == Item::Defense)
+            .expect("the towers are a step");
+        let factories = STEPS
+            .iter()
+            .position(|step| step.item == Item::Weapons && step.want == 3)
+            .expect("the extra factories are a step");
+        assert!(bays < towers, "bays {bays} before towers {towers}");
+        assert!(bays < factories, "bays {bays} before factories {factories}");
+    }
+
+    /// And the step answers with the type that carries the key, not with a
+    /// name: a mod's depot is the same building.
+    #[test]
+    fn the_repair_step_answers_with_a_unit_repair_building() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        sim.spawn_object("GACNST", "Americans", 16, 16, 255, &rules)
+            .expect("a yard");
+        sim.spawn_object("GAPOWR", "Americans", 20, 16, 255, &rules)
+            .expect("a power plant");
+        sim.spawn_object("GAWEAP", "Americans", 24, 16, 255, &rules)
+            .expect("a war factory");
+        sim.spawn_object("GAPILE", "Americans", 16, 24, 255, &rules)
+            .expect("a barracks");
+        let census = ledger(&rules, &sim, owner);
+        let obs = Observation::new(&sim, owner);
+        let (ty, _) =
+            pick(&rules, &obs, &census, Item::Repair).expect("a depot the base can build");
+        assert!(ty.unit_repair, "the step answers UnitRepair=: {}", ty.id);
+    }
+
     #[test]
     fn a_plant_on_the_way_is_the_output_the_base_already_has() {
         let Some((mut sim, rules)) = arena(0xA17) else {
@@ -636,7 +717,11 @@ mod tests {
         let obs = Observation::new(&sim, owner);
         let mut census = Census::default();
         // A bare base: no output, no draw, nothing short.
-        assert_eq!(power_deficit(&rules, &obs, &census, 0), 0, "nothing to power");
+        assert_eq!(
+            power_deficit(&rules, &obs, &census, 0),
+            0,
+            "nothing to power"
+        );
         // A lab about to be started: its own -100 is a plant the base needs now.
         assert!(
             power_deficit(&rules, &obs, &census, -100) > 0,

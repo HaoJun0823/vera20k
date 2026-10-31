@@ -85,6 +85,19 @@ const INFANTRY_CEILING_PERCENT: usize = 55;
 /// composition by itself.
 const GAP_CAP: i32 = 3;
 
+/// The most of one pool a single type may be, in percent, while another type
+/// can still close a gap.
+///
+/// A gap the ranking answers is answered by *one* unit; the line that keeps
+/// producing the same answer is a pool with one shape — the play test's "it
+/// still only makes IFVs". Past this share the next best type takes the cycle.
+const TYPE_SHARE_PERCENT: usize = 60;
+
+/// The pool has to be big enough for a share to mean anything: two units of
+/// three is 66%, and a factory told to rotate on the second vehicle of a
+/// match makes a worse army, not a mixed one.
+const TYPE_SHARE_MIN_POOL: usize = 5;
+
 /// Fill every idle production line with what the house needs next.
 pub(super) fn fill_lines(
     brain: &mut RetailBrain,
@@ -150,6 +163,14 @@ pub(super) fn fill_lines(
         // can make any type of this category at all is `CanBuild`'s answer, and
         // the candidate list below is already filtered by it.
         if brain.census.line(category).busy() {
+            continue;
+        }
+        // A line the house does not own is not idle, it is absent: an aircraft
+        // type the prerequisites allow but no airfield can make answers `Yes`
+        // to `CanBuild` and is refused at the queue, every frame, for as long
+        // as the wallet stays above its price. The plant is read off the rules
+        // (`Factory=AircraftType`), which is the same owner the build list uses.
+        if category == ProductionCategory::Aircraft && !has_aircraft_factory(rules, obs) {
             continue;
         }
         let wanted = product_for(
@@ -218,11 +239,7 @@ fn tool<'r>(
         .iter()
         .filter(|unit| unit.traits.engineer)
         .count();
-    let spies = census
-        .units
-        .iter()
-        .filter(|unit| unit.traits.spy)
-        .count();
+    let spies = census.units.iter().filter(|unit| unit.traits.spy).count();
     // The attack dog: `NotHuman=yes` with `Natural=yes` is retail's only such
     // pair, and it is the unit the scan role is built on. Nothing else in the
     // infantry list can look at the map — a rifleman walks where it is put and
@@ -280,9 +297,7 @@ fn product_for<'r>(
         // on the field — everything else the base builds is gated on it.
         let needs_maker = !super::expand::yard_stands(&brain.census)
             && !super::expand::owns_yard_maker(&brain.census);
-        if needs_maker
-            && let Some(maker) = super::expand::yard_maker(rules, obs)
-        {
+        if needs_maker && let Some(maker) = super::expand::yard_maker(rules, obs) {
             return Some(maker);
         }
         // A maker bought while the yard stands is for a second base, not for the
@@ -471,6 +486,9 @@ fn fighter<'r>(
             })
             .collect();
         let mut best: Option<(f64, i32, i32, &ObjectType, InternedId)> = None;
+        // Whether each candidate closes any gap at all: read with the role
+        // table, and kept for the cap below, which runs after the borrow.
+        let mut closes: Vec<bool> = vec![false; affordable.len()];
         {
             let roles = brain.roles(rules);
             for (index, (ty, type_id, cost)) in affordable.iter().copied().enumerate() {
@@ -483,6 +501,7 @@ fn fighter<'r>(
                     .iter()
                     .map(|role| weights.get(*role) * f64::from(need[role.index()].min(GAP_CAP)))
                     .fold(0.0f64, f64::max);
+                closes[index] = score > 0.0;
                 // Between two types that close the same gap, the one the house
                 // holds fewest of. One gap, one answer, and the answer with the
                 // best score won every cycle for as long as the gap lasted —
@@ -500,9 +519,32 @@ fn fighter<'r>(
                 }
             }
         }
+        // A gap is a reason for the first answer, not for the tenth. Once a
+        // type is most of the pool the gap it closes is covered by what the
+        // house already has, and every further one is the line making the same
+        // unit again — the play test's "it still only makes IFVs" while the
+        // operator's real problem is that the pool has one shape. The next
+        // type that closes any gap takes the cycle instead; with nothing else
+        // scoring, the capped type still answers, because a line that makes
+        // nothing is worse than a line that repeats.
+        let pool: usize = tiers[slot_category(category).index()].iter().sum();
         if let Some((score, _, _, ty, type_id)) = best
             && score > 0.0
         {
+            let cap = pool.max(1) * TYPE_SHARE_PERCENT;
+            let over = pool >= TYPE_SHARE_MIN_POOL && brain.census.type_count(type_id) * 100 >= cap;
+            if over {
+                let alternative = affordable
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|(index, (_, id, _))| *id != type_id && closes[*index])
+                    .filter(|(_, (_, id, _))| brain.census.type_count(*id) * 100 < cap)
+                    .min_by_key(|(_, (_, id, cost))| (brain.census.type_count(*id), -cost, *id));
+                if let Some((_, (candidate, id, _))) = alternative {
+                    return Some((candidate, id));
+                }
+            }
             return Some((ty, type_id));
         }
     }
@@ -557,6 +599,18 @@ fn unit_ceiling(credits: i32) -> i32 {
         i32::MAX
     };
     band.min(credits)
+}
+
+/// Whether a building of the house answers `Factory=AircraftType`: the line
+/// exists only when one does, and an aircraft type whose prerequisites are met
+/// answers `CanBuild` yes without it — the queue refuses the order every frame
+/// it is retried.
+fn has_aircraft_factory(rules: &RuleSet, obs: &Observation<'_>) -> bool {
+    obs.own_entities().any(|entity| {
+        obs.object_type(rules, entity.type_id).is_some_and(|ty| {
+            ty.factory_type() == Some(crate::rules::object_type::FactoryType::AircraftType)
+        })
+    })
 }
 
 fn queue_unit(
@@ -938,11 +992,10 @@ mod tests {
             );
         }
         assert!(
-            queued.iter().any(|name| rules
-                .object(name)
-                .expect("a rules type")
-                .category
-                == ObjectCategory::Vehicle),
+            queued
+                .iter()
+                .any(|name| rules.object(name).expect("a rules type").category
+                    == ObjectCategory::Vehicle),
             "the wallet reaches the war factory: {queued:?}"
         );
     }
@@ -978,9 +1031,7 @@ mod tests {
         }
         let obs = Observation::new(&sim, owner);
         let floor = line_vehicle_floor(&rules, &obs).expect("the side has a line vehicle");
-        let under = floor
-            .saturating_sub(100)
-            .max(INFANTRY_MIN_CREDITS);
+        let under = floor.saturating_sub(100).max(INFANTRY_MIN_CREDITS);
         sim.houses
             .get_mut(&owner)
             .expect("the house")
@@ -1011,11 +1062,10 @@ mod tests {
             })
             .collect();
         assert!(
-            queued.iter().any(|name| rules
-                .object(name)
-                .expect("a rules type")
-                .category
-                == ObjectCategory::Infantry),
+            queued
+                .iter()
+                .any(|name| rules.object(name).expect("a rules type").category
+                    == ObjectCategory::Infantry),
             "the base does not stand idle: {queued:?}"
         );
     }
@@ -1067,8 +1117,9 @@ mod tests {
             })
             .collect();
         assert!(
-            made.iter()
-                .any(|name| rules.object(name).is_some_and(|ty| ty.not_human && ty.natural)),
+            made.iter().any(|name| rules
+                .object(name)
+                .is_some_and(|ty| ty.not_human && ty.natural)),
             "the opening infantry is the dog: {made:?}"
         );
     }

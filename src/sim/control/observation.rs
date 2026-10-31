@@ -43,10 +43,10 @@ use std::collections::BTreeSet;
 use crate::rules::locomotor_type::MovementZone;
 use crate::rules::object_type::{ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
-use crate::sim::movement::locomotor::MovementLayer;
 use crate::sim::house_state::HouseDifficulty;
 use crate::sim::intern::InternedId;
 use crate::sim::mission::MissionId;
+use crate::sim::movement::locomotor::MovementLayer;
 use crate::sim::production::ProductionCategory;
 use crate::sim::production::{CanBuild, can_build};
 use crate::sim::world::Simulation;
@@ -225,13 +225,10 @@ impl<'a> Observation<'a> {
     /// fast the house is earning reads this and takes two samples of it
     /// instead — the difference is income, whatever was paid out meanwhile.
     pub fn earned(&self) -> i32 {
-        self.sim
-            .houses()
-            .get(&self.house)
-            .map_or(0, |house| {
-                let economy = house.economy();
-                economy.credits().wrapping_add(economy.spent_credits())
-            })
+        self.sim.houses().get(&self.house).map_or(0, |house| {
+            let economy = house.economy();
+            economy.credits().wrapping_add(economy.spent_credits())
+        })
     }
 
     /// Power produced by the house's live, powered buildings.
@@ -369,7 +366,11 @@ impl<'a> Observation<'a> {
     pub fn production_progress(&self, rules: &RuleSet, type_id: InternedId) -> Option<u16> {
         let ty = self.sim.object_type(type_id, rules)?;
         let category = crate::sim::production::category_for_object(ty);
-        let factory = self.sim.production().factories().view(self.house, category)?;
+        let factory = self
+            .sim
+            .production()
+            .factories()
+            .view(self.house, category)?;
         let object = factory.object?;
         (object.type_id == type_id).then_some(factory.progress)
     }
@@ -708,9 +709,7 @@ impl<'a> Observation<'a> {
             _ => {}
         }
         self.sim.infiltrator_building_action(actor, building, rules)
-            || crate::sim::passenger::building_can_be_occupied_by(
-                self.sim, rules, building, actor,
-            )
+            || crate::sim::passenger::building_can_be_occupied_by(self.sim, rules, building, actor)
     }
 
     /// Buildings a spy may walk into: alive, not this house's, and `Spyable=`.
@@ -780,7 +779,8 @@ impl<'a> Observation<'a> {
             // `passenger_role.cargo()` is the transport's `Passengers=` list and
             // is absent on a building, which would leave every bunker off the
             // list. The room here is `MaxOccupants=` minus who is inside.
-            let taken = u32::try_from(entity.passenger_role.occupants().count()).unwrap_or(u32::MAX);
+            let taken =
+                u32::try_from(entity.passenger_role.occupants().count()).unwrap_or(u32::MAX);
             let room = ty.max_number_occupants.saturating_sub(taken);
             if room == 0 {
                 return None;
@@ -860,8 +860,7 @@ impl<'a> Observation<'a> {
     pub fn can_engage(&self, rules: &RuleSet, firer: u64, target: u64) -> bool {
         !matches!(
             crate::sim::combat::fire_error_world::fire_error(self.sim, rules, firer, target),
-            None
-                | Some(crate::sim::combat::fire_error::FireError::Illegal)
+            None | Some(crate::sim::combat::fire_error::FireError::Illegal)
                 | Some(crate::sim::combat::fire_error::FireError::Cant)
         )
     }
@@ -973,7 +972,37 @@ impl<'a> Observation<'a> {
     /// Whether `infantry_id` may garrison `building_id`:
     /// `BuildingClass::CanBeOccupiedBy`'s answer for this pair.
     pub fn can_garrison(&self, rules: &RuleSet, infantry_id: u64, building_id: u64) -> bool {
-        crate::sim::passenger::building_can_be_occupied_by(self.sim, rules, building_id, infantry_id)
+        crate::sim::passenger::building_can_be_occupied_by(
+            self.sim,
+            rules,
+            building_id,
+            infantry_id,
+        )
+    }
+
+    /// The rules' type of one object, for the questions that read it directly
+    /// rather than through the ledger.
+    pub fn entity_type<'r>(&self, rules: &'r RuleSet, entity_id: u64) -> Option<&'r ObjectType> {
+        let entity = self.sim.entities().get(entity_id)?;
+        self.object_type(rules, entity.type_ref())
+    }
+
+    /// Whether `attacker` flattens `target` by driving onto its cell: the
+    /// attacker's `Crusher=`/`OmniCrusher=` against the victim's
+    /// `ObjectClass::Is_Crushable_By @ 0x005F6CD0` (allies and an Iron
+    /// Curtain refused).
+    ///
+    /// The native approach arm (`UnitClass::Approach_Target`, `0x007414E0`)
+    /// is a computer house's — `0x0073856D` turns a human one away — so a
+    /// human house's tank only crushes what it actually drives over. A policy
+    /// driving that house has to order the walk itself, and this is the two
+    /// facts it asks before it does.
+    pub fn crushes(&self, rules: &RuleSet, attacker: u64, target: u64) -> bool {
+        let Some(ty) = self.entity_type(rules, attacker) else {
+            return false;
+        };
+        (ty.crusher || ty.omni_crusher)
+            && self.sim.object_crushable_by_unit(attacker, target, rules)
     }
 
     /// The rules' type for `type_id`: a policy reads the type's own fields
