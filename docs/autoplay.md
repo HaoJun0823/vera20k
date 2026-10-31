@@ -483,6 +483,56 @@ The seam is in place, and the base-building half of the retail policy now occupi
    assuming the local player, so this is reachable; what it means for the existing
    computer AI, which writes house state directly, is undecided.
 
+## The strategy layer: books, not passes
+
+The unit decisions used to be fifteen passes over the army, each deciding for
+itself and each carrying its own list of orders to defer to. That is why fixing
+one unit's behaviour kept reopening another's: the rule had fifteen copies.
+Two ranks now decide instead — one per frame, one across frames — and the
+remaining question is what the layer above them *is*.
+
+An RTS AI of the kind worth copying keeps four books and a map, and hands the
+map's decisions down to units through an executor:
+
+| Book | What it holds | Cadence |
+|---|---|---|
+| Economy | income, harvester round trip, line occupancy | 1–2 s |
+| Build/tech | the stage, the next structure, prerequisites | event |
+| Army | group, task, destination, strength, reinforcement | 0.5–2 s |
+| Map | threat coverage, seen versus remembered, ore | 1 s or event |
+
+The decision is about groups and books; a unit is an executor. Retail's own
+shape is the content: power, then barracks, refinery, war factory, radar, lab;
+two miners per bay; `Verses` deciding what counters what; kiting, crushing,
+garrisoning, transports, repairs and super weapons as tactics.
+
+The simulation already implements far more than the brain uses — gunner
+(IFV turret), disguise, mind control, cloak, detector and spawns are all
+represented and the policy mentions none of them. The work is the layer, not
+the mechanisms.
+
+Three invariants, and the migration that establishes them one slice at a time:
+
+1. One object, one order per frame, chosen by the arbiter. No pass issues a
+   command on its own.
+2. Decisions are about groups. A group has a task, a destination and a
+   strength; units execute it.
+3. Every refusal comes back — unreachable, not ready, out of budget, taken by a
+   stronger order — and the layer that asked answers it.
+
+| Slice | Content | Acceptance |
+|---|---|---|
+| S0 | One threat type and index (`retail::threats`); the shell in `dodge` named as one | tests green, pinned match unchanged |
+| S1 | `UnitRuntime`: directive, committed order, review frame | jitter count zero |
+| S2 | Refusal loop (unreachable is in; not-ready, budget and preemption follow) | units idle with no intent |
+| S3 | Honest perception, shadow mode first | difference list |
+| S4 | Army groups replace the per-unit loops in `advance` and `forces` | units under one task stop acting alone |
+| S5 | Capability tags and the pilot table | 1–3 unit-level tests per capability |
+| S6 | `--trace <id>`, behaviour fingerprints, golden replays | every change shows its diff |
+
+A rule lives in one of four places — the rank table, the pilot table, the
+refusal loop, or the army book — and nowhere else.
+
 ## Validation per stage
 
 - Headless scenario runs (`src/headless_scenario.rs`), never retail assets in the lib
