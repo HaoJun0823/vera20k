@@ -40,14 +40,27 @@
 use crate::map::entities::EntityCategory;
 use std::collections::BTreeSet;
 
+use crate::rules::locomotor_type::MovementZone;
 use crate::rules::object_type::{ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
+use crate::sim::movement::locomotor::MovementLayer;
 use crate::sim::house_state::HouseDifficulty;
 use crate::sim::intern::InternedId;
 use crate::sim::mission::MissionId;
 use crate::sim::production::ProductionCategory;
 use crate::sim::production::{CanBuild, can_build};
 use crate::sim::world::Simulation;
+
+/// What [`Observation::engage`] found: a yes, a not-yet, or a no.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Engage {
+    /// A weapon answers the target and it stands inside that weapon's reach.
+    Ready,
+    /// A weapon answers the target, but it has to be walked to first.
+    OutOfRange,
+    /// Nothing this unit carries does anything to that one, ever.
+    Cannot,
+}
 
 /// What one house's agent may look at, and nothing else.
 pub struct Observation<'a> {
@@ -295,6 +308,19 @@ impl<'a> Observation<'a> {
             })
     }
 
+    /// Where one object stands and what it is, by id.
+    ///
+    /// The order gate asks this to reach the object's movement zone, which is
+    /// the key the zone map answers a destination by; `own_entities` walks the
+    /// whole store, and a gate that runs once per order cannot.
+    pub fn object_cell_and_type(&self, entity_id: u64) -> Option<((u16, u16), InternedId)> {
+        let entity = self.sim.entities().get(entity_id)?;
+        Some((
+            (entity.position.rx(), entity.position.ry()),
+            entity.type_ref(),
+        ))
+    }
+
     /// Full strength of a type, from the frozen rules an object was built with.
     pub fn max_health(&self, rules: &RuleSet, type_id: InternedId) -> Option<i32> {
         self.sim.object_type(type_id, rules).map(|ty| ty.strength)
@@ -426,6 +452,74 @@ impl<'a> Observation<'a> {
         })
     }
 
+    /// Buildings owned by a `MultiplayPassive` house — the neutral and civilian
+    /// structures that stand on the map and belong to nobody, in storage order.
+    ///
+    /// Kept apart from [`Self::enemy_entities`], which excludes them on purpose:
+    /// the computer AI does not go to war with the map. It does shoot what
+    /// stands in its way, and what stands in its way is exactly this: a
+    /// building that is neither the house's nor an enemy's, so no target list
+    /// holds it. The caller decides what counts as in the way; this only says
+    /// which objects are nobody's.
+    pub fn neutral_structures(&self) -> impl Iterator<Item = EnemyEntity> + '_ {
+        let houses = self.sim.houses();
+        self.sim.entities().values().filter_map(move |entity| {
+            if entity.lifecycle.in_limbo()
+                || entity.health.current() <= 0
+                || entity.category() != EntityCategory::Structure
+            {
+                return None;
+            }
+            let owner = entity.owner();
+            if owner == self.house {
+                return None;
+            }
+            let house = houses.get(&owner)?;
+            if !house.multiplay_passive() {
+                return None;
+            }
+            Some(EnemyEntity {
+                entity_id: entity.stable_id(),
+                type_id: entity.type_ref(),
+                cell: (entity.position.rx(), entity.position.ry()),
+            })
+        })
+    }
+
+    /// Every cell a live ground object stands on — units, infantry and the whole
+    /// foundation of every building.
+    ///
+    /// A plan that names a cell for a new object has to know this before it
+    /// names it: the placement is refused at the other end while anything
+    /// stands there, and a plan that keeps naming the same occupied cell never
+    /// finishes — which is what a wall ring looked like when a rifleman
+    /// happened to be standing on it.
+    pub fn ground_object_cells(&self, rules: &RuleSet) -> std::collections::BTreeSet<(u16, u16)> {
+        let mut cells = std::collections::BTreeSet::new();
+        for entity in self.sim.entities().values() {
+            if entity.lifecycle.in_limbo() || entity.health.current() <= 0 {
+                continue;
+            }
+            let (rx, ry) = (entity.position.rx(), entity.position.ry());
+            let foundation = self
+                .sim
+                .object_type(entity.type_ref(), rules)
+                .map_or((1u16, 1u16), |ty| ty.foundation.dimensions());
+            for dy in 0..i32::from(foundation.1.max(1)) {
+                for dx in 0..i32::from(foundation.0.max(1)) {
+                    let (Ok(x), Ok(y)) = (
+                        u16::try_from(i32::from(rx) + dx),
+                        u16::try_from(i32::from(ry) + dy),
+                    ) else {
+                        continue;
+                    };
+                    cells.insert((x, y));
+                }
+            }
+        }
+        cells
+    }
+
     /// Every shot in the air that names `entity_id`, in projectile order.
     ///
     /// What a player sees as a shell crossing the screen is here as the three
@@ -502,6 +596,19 @@ impl<'a> Observation<'a> {
         }
     }
 
+    /// Where `entity_id` is walking to, in cells, when it is walking; `None`
+    /// when it stands still or its nav target is an object rather than a cell.
+    ///
+    /// The order door asks this before it re-sends a march: `Set_Destination`
+    /// re-runs the path, so a destination a unit already holds is not one to
+    /// send again — a path re-run every frame is what drift looks like.
+    pub fn destination(&self, entity_id: u64) -> Option<(u16, u16)> {
+        match self.sim.entities().get(entity_id)?.navigation.nav_com()? {
+            crate::sim::components::NavTargetRef::Cell { rx, ry } => Some((rx, ry)),
+            crate::sim::components::NavTargetRef::Object { .. } => None,
+        }
+    }
+
     /// Whether `entity_id`'s weapon may fire this frame: the rearm timer has
     /// run out (`TechnoClass+0x2E4`, `sim::combat::rof`).
     ///
@@ -525,17 +632,31 @@ impl<'a> Observation<'a> {
             .map_or(0, |warhead| warhead.cell_spread_f64.floor().max(0.0) as i32)
     }
 
-    /// Buildings any engineer may take: alive, not this house's, and
-    /// `Capturable=`. Neutral tech buildings and civilian structures qualify,
-    /// which is exactly the difference between capturing one and shooting it.
+    /// Candidate buildings for an engineer: alive, not this house's or its
+    /// ally's, and `Capturable=`. Neutral tech buildings and civilian
+    /// structures qualify, which is exactly the difference between capturing
+    /// one and shooting it.
+    ///
+    /// A candidate list, not the click's answer. Whether one engineer may take
+    /// one building is [`Self::can_take_building`]: an ally's building is a
+    /// Repair click, and one whose type answers no action at all is no click.
+    /// An ally is left out here because no engineer ever captures one — the
+    /// native arm answers Repair before it looks at `Capturable=`.
     pub fn capturable_buildings<'r>(
         &'r self,
         rules: &'r RuleSet,
     ) -> impl Iterator<Item = EnemyEntity> + 'r {
         let house = self.house;
+        let allied = crate::map::houses::ally_test(
+            self.sim.house_alliances.as_map(),
+            self.sim.interner().resolve(house),
+        );
         self.sim.entities().values().filter_map(move |entity| {
             let owner = entity.owner();
             if owner == house || entity.lifecycle.in_limbo() || entity.health.current() <= 0 {
+                return None;
+            }
+            if allied(self.sim.interner().resolve(owner)) {
                 return None;
             }
             let ty = self.sim.object_type(entity.type_ref(), rules)?;
@@ -548,6 +669,48 @@ impl<'a> Observation<'a> {
                 cell: (entity.position.rx(), entity.position.ry()),
             })
         })
+    }
+
+    /// Whether `actor` may be told to take `building`: the click's own answer,
+    /// from the three `InfantryClass::What_Action_OnObject` arms that answer
+    /// action 9 (`Capture`).
+    ///
+    /// An engineer's arm ([`Simulation::engineer_building_action`]) answers
+    /// Capture — or the Damage it does to a building under
+    /// `EngineerCaptureLevel`, which is the same click's other outcome — only
+    /// for a building its house is not allied to, that answers an action at all
+    /// (`is_1x1_with_undeploy`, `Repairable=`) and carries `Capturable=`. A
+    /// spy's arm ([`Simulation::infiltrator_building_action`]) answers for the
+    /// `Infiltrate=` flags. A rifleman's arm is the garrison: `Foot
+    /// Class::ClickedAction` (`0x004D7716..0x004D773A`) sends the same
+    /// `Capture8` for an `Occupier=` infantryman over a `CanBeOccupied=`
+    /// building, and [`Self::can_garrison`] is `CanBeOccupiedBy`'s answer.
+    ///
+    /// Everything else — an ally's plant, an MCV-type hulk, a
+    /// `Capturable=no` structure — is an order the object refuses on arrival:
+    /// the specialist walks the whole way there and stands at the wall, which
+    /// reads as a stuck unit and is not one.
+    pub fn can_take_building(&self, rules: &RuleSet, actor: u64, building: u64) -> bool {
+        use crate::sim::world::EngineerBuildingAction;
+        match self.sim.engineer_building_action(actor, building, rules) {
+            Some(EngineerBuildingAction::Capture | EngineerBuildingAction::Damage) => return true,
+            // A `BridgeRepairHut=` whose span is down is the same Capture click
+            // and the same consumed engineer: the hut arm answers Repair, and
+            // only while there is a span to put back ([`Self::bridge_repair_huts`]).
+            Some(EngineerBuildingAction::Repair(_)) => {
+                if self
+                    .bridge_repair_huts(rules)
+                    .any(|site| site.building_id == building)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        self.sim.infiltrator_building_action(actor, building, rules)
+            || crate::sim::passenger::building_can_be_occupied_by(
+                self.sim, rules, building, actor,
+            )
     }
 
     /// Buildings a spy may walk into: alive, not this house's, and `Spyable=`.
@@ -663,8 +826,26 @@ impl<'a> Observation<'a> {
         })
     }
 
-    /// Whether `infantry_id` may garrison `building_id`:
-    /// `BuildingClass::CanBeOccupiedBy`'s answer for this pair.
+    /// The cells the map currently holds a crate on.
+    ///
+    /// The map owns the slots and the coordinate pair is the only emptiness
+    /// discriminator (`sim::crates::CrateSlot::is_empty`). A policy only needs
+    /// where they are: entering the cell is the pickup, so the answer is a
+    /// walk target.
+    pub fn crate_cells(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+        self.sim
+            .crate_authority()
+            .slots()
+            .iter()
+            .filter(|slot| !slot.is_empty())
+            .filter_map(|slot| {
+                Some((
+                    u16::try_from(slot.cell_x).ok()?,
+                    u16::try_from(slot.cell_y).ok()?,
+                ))
+            })
+    }
+
     /// Whether `firer` may be sent at `target` at all:
     /// `TechnoClass::GetFireError` (`src/sim/combat/fire_error.rs`), the one
     /// native answer to "can this object do anything to that one".
@@ -673,6 +854,7 @@ impl<'a> Observation<'a> {
     /// combat unit at the army's one target: a terror drone was ordered to
     /// attack a building its weapon has no answer to, the order was refused
     /// every time, and the refusals ate the frame's whole command budget.
+    ///
     /// Reach is the caller's question — a unit out of reach walks — so it is
     /// not part of this answer.
     pub fn can_engage(&self, rules: &RuleSet, firer: u64, target: u64) -> bool {
@@ -682,6 +864,92 @@ impl<'a> Observation<'a> {
                 | Some(crate::sim::combat::fire_error::FireError::Illegal)
                 | Some(crate::sim::combat::fire_error::FireError::Cant)
         )
+    }
+
+    /// Whether "can this unit do anything to that" is a yes, a not-yet or a no.
+    ///
+    /// [`Self::can_engage`] answers the first two the same way, and for "may
+    /// this unit be sent at that one" that is right: a target out of reach is
+    /// still a target. The layer choosing *which* order to send needs the
+    /// difference. An `Attack` on a target out of reach is a mission the engine
+    /// restarts every time it is re-issued (`Queue_Mission`), so a brain that
+    /// re-sends it each frame keeps the unit in the opening state and it never
+    /// walks closer.
+    pub fn engage(&self, rules: &RuleSet, firer: u64, target: u64) -> Engage {
+        match crate::sim::combat::fire_error_world::fire_error(self.sim, rules, firer, target) {
+            None
+            | Some(crate::sim::combat::fire_error::FireError::Illegal)
+            | Some(crate::sim::combat::fire_error::FireError::Cant) => Engage::Cannot,
+            // The magazine empty or the turret still turning is "not this
+            // instant", and both clear on their own: the question left is only
+            // whether the target is inside the weapon's reach.
+            _ => match crate::sim::combat::fire_error_world::fire_error_in_range(
+                self.sim, rules, firer, target,
+            ) {
+                Some(crate::sim::combat::fire_error::FireError::Range) => Engage::OutOfRange,
+                _ => Engage::Ready,
+            },
+        }
+    }
+
+    /// Whether any weapon `unit` actually fires does anything to `target`: the
+    /// armour floor the native target scan applies to a candidate
+    /// (`Evaluate_Candidate` `0x006F7D19..0x006F7D4F`), asked of the unit's own
+    /// slots.
+    ///
+    /// [`Self::can_engage`] is not this answer. A dog carries a
+    /// `NeverUse=yes` scanner beside its jaw: the jaw's `ParasiteDog` does
+    /// nothing to armour, the scanner does, and `GetFireError` therefore admits
+    /// a tank that the dog can never hurt. The scan's own rule is the armour
+    /// multiplier, so a slot is only counted when it is one the unit would fire
+    /// (`NeverUse=` takes the scanner out) and its warhead's Verses against the
+    /// target's armour are not zero.
+    ///
+    /// One owner for the question, in the rules the object is built from: a mod
+    /// that gives a dog an anti-tank jaw, or a tank a warhead that cannot dent
+    /// another, is answered without another list here.
+    ///
+    /// Aircraft are left to [`Self::can_engage`]: `AA=` is a projectile flag and
+    /// high-flying targets are the fire error's business, not the armour's.
+    pub fn can_hurt(&self, rules: &RuleSet, unit: u64, target: u64) -> bool {
+        let (Some(unit_entity), Some(target_entity)) = (
+            self.sim.entities().get(unit),
+            self.sim.entities().get(target),
+        ) else {
+            return false;
+        };
+        if target_entity.category() == EntityCategory::Aircraft {
+            return true;
+        }
+        let (Some(unit_type), Some(target_type)) = (
+            self.sim.object_type(unit_entity.type_ref(), rules),
+            self.sim.object_type(target_entity.type_ref(), rules),
+        ) else {
+            return false;
+        };
+        let armour = target_type.armor_id();
+        (0..unit_type.weapon_record_count()).any(|slot| {
+            let Some(name) = unit_type.weapon_at(slot) else {
+                return false;
+            };
+            let Some(weapon) = rules.weapon(name) else {
+                return false;
+            };
+            if weapon.never_use {
+                return false;
+            }
+            let Some(warhead) = weapon
+                .warhead
+                .as_deref()
+                .and_then(|name| rules.warhead(name))
+            else {
+                return false;
+            };
+            // The native floor is a masked x87 compare against `0.02f` for
+            // acquisition and plain zero for fire; a weapon that does no
+            // damage is not a weapon for this target either way.
+            f64::from_bits(warhead.interaction(armour).multiplier().bits()) != 0.0
+        })
     }
 
     /// Why `firer` may not fire at `target` right now, when it may not. `None`
@@ -702,6 +970,8 @@ impl<'a> Observation<'a> {
         }
     }
 
+    /// Whether `infantry_id` may garrison `building_id`:
+    /// `BuildingClass::CanBeOccupiedBy`'s answer for this pair.
     pub fn can_garrison(&self, rules: &RuleSet, infantry_id: u64, building_id: u64) -> bool {
         crate::sim::passenger::building_can_be_occupied_by(self.sim, rules, building_id, infantry_id)
     }
@@ -937,12 +1207,106 @@ impl<'a> Observation<'a> {
         self.sim.cost_of(self.house, object, rules)
     }
 
+    /// Whether the navigation projection this file's ground answers come from
+    /// stands at all.
+    ///
+    /// "Not walkable" is the projection's answer about a cell, and it is only
+    /// an answer when the projection exists: a map loaded without one gives
+    /// the same `false` for every cell, which is a map made of walls. A
+    /// decision that reads `is_ground_walkable` to tell a blocked cell from an
+    /// open one has to know the difference.
+    pub fn has_ground_grid(&self) -> bool {
+        self.sim.path_grid().is_some()
+    }
+
     /// Whether the ground at a cell is walkable in the current path projection.
     /// Out of bounds answers false. This is not an occupancy query.
     pub fn is_ground_walkable(&self, rx: u16, ry: u16) -> bool {
         self.sim
             .path_grid()
             .is_some_and(|grid| grid.is_walkable(rx, ry))
+    }
+
+    /// Whether a wall stands on the cell, whoever owns it.
+    ///
+    /// A wall is an overlay, so it is not an object this file can see; and the
+    /// passability it takes away is the navigation projection's
+    /// ([`Self::is_ground_walkable`]), which says "closed" without saying why.
+    /// What this adds is the reason: a closed cell that is a wall is one a shot
+    /// can open, and a closed cell that is a cliff is not.
+    pub fn wall_at(&self, rules: &RuleSet, rx: u16, ry: u16) -> bool {
+        self.sim
+            .overlay_grid
+            .as_ref()
+            .and_then(|grid| grid.cell(rx, ry).overlay_id)
+            .and_then(|id| rules.overlay_registry().flags(id))
+            .is_some_and(|flags| flags.wall)
+    }
+
+    /// Whether the navigation projection the connectivity answers come from
+    /// stands at all.
+    ///
+    /// The water rows of the passability matrix are modelled
+    /// (`crate::sim::pathfinding::passability` carries `Water` and `WaterBeach`
+    /// and the three amphibious zones), so this is the seam for a fleet: a
+    /// decision that asks in its own movement zone gets the right answer for a
+    /// boat today and for a hovercraft when one exists. What is *not* modelled
+    /// yet is water as a movement layer — `MovementLayer` has no `Water` — so
+    /// this answers connectivity between cells, not the cost of the cells
+    /// between them.
+    pub fn has_zone_grid(&self) -> bool {
+        self.sim.zone_grid().is_some()
+    }
+
+    /// Whether a walker of movement zone `zone` can get from `from` to `to` at
+    /// all: one lookup in the zone map, so this is cheap enough to ask per
+    /// candidate cell.
+    ///
+    /// `is_ground_walkable` answers "is this one cell open"; this answers the
+    /// question a destination has to pass — the cell can be open and still be
+    /// on the far side of a wall, an island or a cliff, where a walk ordered
+    /// to it never arrives. `true` when there is no zone grid: a decision that
+    /// has no map is not told that everywhere is unreachable, and the caller
+    /// that cares asks [`Self::has_zone_grid`] first.
+    pub fn can_reach(&self, zone: MovementZone, from: (u16, u16), to: (u16, u16)) -> bool {
+        self.sim.zone_grid().is_none_or(|grid| {
+            grid.can_reach(zone, from, MovementLayer::Ground, to, MovementLayer::Ground)
+        })
+    }
+
+    /// The structure standing whose foundation covers `cell`, as `(id, mine)`.
+    ///
+    /// A structure is several cells of closed ground and it is not an overlay,
+    /// so the wall's answer does not reach it: the ground is closed and the
+    /// reason is an object, which is the one thing that says "it can be shot".
+    /// `mine` is what keeps a house from shelling its own power plant.
+    ///
+    /// It is a scan of the entity store, so it is for the question a walk asks
+    /// about the one cell in front of it, not for a sweep.
+    pub fn structure_at(&self, rules: &RuleSet, cell: (u16, u16)) -> Option<(u64, bool)> {
+        for entity in self.sim.entities().values() {
+            if entity.lifecycle.in_limbo() || entity.health.current() <= 0 {
+                continue;
+            }
+            let Some(ty) = self.sim.object_type(entity.type_ref(), rules) else {
+                continue;
+            };
+            if ty.category != ObjectCategory::Building {
+                continue;
+            }
+            let (width, height) = ty.foundation.dimensions();
+            let (x0, y0) = (entity.position.rx(), entity.position.ry());
+            let covers = {
+                let (w, h) = (i32::from(width.max(1)), i32::from(height.max(1)));
+                let dx = i32::from(cell.0) - i32::from(x0);
+                let dy = i32::from(cell.1) - i32::from(y0);
+                dx >= 0 && dx < w && dy >= 0 && dy < h
+            };
+            if covers {
+                return Some((entity.stable_id(), entity.owner() == self.house));
+            }
+        }
+        None
     }
 
     /// The owner of the wall standing on a cell, if one stands there.

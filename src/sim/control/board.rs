@@ -422,6 +422,22 @@ impl ControlBoard {
         goal: Goal,
         pending: &mut Vec<Command>,
     ) -> ApplyOutcome {
+        // Two orders are not sent: the one the object already stands on, and a
+        // march that would delete the gun order it is working.
+        //
+        // `Set_Destination` re-runs the path, so a destination re-sent every
+        // frame is a unit that restarts its walk before it covers a cell —
+        // drift, and a command stream the engine has no use for. And
+        // `FootClass::Assign_Target_Command` (`0x004DF0E0`) runs
+        // `Clear_All_TarCom` for every mission but AttackMove, so a march does
+        // not pause an attack: it deletes the target and the unit walks off
+        // unarmed. A one-step reposition still preempts — the dodge and kite
+        // passes move a unit out from under a shell — so only a destination
+        // more than a step away is refused.
+        if let Some(standing) = order_stands(sim, rules, self.owner, actor, &goal) {
+            log::trace!("auto play: {actor} already {standing}, {goal:?} dropped");
+            return ApplyOutcome::Queued;
+        }
         let funnel = Funnel::new(sim, rules, self.owner);
         match funnel.prepare(actor, goal) {
             Ok(command) => {
@@ -489,6 +505,41 @@ fn admits(sim: &Simulation, owner: &str, command: &Command) -> bool {
     }
 }
 
+/// How far from where a unit stands a movement order may name and still count
+/// as a reposition rather than a march, in cells. A dodge or a kite step moves
+/// a unit out from under a shell; a march sends it somewhere else entirely.
+const REPOSITION_CELLS: u16 = 2;
+
+/// When `goal` is already what `actor` is doing — or a march that would delete
+/// the fire order it is working — the reason, for the log; `None` otherwise.
+fn order_stands(
+    sim: &Simulation,
+    rules: &RuleSet,
+    owner: InternedId,
+    actor: u64,
+    goal: &Goal,
+) -> Option<&'static str> {
+    let obs = Observation::new(sim, owner);
+    match *goal {
+        Goal::Attack { target } => {
+            (obs.attack_target(actor) == Some(target)).then_some("on that target")
+        }
+        Goal::Move { cell } | Goal::AttackMove { cell } => {
+            if obs.destination(actor) == Some(cell) {
+                return Some("walking there");
+            }
+            let entity = sim.entities().get(actor)?;
+            let from = (entity.position.rx(), entity.position.ry());
+            let steps = from.0.abs_diff(cell.0).max(from.1.abs_diff(cell.1));
+            let live_gun = obs
+                .attack_target(actor)
+                .is_some_and(|target| obs.engage_error(rules, actor, target).is_none());
+            (live_gun && steps > REPOSITION_CELLS).then_some("firing on a target")
+        }
+        _ => None,
+    }
+}
+
 /// The object a command acts on, when it names exactly one.
 fn actor_of(command: &Command) -> Option<u64> {
     Some(match command {
@@ -520,4 +571,94 @@ fn actor_of(command: &Command) -> Option<u64> {
         // their receivers.
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arena() -> Option<(Simulation, RuleSet)> {
+        let rules = crate::rules::retail_ini_fixture::retail_unlayered_rules()?;
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xA17);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        Some((sim, rules))
+    }
+
+    /// A march does not replace a gun that is firing: `Assign_Target_Command`
+    /// clears the target on any mission but AttackMove, so the Move does not
+    /// pause the attack — it deletes it. A one-step reposition still preempts,
+    /// which is what the dodge and kite passes move a unit with.
+    #[test]
+    fn a_march_does_not_replace_a_live_fire_order() {
+        let Some((mut sim, rules)) = arena() else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        let gi = sim
+            .spawn_object("E1", "Americans", 20, 20, 255, &rules)
+            .expect("a GI");
+        let target = sim
+            .spawn_object("E2", "Russians", 21, 20, 255, &rules)
+            .expect("a conscript");
+        sim.queue_commands([CommandEnvelope::new(
+            owner,
+            sim.session().tick(),
+            Command::Attack {
+                attacker_id: gi,
+                target_id: target,
+            },
+        )]);
+        sim.advance_tick(&[], Some(&rules), None, None, 33);
+        let obs = Observation::new(&sim, owner);
+        assert_eq!(obs.attack_target(gi), Some(target), "the target is held");
+        assert_eq!(
+            order_stands(&sim, &rules, owner, gi, &Goal::Move { cell: (40, 40) }),
+            Some("firing on a target")
+        );
+        assert_eq!(
+            order_stands(&sim, &rules, owner, gi, &Goal::Move { cell: (21, 21) }),
+            None,
+            "a step out from under a shell is still a reposition"
+        );
+        assert_eq!(
+            order_stands(&sim, &rules, owner, gi, &Goal::Attack { target }),
+            Some("on that target"),
+            "an attack it already holds is not re-sent"
+        );
+    }
+
+    /// A destination the unit already holds is not re-sent: the path is not
+    /// re-run, which is what drift looked like from the outside.
+    #[test]
+    fn a_destination_already_held_is_not_re_sent() {
+        let Some((mut sim, rules)) = arena() else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        let gi = sim
+            .spawn_object("E1", "Americans", 20, 20, 255, &rules)
+            .expect("a GI");
+        sim.queue_commands([CommandEnvelope::new(
+            owner,
+            sim.session().tick(),
+            Command::Move {
+                entity_id: gi,
+                target_rx: 26,
+                target_ry: 20,
+            },
+        )]);
+        sim.advance_tick(&[], Some(&rules), None, None, 2);
+        let obs = Observation::new(&sim, owner);
+        assert_eq!(obs.destination(gi), Some((26, 20)), "it is walking there");
+        assert_eq!(
+            order_stands(&sim, &rules, owner, gi, &Goal::Move { cell: (26, 20) }),
+            Some("walking there")
+        );
+        assert_eq!(
+            order_stands(&sim, &rules, owner, gi, &Goal::Move { cell: (26, 30) }),
+            None,
+            "a different destination is a new order"
+        );
+    }
 }

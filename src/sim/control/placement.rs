@@ -36,9 +36,20 @@ const PLACEMENT_SCAN_RADIUS: i32 = 12;
 const OPENNESS_RADIUS: i32 = 2;
 
 /// How many rings past the nearest admissible one a roomier cell may be taken
-/// from. Two is one building's width: enough to step out of a gap, not enough
-/// to leave the base.
-const PLACEMENT_WINDOW_RINGS: i32 = 2;
+/// from. Four is two buildings' width: enough to step out of the gap the last
+/// foundation left — which is the only way a base that fills its first ring
+/// keeps a lane — and not enough to leave the base. It was two, and a base
+/// that had filled its ring had nowhere left to go but tighter.
+const PLACEMENT_WINDOW_RINGS: i32 = 4;
+
+/// The share of the roomiest admissible cell a candidate must have open around
+/// it to be built on at all, as `NUMER / DENOM`: three fifths.
+///
+/// The floor is what stops the sweep from closing the last one-cell gap. It is
+/// measured against the roomiest cell *in the window*, not a fixed number, so
+/// an open map asks for room and a hemmed-in base asks for what it can get.
+const OPENNESS_FLOOR_NUMER: i32 = 3;
+const OPENNESS_FLOOR_DENOM: i32 = 5;
 
 /// How many admitted cells the sweep counts before starting over: a cell the
 /// gate admits but the receiver refuses must not be asked for forever.
@@ -90,11 +101,130 @@ fn sector_counts(origin: Option<(u16, u16)>, anchors: &[(u16, u16)]) -> [i32; SE
 pub struct Placement<'a, 'b> {
     obs: &'a Observation<'b>,
     rules: &'a RuleSet,
+    /// Cells the caller asked to keep free of foundations: the ring a wall
+    /// stands on. Not refused outright — a base with nowhere else still has to
+    /// build — but ranked behind every cell that leaves the ring alone.
+    reserved: BTreeSet<(u16, u16)>,
+}
+
+/// How many cells a new foundation must leave between itself and any of the
+/// house's other buildings.
+///
+/// Zero — sharing an edge — is what `Adjacent=` alone permits, and it is what
+/// makes a barracks hug the yard: two foundations nose to nose are a wall of
+/// concrete with no lane past it, no cell to repair from and no cell to wall.
+/// One cell is the smallest gap a unit can walk through and a wall can stand
+/// in, and it is a legality rule of the sweep rather than a preference: a cell
+/// that leaves no gap is not a site.
+const BUILDING_GAP_CELLS: i32 = 2;
+
+/// One cell the sweep admits, with the keys it is ranked by.
+struct Candidate {
+    /// Its foundation would stand within [`BUILDING_GAP_CELLS`] of another of
+    /// the house's buildings. Not a ranking key: the sweep drops those cells.
+    too_close: bool,
+    /// Its foundation would cover a cell the caller reserved. Last key first:
+    /// a barracks in the ring is a wall that can never be closed there.
+    covers_reserved: bool,
+    /// How many of the house's buildings already stand in its sector.
+    sector: i32,
+    /// Walkable cells within [`OPENNESS_RADIUS`] that no foundation covers.
+    open: i32,
+    /// Rings from the anchor it was scanned around.
+    ring: i32,
+    cell: (u16, u16),
 }
 
 impl<'a, 'b> Placement<'a, 'b> {
     pub fn new(obs: &'a Observation<'b>, rules: &'a RuleSet) -> Self {
-        Self { obs, rules }
+        Self {
+            obs,
+            rules,
+            reserved: BTreeSet::new(),
+        }
+    }
+
+    /// Keep `cells` free of foundations when anything else fits.
+    ///
+    /// The wall plan closes a ring around every `ProtectWithWall=yes` building,
+    /// and a foundation that covers a cell of that ring is a permanent gap in
+    /// it: the wall is an overlay and cannot build where a building stands, and
+    /// the building cannot be moved. Reserving the ring is cheaper than a wall
+    /// with a hole in it.
+    pub fn reserving(mut self, cells: BTreeSet<(u16, u16)>) -> Self {
+        self.reserved = cells;
+        self
+    }
+
+    /// The cells covered by the house's own building foundations, grown by
+    /// [`BUILDING_GAP_CELLS`]: what a new foundation may not touch.
+    fn crowd(&self) -> BTreeSet<(u16, u16)> {
+        let mut cells: BTreeSet<(u16, u16)> = BTreeSet::new();
+        for entity in self.obs.own_entities() {
+            let Some(ty) = self.obs.object_type(self.rules, entity.type_id) else {
+                continue;
+            };
+            if ty.category != ObjectCategory::Building || ty.wall {
+                continue;
+            }
+            let (width, height) = ty.foundation.dimensions();
+            let (w, h) = (i32::from(width.max(1)), i32::from(height.max(1)));
+            for dy in -BUILDING_GAP_CELLS..h + BUILDING_GAP_CELLS {
+                for dx in -BUILDING_GAP_CELLS..w + BUILDING_GAP_CELLS {
+                    let (Some(x), Some(y)) = (
+                        u16::try_from(i32::from(entity.cell.0) + dx).ok(),
+                        u16::try_from(i32::from(entity.cell.1) + dy).ok(),
+                    ) else {
+                        continue;
+                    };
+                    cells.insert((x, y));
+                }
+            }
+        }
+        cells
+    }
+
+    /// Whether a foundation at `cell` would stand inside the grown footprint of
+    /// another building: no lane between the two.
+    fn too_close(&self, cell: (u16, u16), foundation: (u16, u16), crowd: &BTreeSet<(u16, u16)>) -> bool {
+        if crowd.is_empty() {
+            return false;
+        }
+        for dy in 0..i32::from(foundation.1.max(1)) {
+            for dx in 0..i32::from(foundation.0.max(1)) {
+                let (Some(x), Some(y)) = (
+                    u16::try_from(i32::from(cell.0) + dx).ok(),
+                    u16::try_from(i32::from(cell.1) + dy).ok(),
+                ) else {
+                    continue;
+                };
+                if crowd.contains(&(x, y)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Whether a foundation at `cell` would cover a reserved cell.
+    fn covers_reserved(&self, cell: (u16, u16), foundation: (u16, u16)) -> bool {
+        if self.reserved.is_empty() {
+            return false;
+        }
+        for dy in 0..i32::from(foundation.1.max(1)) {
+            for dx in 0..i32::from(foundation.0.max(1)) {
+                let (Some(x), Some(y)) = (
+                    u16::try_from(i32::from(cell.0) + dx).ok(),
+                    u16::try_from(i32::from(cell.1) + dy).ok(),
+                ) else {
+                    continue;
+                };
+                if self.reserved.contains(&(x, y)) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// The cell to place `type_id` at, `attempt`-th admissible candidate.
@@ -103,14 +233,31 @@ impl<'a, 'b> Placement<'a, 'b> {
     /// outward sweep answers.
     pub fn cell_for(&self, type_id: InternedId, attempt: u32) -> Option<(u16, u16)> {
         let ty = self.obs.object_type(self.rules, type_id)?;
+        let foundation = ty.foundation.dimensions();
+        let crowd = self.crowd();
         if let Some(cell) = self.native_site(ty)
             && self.obs.placement_admits(self.rules, ty, cell.0, cell.1)
         {
-            log::info!(
-                "auto play: site for {} from the native search at {cell:?}",
-                ty.id
-            );
-            return Some(cell);
+            // `FindBaseBuildingSite` answers what the plan wants built *next*,
+            // not how far it has to stand from the last foundation: its cell
+            // goes through the same legality gate the sweep uses. Without this
+            // the native path placed the barracks on the yard's doorstep and
+            // the sweep's gap rule never ran — the site was answered upstream.
+            // A wall is an overlay, not a building: it *belongs* against a
+            // foundation, and holding it to the building gap pushed every
+            // segment one cell further out than the wall plan asked for.
+            if !ty.wall && self.too_close(cell, foundation, &crowd) {
+                log::info!(
+                    "auto play: native site for {} at {cell:?} refused: it leaves no lane to the building beside it",
+                    ty.id
+                );
+            } else {
+                log::info!(
+                    "auto play: site for {} from the native search at {cell:?}",
+                    ty.id
+                );
+                return Some(cell);
+            }
         }
         let cell = self.sweep(ty, attempt);
         log::info!(
@@ -141,15 +288,18 @@ impl<'a, 'b> Placement<'a, 'b> {
     /// buildings: the Construction Yard first, then everything else in entity
     /// order.
     ///
-    /// "Best" is the nearest ring that is not a gap: of the admitted cells,
-    /// those with at least three fifths of the roomiest cell's open ground are
-    /// considered, and the nearest of those wins, then the roomiest, then a
-    /// fixed cell order. Building in ring order alone wedges new foundations
-    /// into the one-cell gaps between existing ones — the densest possible base,
-    /// and the one that walls its own yard in; ranking by openness alone walks
-    /// the base out onto the open ground and leaves the refinery sixteen cells
-    /// from the yard, where nothing can defend it. The filter is a policy
-    /// choice, like the sweep itself: a human places by eye, and an eye keeps a
+    /// "Best" is the roomiest cell in the emptiest sector of the nearest rings
+    /// that is not a gap: the sweep keeps the first rings that admit anything at
+    /// all plus [`PLACEMENT_WINDOW_RINGS`], drops the cells that have less than
+    /// three fifths of the roomiest one's open ground, and ranks what is left by
+    /// sector, then openness, then ring, then distance to the yard.
+    ///
+    /// Building in ring order alone wedges new foundations into the one-cell
+    /// gaps between existing ones — the densest possible base, and the one that
+    /// walls its own yard in; ranking by openness alone walks the base out onto
+    /// the open ground and leaves the refinery sixteen cells from the yard,
+    /// where nothing can defend it. Both the floor and the order are policy
+    /// choices, like the sweep itself: a human places by eye, and an eye keeps a
     /// gap without crossing the map for it.
     ///
     /// A building retail marks `ProtectWithWall=yes` is then kept on the side
@@ -160,8 +310,10 @@ impl<'a, 'b> Placement<'a, 'b> {
     fn sweep(&self, ty: &ObjectType, attempt: u32) -> Option<(u16, u16)> {
         let blocked = self.occupied_cells();
         let anchors = self.anchors();
+        let foundation = ty.foundation.dimensions();
+        let crowd = self.crowd();
         let mut seen: BTreeSet<(u16, u16)> = BTreeSet::new();
-        let mut admitted: Vec<(i32, i32, i32, u16, u16)> = Vec::new();
+        let mut admitted: Vec<Candidate> = Vec::new();
         // How much of the base already stands in each sector around the first
         // anchor: the yard, which is what everything else is built out from.
         let crowded = sector_counts(anchors.first().copied(), &anchors);
@@ -184,13 +336,15 @@ impl<'a, 'b> Placement<'a, 'b> {
                             continue;
                         }
                         let sector = sector_of(anchors.first().copied(), (rx, ry));
-                        admitted.push((
-                            crowded[sector],
-                            self.openness(rx, ry, &blocked),
+                        admitted.push(Candidate {
+                            too_close: !ty.wall
+                                && self.too_close((rx, ry), foundation, &crowd),
+                            covers_reserved: self.covers_reserved((rx, ry), foundation),
+                            sector: crowded[sector],
+                            open: self.openness(rx, ry, &blocked),
                             ring,
-                            ry,
-                            rx,
-                        ));
+                            cell: (rx, ry),
+                        });
                     }
                 }
             }
@@ -200,35 +354,89 @@ impl<'a, 'b> Placement<'a, 'b> {
         // yard. Within that window the roomiest cell wins — a foundation wedged
         // into a one-cell gap between two others walls the base in, and a yard
         // with no lane out is a yard that feeds nothing.
-        let Some(nearest) = admitted.iter().map(|(_, ring, ..)| *ring).min() else {
+        let Some(nearest) = admitted.iter().map(|candidate| candidate.ring).min() else {
             return None;
         };
         let window = nearest + PLACEMENT_WINDOW_RINGS;
-        admitted.retain(|(_, _, ring, ..)| *ring <= window);
+        admitted.retain(|candidate| candidate.ring <= window);
+        // The gap is a rule, not a preference: a foundation that leaves no lane
+        // between itself and its neighbour is refused the way a cell on top of
+        // a building is. What is left is logged when nothing legal remains,
+        // because a base that cannot place anything looks exactly like a base
+        // that is not trying to.
+        let legal = admitted.iter().filter(|candidate| !candidate.too_close).count();
+        if legal == 0 {
+            log::warn!(
+                "placement: no site keeps {} cells from another building for {}; \
+                 {} candidates refused, falling back to the closest fit",
+                BUILDING_GAP_CELLS,
+                ty.id,
+                admitted.len()
+            );
+        } else {
+            admitted.retain(|candidate| !candidate.too_close);
+        }
         if ty.protect_with_wall {
             self.keep_safe_side(&mut admitted, &anchors);
         }
-        // Nearest the yard first, then the emptiest sector at that distance,
-        // then the roomiest cell in it. The distance is what keeps the base a
-        // base: a sweep that asks for the emptiest sector wherever it lies
-        // walks the base off the map, one uncrowded ring at a time. The sector
-        // is what stops it stacking on the side it started on, and the
-        // openness is what keeps a lane between what it has already built.
+        // Of the cells the window left, only the roomy ones are built on. A
+        // foundation that *fits* is not a foundation that works: ranked by ring
+        // alone every building lands in the last one-cell gap between the
+        // others, and the base ends up a solid block with no lane through it —
+        // a yard walled in by its own refineries, and a wall that cannot be
+        // closed because the perimeter is the buildings.
+        let roomiest = admitted
+            .iter()
+            .map(|candidate| candidate.open)
+            .max()
+            .unwrap_or(0);
+        if roomiest > 0 {
+            let floor = roomiest * OPENNESS_FLOOR_NUMER / OPENNESS_FLOOR_DENOM;
+            admitted.retain(|candidate| candidate.open >= floor);
+        }
+        // A cell whose foundation would cover the wall's ring is taken only
+        // when the base has nowhere else: the ring is where a wall can stand,
+        // and a barracks dropped on it is a gap no later decision can close.
+        //
+        // The emptiest sector around the yard next, then the roomiest cell in
+        // it, then the nearer ring, and the yard's own distance last.
+        //
+        // The sector is what stops the base stacking on the side it started on,
+        // and the openness is what keeps a lane between what it has already
+        // built; the ring and the distance are what keep it a base at all, so a
+        // roomier cell three rings out cannot outrank a tight one beside the
+        // yard for long. Distance used to be the first key, which is how the
+        // sweep filled every cell touching the yard before it used the ring
+        // outside it.
         let yard = anchors.first().copied();
-        let distance = |candidate: &(i32, i32, i32, u16, u16)| {
-            yard.map_or(0, |yard| cell_distance((candidate.4, candidate.3), yard))
+        let distance = |candidate: &Candidate| {
+            yard.map_or(0, |yard| cell_distance(candidate.cell, yard))
         };
         admitted.sort_by(|a, b| {
-            distance(a)
-                .cmp(&distance(b))
-                .then(a.0.cmp(&b.0))
-                .then(b.1.cmp(&a.1))
-                .then(a.2.cmp(&b.2))
-                .then(a.3.cmp(&b.3))
-                .then(a.4.cmp(&b.4))
+            a.covers_reserved
+                .cmp(&b.covers_reserved)
+                .then(a.sector.cmp(&b.sector))
+                .then(b.open.cmp(&a.open))
+                .then(a.ring.cmp(&b.ring))
+                .then(distance(a).cmp(&distance(b)))
+                .then(a.cell.1.cmp(&b.cell.1))
+                .then(a.cell.0.cmp(&b.cell.0))
         });
         let index = usize::try_from(attempt).ok()?;
-        admitted.get(index).map(|(_, _, _, y, x)| (*x, *y))
+        admitted.get(index).map(|candidate| {
+            // The one line a play test needs to replay a layout: what was
+            // placed, where, and the keys it won on.
+            log::debug!(
+                "placement: {} attempt {attempt} -> {:?} ring={} reserved={} open={} sector={}",
+                ty.id,
+                candidate.cell,
+                candidate.ring,
+                candidate.covers_reserved,
+                candidate.open,
+                candidate.sector
+            );
+            candidate.cell
+        })
     }
 
     /// Keep the cells on the side no attack comes from, when there are any.
@@ -243,17 +451,24 @@ impl<'a, 'b> Placement<'a, 'b> {
     /// The direction is the one measured from the base's own buildings to the
     /// nearest hostile object, so "the back" follows the same enemy the walls
     /// face. A house that has seen no enemy has no front, and keeps every cell.
-    fn keep_safe_side(&self, admitted: &mut Vec<(i32, i32, i32, u16, u16)>, anchors: &[(u16, u16)]) {
+    fn keep_safe_side(&self, admitted: &mut Vec<Candidate>, anchors: &[(u16, u16)]) {
         let Some((centre, direction)) = self.enemy_side(anchors) else {
             return;
         };
-        let safe: Vec<(i32, i32, i32, u16, u16)> = admitted
+        let safe: Vec<Candidate> = admitted
             .iter()
-            .copied()
-            .filter(|(_, _, _, y, x)| {
-                let dx = i32::from(*x) - i32::from(centre.0);
-                let dy = i32::from(*y) - i32::from(centre.1);
+            .filter(|candidate| {
+                let dx = i32::from(candidate.cell.0) - i32::from(centre.0);
+                let dy = i32::from(candidate.cell.1) - i32::from(centre.1);
                 dx * direction.0 + dy * direction.1 <= 0
+            })
+            .map(|candidate| Candidate {
+                too_close: candidate.too_close,
+                covers_reserved: candidate.covers_reserved,
+                sector: candidate.sector,
+                open: candidate.open,
+                ring: candidate.ring,
+                cell: candidate.cell,
             })
             .collect();
         if !safe.is_empty() {
@@ -384,5 +599,82 @@ impl<'a, 'b> Placement<'a, 'b> {
             }
         }
         anchors
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whether a foundation at `cell` covers any of `cells`.
+    fn covers(cells: &BTreeSet<(u16, u16)>, cell: (u16, u16), foundation: (u16, u16)) -> bool {
+        (0..foundation.1).any(|dy| {
+            (0..foundation.0).any(|dx| {
+                cells.contains(&(cell.0 + dx, cell.1 + dy))
+            })
+        })
+    }
+
+    /// A war factory is five by three, so `placement_admits` — which asks about
+    /// the one cell a click names — could put it two cells out and still have
+    /// its footprint touch the yard's. Sharing an edge is what "the barracks
+    /// hugs the yard" is: no lane between the two, and no cell for the wall
+    /// that should stand there. The sweep refuses a cell that leaves no lane.
+    #[test]
+    fn a_foundation_does_not_take_the_wall_ring() {
+        let ini = crate::sim::arena_fixture::clear_ground_ini(
+            "[BuildingTypes]\n0=GACNST\n1=GAWEAP\n\
+             [GACNST]\nStrength=1500\nFoundation=4x4\nBaseNormal=yes\n\
+             Adjacent=4\nProtectWithWall=yes\n\
+             [GAWEAP]\nStrength=1000\nFoundation=5x3\nBaseNormal=yes\nAdjacent=4\n",
+        );
+        let art = crate::rules::ini_parser::IniFile::from_str(
+            "[GACNST]\nFoundation=4x4\n[GAWEAP]\nFoundation=5x3\n",
+        );
+        let rules =
+            RuleSet::from_ini_with_fixed_art_for_test(&ini, &art).expect("base rules");
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xA17);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let owner = sim.interner.intern("Americans");
+        sim.spawn_object("GACNST", "Americans", 14, 14, 255, &rules)
+            .expect("a yard");
+        let obs = Observation::new(&sim, owner);
+        let yard = rules.object("GACNST").expect("the yard");
+        let (width, height) = yard.foundation.dimensions();
+        // The ring the wall stands on: one cell out from the yard's foundation.
+        let mut ring: BTreeSet<(u16, u16)> = BTreeSet::new();
+        for y in 13..=(14 + height) {
+            for x in 13..=(14 + width) {
+                let inside = x >= 14 && x < 14 + width && y >= 14 && y < 14 + height;
+                if !inside {
+                    ring.insert((x, y));
+                }
+            }
+        }
+
+        let factory = rules.object("GAWEAP").expect("a war factory");
+        let (fw, fh) = factory.foundation.dimensions();
+        // The ring is exactly the yard's foundation grown by one cell, so the
+        // lane rule alone already keeps a foundation off it. Asked of
+        // `cell_for`, the entry point `build` uses, so the native site answer
+        // is held to the same rule as the sweep.
+        let factory_id = obs.type_id("GAWEAP").expect("the factory's id");
+        let plain = Placement::new(&obs, &rules)
+            .cell_for(factory_id, 0)
+            .expect("a cell for the factory");
+        assert!(
+            !covers(&ring, plain, (fw, fh)),
+            "the factory keeps a lane from the yard: {plain:?} {fw}x{fh}"
+        );
+
+        let keeping = Placement::new(&obs, &rules).reserving(ring.clone());
+        let kept = keeping
+            .sweep(factory, 0)
+            .expect("a cell for the factory");
+        assert!(
+            !covers(&ring, kept, (fw, fh)),
+            "the ring is kept for the wall: {kept:?}"
+        );
     }
 }
