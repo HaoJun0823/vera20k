@@ -144,7 +144,15 @@ pub(super) fn run(
             }),
             item.cell,
             item.reach,
-            |target| super::orders::admits(rules, obs, item.entity_id, &Goal::Attack { target }),
+            |target| {
+                // Can it hurt it at all? A dog beside a tank can reach it
+                // and fire at it and never damage it; the answer is the
+                // armour floor the native target scan applies, not the fire
+                // error. Without this a dog spent the match on a tank while
+                // the infantry behind it walked past.
+                super::orders::admits(rules, obs, item.entity_id, &Goal::Attack { target })
+                    && obs.can_hurt(rules, item.entity_id, target)
+            },
             |target| prefer(rules, obs, item.preference, target),
         ) {
             // A tank beside a soldier flattens him instead of trading shots:

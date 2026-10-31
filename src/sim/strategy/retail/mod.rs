@@ -328,12 +328,15 @@ pub struct RetailBrain {
     /// and the army goes anyway. Killing units does not count: a trade in the
     /// field that never reaches the base is exactly the stalemate this reads.
     pub(super) push_progress: (u64, usize),
-    /// The object whose orders are traced, from \`AUTOPLAY_TRACE\`: a diagnostic
+    /// The object whose orders are traced, from AUTOPLAY_TRACE: a diagnostic
     /// switch read once at construction, never a decision input. "Why did this
     /// unit do that" is the question every play test asks, and until now the
     /// only answer was to grep four passes' debug lines and guess at the
     /// interleaving.
     pub(super) trace: Option<u64>,
+    /// `AUTOPLAY_TRACE=list`: print the house's own units with their ids, so a
+    /// player can pick one to trace instead of guessing at a stable id.
+    trace_list: bool,
     /// What the house knows: sightings and the memories of them. Fed every
     /// frame; the enemy list it replaces is the census's, which is omniscient.
     pub(super) perception: crate::sim::control::perception::Perception,
@@ -372,6 +375,9 @@ impl RetailBrain {
             trace: std::env::var("AUTOPLAY_TRACE")
                 .ok()
                 .and_then(|raw| raw.trim().parse::<u64>().ok()),
+            trace_list: std::env::var("AUTOPLAY_TRACE")
+                .ok()
+                .is_some_and(|raw| raw.trim().eq_ignore_ascii_case("list")),
             perception: crate::sim::control::perception::Perception::new(),
             // On by default: the house acts on what it can see and remember.
             // AUTOPLAY_HONEST=0 restores the omniscient list for a comparison.
@@ -518,6 +524,18 @@ impl Brain for RetailBrain {
         // cadence the board and the yard deploy log on: "the AI builds nothing"
         // has to be answerable from the log the client already writes.
         if obs.tick() % 600 == 0 {
+            if self.trace_list {
+                for unit in &self.census.units {
+                    log::info!(
+                        "trace list: {} {} at {:?} hp {}",
+                        unit.entity_id,
+                        obs.object_type(rules, unit.type_id)
+                            .map_or("?", |ty| ty.id.as_str()),
+                        unit.cell,
+                        unit.health_permille
+                    );
+                }
+            }
             // Shadow perception: how much of what the brain is using the
             // player could actually see. The census is omniscient today, and
             // switching it off without a reading is how a policy starts
