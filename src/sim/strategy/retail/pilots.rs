@@ -32,6 +32,8 @@ pub(super) enum Pilot {
     Repair,
     /// Jump onto a vehicle and eat it (the terror drone).
     Parasite,
+    /// Take a vehicle whole (the mind-control unit): the target is the prize.
+    Subdue,
     /// Walk onto ore, and back.
     Harvest,
     /// Shoot what is in reach, and go where it is told.
@@ -63,7 +65,7 @@ impl Pilot {
     /// What this pilot prefers in reach.
     pub(super) fn preference(self) -> Preference {
         match self {
-            Pilot::Parasite => Preference::Armour,
+            Pilot::Parasite | Pilot::Subdue => Preference::Armour,
             Pilot::Gunner => Preference::Air,
             _ => Preference::Any,
         }
@@ -81,7 +83,7 @@ impl Pilot {
             return Self::Harvest;
         }
         if caps.has(Tag::MindControl) {
-            return Self::Engage;
+            return Self::Subdue;
         }
         if caps.has(Tag::Infiltrator) && caps.has(Tag::Spy) {
             return Self::Infiltrate;
@@ -139,6 +141,10 @@ mod tests {
         assert_eq!(pilot("GGI"), Some(Pilot::Deploy));
         assert_eq!(pilot("E1"), Some(Pilot::Deploy));
         assert_eq!(pilot("ADOG"), Some(Pilot::Parasite));
+        // A mind-control unit is its own pilot: the target is the prize, so
+        // its preference is what it can take, not the nearest thing.
+        assert_eq!(pilot("YURI"), Some(Pilot::Subdue));
+        assert_eq!(Pilot::Subdue.preference(), Preference::Armour);
         assert_eq!(pilot("E2"), Some(Pilot::Engage));
         assert_eq!(pilot("DRON"), Some(Pilot::Parasite));
         assert_eq!(pilot("GADEPT"), Some(Pilot::Structure));
