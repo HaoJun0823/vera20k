@@ -110,6 +110,7 @@ pub(super) mod expand;
 pub(super) mod kite;
 pub(super) mod micro;
 pub(super) mod orders;
+pub(super) mod pilots;
 pub(super) mod plan;
 pub(super) mod squads;
 pub(super) mod threats;

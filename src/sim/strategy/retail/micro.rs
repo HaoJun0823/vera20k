@@ -67,10 +67,9 @@ struct Work {
     /// How many shots its weapon fires a cycle: the number that decides whether
     /// interrupting it is a thing worth doing.
     burst: i32,
-    /// Whether walking onto a crushable object flattens it: `Crusher=` or
-    /// `OmniCrusher=` on the type, the native cell-entry crush
-    /// (`UnitClass::PerCellProcess`, `0x0073B074`).
-    crusher: bool,
+    /// What this unit runs: the capability table's answer, not a flag each
+    /// pass re-derives.
+    pilot: super::pilots::Pilot,
 }
 
 pub(super) fn run(
@@ -151,7 +150,7 @@ pub(super) fn run(
             // next frame would take anyway — so a miss costs a cell of ground
             // rather than a march, and the native approach arm is a computer
             // house's, which is why nothing else was doing this.
-            if item.crusher
+            if item.pilot == super::pilots::Pilot::Crush
                 && !item.deployed
                 && crush_adjacent(item.cell, enemy.1)
                 && obs
@@ -552,7 +551,9 @@ fn collect(
                 deployed,
                 zone: ty.map_or(MovementZone::Normal, |ty| ty.movement_zone),
                 burst: ty.map_or(1, |ty| super::advance::weapon_burst(rules, ty, deployed)),
-                crusher: ty.is_some_and(|ty| ty.crusher || ty.omni_crusher),
+                pilot: ty.map_or(super::pilots::Pilot::Structure, |ty| {
+                    super::pilots::Pilot::of(rules, ty)
+                }),
             });
         }
     }
