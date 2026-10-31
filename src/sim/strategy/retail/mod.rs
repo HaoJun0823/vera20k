@@ -142,6 +142,12 @@ const STUCK_FRAMES: u64 = 180;
 /// down to a cell grid.
 const SIGHT_CELLS: i32 = 8;
 
+/// A type's Sight value in whole cells: leptons divided by the 256 in a cell,
+/// never below one, so a type with a short sight still sees its own cell.
+fn sight_cells(leptons: i32) -> i32 {
+    (leptons / 256).max(1)
+}
+
 /// Drop a walk that is not moving, once; release it if the retry does not
 /// move either.
 ///
@@ -367,9 +373,9 @@ impl RetailBrain {
                 .ok()
                 .and_then(|raw| raw.trim().parse::<u64>().ok()),
             perception: crate::sim::control::perception::Perception::new(),
-            honest: std::env::var("AUTOPLAY_HONEST")
-                .ok()
-                .is_some_and(|raw| raw.trim() != "0" && !raw.trim().is_empty()),
+            // On by default: the house acts on what it can see and remember.
+            // AUTOPLAY_HONEST=0 restores the omniscient list for a comparison.
+            honest: std::env::var("AUTOPLAY_HONEST").map_or(true, |raw| raw.trim() != "0"),
         }
     }
 
@@ -475,12 +481,22 @@ impl Brain for RetailBrain {
         // own units stand in. The ring stands in for each type's Sight= until
         // the projection carries it; without it the switch reads an
         // unexplored map as an empty one and the house fights nobody.
-        let own: Vec<(u16, u16)> = self.census.units.iter().map(|unit| unit.cell).collect();
+        let own: Vec<((u16, u16), i32)> = self
+            .census
+            .units
+            .iter()
+            .map(|unit| {
+                (
+                    unit.cell,
+                    obs.object_type(rules, unit.type_id)
+                        .map_or(SIGHT_CELLS, |ty| sight_cells(ty.sight)),
+                )
+            })
+            .collect();
         let sight = |cell: (u16, u16)| {
             obs.is_cell_revealed(cell.0, cell.1)
-                || own.iter().any(|at| {
-                    i32::from(at.0.abs_diff(cell.0)).max(i32::from(at.1.abs_diff(cell.1)))
-                        <= SIGHT_CELLS
+                || own.iter().any(|(at, reach)| {
+                    i32::from(at.0.abs_diff(cell.0)).max(i32::from(at.1.abs_diff(cell.1))) <= *reach
                 })
         };
         self.perception
