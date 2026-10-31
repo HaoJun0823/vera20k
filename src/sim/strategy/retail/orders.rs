@@ -1465,19 +1465,19 @@ pub(super) fn transports(
         return;
     };
     let tick = obs.tick();
-    let carriers: Vec<(u64, (u16, u16))> = brain
-        .census
-        .units
-        .iter()
-        .filter(|unit| unit.orderable && !unit.hand && !unit.in_service())
-        .filter(|unit| {
-            obs.object_type(rules, unit.type_id).is_some_and(|ty| {
-                super::pilots::Pilot::of(rules, ty) == super::pilots::Pilot::Transport
+    let carriers: Vec<(u64, (u16, u16), i32)> =
+        brain
+            .census
+            .units
+            .iter()
+            .filter(|unit| unit.orderable && !unit.hand && !unit.in_service())
+            .filter_map(|unit| {
+                let ty = obs.object_type(rules, unit.type_id)?;
+                (super::pilots::Pilot::of(rules, ty) == super::pilots::Pilot::Transport)
+                    .then_some((unit.entity_id, unit.cell, ty.passengers))
             })
-        })
-        .map(|unit| (unit.entity_id, unit.cell))
-        .collect();
-    for (entity_id, cell) in carriers {
+            .collect();
+    for (entity_id, cell, _) in carriers.iter().copied() {
         let step = carrying_step(
             obs.passengers(entity_id),
             super::threats::distance(cell, deliver),
@@ -1500,6 +1500,101 @@ pub(super) fn transports(
             brain.tracked.void(entity_id, kind);
         }
     }
+    // An empty carrier asks one idle rifleman aboard; next frame it is loaded
+    // and the loop above takes it to the front.
+    board_idle(brain, rules, obs, out, &carriers, tick);
+}
+
+/// How near an idle rifleman has to be to an empty carrier to be asked aboard.
+const BOARD_CELLS: i32 = 3;
+
+/// Whether an empty carrier with room asks a rifleman standing this close
+/// aboard. One line, so the rule is testable without a match.
+pub(super) fn wants_board(capacity: i32, passengers: usize, distance: i32) -> bool {
+    capacity > 0 && passengers == 0 && distance <= BOARD_CELLS
+}
+
+/// Ask an idle soldier near an empty carrier aboard, one a frame.
+///
+/// This is the half of Transport measured harmful in 2026-10-28 (won 25636
+/// became 34897): a general boarding step sent units away from where they were
+/// needed. What is different here is who asks and who is asked - only an empty
+/// carrier within BOARD_CELLS, only a soldier with no order and no specialist
+/// job, one a frame - and the pass around it already delivers what it carries.
+/// It is still a behaviour change, so it is measured on the pinned seed rather
+/// than assumed.
+fn board_idle(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    out: &mut Outbox,
+    carriers: &[(u64, (u16, u16), i32)],
+    tick: u64,
+) -> bool {
+    for (carrier, cell, capacity) in carriers.iter().copied() {
+        if capacity <= 0 || obs.passengers(carrier) != 0 {
+            continue;
+        }
+        let Some(soldier) = brain
+            .census
+            .units
+            .iter()
+            .filter(|unit| unit.entity_id != carrier)
+            .filter(|unit| unit.orderable && !unit.hand && !unit.in_service())
+            .filter(|unit| unit.traits.combat && !unit.traits.engineer && !unit.traits.infiltrator)
+            .filter(|unit| !brain.tracked.held(tick, unit.entity_id))
+            .filter(|unit| {
+                obs.object_type(rules, unit.type_id).is_some_and(|ty| {
+                    // A rifleman is the Deploy pilot in the table (a G.I. digs
+                    // in), and he is exactly who a carrier should ask.
+                    matches!(
+                        super::pilots::Pilot::of(rules, ty),
+                        super::pilots::Pilot::Engage | super::pilots::Pilot::Deploy
+                    )
+                })
+            })
+            .filter(|unit| {
+                wants_board(
+                    capacity,
+                    obs.passengers(carrier),
+                    super::threats::distance(unit.cell, cell),
+                )
+            })
+            .min_by_key(|unit| (super::squared_distance(unit.cell, cell), unit.entity_id))
+        else {
+            continue;
+        };
+        let soldier_id = soldier.entity_id;
+        if !brain.tracked.admits(
+            tick,
+            soldier_id,
+            TrackedKind::Enter,
+            Some(carrier),
+            Some(cell),
+        ) {
+            continue;
+        }
+        brain.tracked.record(
+            tick,
+            soldier_id,
+            TrackedKind::Enter,
+            Some(carrier),
+            Some(cell),
+        );
+        log::debug!("auto play: {soldier_id} boards {carrier} at {cell:?}");
+        if issue(
+            brain,
+            out,
+            rules,
+            obs,
+            soldier_id,
+            Goal::Enter { target: carrier },
+        ) {
+            return true;
+        }
+        brain.tracked.void(soldier_id, TrackedKind::Enter);
+    }
+    false
 }
 
 /// Where a carrier should open: the push's target when there is one, else the
@@ -1522,6 +1617,17 @@ mod transport_tests {
         assert_eq!(carrying_step(0, 2), Carrying::Empty);
         assert_eq!(carrying_step(2, 30), Carrying::Advance);
         assert_eq!(carrying_step(2, 3), Carrying::Unload);
+    }
+
+    /// An empty carrier with room asks a soldier standing on it aboard, and
+    /// nobody else: a loaded carrier, one with no seats, and a soldier across
+    /// the yard are all no.
+    #[test]
+    fn boarding_is_only_for_an_empty_carrier_beside_a_soldier() {
+        assert!(wants_board(5, 0, 2));
+        assert!(!wants_board(5, 1, 2), "already carrying someone");
+        assert!(!wants_board(0, 0, 2), "no seats");
+        assert!(!wants_board(5, 0, 4), "too far to ask");
     }
 }
 
@@ -1741,6 +1847,38 @@ mod tests {
         );
         let gi = rules.object("E1").expect("a GI");
         assert!(is_combat_unit(&rules, gi), "a soldier is");
+    }
+
+    /// The boarding half of Transport, end to end: an empty carrier with an
+    /// idle rifleman beside it asks him aboard, and the soldier is the actor
+    /// of the order — the carrier drives, the passenger walks in.
+    #[test]
+    fn an_empty_carrier_asks_a_rifleman_aboard() {
+        let Some((mut sim, rules)) = snapshot(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        let carrier = sim
+            .spawn_object("SAPC", "Americans", 20, 20, 255, &rules)
+            .expect("an APC");
+        let gi = sim
+            .spawn_object("E1", "Americans", 21, 20, 255, &rules)
+            .expect("a rifleman");
+        sim.spawn_object("E1", "Russians", 28, 28, 255, &rules)
+            .expect("an enemy to walk at");
+        let mut brain = RetailBrain::new(0xA17);
+        let obs = Observation::new(&sim, owner);
+        brain.census.refresh(
+            &crate::rules::unit_role::RoleTable::build(&rules),
+            &rules,
+            &obs,
+        );
+        let mut out = Outbox::default();
+        transports(&mut brain, &rules, &obs, &mut out);
+        let boarded = out.orders.iter().any(|order| {
+            order.actor == gi && matches!(order.goal, Goal::Enter { target } if target == carrier)
+        });
+        assert!(boarded, "the rifleman is asked aboard: {:?}", out.orders);
     }
 
     /// One order per unit per frame. The outbox is applied in order and the
