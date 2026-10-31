@@ -530,10 +530,12 @@ Three invariants, and the migration that establishes them one slice at a time:
 | S5 | Capability tags and the pilot table | 1–3 unit-level tests per capability |
 | S6 | `--trace <id>`, behaviour fingerprints, golden replays | every change shows its diff |
 
-Status (2026-11-01): S0, S1, S2, S4 (advance), S5 (tables) and S6 (trace) are in the
-tree; S3 is a measurement so far — the census line now prints
-seen=<visible>/<all>, and on the pinned map it reads 0/19 to 2/32 through the
-opening, which is how much of the brain's picture a player cannot see. S4's
+Status (2026-11-01): S0, S1, S2, S3, S4 (advance + forces), S5 (tables) and S6 (trace) are in the
+tree; S3 is a working switch — AUTOPLAY_HONEST=1 makes the brain act on
+sightings and remembered sightings (with a term and no invented positions),
+while the default stays omniscient. The census line prints seen=<visible>/<all>;
+on the pinned map the omniscient run reads 0/19 to 2/32 through the opening,
+and the honest run reads 9/9, which is the gap a policy has to close. S4's
 forces pass is deliberately on the wider census set: wiring it to the army took
 the same match from a win at 23086 to a timeout, so the group's definition has
 one consumer at a time until the guards are part of it.
