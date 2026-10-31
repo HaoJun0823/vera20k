@@ -30,7 +30,7 @@ use crate::sim::production::ProductionCategory;
 
 use super::RetailBrain;
 use super::build;
-use super::census::{self, CHEAP_UNIT_CREDITS, Census, Slot, price_tier};
+use super::census::{self, Census, Slot, price_tier};
 use super::plan::Budget;
 
 /// The wallet the house wants in hand before it buys troops. Below it every
@@ -42,9 +42,25 @@ const COMBAT_MIN_CREDITS: i32 = 2_000;
 /// at the vehicle's floor the barracks never fires at all.
 const INFANTRY_MIN_CREDITS: i32 = 500;
 
-/// The wallet that decides how dear a band the house reaches for: under the
-/// first it buys cheap, past the second it buys the heavy end.
-const POOR_CREDITS: i32 = 1_200;
+/// The price of the cheapest line vehicle the house can build now.
+///
+/// Two questions read it, and they are the same question from two sides: what
+/// the barracks is saving the wallet for, and what the war factory has to be
+/// able to pay before it has anything to make. It is read from the rules
+/// rather than fixed at [`COMBAT_MIN_CREDITS`]: the fixed floor is the price
+/// of a *heavy* unit, and a war factory held to it makes nothing while the
+/// barracks spends every credit above its own floor — the army that is all
+/// infantry and never a tank. A side whose line tank is dearer than another's
+/// answers with its own price this way.
+fn line_vehicle_floor(rules: &RuleSet, obs: &Observation<'_>) -> Option<i32> {
+    build::class_types(rules, obs, ObjectCategory::Vehicle)
+        .filter(|(ty, _)| super::orders::is_combat_unit(rules, ty))
+        .map(|(ty, _)| obs.cost_of(rules, ty))
+        .min()
+}
+
+/// The wallet past which the house reaches for the heavy end; under it, one
+/// line unit's price is as far as it goes ([`unit_ceiling`]).
 const RICH_CREDITS: i32 = 4_000;
 
 /// The share of the fighting army that has to be infantry, in percent.
@@ -90,7 +106,23 @@ pub(super) fn fill_lines(
     // infantry and the wallet never reaches the price of one — which is the
     // "only ever infantry" army. Past the ceiling the barracks waits, unless
     // the house is rich enough that the vehicles are not being starved.
-    let infantry_full = infantry_above_ceiling(&brain.census) && budget.free < RICH_CREDITS;
+    //
+    // And only in the band of the wallet where a vehicle is actually
+    // affordable. The ceiling is there to save the wallet for a tank; saving
+    // it for a tank the line cannot yet pay for is a base producing nothing
+    // at all — the barracks waiting on the vehicle's floor and the war factory
+    // waiting on the same floor, both of them idle. So below that price the
+    // barracks keeps its own line running, and at it the wallet is the war
+    // factory's.
+    //
+    // The floor is one line vehicle's price, not a heavy unit's: held to the
+    // dearer number the barracks spent every credit above its own floor and the
+    // wallet never reached the price the war factory wanted — the army the
+    // play test reports as "only infantry and dogs, no tank all match".
+    let vehicle_floor = line_vehicle_floor(rules, obs).unwrap_or(COMBAT_MIN_CREDITS);
+    let infantry_full = infantry_above_ceiling(&brain.census)
+        && budget.free >= vehicle_floor
+        && budget.free < RICH_CREDITS;
     let order = if infantry_short {
         [
             ProductionCategory::Infantry,
@@ -120,7 +152,15 @@ pub(super) fn fill_lines(
         if brain.census.line(category).busy() {
             continue;
         }
-        let wanted = product_for(brain, rules, obs, &budget, category, infantry_short);
+        let wanted = product_for(
+            brain,
+            rules,
+            obs,
+            &budget,
+            category,
+            infantry_short,
+            vehicle_floor,
+        );
         queue_unit(rules, obs, &budget, out, wanted);
     }
 }
@@ -224,6 +264,7 @@ fn product_for<'r>(
     budget: &Budget,
     category: ProductionCategory,
     infantry_short: bool,
+    vehicle_floor: i32,
 ) -> Option<(&'r ObjectType, InternedId)> {
     // The house's own choice first: `HouseClass::Suggest_New_Object
     // 0x004FBD80` is where the native team data reaches production, and a team
@@ -244,6 +285,15 @@ fn product_for<'r>(
         {
             return Some(maker);
         }
+        // A maker bought while the yard stands is for a second base, not for the
+        // one that stands. The war factory spends one cycle on it, and it walks
+        // out and deploys where the house has ground of its own
+        // (`super::expand`).
+        if super::expand::wants_a_maker(brain, budget)
+            && let Some(maker) = super::expand::yard_maker(rules, obs)
+        {
+            return Some(maker);
+        }
         // A harvester first while the bays are short of them, but only one the
         // house can actually buy: a harvester that needs a bay the house has
         // not built (retail's `[CMIN] Prerequisite=GAWEAP,PROC`) must not hold
@@ -253,7 +303,11 @@ fn product_for<'r>(
         {
             return Some(found);
         }
-        if budget.free < COMBAT_MIN_CREDITS {
+        // The war factory waits for the price of one line vehicle, not a heavy
+        // one: below it there is nothing it could start, and above it the
+        // barracks has stopped spending the wallet it is waiting for
+        // (`fill_lines`).
+        if budget.free < vehicle_floor {
             return None;
         }
         // A naval type is a `Vehicle` in the rules, so the war factory has to
@@ -407,10 +461,19 @@ fn fighter<'r>(
     if let Some(need) = need {
         // The table is borrowed for the scoring pass only: the fallback below
         // reads the ledger, and one `&mut brain` cannot be both.
-        let mut best: Option<(f64, i32, &ObjectType, InternedId)> = None;
+        // How many of each candidate the house already holds, read before the
+        // role table is borrowed: `brain.roles` takes `&mut brain`, and the
+        // ledger is one of its fields.
+        let held: Vec<i32> = affordable
+            .iter()
+            .map(|(_, type_id, _)| {
+                i32::try_from(brain.census.type_count(*type_id)).unwrap_or(i32::MAX)
+            })
+            .collect();
+        let mut best: Option<(f64, i32, i32, &ObjectType, InternedId)> = None;
         {
             let roles = brain.roles(rules);
-            for (ty, type_id, cost) in affordable.iter().copied() {
+            for (index, (ty, type_id, cost)) in affordable.iter().copied().enumerate() {
                 let weights = roles.weights(&ty.id);
                 // **The biggest gap it closes**, not the sum of all of them: a
                 // type that answers four jobs a little is not four units, and
@@ -420,16 +483,24 @@ fn fighter<'r>(
                     .iter()
                     .map(|role| weights.get(*role) * f64::from(need[role.index()].min(GAP_CAP)))
                     .fold(0.0f64, f64::max);
+                // Between two types that close the same gap, the one the house
+                // holds fewest of. One gap, one answer, and the answer with the
+                // best score won every cycle for as long as the gap lasted —
+                // the war factory made twenty of the same tank while the gap
+                // that made it the answer was still there. The count is what
+                // the fallback below ranks by; using it here too is what makes
+                // the line rotate between the types that answer the job.
+                let held = held[index];
                 // Within the same answer, the cheaper type: a gap is closed by
                 // one unit whether it costs 200 or 900.
-                if best.is_none_or(|(held_score, held_cost, _, _)| {
-                    (score, -cost) > (held_score, held_cost)
+                if best.is_none_or(|(held_score, held_held, held_cost, _, _)| {
+                    (score, -held, -cost) > (held_score, held_held, held_cost)
                 }) {
-                    best = Some((score, -cost, ty, type_id));
+                    best = Some((score, -held, -cost, ty, type_id));
                 }
             }
         }
-        if let Some((score, _, ty, type_id)) = best
+        if let Some((score, _, _, ty, type_id)) = best
             && score > 0.0
         {
             return Some((ty, type_id));
@@ -476,9 +547,11 @@ fn slot_category(category: ObjectCategory) -> Slot {
 /// the middle while it is solvent, anything once it is rich — and never more
 /// than it holds.
 fn unit_ceiling(credits: i32) -> i32 {
-    let band = if credits < POOR_CREDITS {
-        CHEAP_UNIT_CREDITS
-    } else if credits < RICH_CREDITS {
+    // One band under the rich one, not two. The cheap band is the price of a
+    // soldier, and a wallet holding one line tank's price was read as "not
+    // enough for a vehicle" — the war factory answered nothing while the
+    // credits for exactly the tank it should have made sat in the wallet.
+    let band = if credits < RICH_CREDITS {
         census::MID_UNIT_CREDITS
     } else {
         i32::MAX
@@ -874,6 +947,79 @@ mod tests {
         );
     }
 
+    /// The same army with a wallet the war factory cannot reach keeps the
+    /// barracks turning.
+    ///
+    /// The ceiling is there to save the wallet for a tank. Saving it for a
+    /// tank the line cannot pay for is a base producing nothing at all: the
+    /// barracks waiting out its ceiling and the war factory waiting out the
+    /// vehicle's price, both idle. The ceiling only bites at the price of one
+    /// line vehicle, and under it the barracks keeps its own line running.
+    #[test]
+    fn a_barracks_keeps_turning_while_the_wallet_is_below_the_war_factory() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        for (name, cell) in [
+            ("GACNST", (16u16, 16u16)),
+            ("GAPOWR", (12, 16)),
+            ("GAPILE", (20, 16)),
+            ("GAWEAP", (24, 16)),
+            ("CMIN", (28, 16)),
+            ("CMIN", (30, 16)),
+        ] {
+            sim.spawn_object(name, "Americans", cell.0, cell.1, 255, &rules)
+                .unwrap_or_else(|| panic!("{name}"));
+        }
+        for index in 0..6u16 {
+            sim.spawn_object("E1", "Americans", 20 + index, 24, 255, &rules)
+                .expect("a soldier");
+        }
+        let obs = Observation::new(&sim, owner);
+        let floor = line_vehicle_floor(&rules, &obs).expect("the side has a line vehicle");
+        let under = floor
+            .saturating_sub(100)
+            .max(INFANTRY_MIN_CREDITS);
+        sim.houses
+            .get_mut(&owner)
+            .expect("the house")
+            .economy_mut()
+            .set_credits_for_test(under);
+
+        let mut brain = RetailBrain::new(0xA17);
+        brain.census = ledger(&rules, &sim, owner);
+        let obs = Observation::new(&sim, owner);
+        let mut out = Outbox::default();
+        let budget = Budget {
+            committed: 0,
+            free: obs.credits(),
+            income: None,
+        };
+        assert!(
+            budget.free < floor,
+            "the war factory cannot buy: {budget:?} against {floor}"
+        );
+        fill_lines(&mut brain, &rules, &obs, &budget, &mut out);
+
+        let queued: Vec<&str> = out
+            .intents
+            .iter()
+            .filter_map(|intent| match intent {
+                Intent::QueueProduction { type_id } => Some(sim.interner().resolve(*type_id)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            queued.iter().any(|name| rules
+                .object(name)
+                .expect("a rules type")
+                .category
+                == ObjectCategory::Infantry),
+            "the base does not stand idle: {queued:?}"
+        );
+    }
+
     /// A house with no dog makes one, before it makes anything else.
     ///
     /// The dog is the cheapest pair of eyes the house has and the only early
@@ -984,5 +1130,64 @@ mod tests {
         let (ty, _) = tool(&rules, &obs, &census, 100_000)
             .expect("the infantry line still has a tool to make");
         assert!(ty.agent, "the tool is a spy, not {}", ty.id);
+    }
+
+    /// A wallet holding one line tank's price starts the war factory.
+    ///
+    /// Both numbers used to be the heavy unit's: the ceiling answered "cheap
+    /// only" under 1,200 and the line waited for 2,000, so the wallet the tank
+    /// needed was spent on soldiers a barracks-length earlier and never got
+    /// there. The measured match is an army of infantry and dogs, no tank at
+    /// all, and a bank that grew while nothing bought vehicles with it.
+    #[test]
+    fn a_wallet_holding_one_tank_starts_the_war_factory() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        for (name, cell) in [
+            ("GACNST", (16u16, 16u16)),
+            ("GAPILE", (20, 16)),
+            ("GAWEAP", (24, 16)),
+        ] {
+            sim.spawn_object(name, "Americans", cell.0, cell.1, 255, &rules)
+                .unwrap_or_else(|| panic!("{name}"));
+        }
+        sim.houses
+            .get_mut(&owner)
+            .expect("the house")
+            .economy_mut()
+            .set_credits_for_test(800);
+
+        let mut brain = RetailBrain::new(0xA17);
+        brain.census = ledger(&rules, &sim, owner);
+        // The trucks are not this test's question, and a house short of them
+        // is asked for another one before anything else.
+        brain.census.harvesters = 2;
+        brain.census.refineries = 1;
+        let obs = Observation::new(&sim, owner);
+        let mut out = Outbox::default();
+        let budget = Budget {
+            committed: 0,
+            free: obs.credits(),
+            income: None,
+        };
+        assert_eq!(budget.free, 800, "one line tank's price, not a heavy one's");
+        fill_lines(&mut brain, &rules, &obs, &budget, &mut out);
+
+        let queued: Vec<&str> = out
+            .intents
+            .iter()
+            .filter_map(|intent| match intent {
+                Intent::QueueProduction { type_id } => Some(sim.interner().resolve(*type_id)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            queued.iter().any(|name| rules
+                .object(name)
+                .is_some_and(|ty| ty.category == ObjectCategory::Vehicle)),
+            "the war factory has something it can pay for: {queued:?}"
+        );
     }
 }

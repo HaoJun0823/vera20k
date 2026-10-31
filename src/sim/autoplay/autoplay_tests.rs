@@ -18,6 +18,7 @@ use crate::sim::control::external::{
 };
 use crate::sim::control::observation::Observation;
 use crate::sim::intern::InternedId;
+use crate::sim::mission::{MissionId, MissionType};
 use crate::sim::strategy::retail::RetailBrain;
 use crate::sim::world::Simulation;
 
@@ -1120,6 +1121,54 @@ fn the_order_funnel_refuses_an_absent_actor_and_names_a_present_one() {
         Ok(Command::Stop { entity_id: tank })
     );
     assert!(funnel.owns(tank));
+}
+
+/// `Ready_To_Commence` answers whether the mission may be *written* now, and
+/// the MEGAMISSION family never writes one: `EventClass::Execute`'s arm queues
+/// at `0x004C73B9` and promotes at the object's own AI slot. Gating that family
+/// on readiness made a walking unit unreachable — the retail brain could not
+/// pull it out of its walk, so a unit passed every enemy in reach without being
+/// told to fight it, and the brain asked again on every frame of the walk.
+#[test]
+fn a_unit_that_is_not_ready_still_takes_the_commands_that_queue() {
+    let rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
+        "[Countries]\n0=Americans\n[VehicleTypes]\n0=MTNK\n\
+         [MTNK]\nStrength=200\nSpeed=5\nSpeedType=Track\nMovementZone=Normal\n\
+         Armor=none\nLocomotor={4A582741-9839-11d1-B709-00A024DDAFD1}\n",
+    ))
+    .expect("tank rules");
+    let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xB0B);
+    sim.intern_rule_type_ids(&rules);
+    sim.resolve_type_handles(&rules);
+    let owner = american(&mut sim);
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 16, 16, 64, &rules)
+        .expect("an American tank");
+    // `Sticky` is never ready: the answer is false before any world lookup.
+    let now = sim.session().binary_frame();
+    sim.substrate
+        .mission_assign_exact(tank, MissionId::from_known(MissionType::Sticky), now)
+        .expect("a unit takes Sticky");
+    assert!(
+        !sim.mission_ready_to_commence(tank, &rules),
+        "the fixture object is mid-transition"
+    );
+
+    let funnel = Funnel::new(&sim, &rules, owner);
+    assert_eq!(
+        funnel.prepare(tank, Goal::Move { cell: (20, 16) }),
+        Ok(Command::Move {
+            entity_id: tank,
+            target_rx: 20,
+            target_ry: 16
+        }),
+        "the march queues and is taken"
+    );
+    assert_eq!(
+        funnel.prepare(tank, Goal::Deploy),
+        Err(Refusal::NotReady),
+        "a direct write still waits for the object"
+    );
 }
 
 #[test]

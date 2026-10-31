@@ -227,15 +227,17 @@ pub(super) const STEPS: &[Step] = &[
         want: 1,
         gate: Gate::Always,
     },
-    // The first production building, before the income: it is the cheaper of
-    // the two, and it is what an engineer come out of — a captured oil derrick
-    // is the one income that costs no harvester — and what a dog comes out of.
+    // The soldiers first: the barracks is the cheaper of the two, it is what a
+    // dog comes out of — the only early answer to an enemy engineer walking
+    // into the base — and it is what an engineer comes out of, and an engineer
+    // is the one unit that pays for itself on the map's own buildings.
     Step {
         item: Item::Barracks,
         want: 1,
         gate: Gate::Always,
     },
-    // Income. The first bay is what an opening is made of.
+    // Then the income. A bay with a truck at it is the whole of what the house
+    // earns, and every step below this one is paced by the wallet.
     Step {
         item: Item::Refinery,
         want: 1,
@@ -469,8 +471,10 @@ fn open(
         // before it unlocks the tree is a house that pays for the whole army
         // with the opening's tech level. `build_next` already refuses a
         // structure the wallet cannot cover, and the threshold here is the
-        // dearest thing the stage buys ([`build::TECH_MIN_CREDITS`]).
-        Gate::Tech => budget.free >= build::TECH_MIN_CREDITS,
+        // cheapest thing the stage buys ([`build::TECH_START_CREDITS`]): the
+        // stage is decided there, and what it still needs is held back from
+        // the lines rather than waited for.
+        Gate::Tech => budget.free >= build::TECH_START_CREDITS,
     }
 }
 

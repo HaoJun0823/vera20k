@@ -33,6 +33,13 @@
 //!   has no retreat, no regrouping and no wave timing, so a push that is
 //!   losing keeps going. Each unit's actual fight is the sim's `AttackMove`
 //!   and `Guard`.
+//! - The detour ([`avoidance`]) is two legs of geometry, not a path search: it
+//!   does not know a wall, so a corner behind one is refused and the unit walks
+//!   its march instead, and with no gap between two guns it stands at the edge
+//!   of the nearer one rather than finding a way through. The local fight it
+//!   weighs is a sum of `Strength=`, so armour, warheads and what a turret can
+//!   bring to bear are not in the comparison. Aircraft and dug-in units are
+//!   left out: neither walks a route this pass could change.
 //! - Who fights, measured (`autoplay-match --dump-teams`, pinned
 //!   `Death.mmx`/`0x5eed`): this house never has a native `TeamClass` at all —
 //!   `HouseClass::Update`'s team block is gated on the house not being human
@@ -78,13 +85,15 @@
 //! - A yard rebuilt from a bought MCV is not defended differently from the
 //!   first one, and the brain does not repair a damaged structure, so a raid
 //!   that reaches the base can take it a second time.
-//! - A hurt unit is walked to the post and **stays hurt there**. Repairing a
-//!   vehicle is a docking service — the unit enters a `UnitRepair=` bay and
-//!   pays to be healed — and the automatic seek that drives a computer house's
-//!   vehicle to one is gated on the house being a computer
-//!   (`sim::world::unit_repair_seek`). So the retreat takes the unit out of the
-//!   fight and never puts it back: standing on the depot's cell is not the same
-//!   as entering it. Portable as its own chain.
+//! - A hurt unit reaching a `UnitRepair=` bay is now the bay's: the retreat
+//!   clicks it (Enter on the building, the player's own order) instead of
+//!   walking at its cell, so the dock, the paid heal and the release are the
+//!   sim's own chain. What is still ours is the judgement around it: the unit
+//!   is held out of the push while it is under a third of its strength, and the
+//!   bay's release walks it out on
+//!   its own (`building_dock::release_contact`), so a unit healed back over the
+//!   line is simply read as healthy next frame. Nothing re-forms it into a
+//!   squad; the squads regroup on their own term.
 //! - With no building left standing, `advance` has no base centre to measure,
 //!   and reads the house as not under threat, so the push runs: an army is the
 //!   only thing such a house has. What it does not do is rebuild — the maker
@@ -92,6 +101,7 @@
 //!   [`expand`] cannot run without a factory to buy it from.
 
 pub(super) mod advance;
+pub(super) mod avoidance;
 pub(super) mod build;
 pub(super) mod census;
 pub(super) mod composition;
@@ -117,6 +127,68 @@ use crate::sim::rng::SimRng;
 
 use census::Census;
 use tracked::Tracker;
+
+/// How long a unit may hold a walk without changing cell before the brain
+/// decides the walk is not going anywhere, in frames. Twelve seconds: long
+/// enough that a unit waiting at a corner or a bay is not re-tasked, short
+/// enough that a loop is broken before it is visible.
+const STUCK_FRAMES: u64 = 180;
+
+/// Drop a walk that is not moving, once; release it if the retry does not
+/// move either.
+///
+/// Only units on the `Move` mission are offered here. A guard, a capture, a
+/// repair or a deployed unit is deliberately stationary and is not this
+/// check's business — treating them as stuck is what releases an army that
+/// was holding its ground. A cell that changes resets the term, so a unit
+/// walking a long way is never touched.
+fn sweep_stuck(
+    now: u64,
+    units: &[(u64, (u16, u16))],
+    tracked: &mut Tracker,
+    progress: &mut BTreeMap<u64, (u64, (u16, u16))>,
+    stuck_retried: &mut BTreeSet<u64>,
+) {
+    const KINDS: &[tracked::TrackedKind] = &[
+        tracked::TrackedKind::Move,
+        tracked::TrackedKind::AttackMove,
+        tracked::TrackedKind::Avoid,
+        tracked::TrackedKind::Breach,
+    ];
+    let live: BTreeSet<u64> = units.iter().map(|(id, _)| *id).collect();
+    progress.retain(|id, _| live.contains(id));
+    stuck_retried.retain(|id| live.contains(id));
+    for &(id, cell) in units {
+        let Some(&(since, was)) = progress.get(&id) else {
+            progress.insert(id, (now, cell));
+            continue;
+        };
+        if was != cell {
+            progress.insert(id, (now, cell));
+            stuck_retried.remove(&id);
+            continue;
+        }
+        if !tracked.stands(now, id, KINDS) {
+            continue;
+        }
+        if now.saturating_sub(since) < STUCK_FRAMES {
+            continue;
+        }
+        for kind in KINDS {
+            tracked.void(id, *kind);
+        }
+        if stuck_retried.contains(&id) {
+            for kind in KINDS {
+                tracked.refuse(now, id, *kind);
+            }
+            stuck_retried.remove(&id);
+            log::info!("auto play: unit {id} made no progress at {cell:?}; released");
+        } else {
+            stuck_retried.insert(id);
+        }
+        progress.insert(id, (now, cell));
+    }
+}
 
 /// Squared cell distance: comparisons only, so the square root is not needed.
 ///
@@ -158,6 +230,10 @@ pub struct RetailBrain {
     /// cell, by type: a cell the gate admits but the receiver refuses must
     /// not be asked for again.
     pub(super) site_attempts: BTreeMap<InternedId, u32>,
+    /// Types the map has no cell for after every placement attempt. They stay
+    /// in the factory, but they must not hold the rest of the queue behind
+    /// them.
+    pub(super) stranded_sites: BTreeSet<InternedId>,
     /// The entry of the build list the house has decided on, as its index in
     /// [`plan::STEPS`], and the frame the decision may be re-made: the house
     /// saves for what it chose instead of spending the savings on whichever
@@ -200,6 +276,32 @@ pub struct RetailBrain {
     /// reading of the house's own books, kept here because the brain is the
     /// only thing that asks how fast the house is earning.
     income: plan::IncomeMeter,
+    /// Where the avoidance sweep starts in the ledger next frame. That pass may
+    /// only look at part of the army per frame, and the ledger's order does not
+    /// change between frames, so without a cursor the units at its end would
+    /// never be looked at at all.
+    pub(super) avoid_cursor: usize,
+    /// The frame `think` last ran on.
+    ///
+    /// Refusals arrive after `think` returns, and a refused command has to be
+    /// stamped with the frame it was asked on so the intent table can leave it
+    /// alone for its own cool-off instead of the layer re-asking it every
+    /// frame.
+    last_tick: u64,
+    /// Where each eligible unit was last seen, for the no-progress check.
+    progress: BTreeMap<u64, (u64, (u16, u16))>,
+    /// Units already re-tasked once for standing still.
+    stuck_retried: BTreeSet<u64>,
+    /// Cells an unarmed unit found closed, and the frame each request stands
+    /// until, in `(cell, until)` order.
+    ///
+    /// Kept across frames because the gun that opens a gate is rarely free the
+    /// frame the engineer finds it: the helper that answered this frame's
+    /// request is one unit with its own order, and a request that lives only
+    /// one frame is a request the engineer has to run into again — which is the
+    /// "the gate takes forever to open" report. Each request expires on its own
+    /// frame, so a wall nobody can open is not asked for forever.
+    pub(super) breaches: Vec<((u16, u16), u64)>,
 }
 
 impl RetailBrain {
@@ -211,6 +313,7 @@ impl RetailBrain {
             tracked: Tracker::new(),
             squads: squads::Squads::new(),
             site_attempts: BTreeMap::new(),
+            stranded_sites: BTreeSet::new(),
             plan_hold: None,
             wall_type: None,
             yard_reserve: 0,
@@ -220,6 +323,11 @@ impl RetailBrain {
             census: Census::default(),
             super_at: BTreeMap::new(),
             income: plan::IncomeMeter::new(),
+            avoid_cursor: 0,
+            last_tick: 0,
+            progress: BTreeMap::new(),
+            stuck_retried: BTreeSet::new(),
+            breaches: Vec::new(),
         }
     }
 
@@ -243,6 +351,56 @@ impl RetailBrain {
             return;
         };
         census.refresh(roles, rules, obs);
+        // Where the army gathers is beside the base, not inside it: the anchor
+        // is the yard's own cell and the yard has no lane into it.
+        census.rally = census
+            .base_cell
+            .and_then(|anchor| census::rally_near(obs, anchor, &census.home_cells));
+    }
+
+    /// Drop the movement and fight intents the object's own mission no longer
+    /// shows.
+    ///
+    /// The intent table answers "does it need telling", and it was answering
+    /// from its own record alone: a unit that finished the attack it was sent
+    /// on sat with a live [`TrackedKind::Attack`] for the rest of the 450-frame
+    /// term — the push skips it because the intent stands, the area-guard step
+    /// is skipped because the push owns the army, and the unit does nothing at
+    /// all. The mission is the world's answer to whether the order took, so the
+    /// two are compared once, here, before any layer reads the record.
+    ///
+    /// [`MissionId::effective`] is the mission the object is on *or is queued
+    /// onto*: a walk that has an Attack queued behind it is already the attack's
+    /// and is not voided out from under itself.
+    ///
+    /// Capture and Enter are deliberately not here. Both have a receiver that
+    /// can break the visit off (a full depot, a building that stopped being
+    /// occupiable) while leaving the unit on its feet, and neither has a way to
+    /// tell that from an order that landed — voiding them would re-ask every
+    /// frame, which is the storm this whole change is meant to end. Their own
+    /// 300-frame term is the throttle, and `orders_refused` already drops the
+    /// ones the click refuses.
+    fn void_orders_the_world_does_not_show(&mut self) {
+        use crate::sim::mission::{MissionId, MissionType};
+
+        let Self { census, tracked, .. } = self;
+        let attack = MissionId::from_known(MissionType::Attack);
+        let move_mission = MissionId::from_known(MissionType::Move);
+        for unit in &census.units {
+            let mission = unit.mission;
+            // The fight is over: whoever sent it, a unit no longer on Attack
+            // is free to be aimed again.
+            if mission != attack {
+                tracked.void(unit.entity_id, tracked::TrackedKind::Attack);
+                tracked.void(unit.entity_id, tracked::TrackedKind::Engage);
+            }
+            // The march is over. An attack-move is a march with its gun up, so
+            // both are held by the same two missions.
+            if mission != attack && mission != move_mission {
+                tracked.void(unit.entity_id, tracked::TrackedKind::Move);
+                tracked.void(unit.entity_id, tracked::TrackedKind::AttackMove);
+            }
+        }
     }
 
     /// This brain's own draw, for the native decisions it asks.
@@ -258,11 +416,16 @@ impl Brain for RetailBrain {
     }
 
     fn think(&mut self, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
+        self.last_tick = obs.tick();
         // One pass over the house's objects and factories, before any decision
         // asks a question about them. Every step below reads this ledger rather
         // than walking the entity store again.
         self.income.sample(obs.tick(), obs.earned());
         self.rebuild_census(rules, obs);
+        // Before anything decides: an intent the object's own mission no longer
+        // shows is an intent that did not take, and the layers below must be
+        // free to ask again now rather than on its term.
+        self.void_orders_the_world_does_not_show();
         // What each unit is *for*, before anything decides what it does: the
         // membership is rebuilt on its own term, not every frame.
         self.squads.regroup(obs.tick(), &self.census);
@@ -289,7 +452,7 @@ impl Brain for RetailBrain {
         // step's: the attach rides the same outbox as the orders below, and
         // the control layer drops this brain's order for an object a routine
         // has just taken.
-        orders::managed(self, obs.tick(), out);
+        orders::managed(self, rules, obs, obs.tick(), out);
         // A building under fire is worth less than the next one the yard makes,
         // and the wrench is the only thing that keeps it: it is a house-scoped
         // click, so it is asked before the units take their frame.
@@ -317,11 +480,22 @@ impl Brain for RetailBrain {
         // hostile in reach outranks a walk towards a target, and this is the
         // only layer that asks.
         micro::run(self, rules, obs, out);
+        // And what it walks into: a walk towards a target the unit would lose
+        // against is re-aimed around it, after the fight in reach has had its
+        // say and before the march decides the same unit's destination.
+        avoidance::run(self, rules, obs, out);
         // A house that is pushing owns its whole army for the frame; one that
         // is not keeps holding its base.
         if !advance::advance(self, rules, obs, out) {
             orders::forces(self, rules, obs, out);
         }
+        // Harvesters are not combat units and no army layer takes them: a
+        // harvester that rolled out of a factory sits on its birth posture
+        // until something puts it on the ore.
+        orders::harvesters(self, rules, obs, out);
+        // Last of the orders that move a unit, because a crate is a bonus and
+        // not a job: only a scout no step above has spoken for walks to one.
+        orders::crates(self, rules, obs, out);
         // Last, because it is a pose and not a destination: a soldier takes its
         // deployed position where the orders above have left it, and the toggle
         // is issued on the edge only.
@@ -331,7 +505,13 @@ impl Brain for RetailBrain {
     fn orders_refused(&mut self, refused: &[(u64, Goal)]) {
         for (actor, goal) in refused {
             for kind in tracked::kinds_for(*goal) {
+                // The record goes, so the intent itself can be decided again —
+                // but the refusal leaves a short term behind it. Without the
+                // term the layer re-decides from the unchanged world on the
+                // next frame and asks again, once per frame, for as long as the
+                // refusal stands.
                 self.tracked.void(*actor, *kind);
+                self.tracked.refuse(self.last_tick, *actor, *kind);
             }
         }
     }
@@ -341,13 +521,18 @@ impl Brain for RetailBrain {
 mod tests {
     use super::*;
 
+    use super::tracked::TrackedKind;
     use crate::sim::control::Goal;
+    use crate::sim::mission::MissionType;
 
     /// An order the gate dropped must not silence the unit for the intent's
-    /// term. The frame admits eight commands; an army of a hundred asks for more
-    /// than that every frame, and the orders it loses are the ones the tracker
-    /// has already promised — 450 frames of a unit standing still while its
-    /// brain believes it is marching.
+    /// term. The frame admits eight commands; an army of a hundred asks for
+    /// more than that every frame, and the orders it loses are the ones the
+    /// tracker has already promised — 450 frames of a unit standing still
+    /// while its brain believes it is marching. It must not be re-asked on the
+    /// very next frame either: a refusal that never changed the world produces
+    /// the same order again, once per frame, which is the command storm. The
+    /// refusal is therefore retried on its own short term.
     #[test]
     fn a_refused_order_frees_the_unit_to_be_told_again() {
         let mut brain = RetailBrain::new(0xA17);
@@ -368,17 +553,88 @@ mod tests {
         brain.orders_refused(&[(7, Goal::Move { cell: (20, 20) })]);
 
         assert!(
-            brain
+            !brain
                 .tracked
                 .admits(1, 7, tracked::TrackedKind::Move, None, Some((20, 20))),
-            "an order that never left leaves nothing to wait for"
+            "a refusal is not retried on the very next frame"
         );
+        assert!(
+            brain
+                .tracked
+                .admits(31, 7, tracked::TrackedKind::Move, None, Some((20, 20))),
+            "and is retried once the refusal has cooled off"
+        );
+    }
+
+    /// A unit whose attack is over is free again. The table used to believe its
+    /// own `Attack` record for the whole 450-frame term, and the push skips a
+    /// unit whose intent still stands (`admits`), so a fighter that finished
+    /// what it was sent at stood in the field doing nothing until the term ran
+    /// out — the "it killed the target and then idled" the play test reports.
+    #[test]
+    fn an_attack_the_unit_has_finished_is_not_still_standing() {
+        let mut brain = RetailBrain::new(0xA17);
+        brain
+            .tracked
+            .record(0, 7, TrackedKind::Attack, Some(9), Some((10, 10)));
+        brain
+            .tracked
+            .record(0, 8, TrackedKind::Attack, Some(9), Some((10, 10)));
+        // 7 came off the attack; 8 is still on it.
+        brain
+            .census
+            .units
+            .push(census_unit(7, MissionType::Guard));
+        brain
+            .census
+            .units
+            .push(census_unit(8, MissionType::Attack));
+        assert!(
+            !brain
+                .tracked
+                .admits(1, 7, TrackedKind::Attack, Some(9), Some((10, 10))),
+            "the record stands until the world says otherwise"
+        );
+
+        brain.void_orders_the_world_does_not_show();
+
+        assert!(
+            brain
+                .tracked
+                .admits(1, 7, TrackedKind::Attack, Some(9), Some((10, 10))),
+            "a finished attack is not an order that still stands"
+        );
+        assert!(
+            !brain
+                .tracked
+                .admits(1, 8, TrackedKind::Attack, Some(9), Some((10, 10))),
+            "the unit still on Attack is left to its mission"
+        );
+    }
+
+    /// One ledger row for the intent tests: no type, no traits, just the
+    /// mission the comparison is about.
+    fn census_unit(entity_id: u64, mission: MissionType) -> census::Unit {
+        census::Unit {
+            entity_id,
+            type_id: crate::sim::intern::InternedId::default(),
+            cell: (10, 10),
+            health_permille: 1000,
+            points: 0,
+            mission: crate::sim::mission::MissionId::from_known(mission),
+            orderable: true,
+            hand: false,
+            slot: census::Slot::Vehicle,
+            tier: 0,
+            traits: census::Traits::default(),
+        }
     }
 
     /// The other half: a refusal names a goal, and only the intent that goal was
     /// recorded as is dropped. `Goal::Attack` is both the micro layer's `Engage`
     /// and the squad's `Attack`, so the refusal drops whichever one this unit
-    /// actually holds and leaves everything else alone.
+    /// actually holds and leaves everything else alone. The dropped kind is
+    /// retried on the refusal's short term, not on the next frame.
     #[test]
     fn a_refused_attack_does_not_drop_an_unrelated_intent() {
         let mut brain = RetailBrain::new(0xA17);
@@ -392,10 +648,16 @@ mod tests {
         brain.orders_refused(&[(7, Goal::Attack { target: 9 })]);
 
         assert!(
-            brain
+            !brain
                 .tracked
                 .admits(1, 7, tracked::TrackedKind::Engage, Some(9), Some((5, 5))),
-            "the engaged unit is free again"
+            "the refusal is not retried on the next frame"
+        );
+        assert!(
+            brain
+                .tracked
+                .admits(31, 7, tracked::TrackedKind::Engage, Some(9), Some((5, 5))),
+            "the engaged unit is free again once the refusal cools off"
         );
         assert!(
             !brain
@@ -404,4 +666,5 @@ mod tests {
             "another unit's capture walk is untouched"
         );
     }
+
 }

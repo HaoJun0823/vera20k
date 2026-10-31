@@ -127,6 +127,40 @@ impl Line {
     }
 }
 
+/// The nearest cell beside the base an object can stand on: outside the
+/// anchor's own foundation, on ground a unit can walk, and not a cell one of
+/// the house's buildings sits on.
+///
+/// The rings are walked outwards and the first admissible cell in the fixed
+/// ring order wins, so the answer is the same every frame and does not depend
+/// on what the entity store happens to yield.
+pub(super) fn rally_near(
+    obs: &Observation<'_>,
+    anchor: (u16, u16),
+    home: &[(u16, u16)],
+) -> Option<(u16, u16)> {
+    for ring in 2i32..=4 {
+        for dy in -ring..=ring {
+            for dx in -ring..=ring {
+                if dx.abs().max(dy.abs()) != ring {
+                    continue;
+                }
+                let (Some(rx), Some(ry)) = (
+                    u16::try_from(i32::from(anchor.0) + dx).ok(),
+                    u16::try_from(i32::from(anchor.1) + dy).ok(),
+                ) else {
+                    continue;
+                };
+                if !obs.is_ground_walkable(rx, ry) || home.contains(&(rx, ry)) {
+                    continue;
+                }
+                return Some((rx, ry));
+            }
+        }
+    }
+    None
+}
+
 /// What a type is, to the decisions that count it. Resolved once per unit
 /// while the ledger is built, so no decision has to re-open the rules.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -246,6 +280,11 @@ impl Traits {
             .flatten()
             .filter(|slot| ty.weapon_at(*slot).is_some());
         Self {
+            // `spawned` is the controllability tag, and it has to be here as
+            // well as on the ledger: a cargo plane carries a dummy `Primary=`
+            // and answers every other test as army, so without it the brain
+            // hands the paradrop's own plane a combat order, the plane's
+            // mission is rewritten mid-drop, and the drop never lands.
             combat: matches!(
                 ty.category,
                 ObjectCategory::Infantry | ObjectCategory::Vehicle | ObjectCategory::Aircraft
@@ -255,6 +294,7 @@ impl Traits {
                 && !ty.harvester
                 && !ty.resource_gatherer
                 && !carries
+                && !ty.spawned
                 && !ty
                     .deploys_into
                     .as_deref()
@@ -307,6 +347,45 @@ pub(super) struct Unit {
     pub(super) traits: Traits,
 }
 
+impl Unit {
+    /// The mission owns this unit's destination: a garrison, a depot visit, a
+    /// repair job or a sabotage is under way, current or queued.
+    ///
+    /// A movement or kite layer that orders a `Move` over one of these clears
+    /// the nav list, and the mission does not put it back — `mission_capture`
+    /// only re-aims when `NavCom` is empty, and `NavCom` is now a cell. That is
+    /// the walk-in that "took the command" and then stood at the wall, and the
+    /// depot visit that ends at the fence.
+    /// Whether the brain may order this unit at all: the world takes an order
+    /// for it, the player is not steering it, and no other object made it.
+    ///
+    /// The last clause is the controllability tag every layer needs: a
+    /// paradrop's cargo plane, a carrier's Hornet and a V3's missile carry
+    /// `Spawned=yes` and are driven by the object that made them, so an order
+    /// from here does not steer them — it derails them. Read it instead of
+    /// restating two of the three tests at each call site.
+    pub(super) fn controllable(&self) -> bool {
+        self.orderable && !self.hand && !self.traits.spawned
+    }
+
+    pub(super) fn in_service(&self) -> bool {
+        use crate::sim::mission::MissionType;
+        // `Sleep` is not one of them: it is the mission a freshly created
+        // object carries before its first AI slot, so including it would take
+        // every idle unit out of the kite and dodge passes. A docked unit is
+        // held by the retreat's own `tracked.hold` instead.
+        matches!(
+            self.mission.known(),
+            Some(
+                MissionType::Capture
+                    | MissionType::Enter
+                    | MissionType::Repair
+                    | MissionType::Sabotage
+            )
+        )
+    }
+}
+
 /// The house's assets for one frame.
 #[derive(Debug, Default)]
 pub(super) struct Census {
@@ -317,17 +396,34 @@ pub(super) struct Census {
     pub(super) lines: [Line; 6],
     pub(super) units: Vec<Unit>,
     pub(super) enemies: Vec<EnemyEntity>,
+    /// Neutral and civilian buildings: nobody's, so they are in no enemy list,
+    /// but they are ground the army walks into. What may be shot out of the way
+    /// is decided where the walking happens.
+    pub(super) neutrals: Vec<EnemyEntity>,
     /// Cells of the house's own buildings: the yard, the plants, the
     /// factories, the defenses.
     pub(super) home_cells: Vec<(u16, u16)>,
     /// The base's anchor: the yard when one stands, otherwise whatever building
     /// the house still has.
     pub(super) base_cell: Option<(u16, u16)>,
+    /// Where the army gathers, and what a hurt unit walks home to when the
+    /// house has no `UnitRepair=` bay: a cell **beside** the base.
+    ///
+    /// The anchor is the yard's own cell, and the yard is a 3x3 foundation with
+    /// no lane into it, so a retreat told to walk there spends the whole
+    /// retreat running around the outside of its own base and arrives where it
+    /// started — the unit that "returned to base" and then paced inside it.
+    pub(super) rally: Option<(u16, u16)>,
     /// The cell of the house's `UnitRepair=` building, when one stands: where a
     /// hurt vehicle goes back to. The post a retreat walks to, instead of the
     /// yard — a unit that walks home from a fight and stands there is a unit the
     /// house paid for and cannot use.
     pub(super) repair_cell: Option<(u16, u16)>,
+    /// The first `UnitRepair=` building itself, so the retreat can click it
+    /// rather than walk at its cell: entering the bay is an Enter order on the
+    /// building (`FootClass::ClickedAction`'s depot arm), and a cell cannot be
+    /// entered.
+    pub(super) repair_building: Option<u64>,
     pub(super) harvesters: usize,
     pub(super) refineries: usize,
     pub(super) yards: usize,
@@ -446,8 +542,10 @@ impl Census {
         self.lines = [Line::default(); 6];
         self.units.clear();
         self.enemies.clear();
+        self.neutrals.clear();
         self.home_cells.clear();
         self.repair_cell = None;
+        self.repair_building = None;
         self.ready.clear();
         self.harvesters = 0;
         self.refineries = 0;
@@ -498,6 +596,7 @@ impl Census {
                 self.base_cell.get_or_insert(entity.cell);
                 if traits.repairs_units {
                     self.repair_cell.get_or_insert(entity.cell);
+                    self.repair_building.get_or_insert(entity.entity_id);
                 }
             }
             let points = if combat {
@@ -568,6 +667,44 @@ impl Census {
             }
             self.enemies.push(enemy);
         }
+        // Nobody's buildings are not threats and not targets of their own;
+        // they are what the army finds in its way, and they are collected here
+        // so no layer has to scan the map for them again.
+        self.neutrals.extend(obs.neutral_structures());
+    }
+
+    /// The neutral building standing on `cell`, if one does.
+    pub(super) fn neutral_at(&self, cell: (u16, u16)) -> Option<(u64, (u16, u16))> {
+        self.neutrals
+            .iter()
+            .find(|building| building.cell == cell)
+            .map(|building| (building.entity_id, building.cell))
+    }
+
+    /// The nearest neutral building within `cells` of `from` that `admit`
+    /// takes, ties by id.
+    ///
+    /// `admit` is the caller's question about the building itself: whether
+    /// clearing it is work worth doing is a rules question, and the ledger does
+    /// not open the rules. The order is settled here so the answer does not
+    /// depend on what the entity store happens to yield.
+    pub(super) fn neutral_within(
+        &self,
+        from: (u16, u16),
+        cells: i32,
+        admit: impl Fn(&EnemyEntity) -> bool,
+    ) -> Option<(u64, (u16, u16))> {
+        self.neutrals
+            .iter()
+            .filter(|building| admit(building))
+            .filter(|building| super::squared_distance(building.cell, from) <= cells * cells)
+            .min_by_key(|building| {
+                (
+                    super::squared_distance(building.cell, from),
+                    building.entity_id,
+                )
+            })
+            .map(|building| (building.entity_id, building.cell))
     }
 
     pub(super) fn type_count(&self, type_id: InternedId) -> usize {
@@ -865,5 +1002,68 @@ mod tests {
         let census = ledger(&rules, &sim, owner);
         assert!(census.threat.iter().all(|count| *count == 0));
         assert!(census.shortfall().is_none());
+    }
+
+    /// A spawned type is not the house's to command. `[PDPLANE]` is the
+    /// paradrop's cargo plane, and retail says so itself:
+    /// `Spawned=yes ; Created by another object and therefore not player
+    /// controllable`. It also carries a dummy `Primary=`, so read as army it
+    /// was handed a combat order in the middle of the drop and the drop never
+    /// landed.
+    #[test]
+    fn the_cargo_plane_is_neither_army_nor_the_houses_to_order() {
+        let Some((_, rules)) = arena(0xA17) else {
+            return;
+        };
+        let ty = rules.object("PDPLANE").expect("the paradrop's plane");
+        let traits = Traits::of(&rules, ty);
+        assert!(traits.spawned, "`Spawned=yes` is the controllability tag");
+        assert!(!traits.combat, "a spawned object is not army");
+        let unit = Unit {
+            entity_id: 1,
+            type_id: InternedId::default(),
+            cell: (10, 10),
+            health_permille: 1_000,
+            points: 0,
+            mission: MissionId::from_known(crate::sim::mission::MissionType::Move),
+            orderable: true,
+            hand: false,
+            slot: Slot::Aircraft,
+            tier: 0,
+            traits,
+        };
+        assert!(
+            !unit.controllable(),
+            "the world would take the order, and the brain still may not give it"
+        );
+    }
+
+    /// The clearing sweep asks the ledger for a neutral building, and what may
+    /// be cleared is the caller's question: a house the riflemen can garrison
+    /// and a derrick the engineer can capture are worth more standing than the
+    /// walk around them costs.
+    #[test]
+    fn a_neutral_building_a_click_can_use_is_not_the_one_cleared() {
+        let mut census = Census::default();
+        for (id, cell) in [(7u64, (10u16, 10u16)), (9, (12, 10))] {
+            census.neutrals.push(EnemyEntity {
+                entity_id: id,
+                type_id: InternedId::default(),
+                cell,
+            });
+        }
+        let only = |wanted: u64| {
+            move |building: &EnemyEntity| building.entity_id == wanted
+        };
+        assert_eq!(
+            census.neutral_within((10, 10), 3, only(9)),
+            Some((9, (12, 10))),
+            "the admitted building is the answer, not merely the nearest one"
+        );
+        assert_eq!(
+            census.neutral_within((10, 10), 1, only(9)),
+            None,
+            "and the distance still applies to it"
+        );
     }
 }

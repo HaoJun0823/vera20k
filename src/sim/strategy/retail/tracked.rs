@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 use crate::sim::control::Goal;
 
 /// What a unit has been told to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum TrackedKind {
     /// Walk to a cell.
     Move,
@@ -72,12 +72,47 @@ pub(super) enum TrackedKind {
     /// One micro cycle: a step is a cell, and the cycle re-reads the reload, so
     /// the next decision comes when the gun is about to be ready again.
     Kite,
+    /// Walk around a fight the unit would lose on the way, decided by the
+    /// avoidance layer.
+    ///
+    /// Its own kind because it re-aims a march: a unit half a leg into a detour
+    /// must not be re-aimed every micro cycle by the next reading of the same
+    /// block, and a march that owns it again has to be a different intent. Two
+    /// seconds is one leg of the walk.
+    Avoid,
+    /// Shoot the wall standing where the walk would go, decided by the
+    /// avoidance layer.
+    ///
+    /// Its own kind because it is not a march and not a target: there is no
+    /// object to hold, only a cell, and sharing [`Self::Attack`] would make
+    /// every pass that asks "is this unit pushing" believe it is. A wall takes
+    /// a few shots to fall, so the unit is left to finish them rather than
+    /// being re-aimed at the same cell every frame.
+    Breach,
+    /// Put an idle harvester back on the ore.
+    ///
+    /// A harness: the simulation's miner state machine does the work once the
+    /// object is on `Harvest`, but a harvester that rolled out of a factory on
+    /// its birth posture never starts it. Its own kind so the click is not
+    /// repeated every frame while the machine is already running.
+    Harvest,
 }
 
 /// One micro cycle, in frames: a second at play cadence. The layer that
 /// decides what a unit shoots *now* re-decides on this term, so it can both
 /// override a march and hand the unit back to it quickly.
 pub(super) const MICRO_FRAMES: u64 = 15;
+
+/// How long a refused command is left alone before it is asked again, in
+/// frames.
+///
+/// A command the world refuses leaves no mission behind, so the layer that
+/// decided it sees the old state again on the next frame and asks again — for
+/// as long as the refusal stands. Two seconds is long enough to stop that
+/// storm and short enough that a refusal caused by a passing state (a bay that
+/// just filled, a cell a unit has not stepped out of yet) is retried while the
+/// unit still matters.
+const REFUSED_FRAMES: u64 = 30;
 
 impl TrackedKind {
     /// How long the intent stands before it may be issued again, in frames.
@@ -90,13 +125,22 @@ impl TrackedKind {
         match self {
             Self::Deploy => 45,
             Self::Engage => MICRO_FRAMES,
-            // A step is one cell's worth of walk: three frames is enough for
-            // the next shell to be a new decision, and long enough that a
-            // single shot cannot make a unit jitter between two cells.
-            Self::Dodge => 3,
+            // A step is one cell's worth of walk, and a fast unit crosses it
+            // in a handful of frames. Three frames let every new shell pick a
+            // new cell, which is the back-and-forth a dog shows under fire;
+            // twelve frames is one step committed, not a dance between two
+            // cells.
+            Self::Dodge => 12,
             Self::Kite => MICRO_FRAMES,
+            // One leg of a detour: long enough to walk the few cells to the
+            // corner, short enough that a tower that died — or a road that
+            // opened — is read again while the unit is still on the way.
+            Self::Avoid => 30,
+            // A few shots at a wall segment, then read the ground again: the
+            // cell may already be open, or the way around it may have.
+            Self::Breach => 90,
             Self::Enter | Self::Capture => 300,
-            Self::Move | Self::Attack | Self::AttackMove | Self::Guard => 450,
+            Self::Move | Self::Attack | Self::AttackMove | Self::Guard | Self::Harvest => 450,
         }
     }
 }
@@ -115,9 +159,11 @@ pub(super) struct Tracked {
 }
 
 /// How far a target may move before an otherwise-valid intent is worth
-/// repeating, in cells. Squared-distance comparisons below; two cells is a
-/// target that has visibly walked away, not one that shuffled.
-const REISSUE_CELLS: i32 = 2;
+/// repeating, in cells. Squared-distance comparisons below; three cells is a
+/// target that has visibly walked away, not one that shuffled. At two, a fast
+/// unit's next recon sample was far enough to re-issue every time and the
+/// walk alternated between two samples.
+const REISSUE_CELLS: i32 = 3;
 
 /// Every unit's standing intent, and the units a routine is busy with.
 #[derive(Debug, Default)]
@@ -127,6 +173,10 @@ pub(super) struct Tracker {
     /// routine is its object's only issuer, so the layers above ask here before
     /// they tell one anything.
     held: BTreeMap<u64, u64>,
+    /// Commands the world refused, and the frame before which they are not
+    /// asked again. A refused command leaves no mission behind, so without a
+    /// term the layer below re-asks it every frame — the command storm.
+    refused: BTreeMap<(u64, TrackedKind), u64>,
 }
 
 impl Tracker {
@@ -134,6 +184,7 @@ impl Tracker {
         Self {
             intents: BTreeMap::new(),
             held: BTreeMap::new(),
+            refused: BTreeMap::new(),
         }
     }
 
@@ -151,6 +202,13 @@ impl Tracker {
         cell: Option<(u16, u16)>,
     ) -> bool {
         if self.held.get(&unit).is_some_and(|until| now < *until) {
+            return false;
+        }
+        if self
+            .refused
+            .get(&(unit, kind))
+            .is_some_and(|until| now < *until)
+        {
             return false;
         }
         let Some(tracked) = self.intents.get(&unit) else {
@@ -210,6 +268,17 @@ impl Tracker {
         }
     }
 
+    /// Leave `kind` alone for `unit` until the refusal cools off.
+    ///
+    /// Called when the world refused the command: the order left no mission
+    /// behind, so the intent table would otherwise let the layer below ask
+    /// again on the very next frame. Keyed by kind because a refused walk must
+    /// not also silence the dodge that would save the same unit.
+    pub(super) fn refuse(&mut self, now: u64, unit: u64, kind: TrackedKind) {
+        self.refused
+            .insert((unit, kind), now.saturating_add(REFUSED_FRAMES));
+    }
+
     /// Record that `unit` has been told to do `kind` at `frame`.
     pub(super) fn record(
         &mut self,
@@ -219,6 +288,9 @@ impl Tracker {
         target: Option<u64>,
         cell: Option<(u16, u16)>,
     ) {
+        // A command that was taken is no longer refused: clear the term so a
+        // later refusal starts a fresh one.
+        self.refused.remove(&(unit, kind));
         self.intents.insert(
             unit,
             Tracked {
@@ -235,6 +307,7 @@ impl Tracker {
     pub(super) fn retain(&mut self, live: &std::collections::BTreeSet<u64>) {
         self.intents.retain(|id, _| live.contains(id));
         self.held.retain(|id, _| live.contains(id));
+        self.refused.retain(|(id, _), _| live.contains(id));
     }
 
     /// Whether `unit` is still holding an intent of one of `kinds`.
@@ -273,18 +346,19 @@ pub(super) fn kinds_for(goal: Goal) -> &'static [TrackedKind] {
     match goal {
         Goal::Attack { .. } => &[TrackedKind::Engage, TrackedKind::Attack],
         Goal::AttackMove { .. } => &[TrackedKind::AttackMove],
-        Goal::Move { .. } | Goal::MoveToObject { .. } => {
-            &[TrackedKind::Move, TrackedKind::Dodge, TrackedKind::Kite]
-        }
+        Goal::Move { .. } | Goal::MoveToObject { .. } => &[
+            TrackedKind::Move,
+            TrackedKind::Dodge,
+            TrackedKind::Kite,
+            TrackedKind::Avoid,
+        ],
         Goal::Guard | Goal::GuardAt { .. } => &[TrackedKind::Guard],
         Goal::Capture { .. } => &[TrackedKind::Capture],
         Goal::Enter { .. } => &[TrackedKind::Enter],
         Goal::Deploy => &[TrackedKind::Deploy],
-        Goal::AttackCell { .. }
-        | Goal::Harvest { .. }
-        | Goal::Stop
-        | Goal::Scatter
-        | Goal::Unload => &[],
+        Goal::AttackCell { .. } => &[TrackedKind::Breach],
+        Goal::Harvest { .. } => &[TrackedKind::Harvest],
+        Goal::Stop | Goal::Scatter | Goal::Unload => &[],
     }
 }
 
@@ -352,5 +426,33 @@ mod tests {
         tracker.hold(7, 100);
         assert!(!tracker.admits(10, 7, TrackedKind::Guard, None, None));
         assert!(tracker.admits(101, 7, TrackedKind::Guard, None, None));
+    }
+
+    /// A refused command is not asked again on the next frame: the world left
+    /// no mission behind, so the refusal term is the only thing holding the
+    /// layer back. Without it the same order is re-decided and re-sent every
+    /// frame — the command storm.
+    #[test]
+    fn a_refused_command_cools_off() {
+        let mut tracker = Tracker::new();
+        tracker.refuse(100, 7, TrackedKind::Move);
+        assert!(
+            !tracker.admits(101, 7, TrackedKind::Move, None, Some((10, 10))),
+            "the refusal still stands"
+        );
+        assert!(
+            tracker.admits(131, 7, TrackedKind::Move, None, Some((10, 10))),
+            "and is retried once it has cooled"
+        );
+    }
+
+    /// A refusal of one kind does not silence another: a walk the world refused
+    /// must not also stop the dodge that would keep the unit alive.
+    #[test]
+    fn a_refusal_is_per_kind() {
+        let mut tracker = Tracker::new();
+        tracker.refuse(0, 7, TrackedKind::Move);
+        assert!(!tracker.admits(10, 7, TrackedKind::Move, None, Some((0, 0))));
+        assert!(tracker.admits(10, 7, TrackedKind::Dodge, None, Some((1, 0))));
     }
 }

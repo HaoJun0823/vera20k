@@ -53,8 +53,11 @@ const TARGET_LOCK_FRAMES: u64 = 1_800;
 const DEFEND_MAX: usize = 8;
 
 /// How near the base a hostile has to be for it to be a raid on the base, in
-/// cells.
-const HOME_THREAT_CELLS: i32 = 8;
+/// cells: the push step's own threat ring, because "the base is threatened"
+/// must mean one thing. With a smaller number here an enemy inside the push's
+/// ring but outside this one stopped the army from attacking and pulled nobody
+/// home, so the raid met an empty yard.
+const HOME_THREAT_CELLS: i32 = super::advance::THREAT_RADIUS;
 
 /// How large the army has to be before the fist is the answer for all of it.
 ///
@@ -154,6 +157,10 @@ pub(super) struct Squads {
     /// the army has teams on the first frame rather than twenty seconds into
     /// the match — which is when the opening squad is standing in the base.
     formed_at: Option<u64>,
+    /// The raider the teams were last rebuilt for. A new one is answered on the
+    /// frame it appears; the same one is answered on the interval, so a raid
+    /// that no unit can reach does not rebuild the whole army every frame.
+    answered_raid: Option<u64>,
 }
 
 impl Squads {
@@ -161,18 +168,36 @@ impl Squads {
         Self::default()
     }
 
-    /// Rebuild the membership from the ledger, if the term has run.
+    /// Rebuild the membership from the ledger, if the term has run or a new
+    /// raid needs an answer.
     pub(super) fn regroup(&mut self, tick: u64, census: &Census) {
+        let raid = home_threat(census);
+        let new_raid = raid
+            .map(|(target, _)| target)
+            .filter(|target| Some(*target) != self.answered_raid);
+        // A raid that nothing is handling cannot wait for the interval: the
+        // units it needs are the ones standing idle at home, and by the time
+        // the interval ran they would be standing in a wrecked yard.
+        let interval = if new_raid.is_some() { 0 } else { REGROUP_FRAMES };
         if self
             .formed_at
-            .is_some_and(|at| tick.saturating_sub(at) < REGROUP_FRAMES)
+            .is_some_and(|at| tick.saturating_sub(at) < interval)
         {
             return;
         }
+        self.answered_raid = raid.map(|(target, _)| target);
+        // Read before the clear: a team that is still locked keeps its raider,
+        // otherwise every rebuild sends the defenders at a different hostile
+        // and they meet none of them.
+        let held = self
+            .squads
+            .iter()
+            .find(|squad| squad.role == Role::Defend)
+            .filter(|squad| squad.locked(tick))
+            .and_then(|squad| squad.target);
         self.formed_at = Some(tick);
         self.squads.clear();
 
-        let raid = home_threat(census);
         let mut taken: BTreeSet<u64> = BTreeSet::new();
 
         // The scouts first: a dog that has been sent to look is not one of the
@@ -192,16 +217,8 @@ impl Squads {
         });
 
         // Then the defenders, if the base is being raided: the nearest few,
-        // because the nearest are the ones that can arrive. A team that is
-        // still locked on a raider keeps it — otherwise every rebuild would
-        // send the defenders at a different hostile and they would meet none
-        // of them.
-        let held = self
-            .squads
-            .iter()
-            .find(|squad| squad.role == Role::Defend)
-            .filter(|squad| squad.locked(tick))
-            .and_then(|squad| squad.target);
+        // because the nearest are the ones that can arrive. `held` is the
+        // raider the old team was still locked on, read before the clear.
         let raid = raid.map(|(id, _)| id).or(held);
         let raid_cell = raid.and_then(|id| {
             census
@@ -391,6 +408,79 @@ mod tests {
             attack.members.len(),
             12 - DEFEND_MAX,
             "the rest stay in the fist"
+        );
+    }
+
+    /// A hostile that stops the push calls the army home too. The push's own
+    /// threat ring decides "the base is threatened"; with a smaller ring here
+    /// the enemies between the two stopped the army from attacking and pulled
+    /// nobody back, so the raid met an empty yard.
+    #[test]
+    fn a_raider_that_stops_the_push_is_answered_at_home() {
+        let mut census = Census::default();
+        census.base_cell = Some((20, 20));
+        // Ten cells out: outside the old eight-cell ring, inside the push's.
+        census.enemies.push(crate::sim::control::observation::EnemyEntity {
+            entity_id: 999,
+            type_id: crate::sim::intern::InternedId::default(),
+            cell: (20, 30),
+        });
+        census.units.push(unit(0, (20, 25)));
+        census.fighters = 1;
+        let mut squads = Squads::new();
+        squads.regroup(0, &census);
+        let defend = squads.squad(Role::Defend).expect("the yard answers the raid");
+        assert!(defend.members.contains(&0));
+        assert_eq!(defend.target, Some(999));
+    }
+
+    /// A raid that appears between two rebuilds is answered at once: the units
+    /// it needs are the idle ones, and twenty seconds of them standing there is
+    /// the yard burning.
+    #[test]
+    fn a_new_raider_is_answered_within_the_regroup_term() {
+        let mut census = Census::default();
+        census.base_cell = Some((20, 20));
+        census.units.push(unit(0, (20, 25)));
+        census.fighters = 1;
+        let mut squads = Squads::new();
+        squads.regroup(0, &census);
+        assert!(squads.squad(Role::Defend).is_none(), "nothing to answer yet");
+
+        census.enemies.push(crate::sim::control::observation::EnemyEntity {
+            entity_id: 42,
+            type_id: crate::sim::intern::InternedId::default(),
+            cell: (21, 21),
+        });
+        squads.regroup(1, &census);
+        let defend = squads.squad(Role::Defend).expect("answered on the next frame");
+        assert_eq!(defend.target, Some(42));
+    }
+
+    /// And the same raider does not rebuild the army every frame after that.
+    #[test]
+    fn the_same_raider_waits_for_the_regroup_term() {
+        let mut census = Census::default();
+        census.base_cell = Some((20, 20));
+        census.enemies.push(crate::sim::control::observation::EnemyEntity {
+            entity_id: 42,
+            type_id: crate::sim::intern::InternedId::default(),
+            cell: (21, 21),
+        });
+        census.units.push(unit(0, (20, 25)));
+        census.fighters = 1;
+        let mut squads = Squads::new();
+        squads.regroup(0, &census);
+        assert!(squads.squad(Role::Defend).is_some());
+        // A unit that joins late does not get a team until the term runs: the
+        // teams are not rebuilt per frame.
+        census.units.push(unit(1, (22, 22)));
+        squads.regroup(1, &census);
+        assert!(
+            !squads
+                .squad(Role::Defend)
+                .is_some_and(|squad| squad.members.contains(&1)),
+            "the interval still owns the outline"
         );
     }
 

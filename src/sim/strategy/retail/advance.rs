@@ -56,7 +56,11 @@ const ADVANCE_ORDERS_PER_FRAME: usize = 8;
 
 /// How close an enemy has to come to the yard before the army stays home,
 /// in cells. A raid inside this ring is what the army was bought for.
-const THREAT_RADIUS: i32 = 18;
+///
+/// [`super::squads`] answers the raid itself from the same radius: a smaller
+/// one there left a band where the push stopped for a threat no team was sent
+/// at, so the whole army stood in the yard while the raid burned it.
+pub(super) const THREAT_RADIUS: i32 = 18;
 
 /// How few enemy objects are left before the strength gate stops asking. Below
 /// this the enemy is a clean-up job, not a fight: the army goes in and finishes
@@ -80,10 +84,13 @@ pub(super) fn advance(
     // decides matches: an enemy already at the yard is what the army is for,
     // and marching out with it in the base loses the production the army
     // came from.
-    let fighters: Vec<&Unit> = brain
+    let mut fighters: Vec<&Unit> = brain
         .census
         .combat_units()
-        .filter(|unit| !unit.hand)
+        // A unit walking into a building or a depot is not available to the
+        // fist: sending it at a target would drop the visit it is half-way
+        // through.
+        .filter(|unit| unit.controllable() && !unit.in_service())
         .collect();
     if fighters.len() < super::squads::ARMY_TO_ATTACK
         || !super::build::can_replace_units(rules, obs, &brain.census)
@@ -92,10 +99,16 @@ pub(super) fn advance(
     {
         return false;
     }
+    let tick = obs.tick();
     // Structures, not units: a base is what a house loses with, and a
     // defending unit walks into the push on its own. Refineries first — a
     // house that loses its unloading bays loses the war it is paying for,
     // and the opponent's wallet is the one number that decides the late game.
+    //
+    // A building an engineer or a spy is already walking into is left out: it
+    // is being taken whole, and shooting it destroys the prize the walk was
+    // paid for. Capturing outranks destroying wherever both are possible, so
+    // the fist goes for something else while the walk is under way.
     let structures: Vec<(&ObjectType, EnemyEntity)> = brain
         .census
         .enemies
@@ -104,6 +117,14 @@ pub(super) fn advance(
             obs.object_type(rules, enemy.type_id)
                 .filter(|ty| ty.category == ObjectCategory::Building)
                 .map(|ty| (ty, *enemy))
+        })
+        .filter(|(_, enemy)| {
+            !brain.tracked.claimed_by_other(
+                tick,
+                super::tracked::TrackedKind::Capture,
+                enemy.entity_id,
+                0,
+            )
         })
         .collect();
     let economy: Vec<EnemyEntity> = structures
@@ -124,9 +145,30 @@ pub(super) fn advance(
     // pointed at their own nearest structure arrive one at a time and are
     // killed one at a time. A fist is what takes a base.
     let anchor = fighters.first().map_or((0, 0), |unit| unit.cell);
-    let Some(target) = nearest_target(&targets, anchor) else {
+    let Some(nearest) = nearest_target(&targets, anchor) else {
         return false;
     };
+    // The enemy's defenses before its economy while they cover the target: a
+    // tesla coil or a pillbox in range of the structure the fist walks at is
+    // what kills the fist before it fires a shot, and a spy's blackout only
+    // buys the army the window in which those guns are dark. `Primary=` is the
+    // rules' own answer to "does this structure shoot", so a mod's defense is
+    // covered without a name list here.
+    // A structure standing on the way is the first thing to shoot: a wall and a
+    // building are the same answer to a walk — closed ground — and an army that
+    // stops at one and does nothing never arrives. Clearing the way costs one
+    // target and unblocks the whole fist; the target behind it is what the army
+    // comes back for.
+    let target = match blocking_structure(&structures, anchor, nearest) {
+        Some(blocker) => covering_defense(&structures, blocker).unwrap_or(blocker),
+        None => covering_defense(&structures, nearest).unwrap_or(nearest),
+    };
+    // A neutral building is nobody's, so it is in no census and no target list;
+    // it is still closed ground the fist walks into and stops at. Sampling the
+    // line for one turns "the whole army is jammed at a civilian block" into a
+    // demolition order.
+    let (target_id, target_cell) = neutral_blocker(&brain.census, anchor, target.cell)
+        .unwrap_or((target.entity_id, target.cell));
     // And a fist big enough to take it. The size gate above counts heads; this
     // one weighs them against what is standing there, and an army that cannot
     // win the fight stays home and grows instead of being spent.
@@ -144,7 +186,19 @@ pub(super) fn advance(
         return false;
     }
 
-    let tick = obs.tick();
+    // The frame's budget is a handful of orders and the rest of the list is
+    // dropped, so the scan's order decides who is ever told anything at all:
+    // the same leading units were served every frame and the rest of the army
+    // stood where it was built, which is what "the infantry just stands there"
+    // looks like from the player's side. Rotating the start by the tick gives
+    // every unit its turn, and an order holds for its term once given.
+    //
+    // Taken after the anchor, so the target this frame is aimed at does not
+    // depend on who happens to be scanned first.
+    let turn = fighters.len();
+    if turn > 0 {
+        fighters.rotate_left((tick as usize) % turn);
+    }
     let mut issued = 0;
     for unit in &fighters {
         if issued >= ADVANCE_ORDERS_PER_FRAME {
@@ -179,31 +233,48 @@ pub(super) fn advance(
         {
             continue;
         }
+        // A unit whose weapons have nothing for the target does not march at
+        // it. `admits` is `GetFireError` plus the armour floor, the same answer
+        // the player's click gets, and the units it refuses are exactly the
+        // ones that walk to the wall and die there: a dog sent at a building
+        // its jaw cannot touch, a terror drone whose jump has no business with
+        // concrete, a rifleman against armour nothing it carries dents.
+        //
+        // They hold where they stand instead, which is what a player does with
+        // them — the fist is the units that can do the job. Marching them along
+        // anyway is the "sent at the enemy and wiped out for nothing" a play
+        // test reports, and their attack-moves are also what made a squad
+        // shuffle around a structure it could never damage.
+        let attack = Goal::Attack { target: target_id };
+        let engagement = obs.engage(rules, unit.entity_id, target_id);
+        if engagement == crate::sim::control::observation::Engage::Cannot {
+            if !brain
+                .tracked
+                .admits(tick, unit.entity_id, super::tracked::TrackedKind::Guard, None, None)
+            {
+                continue;
+            }
+            brain.tracked.record(
+                tick,
+                unit.entity_id,
+                super::tracked::TrackedKind::Guard,
+                None,
+                None,
+            );
+            if super::orders::issue(out, rules, obs, unit.entity_id, Goal::Guard) {
+                issued += 1;
+            }
+            continue;
+        }
         // Inside its own reach the unit shoots the structure from where it
         // stands; outside it, it walks. The goal is still the one target — this
         // is the same fist, ordered by what each unit can actually do.
-        //
-        // "Inside its reach" is not "able to shoot it". GetFireError is the
-        // answer to whether this object has anything for this target, and a
-        // unit with no weapon for a building — a terror drone, whose jump has
-        // no business with concrete — used to be handed an Attack it was
-        // refused every single frame. Those refusals are the command budget:
-        // eight refusals a frame is eight orders the house never gave. A unit
-        // that cannot shoot the target still walks toward the fist.
-        let reach = obs
-            .object_type(rules, unit.type_id)
-            .map_or(0, |ty| weapon_range_cells(rules, ty, obs.is_deployed(unit.entity_id)));
-        let (kind, goal) = if reach > 0 && cell_distance(unit.cell, target.cell) <= reach {
-            (
-                super::tracked::TrackedKind::Attack,
-                Goal::Attack {
-                    target: target.entity_id,
-                },
-            )
+        let (kind, goal) = if engagement == crate::sim::control::observation::Engage::Ready {
+            (super::tracked::TrackedKind::Attack, attack)
         } else {
             (
                 super::tracked::TrackedKind::AttackMove,
-                Goal::AttackMove { cell: target.cell },
+                Goal::AttackMove { cell: target_cell },
             )
         };
         // L4: it has been sent at this target, the target has not walked away,
@@ -224,7 +295,14 @@ pub(super) fn advance(
             Some(target.entity_id),
             Some(target.cell),
         );
-        out.order(unit.entity_id, goal);
+        // An order the click refuses is not an order: it must not be counted
+        // against the frame's eight, and it must not be remembered as if it had
+        // been given. Eight refusals a frame is eight orders the house never
+        // gave, and a record of one holds the unit for its whole term.
+        if !super::orders::issue(out, rules, obs, unit.entity_id, goal) {
+            brain.tracked.void(unit.entity_id, kind);
+            continue;
+        }
         issued += 1;
     }
     true
@@ -241,6 +319,30 @@ pub(super) fn advance(
 /// brain that measures the standing weapon sends a deployed soldier at a target
 /// its gun cannot cover, and a soldier that cannot walk just stands there.
 pub(super) fn weapon_range_cells(rules: &RuleSet, ty: &ObjectType, deployed: bool) -> i32 {
+    let Some(weapon) = weapon_of(rules, ty, deployed) else {
+        return 0;
+    };
+    let per_cell = crate::util::lepton::LEPTONS_PER_CELL_I32;
+    let reach = (weapon.range_leptons - weapon.minimum_range_leptons.max(0)).max(0);
+    reach.div_euclid(per_cell) + i32::from(reach.rem_euclid(per_cell) != 0)
+}
+
+/// How many shots the type's weapon fires in one attack cycle: `Burst=` from
+/// `[WeaponTypes]`, read where the simulation reads it
+/// (`WeaponTypeClass ReadINI`, default 1).
+///
+/// One is not a burst, and a weapon that fires one shot a cycle has nothing
+/// for a broken cycle to gain.
+pub(super) fn weapon_burst(rules: &RuleSet, ty: &ObjectType, deployed: bool) -> i32 {
+    weapon_of(rules, ty, deployed).map_or(1, |weapon| weapon.burst.max(1))
+}
+
+/// The weapon `ty` fires, in the slot it would fire it from.
+fn weapon_of<'r>(
+    rules: &'r RuleSet,
+    ty: &ObjectType,
+    deployed: bool,
+) -> Option<&'r crate::rules::weapon_type::WeaponType> {
     let slot = if deployed {
         super::census::Traits::of(rules, ty).deploy_slot
     } else {
@@ -252,19 +354,11 @@ pub(super) fn weapon_range_cells(rules: &RuleSet, ty: &ObjectType, deployed: boo
     let name = slot
         .and_then(|slot| ty.weapon_at(slot))
         .or_else(|| (0..8).find_map(|slot| ty.weapon_at(slot)));
-    let Some(name) = name else {
-        return 0;
-    };
-    let Some(weapon) = rules.weapon(name) else {
-        return 0;
-    };
-    let per_cell = crate::util::lepton::LEPTONS_PER_CELL_I32;
-    let reach = (weapon.range_leptons - weapon.minimum_range_leptons.max(0)).max(0);
-    reach.div_euclid(per_cell) + i32::from(reach.rem_euclid(per_cell) != 0)
+    rules.weapon(name?)
 }
 
 /// Chebyshev distance in cells, the metric the game's own adjacency uses.
-fn cell_distance(a: (u16, u16), b: (u16, u16)) -> i32 {
+pub(super) fn cell_distance(a: (u16, u16), b: (u16, u16)) -> i32 {
     let dx = i32::from(a.0).abs_diff(i32::from(b.0));
     let dy = i32::from(a.1).abs_diff(i32::from(b.1));
     i32::try_from(dx.max(dy)).unwrap_or(i32::MAX)
@@ -415,6 +509,57 @@ mod tests {
         );
     }
 
+    /// A nobody's building on the walk is a target: it is closed ground, it is
+    /// in no enemy list, and the ledger's own neutral collection is what names
+    /// it.
+    #[test]
+    fn a_neutral_structure_on_the_walk_is_named_as_the_blocker() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        register_neutral_house(&mut sim, "Neutral");
+        let blocker = sim
+            .spawn_object("NAREFN", "Neutral", 20, 20, 255, &rules)
+            .expect("a civilian refinery in the way");
+        let mut census = ledger(&rules, &sim, owner);
+        assert_eq!(census.neutrals.len(), 1, "the ledger keeps what is nobody's");
+        census.refresh(&RoleTable::build(&rules), &rules, &Observation::new(&sim, owner));
+        assert_eq!(census.neutrals.len(), 1, "a refresh does not accumulate them");
+        assert_eq!(
+            neutral_blocker(&census, (10, 20), (30, 20)).map(|(id, _)| id),
+            Some(blocker),
+            "the structure on the line is the one to shoot"
+        );
+        assert_eq!(
+            neutral_blocker(&census, (10, 10), (10, 25)),
+            None,
+            "a building off the line is not in the way"
+        );
+    }
+
+    /// An enemy building is not a neutral one: it is already in the enemy
+    /// ledger and [`super::blocking_structure`] is what picks it.
+    #[test]
+    fn an_enemy_structure_is_not_a_neutral_blocker() {
+        let Some((mut sim, rules)) = arena(0xA17) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        sim.spawn_object("NAREFN", "Russians", 20, 20, 255, &rules)
+            .expect("an enemy refinery in the way");
+        let census = ledger(&rules, &sim, owner);
+        assert!(census.neutrals.is_empty(), "an enemy owns its building");
+        assert_eq!(neutral_blocker(&census, (10, 20), (30, 20)), None);
+    }
+
+    fn register_neutral_house(sim: &mut crate::sim::world::Simulation, name: &str) {
+        let id = sim.interner.intern(name);
+        let mut house = crate::sim::house_state::HouseState::new(id, 0, None, false, 0, 10);
+        house.set_multiplay_passive_for_test(true);
+        sim.houses.register(house);
+    }
+
     /// A unit inside its own weapon's reach of the push's target attacks it
     /// from where it stands instead of walking into it: the same fist, ordered
     /// by what each unit can actually do.
@@ -432,15 +577,18 @@ mod tests {
             .expect("a war factory");
         sim.spawn_object("GAPILL", "Americans", 4, 8, 255, &rules)
             .expect("a pillbox so the base counts as defended");
-        // The fist, close enough to the enemy refinery to shoot it.
+        // The fist, the first rank standing beside the refinery: "in reach" is
+        // the engine's answer (`GetFireError` with the range test on), which
+        // measures to the building's own cells and not to the cell its click
+        // names.
         let mut fighters = Vec::new();
-        for cell in [(24u16, 24u16), (25, 24), (26, 24), (24, 25), (25, 25)] {
+        for cell in [(26u16, 26u16), (27, 26), (27, 27), (26, 27), (25, 26)] {
             fighters.push(
                 sim.spawn_object("MTNK", "Americans", cell.0, cell.1, 255, &rules)
                     .expect("a Grizzly"),
             );
         }
-        for cell in [(24u16, 26u16), (25, 26), (26, 26), (24, 27), (25, 27)] {
+        for cell in [(24u16, 26u16), (24, 27), (24, 28), (25, 27), (25, 28)] {
             fighters.push(
                 sim.spawn_object("MTNK", "Americans", cell.0, cell.1, 255, &rules)
                     .expect("a Grizzly"),
@@ -465,6 +613,103 @@ mod tests {
             out.orders
         );
     }
+}
+
+/// How near an enemy's own defense has to stand to the structure the fist is
+/// walking at before the defense is the thing to kill first, in cells: far
+/// enough to cover the approach, near enough that it is that structure's gun
+/// and not another base's.
+const DEFENSE_CLEAR_CELLS: i32 = 8;
+
+/// The nearest enemy structure with a weapon that covers `target`, if any.
+///
+/// A defense is what the fist has to walk through, and the economy building
+/// behind it is only reachable once the gun is gone. `Primary=` (or any other
+/// weapon slot) is the rules' own answer to "does this structure shoot", which
+/// is the data's statement of intent: `[GAPILL]` and `[ATESLA]` carry one, a
+/// refinery and a lab do not. Aircraft and units are not in the list — this is
+/// the structure the fist is going to, and a defending tank walks into the
+/// fight on its own.
+fn covering_defense(
+    structures: &[(&ObjectType, EnemyEntity)],
+    target: EnemyEntity,
+) -> Option<EnemyEntity> {
+    let clear = DEFENSE_CLEAR_CELLS * DEFENSE_CLEAR_CELLS;
+    structures
+        .iter()
+        .filter(|(ty, enemy)| {
+            enemy.entity_id != target.entity_id && (0..8).any(|slot| ty.weapon_at(slot).is_some())
+        })
+        .filter(|(_, enemy)| {
+            let dx = i32::from(enemy.cell.0) - i32::from(target.cell.0);
+            let dy = i32::from(enemy.cell.1) - i32::from(target.cell.1);
+            dx * dx + dy * dy <= clear
+        })
+        .min_by_key(|(_, enemy)| {
+            let dx = i32::from(enemy.cell.0) - i32::from(target.cell.0);
+            let dy = i32::from(enemy.cell.1) - i32::from(target.cell.1);
+            (dx * dx + dy * dy, enemy.entity_id)
+        })
+        .map(|(_, enemy)| *enemy)
+}
+
+/// How near a structure has to stand to the straight line from the fist to its
+/// target to block it, in cells: one wall's thickness plus the gap a unit needs
+/// to squeeze past.
+const BLOCKING_CELLS: i32 = 2;
+
+/// The enemy structure standing on the way to `target`, nearest the fist first.
+///
+/// Tested against the straight line rather than the pathfinder: the question is
+/// "what is between us and it", and the answer only has to be good enough to
+/// pick the one thing to shoot. A structure *behind* the target does not count —
+/// `path_crosses` clamps the projection to the segment's ends.
+fn blocking_structure(
+    structures: &[(&ObjectType, EnemyEntity)],
+    from: (u16, u16),
+    target: EnemyEntity,
+) -> Option<EnemyEntity> {
+    structures
+        .iter()
+        .filter(|(_, enemy)| enemy.entity_id != target.entity_id)
+        .filter(|(_, enemy)| {
+            super::orders::path_crosses(&[enemy.cell], from, target.cell, BLOCKING_CELLS)
+        })
+        .min_by_key(|(_, enemy)| (cell_distance(enemy.cell, from), enemy.entity_id))
+        .map(|(_, enemy)| *enemy)
+}
+
+/// How far along the walk the neutral scan looks, in cells.
+const NEUTRAL_SCAN_CELLS: i32 = 24;
+
+/// The first building on the straight line from `from` to `to` that belongs to
+/// nobody, nearest the army first.
+///
+/// A neutral structure is closed ground like any other, and the army that walks
+/// into one and stops is the army that never arrives. It is not in
+/// `census.enemies` — nobody owns it — so the ledger keeps it in
+/// `census.neutrals` (`Observation::neutral_structures`) and the line is tested
+/// against those, not against every cell of the map.
+fn neutral_blocker(
+    census: &Census,
+    from: (u16, u16),
+    to: (u16, u16),
+) -> Option<(u64, (u16, u16))> {
+    let span = i32::from(from.0)
+        .abs_diff(i32::from(to.0))
+        .max(i32::from(from.1).abs_diff(i32::from(to.1)));
+    if i32::try_from(span).unwrap_or(i32::MAX) < 2 {
+        return None;
+    }
+    census
+        .neutrals
+        .iter()
+        .filter(|building| {
+            cell_distance(building.cell, from) <= NEUTRAL_SCAN_CELLS
+                && super::orders::path_crosses(&[building.cell], from, to, BLOCKING_CELLS)
+        })
+        .min_by_key(|building| (cell_distance(building.cell, from), building.entity_id))
+        .map(|building| (building.entity_id, building.cell))
 }
 
 /// The enemy structure nearest `from`, ties going to the earlier one in

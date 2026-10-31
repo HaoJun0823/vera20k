@@ -27,6 +27,8 @@
 //! Determinism: every count and every choice walks the rules' arrays and the
 //! entity store in their own order, and every test is an integer comparison.
 
+use std::collections::BTreeSet;
+
 use crate::rules::object_type::{FactoryType, ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
 use crate::rules::superweapon_type::SuperWeaponKind;
@@ -46,19 +48,20 @@ use super::plan::{self, Budget, Item};
 /// life, and a third one mostly queues at the bay.
 pub(super) const HARVESTERS_PER_REFINERY: usize = 2;
 
-/// How many refineries the base is built around, and when the second one is
-/// worth it: entries of [`super::plan::STEPS`], because the shape of the base
-/// is one list rather than a set of thresholds. Two, not three: an unloading
-/// bay is the dearest structure in the opening and the second one only pays
-/// once the harvesters to fill it exist.
-
 /// The free wallet the tech stage needs before it answers: the price of the
-/// dearest thing it buys.
+/// cheapest thing it buys.
 ///
-/// `[GATECH] Cost=2000`. A house does not start unlocking a tree it cannot
-/// finish, and every cheaper step of the stage (`[AMRADR] 1000`, the radar)
-/// costs less than this, so one number covers all three.
-pub(super) const TECH_MIN_CREDITS: i32 = 2_000;
+/// `[AMRADR] Cost=1000` is that price, and the stage's dearest entry is the
+/// lab at `[GATECH] Cost=2000`. The gate used to ask for the dearest one in
+/// hand, and a house never held it: the barracks and the war factory spend
+/// every credit above their own floors, so the wallet the lab needed was one
+/// frame away for the whole match — the report is an army of infantry and no
+/// lab, no radar, no tank. At the cheap step's price the stage is decided
+/// instead, and `build_next` holds the difference back from the lines
+/// (`yard_reserve`) so the wallet can fill. The hold expires with
+/// [`BUILD_HOLD_FRAMES`], so a house that cannot fill it is not saving
+/// forever.
+pub(super) const TECH_START_CREDITS: i32 = 1_000;
 
 /// The free wallet a building on the yard maker's `Prerequisite=` list has to
 /// hold: it buys the ability to rebuild a lost yard, which only pays off once
@@ -123,6 +126,11 @@ fn place_finished(
     obs: &Observation<'_>,
     out: &mut Outbox,
 ) {
+    // The ring the wall plan fills, kept clear of foundations: a barracks or a
+    // refinery dropped on it is a hole in the wall that nothing can close
+    // afterwards, because a wall is an overlay and cannot be built on the cell
+    // a building stands on.
+    let reserved = wall_ring(rules, obs);
     let mut waiting: Vec<InternedId> = Vec::new();
     for type_id in brain.census.ready.clone() {
         waiting.push(type_id);
@@ -133,20 +141,74 @@ fn place_finished(
         // A wall segment goes where the wall plan says, not where the outward
         // sweep would put it: the cell is the whole decision, and a sweep that
         // answered it would fill the first gap it found instead of closing the
-        // arc that faces the enemy.
+        // ring around a building worth walling.
         let planned = obs
             .object_type(rules, type_id)
             .filter(|ty| ty.wall)
             .and_then(|_| super::walls::next_segment(brain, rules, obs))
-            .map(|segment| segment.cell);
-        let Some(cell) = planned.or_else(|| Placement::new(obs, rules).cell_for(type_id, attempt))
-        else {
-            log::info!(
-                "auto play: no cell for {} (attempt {attempt})",
-                obs.object_type(rules, type_id).map_or("?", |ty| ty.id.as_str())
+            .map(|segment| {
+                // The one line that says whether the ring is where the plan
+                // thinks it is: the cell, and how many cells of gap it closes.
+                log::info!(
+                    "auto play: wall segment at {:?}, {} standing, closes {} cells",
+                    segment.cell,
+                    segment.standing,
+                    segment.fill
+                );
+                segment.cell
+            });
+        // A ready building that cannot be placed holds its factory's queue: the
+        // next thing that factory makes waits behind it forever. Refusing to
+        // place the wall was therefore a worse bug than placing it off the ring
+        // — the defense queue stopped, and no pillbox came out again. The plan
+        // has first refusal; when it has no segment the sweep answers, and the
+        // warning says which happened.
+        if planned.is_none()
+            && obs
+                .object_type(rules, type_id)
+                .is_some_and(|ty| ty.wall)
+        {
+            log::warn!(
+                "auto play: wall plan has no segment for {type_id}; the outgoing sweep places it, which may sit off the ring"
             );
+        }
+        let Some(cell) = planned.or_else(|| {
+            Placement::new(obs, rules)
+                .reserving(reserved.clone())
+                .cell_for(type_id, attempt)
+        }) else {
+            // The sweep has to move on even when it finds nothing: retrying the
+            // same attempt every frame is the placement loop that holds the
+            // queue. Once every attempt has failed the type is left to the yard
+            // and the queue is allowed to start the next structure.
+            let next = (attempt + 1) % PLACEMENT_ATTEMPTS;
+            brain.site_attempts.insert(type_id, next);
+            if next == 0 {
+                brain.stranded_sites.insert(type_id);
+                // Skipping the type is not enough: a house that cannot place
+                // what its factory built holds the whole category behind it,
+                // and no pillbox comes out while a wall waits for a cell.
+                // `FactoryClass::AbandonProduction` (`0x004C9FF0`) is the
+                // native exit — it settles the held object the way a sale
+                // does and drops the factory — and it is the only thing that
+                // frees the slot. Emitted once, when the last attempt fails.
+                out.intent(Intent::CancelProduction {
+                    type_id,
+                    all: true,
+                });
+                log::warn!(
+                    "auto play: no cell for {} after {PLACEMENT_ATTEMPTS} tries; abandoning the build",
+                    obs.object_type(rules, type_id).map_or("?", |ty| ty.id.as_str())
+                );
+            } else {
+                log::info!(
+                    "auto play: no cell for {} (attempt {attempt})",
+                    obs.object_type(rules, type_id).map_or("?", |ty| ty.id.as_str())
+                );
+            }
             continue;
         };
+        brain.stranded_sites.remove(&type_id);
         log::debug!(
             "auto play: place {} at {cell:?} (attempt {attempt})",
             obs.object_type(rules, type_id).map_or("?", |ty| ty.id.as_str())
@@ -156,6 +218,39 @@ fn place_finished(
         brain.site_attempts.insert(type_id, next);
     }
     brain.site_attempts.retain(|id, _| waiting.contains(id));
+}
+
+/// The cells a wall would stand on around the house's own buildings that retail
+/// marks `ProtectWithWall=yes`: one ring outside each foundation.
+///
+/// This is the ring [`super::walls::next_segment`] closes, and the reason a
+/// foundation may not be placed on it. Walls only start once the base has
+/// [`super::walls::WALL_MIN_STRUCTURES`] structures, so by the time the first
+/// segment is queued every cell beside the yard already carries a building
+/// unless the sweep was told to leave them alone.
+fn wall_ring(rules: &RuleSet, obs: &Observation<'_>) -> BTreeSet<(u16, u16)> {
+    let mut ring = BTreeSet::new();
+    for entity in obs.own_entities() {
+        let Some(ty) = obs.object_type(rules, entity.type_id) else {
+            continue;
+        };
+        if !super::walls::protected(ty) {
+            continue;
+        }
+        let (width, height) = ty.foundation.dimensions();
+        // The ring the plan actually builds on, not the one `perimeter`
+        // answers: the wall stands `WALL_OFFSET_CELLS` out, and reserving the
+        // cell beside the foundation instead left every segment a ring
+        // further out than the space kept for it — one cell off, in the same
+        // direction on all four sides, which is what "the wall is shifted"
+        // looked like.
+        ring.extend(super::walls::ring_at(
+            entity.cell,
+            (width, height),
+            super::walls::WALL_OFFSET_CELLS,
+        ));
+    }
+    ring
 }
 
 /// The wallet the house keeps for the harvesters it has not built yet.
@@ -217,9 +312,19 @@ fn build_next(
     // on the map has not caught up is how an opening ended with two power
     // plants — the second was queued in the frames the first spent waiting for
     // its cell, and then the yard built both.
-    if brain.census.line(ProductionCategory::Building).busy()
-        || brain.census.line(ProductionCategory::Defense).ready.is_some()
-    {
+    let building = brain.census.line(ProductionCategory::Building);
+    let defense = brain.census.line(ProductionCategory::Defense);
+    // A stranded type is one the map has no cell for: it still occupies the
+    // factory, but it must not hold the whole queue behind it.
+    let building_busy = building.product.is_some()
+        || building.queued > 0
+        || building
+            .ready
+            .is_some_and(|id| !brain.stranded_sites.contains(&id));
+    let defense_busy = defense
+        .ready
+        .is_some_and(|id| !brain.stranded_sites.contains(&id));
+    if building_busy || defense_busy {
         return;
     }
     let tick = obs.tick();
@@ -629,19 +734,19 @@ mod tests {
             ty.id
         );
 
-        // A refinery on the map: still the barracks, because the production
-        // building comes before the second bay.
-        sim.spawn_object("GAREFN", "Americans", 20, 20, 255, &rules)
-            .expect("a refinery");
+        // The barracks on the map: the income, because the production building
+        // now stands there.
+        sim.spawn_object("GAPILE", "Americans", 24, 24, 255, &rules)
+            .expect("a barracks");
         let census = ledger(&rules, &sim, owner);
         let obs = Observation::new(&sim, owner);
         let budget = plan::budget(&rules, &obs, &census, None);
         let ty = plan::answer(&rules, &obs, &census, &budget, None)
-            .expect("a base with income wants the next thing")
+            .expect("a base with soldiers wants the next thing")
             .ty;
         assert!(
-            rules.build_barracks_types.iter().any(|name| name == &ty.id),
-            "the barracks comes before the war factory: {}",
+            rules.build_refinery_types.iter().any(|name| name == &ty.id),
+            "the bay comes before the war factory: {}",
             ty.id
         );
 
@@ -649,8 +754,8 @@ mod tests {
         // the tech chain and not a tower: the war factory first, because the
         // lab's own `Prerequisite=GAWEAP,RADAR,GACNST`, and then the aircraft
         // plant that stands in for the radar.
-        sim.spawn_object("GAPILE", "Americans", 24, 24, 255, &rules)
-            .expect("a barracks");
+        sim.spawn_object("GAREFN", "Americans", 20, 20, 255, &rules)
+            .expect("a refinery");
         let census = ledger(&rules, &sim, owner);
         let obs = Observation::new(&sim, owner);
         let budget = plan::budget(&rules, &obs, &census, None);

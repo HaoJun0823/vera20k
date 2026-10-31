@@ -20,9 +20,12 @@
 //!   closed by placing its two ends, the way a player drags one down a line,
 //!   and it costs two slots rather than one per cell.
 //! - A wall blocks its owner's units as well, and retail has no gate this house
-//!   can build, so the arc facing *away* from the enemy is the only part worth
-//!   closing. The side facing the base stays open: that is where the yard's
-//!   own units come and go.
+//!   can build, so the ring is closed all the way round except one cell on the
+//!   side away from the enemy ([`gate_cell`]): that is where the yard's own
+//!   units come and go, and one cell is the smallest hole an attack can use. A
+//!   half-ring — the enemy-facing arc alone — is not a wall: it leaves three
+//!   sides of a captured lab open, which is what "the base is only half
+//!   enclosed" looks like on the map.
 //!
 //! The result is a segment plan, not a picture: the next cell to fill is
 //! computed from the base as it stands, so a wall that was interrupted, a
@@ -51,10 +54,11 @@ pub(super) const WALL_CREDITS: i32 = 2_000;
 /// opening.
 pub(super) const WALL_MIN_STRUCTURES: usize = 6;
 
-/// Segments a house may have standing. A four-cell building's enemy-facing arc
-/// is a dozen cells and the base has two or three of them; past this the walls
-/// are eating the defenses' whole queue.
-pub(super) const WALL_SEGMENT_CAP: usize = 24;
+/// Cells a house may have walled. The outline of a base with a yard, two
+/// refineries, a factory, a barracks and a lab is around fifty cells, and the
+/// engine's own fill closes most of them from a handful of segments. Past this
+/// the walls are eating the defenses' whole queue.
+pub(super) const WALL_SEGMENT_CAP: usize = 56;
 
 /// The wall segment the base wants: the cell to put it on, the run it closes,
 /// and how much of the wall already stands.
@@ -118,8 +122,11 @@ pub(super) fn protected(ty: &ObjectType) -> bool {
     ty.protect_with_wall && ty.category == ObjectCategory::Building
 }
 
-/// The cells around a building's foundation, one ring out: the cells a wall
-/// would stand on.
+/// The cells around a building's foundation, one ring out.
+///
+/// This is *not* where the wall stands: it is the cell beside the foundation,
+/// the lane the house's own units are born on. [`ring_at`] is the door to a
+/// ring at a stated offset, and the wall's is `WALL_OFFSET_CELLS`.
 pub(super) fn perimeter(cell: (u16, u16), foundation: (u16, u16)) -> Vec<(u16, u16)> {
     let (width, height) = (i32::from(foundation.0.max(1)), i32::from(foundation.1.max(1)));
     let (x0, y0) = (i32::from(cell.0), i32::from(cell.1));
@@ -140,31 +147,46 @@ pub(super) fn perimeter(cell: (u16, u16), foundation: (u16, u16)) -> Vec<(u16, u
     cells
 }
 
-/// The half of a ring that faces `direction`: cells whose offset from the
-/// building's centre points the same way.
+/// The ring standing `offset` cells out from a foundation.
 ///
-/// `direction` is in cells and need not be normalised; a zero direction keeps
-/// nothing, because a wall with no enemy side would close the base on its own
-/// units. Ties (a cell exactly beside the building, neither toward nor away
-/// from the enemy) are dropped, which leaves a gap on each side of the arc
-/// rather than a corner a unit cannot pass.
-pub(super) fn facing(
-    cells: &[(u16, u16)],
+/// [`perimeter`] answers the ring one cell out, which is the cell beside the
+/// foundation and what the wall takes (`WALL_OFFSET_CELLS`); a larger offset
+/// grows the footprint by `offset - 1` before it is asked. Written once,
+/// because "two cells out" was implemented twice and the second copy was three.
+pub(super) fn ring_at(cell: (u16, u16), foundation: (u16, u16), offset: i32) -> Vec<(u16, u16)> {
+    let back = u16::try_from(offset.max(1) - 1).unwrap_or(0);
+    perimeter(
+        (cell.0.saturating_sub(back), cell.1.saturating_sub(back)),
+        (foundation.0.saturating_add(2 * back), foundation.1.saturating_add(2 * back)),
+    )
+}
+
+/// The one cell of a ring left open as the way in and out: the cell furthest
+/// from the enemy, and the most centred among those.
+///
+/// A closed ring walls the house's own units in, and retail has no gate this
+/// house can build. One cell is enough for a column of tanks and is the
+/// smallest hole an attacker can use. A house with no enemy keeps every cell:
+/// a wall is only ever built toward something.
+pub(super) fn gate_cell(
+    ring: &[(u16, u16)],
     centre: (u16, u16),
     direction: (i32, i32),
-) -> Vec<(u16, u16)> {
+) -> Option<(u16, u16)> {
     if direction == (0, 0) {
-        return Vec::new();
+        return None;
     }
-    cells
-        .iter()
-        .copied()
-        .filter(|(x, y)| {
-            let dx = i32::from(*x) - i32::from(centre.0);
-            let dy = i32::from(*y) - i32::from(centre.1);
-            dx * direction.0 + dy * direction.1 > 0
-        })
-        .collect()
+    ring.iter().copied().min_by_key(|(x, y)| {
+        let dx = i32::from(*x) - i32::from(centre.0);
+        let dy = i32::from(*y) - i32::from(centre.1);
+        (
+            // Furthest from the enemy first, then the middle of that side, so
+            // a 4x4's gate is the centre of its back wall and not a corner.
+            dx * direction.0 + dy * direction.1,
+            (dx * direction.1 - dy * direction.0).abs(),
+            (*x, *y),
+        )
+    })
 }
 
 /// The house's wall type, resolved once from the rules and cached: a
@@ -210,14 +232,47 @@ pub(super) fn next_segment(
         return None;
     }
     let (centre, targets) = base_targets(rules, obs)?;
-    // What the cap counts is the wall on the rings the plan fills. A standing
+    let blocked = blocked_cells(rules, obs);
+    let house = obs.house();
+    // A cell that already holds a wall, its own or a hostile one, is not walled
+    // again; the walkability of the path projection says the same, one step
+    // later than the grid does.
+    // A cell anything stands on is not free, whoever it belongs to. The
+    // placement would be refused while the object is still there, and a plan
+    // that keeps naming that cell never finishes: the ring closed everything
+    // except the cell a rifleman happened to be standing on, and the wall sat
+    // in the factory until it was abandoned. Own units standing there are not
+    // moved out of the way either — the plan goes round them, and comes back
+    // for the cell once they have walked.
+    let occupied = obs.ground_object_cells(rules);
+    let free = |x: u16, y: u16| {
+        !blocked.contains(&(x, y))
+            && !occupied.contains(&(x, y))
+            && obs.wall_owner_at(x, y).is_none()
+            && obs.is_ground_walkable(x, y)
+    };
+    // The ring stands on the cell beside each protected building's foundation:
+    // the wall touches the base instead of leaving a corridor between the two.
+    // The gate (below) is what keeps the house's own units moving; build.rs
+    // reserves the same ring, so a building never lands on the wall's cell.
+    //
+    // Walled all the way round, one two-cell gate aside. The enemy-facing arc
+    // alone was half a pen, and the base's own outline was worse: the segments
+    // followed the alleys between buildings, so the loop cut through whatever
+    // stood beside the lane — half a power plant inside, half outside.
+    let mut ring: Vec<(u16, u16)> = Vec::new();
+    for (cell, foundation) in &targets {
+        for cell in ring_at(*cell, *foundation, WALL_OFFSET_CELLS) {
+            if !ring.contains(&cell) {
+                ring.push(cell);
+            }
+        }
+    }
+    ring.retain(|(x, y)| !blocked.contains(&(*x, *y)));
+    ring.sort_unstable();
+    // What the cap counts is the wall on the outline the plan fills. A standing
     // wall is an overlay rather than an object (`Observation::wall_owner_at`),
     // so it is counted where it stands.
-    let house = obs.house();
-    let mut ring: BTreeSet<(u16, u16)> = BTreeSet::new();
-    for (cell, foundation) in &targets {
-        ring.extend(perimeter(*cell, *foundation));
-    }
     let standing = ring
         .iter()
         .filter(|(x, y)| obs.wall_owner_at(*x, *y) == Some(house))
@@ -225,7 +280,6 @@ pub(super) fn next_segment(
     if standing >= WALL_SEGMENT_CAP {
         return None;
     }
-    let blocked = blocked_cells(rules, obs);
     // The enemy side: the nearest hostile object to the base's centre, so the
     // wall faces the way an attack has to come from. A house that has seen no
     // enemy builds no wall.
@@ -248,46 +302,63 @@ pub(super) fn next_segment(
         .object_type(rules, wall)
         .and_then(|ty| ty.guard_range)
         .map_or(0, |range| range.to_num::<i32>().max(0) as usize);
-    // A cell that already holds a wall, its own or a hostile one, is not walled
-    // again; the walkability of the path projection says the same, one step
-    // later than the grid does.
-    let free = |x: u16, y: u16| {
-        !blocked.contains(&(x, y)) && obs.wall_owner_at(x, y).is_none() && obs.is_ground_walkable(x, y)
-    };
-    for (cell, foundation) in targets {
-        let ring = perimeter(cell, foundation);
-        // The arc is the building's own, so the offset is taken from its
-        // centre: a building at the edge of the base still gets a wall on the
-        // side that faces the enemy, not on the side that faces away from the
-        // base's centroid.
-        let centre = (
-            cell.0.saturating_add(foundation.0 / 2),
-            cell.1.saturating_add(foundation.1 / 2),
-        );
-        let arc = facing(&ring, centre, direction);
-        // The end of the run, not the cell beside the last one: a segment is
-        // worth the gap it closes, because the engine builds the cells between
-        // for free. Ties keep the first cell of the arc.
-        let mut best: Option<((u16, u16), usize)> = None;
-        for cell in arc {
-            if !free(cell.0, cell.1) {
-                continue;
-            }
-            let fill = autofill_gain(cell, limit, |x, y| obs.wall_owner_at(x, y) == Some(house), &free);
-            if best.is_none_or(|(_, best_fill)| fill > best_fill) {
-                best = Some((cell, fill));
-            }
-        }
-        if let Some((cell, fill)) = best {
-            return Some(Segment {
-                type_id: wall,
-                cell,
-                standing,
-                fill,
-            });
+    // One gate for the whole outline, on the side away from the enemy: the
+    // house's own units come and go through it, and one cell is the smallest
+    // hole an attack can use. Everything else is closed — a three-sided pen is
+    // what "the base is only half enclosed" looks like on the map.
+    //
+    // The gate is treated as blocked by the fill scan as well: `MapClass` fills
+    // whatever lies between two of this house's walls, so a run planned straight
+    // across the gate would build over it.
+    // Two cells of gate, not one: one cell is a doorway a column of tanks
+    // wedges in, and the whole point of the ring is that the house's units get
+    // out faster than an attack gets in.
+    let mut gate: Vec<(u16, u16)> = Vec::new();
+    if let Some(first) = gate_cell(&ring, centre, direction) {
+        gate.push(first);
+        if let Some(next) = ring
+            .iter()
+            .copied()
+            .filter(|cell| chebyshev(*cell, first) == 1)
+            .min_by_key(|cell| {
+                let dx = i32::from(cell.0) - i32::from(centre.0);
+                let dy = i32::from(cell.1) - i32::from(centre.1);
+                (dx * direction.0 + dy * direction.1, *cell)
+            })
+        {
+            gate.push(next);
         }
     }
-    None
+    let clear = |x: u16, y: u16| free(x, y) && !gate.contains(&(x, y));
+    let best = ring
+        .iter()
+        .copied()
+        .filter(|(x, y)| free(*x, *y))
+        .map(|cell| {
+            let fill = autofill_gain(
+                cell,
+                limit,
+                |x, y| obs.wall_owner_at(x, y) == Some(house),
+                &clear,
+            );
+            let side = (i32::from(cell.0) - i32::from(centre.0)) * direction.0
+                + (i32::from(cell.1) - i32::from(centre.1)) * direction.1;
+            // The end of the run, not the cell beside the last one: a segment is
+            // worth the gap it closes, because the engine builds the cells
+            // between for free. Among equal gaps the cell nearest the enemy goes
+            // first, so an empty outline starts on the side an attack comes
+            // from; then the lower cell, so the answer does not depend on the
+            // scan's own order.
+            (fill, side, std::cmp::Reverse(cell))
+        })
+        .max();
+    let (fill, _, std::cmp::Reverse(cell)) = best?;
+    Some(Segment {
+        type_id: wall,
+        cell,
+        standing,
+        fill,
+    })
 }
 
 /// The cells any building's foundation stands on, own and hostile. Walls are
@@ -324,8 +395,26 @@ fn blocked_cells(rules: &RuleSet, obs: &Observation<'_>) -> BTreeSet<(u16, u16)>
     cells
 }
 
-/// The base's centre and the buildings worth walling, in entity order so the
-/// plan is deterministic.
+/// How far from a protected building's foundation its wall ring stands, in
+/// cells. One is the cell beside the foundation: the wall hugs the base, with no
+/// empty lane between it and the buildings it encloses. Two left a corridor the
+/// player could not use and read as a misplaced wall, so the ring closed onto
+/// the foundations (decision 2026-10-31).
+pub(super) const WALL_OFFSET_CELLS: i32 = 1;
+
+/// How far from the base's centre a building still counts as part of it, in
+/// cells: the wall runs around the base, not around a captured derrick on the
+/// other side of the map.
+const BASE_WALL_RADIUS: i32 = 12;
+
+/// The base's centre and the buildings its outline is taken from, in entity
+/// order so the plan is deterministic.
+///
+/// Every building, not only the ones retail marks `ProtectWithWall=yes`: the
+/// wall's job is to stop an attack reaching the base, and a ring per protected
+/// building guards the yard while the refineries and the barracks sit outside
+/// it. Because one foundation covers its neighbours' rings, the union's free
+/// cells are the base's edge — the inside is building on building.
 fn base_targets(
     rules: &RuleSet,
     obs: &Observation<'_>,
@@ -345,18 +434,24 @@ fn base_targets(
         return None;
     }
     targets.sort_by_key(|(entity_id, ..)| *entity_id);
-    let (mut sx, mut sy, mut count) = (0_i64, 0_i64, 0_i64);
-    for (_, cell, _) in &targets {
-        sx += i64::from(cell.0);
-        sy += i64::from(cell.1);
-        count += 1;
-    }
-    let centre = (
-        u16::try_from(sx / count).unwrap_or(0),
-        u16::try_from(sy / count).unwrap_or(0),
-    );
+    let centre = |targets: &[(u64, (u16, u16), (u16, u16))]| {
+        let (mut sx, mut sy) = (0_i64, 0_i64);
+        for (_, cell, _) in targets {
+            sx += i64::from(cell.0);
+            sy += i64::from(cell.1);
+        }
+        let count = i64::try_from(targets.len()).unwrap_or(1).max(1);
+        (
+            u16::try_from(sx / count).unwrap_or(0),
+            u16::try_from(sy / count).unwrap_or(0),
+        )
+    };
+    // Centred once on everything to drop the far-flung outliers, then again on
+    // what is left: one captured derrick must not drag the wall across the map.
+    let rough = centre(&targets);
+    targets.retain(|(_, cell, _)| chebyshev(*cell, rough) <= BASE_WALL_RADIUS);
     Some((
-        centre,
+        centre(&targets),
         targets
             .into_iter()
             .map(|(_, cell, foundation)| (cell, foundation))
@@ -424,19 +519,34 @@ mod tests {
         assert!(!ring.contains(&(11, 11)), "inside the foundation");
     }
 
-    /// Only the half facing the enemy is walled: the base side stays open, so
-    /// the house's own units keep their way out.
+    /// The ring stands on the cell beside the foundation, so the wall touches
+    /// the base: no empty lane is left between the two, and the plan's ring is
+    /// the same ring `build.rs` reserves.
     #[test]
-    fn the_arc_faces_the_enemy() {
+    fn the_ring_stands_beside_the_foundation() {
+        let ring = ring_at((10, 10), (2, 2), WALL_OFFSET_CELLS);
+        assert_eq!(ring, perimeter((10, 10), (2, 2)));
+        assert!(ring.contains(&(9, 11)), "beside the foundation is the wall");
+        assert!(ring.contains(&(11, 9)), "and so is the far side");
+        assert!(!ring.contains(&(8, 11)), "two cells out is not");
+        assert!(!ring.contains(&(11, 11)), "inside the foundation is not");
+    }
+
+    /// The ring is closed all the way round except one cell on the side away
+    /// from the enemy: the house's own units keep a way out, and the wall has
+    /// no other hole.
+    #[test]
+    fn the_gate_is_the_one_cell_facing_away_from_the_enemy() {
         let ring = perimeter((10, 10), (2, 2));
-        // A 2x2 standing at (10,10) has its centre at (11,11).
-        let arc = facing(&ring, (11, 11), (1, 0));
-        assert_eq!(arc.len(), 4, "{arc:?} is the east arc");
-        assert!(arc.iter().all(|(x, _)| *x > 11), "{arc:?} is the east arc");
-        assert!(!arc.contains(&(9, 11)), "the west side is left open");
-        assert!(!arc.contains(&(11, 9)), "a cell straight beside is a tie");
-        // Nothing to face means no wall.
-        assert!(facing(&ring, (11, 11), (0, 0)).is_empty());
+        // A 2x2 standing at (10,10) has its centre at (11,11); the enemy is
+        // east, so the gate is the middle of the west wall.
+        assert_eq!(gate_cell(&ring, (11, 11), (1, 0)), Some((9, 11)));
+        // With the enemy to the south the gate moves to the north wall.
+        assert_eq!(gate_cell(&ring, (11, 11), (0, 1)), Some((11, 9)));
+        // One gate, and it is on the ring itself.
+        assert!(ring.contains(&gate_cell(&ring, (11, 11), (1, 0)).expect("a gate")));
+        // Nothing to face means no gate; the ring stays whole.
+        assert_eq!(gate_cell(&ring, (11, 11), (0, 0)), None);
     }
 
     /// The cell worth a production slot is the end of the run, because the

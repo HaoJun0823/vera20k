@@ -69,9 +69,12 @@ pub(super) struct Threat {
     pub(super) reach: i32,
 }
 
-/// Whether `cell` is inside `threat`'s reach.
-pub(super) fn covers(threat: &Threat, cell: (u16, u16)) -> bool {
-    chebyshev(cell, threat.cell) <= threat.reach
+/// Whether a weapon reaching `reach` cells from `origin` covers `cell`.
+///
+/// The one reach test: the exposure below, the step out of it, and the
+/// avoidance layer's zones all measure "inside the guns" with it.
+pub(super) fn covers(cell: (u16, u16), origin: (u16, u16), reach: i32) -> bool {
+    chebyshev(cell, origin) <= reach
 }
 
 /// What a cell has to put up with: how many enemies reach it, and how far the
@@ -94,11 +97,11 @@ pub(super) fn exposure(cell: (u16, u16), threats: &[Threat]) -> Exposure {
     let mut covered = 0;
     let mut nearest = i32::MAX;
     for threat in threats {
-        let distance = chebyshev(cell, threat.cell);
-        if distance <= threat.reach {
-            covered += 1;
-            nearest = nearest.min(distance);
+        if !covers(cell, threat.cell, threat.reach) {
+            continue;
         }
+        covered += 1;
+        nearest = nearest.min(chebyshev(cell, threat.cell));
     }
     Exposure { covered, nearest }
 }
@@ -194,6 +197,57 @@ impl ThreatIndex {
     }
 }
 
+/// Whether any weapon `ty` carries has a `Parasite=yes` warhead.
+///
+/// The flag is the warhead's, not the type's: in the retail rules a terror
+/// drone's jaw and a squid's tentacles carry it and nothing else does, and a
+/// mod that puts one on a tank is answered without a name list here.
+fn carries_parasite(rules: &RuleSet, ty: &crate::rules::object_type::ObjectType) -> bool {
+    (0..8)
+        .filter_map(|slot| ty.weapon_at(slot))
+        .filter_map(|name| rules.weapon(name))
+        .filter_map(|weapon| weapon.warhead.as_deref())
+        .filter_map(|name| rules.warhead(name))
+        .any(|warhead| warhead.parasite)
+}
+
+/// The neighbouring cell that puts the most ground between the unit and what
+/// would board it, or `None` when no step is further away than standing still.
+fn flee_step(
+    cell: (u16, u16),
+    danger: &[((u16, u16), i32)],
+    obs: &Observation<'_>,
+) -> Option<(u16, u16)> {
+    let clearance = |c: (u16, u16)| {
+        danger
+            .iter()
+            .map(|(other, _)| chebyshev(c, *other))
+            .min()
+            .unwrap_or(i32::MAX)
+    };
+    let here = clearance(cell);
+    let mut best: Option<(i32, (u16, u16))> = None;
+    for (dx, dy) in STEPS {
+        let (Ok(x), Ok(y)) = (
+            u16::try_from(i32::from(cell.0) + dx),
+            u16::try_from(i32::from(cell.1) + dy),
+        ) else {
+            continue;
+        };
+        if !obs.is_ground_walkable(x, y) {
+            continue;
+        }
+        let clear = clearance((x, y));
+        if clear <= here {
+            continue;
+        }
+        if best.is_none_or(|(best, _)| clear > best) {
+            best = Some((clear, (x, y)));
+        }
+    }
+    best.map(|(_, cell)| cell)
+}
+
 /// Shoot, step out, come back.
 pub(super) fn run(
     brain: &mut RetailBrain,
@@ -204,6 +258,11 @@ pub(super) fn run(
     let tick = obs.tick();
     let mut index = ThreatIndex::default();
     let mut enemy_cell: BTreeMap<u64, ((u16, u16), i32)> = BTreeMap::new();
+    // The enemies whose weapons do not shoot but board: a terror drone's jaw
+    // and a squid's tentacles carry a `Parasite=yes` warhead, and the unit they
+    // touch is taken over rather than damaged. Collected apart from the firing
+    // threats because the answer to one is not the answer to the other.
+    let mut parasites: Vec<((u16, u16), i32)> = Vec::new();
     for enemy in &brain.census.enemies {
         let Some(ty) = obs.object_type(rules, enemy.type_id) else {
             continue;
@@ -216,10 +275,18 @@ pub(super) fn run(
                 reach,
             });
         }
+        if reach > 0 && carries_parasite(rules, ty) {
+            parasites.push((enemy.cell, reach));
+        }
     }
 
     for unit in &brain.census.units {
-        if !unit.traits.combat || unit.hand || !unit.orderable {
+        if !unit.traits.combat || !unit.controllable() {
+            continue;
+        }
+        // A walk-in or a depot visit owns the destination; a kite `Move` over
+        // it ends the visit.
+        if unit.in_service() {
             continue;
         }
         if obs.is_deployed(unit.entity_id) {
@@ -234,6 +301,50 @@ pub(super) fn run(
         if ty.category == ObjectCategory::Aircraft {
             continue;
         }
+        // A boarding is not a fight. A `Parasiteable=` unit — every soldier and
+        // the dog — that walks within a parasite weapon's reach is taken over
+        // outright: there is no exchange of fire to win, so the step out comes
+        // before every other decision in this pass, loaded gun included.
+        if ty.parasiteable {
+            let danger: Vec<((u16, u16), i32)> = parasites
+                .iter()
+                .filter(|(cell, reach)| chebyshev(unit.cell, *cell) <= *reach)
+                .copied()
+                .collect();
+            if !danger.is_empty() {
+                if let Some(step) = flee_step(unit.cell, &danger, obs)
+                    && brain
+                        .tracked
+                        .admits(tick, unit.entity_id, TrackedKind::Kite, None, Some(step))
+                {
+                    brain.tracked.record(
+                        tick,
+                        unit.entity_id,
+                        TrackedKind::Kite,
+                        None,
+                        Some(step),
+                    );
+                    super::orders::issue(
+                        out,
+                        rules,
+                        obs,
+                        unit.entity_id,
+                        Goal::Move { cell: step },
+                    );
+                }
+                continue;
+            }
+        }
+        // A burst weapon mid-cycle is not stepped out of. The step is a Move,
+        // and a Move is the assignment that empties the burst — the gun comes
+        // back three frames later as if none of it had been fired. The kite
+        // pass is a re-position, so it is the one that waits; a single-shot
+        // weapon has no cycle to break and is kited as before.
+        if super::micro::firing(obs, unit.mission, unit.entity_id)
+            && super::advance::weapon_burst(rules, ty, false) > 1
+        {
+            continue;
+        }
         let mine = super::advance::weapon_range_cells(rules, ty, false);
         // What the unit is shooting at: the native mission's own choice. A unit
         // that was never given one does not get an attack from here — the micro
@@ -242,6 +353,14 @@ pub(super) fn run(
         let native_target = obs
             .attack_target(unit.entity_id)
             .and_then(|id| enemy_cell.get(&id).map(|(cell, _)| (id, *cell)));
+        // A target the index does not hold is nobody's building: a neutral
+        // blocker the unit was sent to clear. Stepping out of it is a Move, and
+        // a Move ends the attack — and nothing downstream would send the unit
+        // back, because only the ledger knows where that building stands. It
+        // holds its ground and finishes the demolition.
+        if native_target.is_none() && obs.attack_target(unit.entity_id).is_some() {
+            continue;
+        }
         // The direction half may use whatever is closest when the unit has no
         // target: stepping away from a tank is right even for a unit that was
         // shooting a building.
@@ -280,7 +399,13 @@ pub(super) fn run(
                 Some(target_id),
                 None,
             );
-            out.order(unit.entity_id, Goal::Attack { target: target_id });
+            super::orders::issue(
+                out,
+                rules,
+                obs,
+                unit.entity_id,
+                Goal::Attack { target: target_id },
+            );
             continue;
         }
 
@@ -304,7 +429,7 @@ pub(super) fn run(
         brain
             .tracked
             .record(tick, unit.entity_id, TrackedKind::Kite, None, Some(step));
-        out.order(unit.entity_id, Goal::Move { cell: step });
+        super::orders::issue(out, rules, obs, unit.entity_id, Goal::Move { cell: step });
     }
 }
 

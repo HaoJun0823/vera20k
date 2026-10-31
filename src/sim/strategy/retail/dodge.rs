@@ -80,7 +80,16 @@ pub(super) fn exposure_to_all(cell: (i32, i32), threats: &[Threat]) -> i32 {
 /// ranked by `(exposure, distance)` and walked in a fixed order, so a farther
 /// cell that is fully clear beats a nearer one that is half inside the blast,
 /// and equal cells are decided by position rather than by hash order.
-pub(super) fn escape_cell(cell: (u16, u16), threats: &[Threat]) -> Option<(u16, u16)> {
+///
+/// `extent` is the map's: a cell past the edge is not a place to stand, so it
+/// is not a candidate. The shell does not move, and a unit on the last row
+/// otherwise takes its step off the map — the order is refused at the door and
+/// the unit stands in the blast it was told to leave.
+pub(super) fn escape_cell(
+    cell: (u16, u16),
+    threats: &[Threat],
+    extent: (u16, u16),
+) -> Option<(u16, u16)> {
     let here = (i32::from(cell.0), i32::from(cell.1));
     let current = exposure_to_all(here, threats);
     if current == 0 {
@@ -101,6 +110,9 @@ pub(super) fn escape_cell(cell: (u16, u16), threats: &[Threat]) -> Option<(u16, 
             let (Ok(x), Ok(y)) = (u16::try_from(x), u16::try_from(y)) else {
                 continue;
             };
+            if !super::orders::on_map((x, y), extent) {
+                continue;
+            }
             let exposure = exposure_to_all((i32::from(x), i32::from(y)), threats);
             let distance = dx.abs().max(dy.abs());
             if best.is_none_or(|(_, best_exposure, best_distance)| {
@@ -145,29 +157,43 @@ pub(super) fn run(
 ) {
     let tick = obs.tick();
     let mut by_target: BTreeMap<u64, Vec<Threat>> = BTreeMap::new();
+    // Guided shots, kept apart: a step does not make one miss, so a walker
+    // takes the hit, but an airframe that leaves the launcher's range or the
+    // missile's turn circle does outfly it. Air gets them; the ground does not.
+    let mut homing: BTreeMap<u64, Vec<Threat>> = BTreeMap::new();
     for (target, shot) in obs.shots_in_flight() {
-        // A guided shot follows the unit; a step does not make it miss.
-        if shot.homing {
-            continue;
-        }
         let spread = obs.warhead_spread_cells(rules, shot.warhead);
-        by_target.entry(target).or_default().push(Threat {
+        let threat = Threat {
             impact: (i32::from(shot.impact.0), i32::from(shot.impact.1)),
             frames: shot.frames,
             spread,
-        });
+        };
+        if shot.homing {
+            homing.entry(target).or_default().push(threat);
+        } else {
+            by_target.entry(target).or_default().push(threat);
+        }
     }
-    if by_target.is_empty() {
+    if by_target.is_empty() && homing.is_empty() {
         return;
     }
 
     for unit in &brain.census.units {
-        if !unit.traits.combat || unit.hand || !unit.orderable {
+        if !unit.traits.combat || !unit.controllable() {
             continue;
         }
-        let Some(threats) = by_target.get(&unit.entity_id) else {
+        // A unit walking into a building or a depot keeps its destination: a
+        // dodge `Move` over it drops the visit, and the mission does not
+        // re-aim.
+        if unit.in_service() {
             continue;
-        };
+        }
+        // An earlier pass already gave this unit the frame's order — a
+        // garrison's Capture, a specialist's walk. A second one is a second
+        // command, and the later of the two is the one the world takes.
+        if super::orders::ordered_this_frame(out, unit.entity_id) {
+            continue;
+        }
         // A dug-in soldier cannot walk, and a position it was told to hold is
         // worth more than one shell.
         if obs.is_deployed(unit.entity_id) {
@@ -176,10 +202,33 @@ pub(super) fn run(
         let Some(ty) = obs.object_type(rules, unit.type_id) else {
             continue;
         };
-        if ty.category == ObjectCategory::Aircraft {
+        // An airframe dodges in the third dimension: it is not held to the
+        // ground, a step costs it nothing, and a guided missile that has to
+        // turn is a missile it can outfly. Everything else takes the guided
+        // shot it cannot step out of.
+        let airborne = ty.category == ObjectCategory::Aircraft
+            || ty.movement_zone == crate::rules::locomotor_type::MovementZone::Fly;
+        let threats: Vec<Threat> = match (by_target.get(&unit.entity_id), airborne) {
+            (Some(list), _) => list.clone(),
+            (None, true) => homing.get(&unit.entity_id).cloned().unwrap_or_default(),
+            (None, false) => continue,
+        };
+        if threats.is_empty() {
             continue;
         }
-        let Some(target) = escape_cell(unit.cell, threats) else {
+        // A burst weapon mid-cycle takes the shell. The step is a Move and a
+        // Move empties the burst, which is the rate-of-fire bug: the gun
+        // comes back in three frames instead of a reload. Dodging is the pass
+        // that would otherwise feed the loop every time anything shoots at
+        // this unit, so for a burst weapon the cycle is finished first and
+        // the shell is taken — the same trade a player makes who wants the
+        // burst and not the exploit.
+        if super::micro::firing(obs, unit.mission, unit.entity_id)
+            && super::advance::weapon_burst(rules, ty, false) > 1
+        {
+            continue;
+        }
+        let Some(target) = escape_cell(unit.cell, &threats, obs.map_extent()) else {
             continue;
         };
         let here = (i32::from(unit.cell.0), i32::from(unit.cell.1));
@@ -207,7 +256,7 @@ pub(super) fn run(
         brain
             .tracked
             .record(tick, unit.entity_id, TrackedKind::Dodge, None, Some(target));
-        out.order(unit.entity_id, Goal::Move { cell: target });
+        super::orders::issue(out, rules, obs, unit.entity_id, Goal::Move { cell: target });
     }
 }
 
@@ -240,7 +289,7 @@ mod tests {
         let threat = shot((10, 10), 6, 2);
         assert_eq!(exposure((12, 12), &threat), 1);
         assert_eq!(exposure((13, 10), &threat), 0);
-        let escape = escape_cell((10, 10), &[threat]).expect("a step out of the blast");
+        let escape = escape_cell((10, 10), &[threat], (60, 60)).expect("a step out of the blast");
         let escape = (i32::from(escape.0), i32::from(escape.1));
         assert_eq!(exposure_to_all(escape, &[threat]), 0);
         assert!(escape.0.abs_diff(10).max(escape.1.abs_diff(10)) >= 3);
@@ -250,16 +299,36 @@ mod tests {
     /// shuffles units standing outside the blast spends the frame on nothing.
     #[test]
     fn a_clear_cell_asks_for_no_step() {
-        assert_eq!(escape_cell((1, 1), &[shot((10, 10), 6, 0)]), None);
+        assert_eq!(escape_cell((1, 1), &[shot((10, 10), 6, 0)], (60, 60)), None);
     }
 
     /// Two shells, two impact points: the step goes where neither lands.
     #[test]
     fn the_step_leaves_every_impact() {
         let threats = [shot((10, 10), 6, 0), shot((11, 10), 6, 0)];
-        let escape = escape_cell((10, 10), &threats).expect("a step");
+        let escape = escape_cell((10, 10), &threats, (60, 60)).expect("a step");
         let escape = (i32::from(escape.0), i32::from(escape.1));
         assert_eq!(exposure_to_all(escape, &threats), 0);
+    }
+
+    /// A shell landing beside a unit on the map's last cell leaves it one way
+    /// out that is on the map: the steps past the edge are not candidates, so
+    /// the pass takes the one that stays. Without them the clearest cell is
+    /// past the edge, the door refuses the order, and the unit stands in the
+    /// blast it was told to leave.
+    #[test]
+    fn a_step_at_the_edge_of_the_map_stays_on_it() {
+        let threats = [shot((62, 62), 6, 3)];
+        let escape = escape_cell((63, 63), &threats, (64, 64)).expect("a step out of the blast");
+        assert!(
+            escape.0 < 64 && escape.1 < 64,
+            "{escape:?} is off the map, and every cell past the edge is"
+        );
+        let escape = (i32::from(escape.0), i32::from(escape.1));
+        assert!(
+            exposure_to_all(escape, &threats) < exposure_to_all((63, 63), &threats),
+            "the step it takes still leaves the blast"
+        );
     }
 
     /// The feasibility test is why this pass does not fire every frame: a shell
