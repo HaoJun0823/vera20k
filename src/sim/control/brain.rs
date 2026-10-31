@@ -117,19 +117,27 @@ impl Outbox {
     ///
     /// Called once, after every pass has had its say and before the frame's
     /// orders are applied. The survivors keep the order they were asked in.
-    pub fn resolve(&mut self) {
+    /// Returns the orders a stronger ask replaced: those callers recorded an
+    /// intent for an order that never left, and the brain has to hear about it
+    /// or the unit waits out a term for an order the engine never saw.
+    pub fn resolve(&mut self) -> Vec<(u64, Goal)> {
         if self.wants.is_empty() {
-            return;
+            return Vec::new();
         }
         let keep: std::collections::BTreeSet<usize> =
             self.wants.values().map(|(_, index)| *index).collect();
         let mut index = 0usize;
-        self.orders.retain(|_| {
+        let mut dropped = Vec::new();
+        self.orders.retain(|order| {
             let held = keep.contains(&index);
             index += 1;
+            if !held {
+                dropped.push((order.actor, order.goal));
+            }
             held
         });
         self.wants.clear();
+        dropped
     }
 
     /// Ask L2 to hand `actor` to a managed routine. The routine becomes that
@@ -199,6 +207,21 @@ mod tests {
             "and it is the strongest ask: {:?}",
             out.orders[0].goal
         );
+    }
+
+    /// The ask a stronger one replaced is a refusal: the caller recorded an
+    /// intent for an order that never left, and without hearing about it the
+    /// unit waits out a term for nothing.
+    #[test]
+    fn a_replaced_ask_comes_back_as_a_refusal() {
+        let mut out = Outbox::default();
+        assert!(out.want(7, 6, Goal::Move { cell: (10, 10) }));
+        assert!(out.want(7, 3, Goal::Attack { target: 9 }));
+        let replaced = out.resolve();
+        assert_eq!(replaced.len(), 1, "one order was replaced");
+        assert!(matches!(replaced[0].1, Goal::Move { .. }));
+        assert_eq!(out.orders.len(), 1);
+        assert!(matches!(out.orders[0].goal, Goal::Attack { target: 9 }));
     }
 
     /// A weaker ask that arrives after a stronger one is refused, so the pass

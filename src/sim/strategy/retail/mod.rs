@@ -518,8 +518,14 @@ impl Brain for RetailBrain {
         // is issued on the edge only.
         orders::deploy(self, obs, out);
         // Every pass has had its say: keep one order per object, the strongest
-        // ask, in the order the asks were made.
-        out.resolve();
+        // ask, in the order the asks were made. The asks a stronger one
+        // replaced are refusals like any other — the caller that made them
+        // recorded an intent for an order the engine never saw, and leaving
+        // that record in place is the unit waiting out a term for nothing.
+        let replaced = out.resolve();
+        if !replaced.is_empty() {
+            self.orders_refused(&replaced);
+        }
     }
 
     fn orders_refused(&mut self, refused: &[(u64, Goal)]) {
