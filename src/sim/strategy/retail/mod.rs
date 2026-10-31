@@ -137,6 +137,11 @@ use tracked::Tracker;
 /// enough that a loop is broken before it is visible.
 const STUCK_FRAMES: u64 = 180;
 
+/// How far the house's own units are taken to see, in cells, until the
+/// projection carries each type's Sight=. Eight is a rifleman's sight rounded
+/// down to a cell grid.
+const SIGHT_CELLS: i32 = 8;
+
 /// Drop a walk that is not moving, once; release it if the retry does not
 /// move either.
 ///
@@ -323,6 +328,13 @@ pub struct RetailBrain {
     /// only answer was to grep four passes' debug lines and guess at the
     /// interleaving.
     pub(super) trace: Option<u64>,
+    /// What the house knows: sightings and the memories of them. Fed every
+    /// frame; the enemy list it replaces is the census's, which is omniscient.
+    pub(super) perception: crate::sim::control::perception::Perception,
+    /// Whether the brain acts on `perception` instead of the census's enemy
+    /// list, from `AUTOPLAY_HONEST`: off by default while the policy is moved
+    /// onto the picture a player has.
+    honest: bool,
 }
 
 impl RetailBrain {
@@ -354,6 +366,10 @@ impl RetailBrain {
             trace: std::env::var("AUTOPLAY_TRACE")
                 .ok()
                 .and_then(|raw| raw.trim().parse::<u64>().ok()),
+            perception: crate::sim::control::perception::Perception::new(),
+            honest: std::env::var("AUTOPLAY_HONEST")
+                .ok()
+                .is_some_and(|raw| raw.trim() != "0" && !raw.trim().is_empty()),
         }
     }
 
@@ -450,6 +466,28 @@ impl Brain for RetailBrain {
         // than walking the entity store again.
         self.income.sample(obs.tick(), obs.earned());
         self.rebuild_census(rules, obs);
+        // The house's picture: what the shroud shows, plus what it remembers
+        // having seen. With AUTOPLAY_HONEST set, that picture is what the
+        // passes below act on; without it the census's omniscient list stays,
+        // so the switch can be measured against the policy it is replacing.
+        let tick = obs.tick();
+        // Visibility for the house: ground it has explored, and the ring its
+        // own units stand in. The ring stands in for each type's Sight= until
+        // the projection carries it; without it the switch reads an
+        // unexplored map as an empty one and the house fights nobody.
+        let own: Vec<(u16, u16)> = self.census.units.iter().map(|unit| unit.cell).collect();
+        let sight = |cell: (u16, u16)| {
+            obs.is_cell_revealed(cell.0, cell.1)
+                || own.iter().any(|at| {
+                    i32::from(at.0.abs_diff(cell.0)).max(i32::from(at.1.abs_diff(cell.1)))
+                        <= SIGHT_CELLS
+                })
+        };
+        self.perception
+            .observe(tick, self.census.enemies.iter().copied(), sight);
+        if self.honest {
+            self.census.enemies = self.perception.enemies();
+        }
         // Before anything decides: an intent the object's own mission no longer
         // shows is an intent that did not take, and the layers below must be
         // free to ask again now rather than on its term.

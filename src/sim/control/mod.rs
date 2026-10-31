@@ -30,6 +30,7 @@ pub mod external;
 pub mod intent;
 pub mod micro;
 pub mod observation;
+pub mod perception;
 pub mod placement;
 
 pub use board::{AutoPlayDomains, ControlBoard};
