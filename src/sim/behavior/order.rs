@@ -7,12 +7,16 @@
 //!
 //! - the [`Command`] to issue, when the object exists and its mission engine is
 //!   ready to take a new order (`Simulation::mission_ready_to_commence`,
-//!   `0x005B362D`'s answer as the per-tick promotion asks it);
-//! - [`Refusal::NotReady`], when the object is mid-transition. The order is
-//!   *retryable*: nothing was written, and asking again a frame later is
-//!   correct. A caller that records an order it never issued stalls the unit —
-//!   this is the failure the `NotReady` arm exists to prevent, so it is a
-//!   typed answer rather than a silent `None`;
+//!   `0x005B362D`'s answer as the per-tick promotion asks it). The MEGAMISSION
+//!   family is exempt: it queues at `0x004C73B9` rather than commencing, so a
+//!   walking object takes it and promotes it when it is ready — see
+//!   [`queues_natively`];
+//! - [`Refusal::NotReady`], when the object is mid-transition and the command
+//!   would write the mission directly. The order is *retryable*: nothing was
+//!   written, and asking again a frame later is correct. A caller that records
+//!   an order it never issued stalls the unit — this is the failure the
+//!   `NotReady` arm exists to prevent, so it is a typed answer rather than a
+//!   silent `None`;
 //! - [`Refusal::NoSuchActor`], when the object is gone. Not retryable.
 //!
 //! The funnel writes no simulation state. The command it hands back travels
@@ -96,9 +100,38 @@ impl<'a> Funnel<'a> {
         if self.sim.entities().get(actor).is_none() {
             return Err(Refusal::NoSuchActor);
         }
-        if !self.sim.mission_ready_to_commence(actor, self.rules) {
+        let command = goal.command(actor);
+        // The readiness answer is about *writing* the mission now. The
+        // MEGAMISSION family does not write it: `EventClass::Execute`'s arm
+        // ends in `Queue_Mission` with `commence_now = 0` (`0x004C73B9`), so an
+        // object that is not ready takes the order and commences it when it is.
+        // Holding those back made a walking unit unreachable — a unit mid-Move
+        // answers `Ready_To_Commence` false (`unit_ready_to_commence`,
+        // `0x007360C0`), so the brain could neither pull it out of the walk nor
+        // give it the fight in front of it, and asked again every frame for the
+        // whole walk. A queued mission is the native answer to exactly this.
+        if !queues_natively(&command) && !self.sim.mission_ready_to_commence(actor, self.rules) {
             return Err(Refusal::NotReady);
         }
-        Ok(goal.command(actor))
+        Ok(command)
     }
+}
+
+/// Whether `command` reaches the mission authority as a queue rather than a
+/// direct write: `Simulation::apply_megamission_command`'s family. Each of
+/// these is the same event a player's click sends, and each queues
+/// (`MissionType` + `Queue 0x004C73B9`) instead of commencing.
+fn queues_natively(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Attack { .. }
+            | Command::ForceAttackCell { .. }
+            | Command::AttackMove { .. }
+            | Command::Move { .. }
+            | Command::MoveToObject { .. }
+            | Command::Guard { .. }
+            | Command::CaptureBuilding { .. }
+            | Command::PlantC4 { .. }
+            | Command::MegaMission { .. }
+    )
 }

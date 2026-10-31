@@ -54,6 +54,32 @@ pub fn fire_error(
     firer: u64,
     target: u64,
 ) -> Option<FireError> {
+    answer(world, rules, firer, target, false)
+}
+
+/// The same question with the range test on: `CanFireAt @ 0x006F77B0`'s half of
+/// the answer, which is what the firing code itself gets.
+///
+/// [`fire_error`] deliberately leaves it off, because "may this object be sent
+/// at that one" does not depend on where it stands. A caller deciding between
+/// *shoot from here* and *walk closer* needs the range in the answer, and this
+/// is the only second door to the same body: one rule, two questions.
+pub fn fire_error_in_range(
+    world: &Simulation,
+    rules: &RuleSet,
+    firer: u64,
+    target: u64,
+) -> Option<FireError> {
+    answer(world, rules, firer, target, true)
+}
+
+fn answer(
+    world: &Simulation,
+    rules: &RuleSet,
+    firer: u64,
+    target: u64,
+    check_range: bool,
+) -> Option<FireError> {
     let entity = world.entities().get(firer)?;
     let obj = world.interner().object_type(entity.type_ref(), rules)?;
     let mut transient: Option<FireError> = None;
@@ -69,7 +95,7 @@ pub fn fire_error(
             target: Some(TargetKind::Entity(target)),
             weapon_index: slot,
         }
-        .fire_error(false);
+        .fire_error(check_range);
         match code {
             FireError::Ok => return Some(FireError::Ok),
             // Not this type against this target, ever: no weapon here has an
