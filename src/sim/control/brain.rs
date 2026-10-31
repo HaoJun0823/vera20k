@@ -56,6 +56,13 @@ pub struct Outbox {
     /// Objects handed to a managed routine this frame. Consumed before the
     /// orders below, so an object a routine just took owns no second issuer.
     pub attachments: Vec<Attachment>,
+    /// Destinations the map refused this frame, as `(unit, cell, frame)`.
+    ///
+    /// A walk the projection will not take is a fact the order gate holds and
+    /// the passes cannot see: the unit is left with no mission, and every pass
+    /// reads missions. The gate records it here; the obstacle pass answers it
+    /// in the same frame.
+    pub blocked: Vec<(u64, (u16, u16), u64)>,
     /// The strongest rank each object was asked for this frame, and where its
     /// order sits in `orders` — the arbiter's own record.
     ///

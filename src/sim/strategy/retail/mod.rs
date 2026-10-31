@@ -302,6 +302,12 @@ pub struct RetailBrain {
     /// "the gate takes forever to open" report. Each request expires on its own
     /// frame, so a wall nobody can open is not asked for forever.
     pub(super) breaches: Vec<((u16, u16), u64)>,
+    /// Destinations the map refused, by unit: where it was told to walk and
+    /// when. The refusal is the one fact the obstacle answer needs and the
+    /// order gate could not keep — a walk to a cell behind a gate leaves the
+    /// unit standing in front of it with no mission and no record, and every
+    /// pass that reads missions sees an idle unit.
+    pub(super) blocked_goals: BTreeMap<u64, ((u16, u16), u64)>,
 }
 
 impl RetailBrain {
@@ -328,6 +334,7 @@ impl RetailBrain {
             progress: BTreeMap::new(),
             stuck_retried: BTreeSet::new(),
             breaches: Vec::new(),
+            blocked_goals: BTreeMap::new(),
         }
     }
 
@@ -383,7 +390,9 @@ impl RetailBrain {
     fn void_orders_the_world_does_not_show(&mut self) {
         use crate::sim::mission::{MissionId, MissionType};
 
-        let Self { census, tracked, .. } = self;
+        let Self {
+            census, tracked, ..
+        } = self;
         let attack = MissionId::from_known(MissionType::Attack);
         let move_mission = MissionId::from_known(MissionType::Move);
         for unit in &census.units {
@@ -539,13 +548,9 @@ mod tests {
     #[test]
     fn a_refused_order_frees_the_unit_to_be_told_again() {
         let mut brain = RetailBrain::new(0xA17);
-        brain.tracked.record(
-            0,
-            7,
-            tracked::TrackedKind::Move,
-            None,
-            Some((20, 20)),
-        );
+        brain
+            .tracked
+            .record(0, 7, tracked::TrackedKind::Move, None, Some((20, 20)));
         assert!(
             !brain
                 .tracked
@@ -584,14 +589,8 @@ mod tests {
             .tracked
             .record(0, 8, TrackedKind::Attack, Some(9), Some((10, 10)));
         // 7 came off the attack; 8 is still on it.
-        brain
-            .census
-            .units
-            .push(census_unit(7, MissionType::Guard));
-        brain
-            .census
-            .units
-            .push(census_unit(8, MissionType::Attack));
+        brain.census.units.push(census_unit(7, MissionType::Guard));
+        brain.census.units.push(census_unit(8, MissionType::Attack));
         assert!(
             !brain
                 .tracked
@@ -669,5 +668,4 @@ mod tests {
             "another unit's capture walk is untouched"
         );
     }
-
 }

@@ -528,7 +528,9 @@ impl Census {
             let Some(ty) = obs.object_type(rules, type_id) else {
                 continue;
             };
-            let copies = i32::try_from(line.queued).unwrap_or(i32::MAX).saturating_add(1);
+            let copies = i32::try_from(line.queued)
+                .unwrap_or(i32::MAX)
+                .saturating_add(1);
             total = total.saturating_add(obs.cost_of(rules, ty).saturating_mul(copies));
         }
         total
@@ -764,7 +766,9 @@ impl Census {
                 dx * dx + dy * dy <= reach
             })
             .filter_map(|enemy| obs.object_type(rules, enemy.type_id))
-            .fold(0i32, |total, ty| total.saturating_add(fight_points(ty, 1_000)))
+            .fold(0i32, |total, ty| {
+                total.saturating_add(fight_points(ty, 1_000))
+            })
     }
 
     /// The job gaps: what the enemy's field asks for, less what this house can
@@ -777,7 +781,8 @@ impl Census {
         let mut need = [0i32; ROLES.len()];
         let mut short = false;
         for role in ROLES {
-            let gap = i32::try_from(self.threat[role.index()]).unwrap_or(i32::MAX)
+            let gap = i32::try_from(self.threat[role.index()])
+                .unwrap_or(i32::MAX)
                 .saturating_sub(i32::try_from(self.able[role.index()]).unwrap_or(i32::MAX));
             if gap > 0 {
                 need[role.index()] = gap;
@@ -834,7 +839,11 @@ mod tests {
 
     fn ledger(rules: &RuleSet, sim: &Simulation, owner: InternedId) -> Census {
         let mut census = Census::default();
-        census.refresh(&RoleTable::build(rules), rules, &Observation::new(sim, owner));
+        census.refresh(
+            &RoleTable::build(rules),
+            rules,
+            &Observation::new(sim, owner),
+        );
         census
     }
 
@@ -958,10 +967,18 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name}"));
         }
         let census = ledger(&rules, &sim, owner);
-        let need = census.shortfall().expect("an army of nothing is short of it all");
+        let need = census
+            .shortfall()
+            .expect("an army of nothing is short of it all");
 
-        assert!(need[Role::AntiVehicle.index()] > 0, "a Rhino tank: {need:?}");
-        assert!(need[Role::AntiInfantry.index()] > 0, "a conscript: {need:?}");
+        assert!(
+            need[Role::AntiVehicle.index()] > 0,
+            "a Rhino tank: {need:?}"
+        );
+        assert!(
+            need[Role::AntiInfantry.index()] > 0,
+            "a conscript: {need:?}"
+        );
         assert_eq!(need[Role::AntiAir.index()], 0, "nothing in the air");
         assert_eq!(need[Role::AntiStructure.index()], 0, "no buildings");
         assert_eq!(need[Role::Artillery.index()], 0, "nothing asks for reach");
@@ -982,9 +999,18 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name}"));
         }
         let census = ledger(&rules, &sim, owner);
-        let need = census.shortfall().expect("an army of nothing is short of it all");
-        assert_eq!(census.threat[Role::AntiAir.index()], 0, "the rocket is not air");
-        assert!(need[Role::AntiInfantry.index()] > 0, "the conscript still counts");
+        let need = census
+            .shortfall()
+            .expect("an army of nothing is short of it all");
+        assert_eq!(
+            census.threat[Role::AntiAir.index()],
+            0,
+            "the rocket is not air"
+        );
+        assert!(
+            need[Role::AntiInfantry.index()] > 0,
+            "the conscript still counts"
+        );
     }
 
     /// A building is ground the army stands on, not a threat to compose
@@ -1052,9 +1078,7 @@ mod tests {
                 cell,
             });
         }
-        let only = |wanted: u64| {
-            move |building: &EnemyEntity| building.entity_id == wanted
-        };
+        let only = |wanted: u64| move |building: &EnemyEntity| building.entity_id == wanted;
         assert_eq!(
             census.neutral_within((10, 10), 3, only(9)),
             Some((9, (12, 10))),

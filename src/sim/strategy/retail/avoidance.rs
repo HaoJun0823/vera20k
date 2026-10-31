@@ -804,6 +804,140 @@ pub(super) fn run(
         remember_breaches(brain, tick, &breaches);
     }
     answer_breaches(brain, rules, obs, out, tick);
+    // A walk the map refused is the other half of the same question: the gate
+    // above answers a unit already walking into a wall, this answers the one
+    // whose order never took.
+    answer_blocked(brain, rules, obs, out, tick);
+}
+
+/// How long a refused destination is answered for, in frames: twenty seconds.
+const BLOCKED_FRAMES: u64 = 300;
+
+/// How far along the line to the destination the first closed cell is looked
+/// for, in cells.
+const BLOCKED_SCAN_CELLS: i32 = 24;
+
+/// Answer a walk the map refused.
+///
+/// `orders::issue` refuses a destination it cannot reach and leaves the unit
+/// with no mission at all — and every pass here reads missions, so the unit is
+/// invisible to all of them. That is the unit parked in front of a gate after
+/// it shot the neutral building beside it: the building fell, the walk was
+/// refused, and nothing ever asked what stood in the way.
+///
+/// The refused cell is recorded by the gate that refused it; this pass walks
+/// the line to it, finds the first cell it cannot enter, and clicks that cell
+/// the way a player does: a forced cell fire for an overlay (a wall, a gate,
+/// a barricade — anything the overlay grid holds), an attack on a structure.
+/// Terrain that no click can open is dropped, so a cliff does not become a
+/// permanent demolition order.
+fn answer_blocked(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    out: &mut Outbox,
+    tick: u64,
+) {
+    if !obs.has_ground_grid() {
+        return;
+    }
+    // This frame's refusals join the ones still unanswered from earlier
+    // frames: the gate that opened may need a second shot, and a request that
+    // lived one frame would be a request the unit has to earn again.
+    let fresh = std::mem::take(&mut out.blocked);
+    for (unit, cell, at) in fresh {
+        brain.blocked_goals.insert(unit, (cell, at));
+    }
+    if brain.blocked_goals.is_empty() {
+        return;
+    }
+    brain
+        .blocked_goals
+        .retain(|_, (_, at)| tick.saturating_sub(*at) < BLOCKED_FRAMES);
+    let blocked: Vec<(u64, (u16, u16))> = brain
+        .blocked_goals
+        .iter()
+        .map(|(id, (cell, _))| (*id, *cell))
+        .collect();
+    for (entity_id, destination) in blocked {
+        let Some(unit) = brain
+            .census
+            .units
+            .iter()
+            .find(|unit| unit.entity_id == entity_id)
+        else {
+            brain.blocked_goals.remove(&entity_id);
+            continue;
+        };
+        if !unit.controllable() || unit.in_service() {
+            continue;
+        }
+        let Some(blocker) = first_closed_cell(obs, unit.cell, destination) else {
+            brain.blocked_goals.remove(&entity_id);
+            continue;
+        };
+        let goal = if obs.overlay_at(blocker.0, blocker.1) {
+            Goal::AttackCell { cell: blocker }
+        } else if let Some((target, true)) = obs.structure_at(rules, blocker) {
+            let _ = target;
+            // The house's own building is not the thing in the way of its own
+            // unit's walk: drop the record rather than shell the base.
+            brain.blocked_goals.remove(&entity_id);
+            continue;
+        } else if let Some((target, false)) = obs.structure_at(rules, blocker) {
+            Goal::Attack { target }
+        } else {
+            // Closed ground with nothing to click: terrain, not an obstacle.
+            brain.blocked_goals.remove(&entity_id);
+            continue;
+        };
+        if !brain
+            .tracked
+            .admits(tick, entity_id, TrackedKind::Breach, None, Some(blocker))
+        {
+            continue;
+        }
+        brain
+            .tracked
+            .record(tick, entity_id, TrackedKind::Breach, None, Some(blocker));
+        log::debug!(
+            "auto play: {} blocked at {:?} on the way to {:?}; clicking {:?}",
+            entity_id,
+            blocker,
+            destination,
+            goal
+        );
+        if super::orders::issue(brain, out, rules, obs, entity_id, goal) {
+            brain.blocked_goals.remove(&entity_id);
+        } else {
+            brain.tracked.void(entity_id, TrackedKind::Breach);
+        }
+    }
+}
+
+/// The first cell on the straight line from `from` to `to` that the ground
+/// projection will not let this unit enter.
+fn first_closed_cell(
+    obs: &Observation<'_>,
+    from: (u16, u16),
+    to: (u16, u16),
+) -> Option<(u16, u16)> {
+    let mut cell = from;
+    for _ in 0..BLOCKED_SCAN_CELLS {
+        if cell == to {
+            return None;
+        }
+        cell = step_toward(cell, to);
+        if cell == to {
+            // The destination itself is closed to *walking* (a building's own
+            // cell is), but the click that matters is the one before it.
+            return None;
+        }
+        if !obs.is_ground_walkable(cell.0, cell.1) {
+            return Some(cell);
+        }
+    }
+    None
 }
 
 /// How many wall cells one frame may ask the house's guns to open, in cells.

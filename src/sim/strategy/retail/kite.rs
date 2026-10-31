@@ -313,17 +313,17 @@ pub(super) fn run(
                 .collect();
             if !danger.is_empty() {
                 if let Some(step) = flee_step(unit.cell, &danger, obs)
-                    && brain
-                        .tracked
-                        .admits(tick, unit.entity_id, TrackedKind::Kite, None, Some(step))
-                {
-                    brain.tracked.record(
+                    && brain.tracked.admits(
                         tick,
                         unit.entity_id,
                         TrackedKind::Kite,
                         None,
                         Some(step),
-                    );
+                    )
+                {
+                    brain
+                        .tracked
+                        .record(tick, unit.entity_id, TrackedKind::Kite, None, Some(step));
                     super::orders::issue(
                         brain,
                         out,
@@ -387,10 +387,13 @@ pub(super) fn run(
             if chebyshev(unit.cell, target_cell) <= mine {
                 continue;
             }
-            if !brain
-                .tracked
-                .admits(tick, unit.entity_id, TrackedKind::Kite, Some(target_id), None)
-            {
+            if !brain.tracked.admits(
+                tick,
+                unit.entity_id,
+                TrackedKind::Kite,
+                Some(target_id),
+                None,
+            ) {
                 continue;
             }
             brain.tracked.record(
@@ -431,7 +434,14 @@ pub(super) fn run(
         brain
             .tracked
             .record(tick, unit.entity_id, TrackedKind::Kite, None, Some(step));
-        super::orders::issue(brain, out, rules, obs, unit.entity_id, Goal::Move { cell: step });
+        super::orders::issue(
+            brain,
+            out,
+            rules,
+            obs,
+            unit.entity_id,
+            Goal::Move { cell: step },
+        );
     }
 }
 

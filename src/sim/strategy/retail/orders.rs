@@ -777,6 +777,12 @@ pub(super) fn issue(
     if let Some(cell) = goal_cell(&goal)
         && !reachable(rules, obs, unit, cell)
     {
+        // The refusal is kept. A walk the map will not take is not "nothing
+        // to do": something stands between the unit and the cell, and that
+        // something is what a player clicks next. Without the record the unit
+        // stands in front of it for the rest of the match — the report of a
+        // unit parked at a gate it never shoots.
+        out.blocked.push((unit, cell, obs.tick()));
         log::debug!("auto play: {goal:?} refused for {unit}: no way there from here");
         return false;
     }

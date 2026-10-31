@@ -1272,6 +1272,19 @@ impl<'a> Observation<'a> {
             .is_some_and(|flags| flags.wall)
     }
 
+    /// Whether any overlay stands on the cell, wall or not.
+    ///
+    /// A wall is an overlay whose flags say so ([Self::wall_at]); a gate, a
+    /// fence or a mod's own barricade is an overlay too and closes the cell
+    /// without being a wall. The forced cell click is the same click for both.
+    pub fn overlay_at(&self, rx: u16, ry: u16) -> bool {
+        self.sim
+            .overlay_grid
+            .as_ref()
+            .and_then(|grid| grid.cell(rx, ry).overlay_id)
+            .is_some()
+    }
+
     /// Whether the navigation projection the connectivity answers come from
     /// stands at all.
     ///

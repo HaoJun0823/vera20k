@@ -178,7 +178,11 @@ impl Squads {
         // A raid that nothing is handling cannot wait for the interval: the
         // units it needs are the ones standing idle at home, and by the time
         // the interval ran they would be standing in a wrecked yard.
-        let interval = if new_raid.is_some() { 0 } else { REGROUP_FRAMES };
+        let interval = if new_raid.is_some() {
+            0
+        } else {
+            REGROUP_FRAMES
+        };
         if self
             .formed_at
             .is_some_and(|at| tick.saturating_sub(at) < interval)
@@ -232,7 +236,10 @@ impl Squads {
                 .units
                 .iter()
                 .filter(|unit| {
-                    unit.traits.combat && unit.orderable && !unit.hand && !taken.contains(&unit.entity_id)
+                    unit.traits.combat
+                        && unit.orderable
+                        && !unit.hand
+                        && !taken.contains(&unit.entity_id)
                 })
                 .collect();
             nearest.sort_by_key(|unit| (squared_distance(unit.cell, cell), unit.entity_id));
@@ -258,10 +265,18 @@ impl Squads {
                 .units
                 .iter()
                 .filter(|unit| {
-                    unit.traits.combat && unit.orderable && !unit.hand && !taken.contains(&unit.entity_id)
+                    unit.traits.combat
+                        && unit.orderable
+                        && !unit.hand
+                        && !taken.contains(&unit.entity_id)
                 })
                 .collect();
-            nearest.sort_by_key(|unit| (squared_distance(unit.cell, enemy_anchor(census)), unit.entity_id));
+            nearest.sort_by_key(|unit| {
+                (
+                    squared_distance(unit.cell, enemy_anchor(census)),
+                    unit.entity_id,
+                )
+            });
             let members: BTreeSet<u64> = nearest
                 .into_iter()
                 .take(HARASS_MAX)
@@ -301,7 +316,6 @@ impl Squads {
     pub(super) fn squad(&self, role: Role) -> Option<&Squad> {
         self.squads.iter().find(|squad| squad.role == role)
     }
-
 }
 
 /// Where the enemy's economy is, as far as the house knows: the cell the
@@ -362,11 +376,13 @@ mod tests {
     fn a_raid_on_the_base_calls_the_nearest_few_home() {
         let mut census = Census::default();
         census.base_cell = Some((20, 20));
-        census.enemies.push(crate::sim::control::observation::EnemyEntity {
-            entity_id: 999,
-            type_id: crate::sim::intern::InternedId::default(),
-            cell: (21, 20),
-        });
+        census
+            .enemies
+            .push(crate::sim::control::observation::EnemyEntity {
+                entity_id: 999,
+                type_id: crate::sim::intern::InternedId::default(),
+                cell: (21, 20),
+            });
         for id in 0..12u64 {
             census.units.push(Unit {
                 entity_id: id,
@@ -374,7 +390,9 @@ mod tests {
                 cell: (20 + u16::try_from(id).unwrap_or(0), 30),
                 health_permille: 1_000,
                 points: 100,
-                mission: crate::sim::mission::MissionId::from_known(crate::sim::mission::MissionType::Guard),
+                mission: crate::sim::mission::MissionId::from_known(
+                    crate::sim::mission::MissionType::Guard,
+                ),
                 orderable: true,
                 hand: false,
                 slot: crate::sim::strategy::retail::census::Slot::Infantry,
@@ -392,7 +410,11 @@ mod tests {
         let mut squads = Squads::new();
         squads.regroup(0, &census);
         let defend = squads.squad(Role::Defend).expect("a raid is met");
-        assert_eq!(defend.members.len(), DEFEND_MAX, "some of the army, not all");
+        assert_eq!(
+            defend.members.len(),
+            DEFEND_MAX,
+            "some of the army, not all"
+        );
         assert!(
             defend.members.contains(&0),
             "the nearest is called: {:?}",
@@ -420,16 +442,20 @@ mod tests {
         let mut census = Census::default();
         census.base_cell = Some((20, 20));
         // Ten cells out: outside the old eight-cell ring, inside the push's.
-        census.enemies.push(crate::sim::control::observation::EnemyEntity {
-            entity_id: 999,
-            type_id: crate::sim::intern::InternedId::default(),
-            cell: (20, 30),
-        });
+        census
+            .enemies
+            .push(crate::sim::control::observation::EnemyEntity {
+                entity_id: 999,
+                type_id: crate::sim::intern::InternedId::default(),
+                cell: (20, 30),
+            });
         census.units.push(unit(0, (20, 25)));
         census.fighters = 1;
         let mut squads = Squads::new();
         squads.regroup(0, &census);
-        let defend = squads.squad(Role::Defend).expect("the yard answers the raid");
+        let defend = squads
+            .squad(Role::Defend)
+            .expect("the yard answers the raid");
         assert!(defend.members.contains(&0));
         assert_eq!(defend.target, Some(999));
     }
@@ -445,15 +471,22 @@ mod tests {
         census.fighters = 1;
         let mut squads = Squads::new();
         squads.regroup(0, &census);
-        assert!(squads.squad(Role::Defend).is_none(), "nothing to answer yet");
+        assert!(
+            squads.squad(Role::Defend).is_none(),
+            "nothing to answer yet"
+        );
 
-        census.enemies.push(crate::sim::control::observation::EnemyEntity {
-            entity_id: 42,
-            type_id: crate::sim::intern::InternedId::default(),
-            cell: (21, 21),
-        });
+        census
+            .enemies
+            .push(crate::sim::control::observation::EnemyEntity {
+                entity_id: 42,
+                type_id: crate::sim::intern::InternedId::default(),
+                cell: (21, 21),
+            });
         squads.regroup(1, &census);
-        let defend = squads.squad(Role::Defend).expect("answered on the next frame");
+        let defend = squads
+            .squad(Role::Defend)
+            .expect("answered on the next frame");
         assert_eq!(defend.target, Some(42));
     }
 
@@ -462,11 +495,13 @@ mod tests {
     fn the_same_raider_waits_for_the_regroup_term() {
         let mut census = Census::default();
         census.base_cell = Some((20, 20));
-        census.enemies.push(crate::sim::control::observation::EnemyEntity {
-            entity_id: 42,
-            type_id: crate::sim::intern::InternedId::default(),
-            cell: (21, 21),
-        });
+        census
+            .enemies
+            .push(crate::sim::control::observation::EnemyEntity {
+                entity_id: 42,
+                type_id: crate::sim::intern::InternedId::default(),
+                cell: (21, 21),
+            });
         census.units.push(unit(0, (20, 25)));
         census.fighters = 1;
         let mut squads = Squads::new();
@@ -501,7 +536,9 @@ mod tests {
             .expect("a small army does not stand in its yard");
         assert_eq!(harass.members.len(), HARASS_MAX, "a handful, not the rest");
         assert_eq!(
-            squads.squad(Role::Attack).map_or(0, |squad| squad.members.len()),
+            squads
+                .squad(Role::Attack)
+                .map_or(0, |squad| squad.members.len()),
             5 - HARASS_MAX,
             "and the house keeps something at home"
         );
@@ -518,7 +555,11 @@ mod tests {
         Some((sim, rules))
     }
 
-    fn ledger(rules: &RuleSet, sim: &crate::sim::world::Simulation, owner: crate::sim::intern::InternedId) -> Census {
+    fn ledger(
+        rules: &RuleSet,
+        sim: &crate::sim::world::Simulation,
+        owner: crate::sim::intern::InternedId,
+    ) -> Census {
         let mut census = Census::default();
         census.refresh(
             &crate::rules::unit_role::RoleTable::build(rules),

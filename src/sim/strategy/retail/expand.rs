@@ -141,7 +141,14 @@ pub(super) fn deploy_yard_maker(
     let attempt = brain.site_attempts.get(&yard_id).copied().unwrap_or(0);
     match Placement::new(obs, rules).cell_for(yard_id, attempt) {
         Some(target) if target != cell => {
-            super::orders::issue(brain, out, rules, obs, entity_id, Goal::Move { cell: target });
+            super::orders::issue(
+                brain,
+                out,
+                rules,
+                obs,
+                entity_id,
+                Goal::Move { cell: target },
+            );
         }
         _ => {
             let next = (attempt + 1) % PLACEMENT_ATTEMPTS;
@@ -206,7 +213,14 @@ fn deploy_second_yard(
         return;
     }
     if let Some(target) = expansion_cell(brain, rules, obs, home, yard) {
-        super::orders::issue(brain, out, rules, obs, entity_id, Goal::Move { cell: target });
+        super::orders::issue(
+            brain,
+            out,
+            rules,
+            obs,
+            entity_id,
+            Goal::Move { cell: target },
+        );
     }
 }
 
@@ -326,8 +340,8 @@ mod tests {
     use super::*;
 
     use crate::sim::arena_fixture;
-    use crate::sim::world::Simulation;
     use crate::sim::strategy::retail::RetailBrain;
+    use crate::sim::world::Simulation;
 
     /// The flat arena with the computer `Russians` and the human `Americans`.
     fn arena(seed: u64) -> Option<(Simulation, RuleSet, InternedId)> {

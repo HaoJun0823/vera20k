@@ -95,7 +95,11 @@ pub(super) fn escape_cell(
     if current == 0 {
         return None;
     }
-    let widest = threats.iter().map(|threat| threat.spread + 1).max().unwrap_or(1);
+    let widest = threats
+        .iter()
+        .map(|threat| threat.spread + 1)
+        .max()
+        .unwrap_or(1);
     let radius = widest.clamp(1, MAX_STEP_CELLS);
     let mut best: Option<((u16, u16), i32, i32)> = None;
     for dy in -radius..=radius {
@@ -256,7 +260,14 @@ pub(super) fn run(
         brain
             .tracked
             .record(tick, unit.entity_id, TrackedKind::Dodge, None, Some(target));
-        super::orders::issue(brain, out, rules, obs, unit.entity_id, Goal::Move { cell: target });
+        super::orders::issue(
+            brain,
+            out,
+            rules,
+            obs,
+            unit.entity_id,
+            Goal::Move { cell: target },
+        );
     }
 }
 
@@ -338,7 +349,10 @@ mod tests {
     #[test]
     fn only_a_step_that_arrives_in_time_is_ordered() {
         assert!(!can_clear(1, 15, 2, REACTION_FRAMES), "no time to move");
-        assert!(!can_clear(1, 15, 10, REACTION_FRAMES), "not one cell's time");
+        assert!(
+            !can_clear(1, 15, 10, REACTION_FRAMES),
+            "not one cell's time"
+        );
         assert!(can_clear(1, 15, 40, REACTION_FRAMES), "18 frames a cell");
         assert!(can_clear(2, 15, 40, REACTION_FRAMES), "two cells in forty");
         assert!(
@@ -382,7 +396,12 @@ mod tests {
             origin,
             target: ProjectileTarget::Entity(tank),
             initial_target_position: aim,
-            payload: ProjectilePayload::new(40, crate::sim::intern::InternedId::from_index(0), None, false),
+            payload: ProjectilePayload::new(
+                40,
+                crate::sim::intern::InternedId::from_index(0),
+                None,
+                false,
+            ),
             speed_leptons_per_frame: 64,
             velocity: ProjectileVelocity::new(0, 0, 0),
             trajectory: ProjectileTrajectory::Straight,
@@ -449,11 +468,7 @@ mod tests {
                 line_trail: None,
                 flat: false,
                 source_id: 0,
-                origin: ProjectileCoord::new(
-                    10 * 256 + 128,
-                    i32::from(origin_row) * 256 + 128,
-                    0,
-                ),
+                origin: ProjectileCoord::new(10 * 256 + 128, i32::from(origin_row) * 256 + 128, 0),
                 target: ProjectileTarget::Entity(tank),
                 initial_target_position: ProjectileCoord::new(10 * 256 + 128, 10 * 256 + 128, 0),
                 payload: ProjectilePayload::new(
@@ -500,7 +515,10 @@ mod tests {
         let speed = crate::util::fixed_math::ra2_speed_to_leptons_per_frame(6);
         assert_eq!(speed, 15);
         assert!(can_clear(1, speed, 18, 0), "a cell exactly");
-        assert!(!can_clear(1, speed, 18, REACTION_FRAMES), "plus the reaction");
+        assert!(
+            !can_clear(1, speed, 18, REACTION_FRAMES),
+            "plus the reaction"
+        );
         assert!(can_clear(1, speed, 20, REACTION_FRAMES));
     }
 }
