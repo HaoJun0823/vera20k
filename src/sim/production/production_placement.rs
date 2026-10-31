@@ -421,7 +421,7 @@ pub(crate) fn place_production_with_overlays(
         effects,
     );
     let new_sid = if obj.wall {
-        if evaluate_resolved_building_placement(
+        if let Some(reason) = evaluate_resolved_building_placement(
             sim,
             rules,
             owner,
@@ -432,8 +432,8 @@ pub(crate) fn place_production_with_overlays(
             None,
         )
         .reason
-        .is_some()
         {
+            log::warn!("Placement of {type_id} at ({rx},{ry}) refused: {reason:?} (wall)");
             failed_building_unlimbo(sim, rules, owner_id, yard, effects);
             return false;
         }
@@ -480,7 +480,23 @@ pub(crate) fn place_production_with_overlays(
         // Event::Execute4C70E1..4C710B passes an admitted PLACE straight to
         // House4FB0E0. Its placement refusal occurs after HELLO4FB1F1, and
         // still reaches the yard's FirstContact BREAK4FB4A6.
-        if evaluate_resolved_building_placement(
+        //
+        // The site is cleared before it is judged, exactly as the computer's
+        // yard clears its own (`BuildingTypeClass::Flush_For_Placement @
+        // 0x0045EE70`): allied Units standing on the foundation are told to
+        // leave. Without it a 5x3 foundation is refused outright whenever a
+        // freshly built vehicle happens to stand on one of its cells, and the
+        // refusal left no trace in the log.
+        let flush = crate::sim::build_site::flush_for_placement(
+            sim,
+            rules,
+            overlay_registry,
+            obj,
+            (rx as i16, ry as i16),
+            owner_id,
+            effects,
+        );
+        if let Some(reason) = evaluate_resolved_building_placement(
             sim,
             rules,
             owner,
@@ -491,8 +507,10 @@ pub(crate) fn place_production_with_overlays(
             None,
         )
         .reason
-        .is_some()
         {
+            log::warn!(
+                "Placement of {type_id} at ({rx},{ry}) refused: {reason:?} (site flush: {flush:?})"
+            );
             failed_building_unlimbo(sim, rules, owner_id, yard, effects);
             return false;
         }
