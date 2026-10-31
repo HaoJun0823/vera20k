@@ -980,6 +980,15 @@ impl<'a> Observation<'a> {
         )
     }
 
+    /// How many objects this one is carrying: a transport's cargo, or a
+    /// building's garrison. The Transport pilot needs it to tell a loaded
+    /// carrier from an empty one.
+    pub fn passengers(&self, entity_id: u64) -> usize {
+        self.sim.entities().get(entity_id).map_or(0, |entity| {
+            entity.passenger_role.occupants().count().max(0) as usize
+        })
+    }
+
     /// The rules' type of one object, for the questions that read it directly
     /// rather than through the ledger.
     pub fn entity_type<'r>(&self, rules: &'r RuleSet, entity_id: u64) -> Option<&'r ObjectType> {

@@ -1422,6 +1422,109 @@ const HOLD_FRAMES: u64 = 15;
 /// refusal that clears.
 const SUPER_RETRY_FRAMES: u64 = 600;
 
+/// How near the delivery cell a loaded transport has to be before it opens.
+const UNLOAD_CELLS: i32 = 4;
+
+/// What a carrier does with what it is carrying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Carrying {
+    /// Empty: nothing to carry, and boarding is its own decision.
+    Empty,
+    /// Loaded and far from where the army is going: walk there.
+    Advance,
+    /// Loaded and close enough: open.
+    Unload,
+}
+
+/// The one answer the transport pass is built on, so the rule is testable
+/// without a match: an empty carrier does nothing, a loaded one walks to the
+/// delivery cell and opens inside [`UNLOAD_CELLS`] of it.
+pub(super) fn carrying_step(passengers: usize, distance: i32) -> Carrying {
+    if passengers == 0 {
+        Carrying::Empty
+    } else if distance <= UNLOAD_CELLS {
+        Carrying::Unload
+    } else {
+        Carrying::Advance
+    }
+}
+
+/// Drive what a transport carries: the Transport pilot's dispatch.
+///
+/// Boarding is deliberately not here. It was measured before (won 25636 became
+/// 34897) and needs its own comparison; what this pass does is the other half
+/// — a carrier that already has passengers takes them where the army is going
+/// and opens, instead of standing where it was built for the whole match.
+pub(super) fn transports(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    out: &mut Outbox,
+) {
+    let Some(deliver) = delivery_cell(brain) else {
+        return;
+    };
+    let tick = obs.tick();
+    let carriers: Vec<(u64, (u16, u16))> = brain
+        .census
+        .units
+        .iter()
+        .filter(|unit| unit.orderable && !unit.hand && !unit.in_service())
+        .filter(|unit| {
+            obs.object_type(rules, unit.type_id).is_some_and(|ty| {
+                super::pilots::Pilot::of(rules, ty) == super::pilots::Pilot::Transport
+            })
+        })
+        .map(|unit| (unit.entity_id, unit.cell))
+        .collect();
+    for (entity_id, cell) in carriers {
+        let step = carrying_step(
+            obs.passengers(entity_id),
+            super::threats::distance(cell, deliver),
+        );
+        let (kind, goal) = match step {
+            Carrying::Empty => continue,
+            Carrying::Advance => (TrackedKind::Move, Goal::Move { cell: deliver }),
+            Carrying::Unload => (TrackedKind::Enter, Goal::Unload),
+        };
+        if !brain
+            .tracked
+            .admits(tick, entity_id, kind, None, Some(deliver))
+        {
+            continue;
+        }
+        brain
+            .tracked
+            .record(tick, entity_id, kind, None, Some(deliver));
+        if !issue(brain, out, rules, obs, entity_id, goal) {
+            brain.tracked.void(entity_id, kind);
+        }
+    }
+}
+
+/// Where a carrier should open: the push's target when there is one, else the
+/// nearest hostile the house knows about.
+fn delivery_cell(brain: &RetailBrain) -> Option<(u16, u16)> {
+    brain
+        .census
+        .enemies
+        .iter()
+        .map(|enemy| enemy.cell)
+        .min_by_key(|cell| (cell.0, cell.1))
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn a_carrier_walks_to_the_delivery_and_opens_there() {
+        assert_eq!(carrying_step(0, 2), Carrying::Empty);
+        assert_eq!(carrying_step(2, 30), Carrying::Advance);
+        assert_eq!(carrying_step(2, 3), Carrying::Unload);
+    }
+}
+
 /// Fire the house's charged supers at the enemy, the way a player clicks the
 /// button and then the target.
 ///

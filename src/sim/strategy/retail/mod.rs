@@ -587,6 +587,9 @@ impl Brain for RetailBrain {
         // harvester that rolled out of a factory sits on its birth posture
         // until something puts it on the ore.
         orders::harvesters(self, rules, obs, out);
+        // A carrier with passengers takes them where the army is going and
+        // opens there: the Transport pilot dispatch.
+        orders::transports(self, rules, obs, out);
         // Last of the orders that move a unit, because a crate is a bonus and
         // not a job: only a scout no step above has spoken for walks to one.
         orders::crates(self, rules, obs, out);
