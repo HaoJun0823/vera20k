@@ -113,31 +113,7 @@ const CORNER_MARGIN: i32 = 1;
 /// than shoots; a wall past six either side encloses something.
 const WALL_WAY_CELLS: i32 = 6;
 
-/// Cell distance in the metric adjacency is measured in, the one weapon reach
-/// and `CellSpread` are written in ([`super::kite::chebyshev`]).
-fn distance(a: (u16, u16), b: (u16, u16)) -> i32 {
-    super::kite::chebyshev(a, b)
-}
-
-/// An enemy that can shoot, with what it is worth in a fight.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Threat {
-    pub(super) entity_id: u64,
-    pub(super) cell: (u16, u16),
-    /// What its weapon reaches, in cells.
-    pub(super) reach: i32,
-    /// `Strength=`, the currency both sides are weighed in
-    /// ([`super::census::fight_points`]).
-    pub(super) points: i32,
-}
-
-impl Threat {
-    /// Whether this threat's guns cover `cell`, by the one reach test
-    /// ([`super::kite::covers`]).
-    pub(super) fn covers(&self, cell: (u16, u16)) -> bool {
-        super::kite::covers(cell, self.cell, self.reach)
-    }
-}
+use super::threats::{BUCKET_CELLS, Threat, ThreatIndex, bucket_of, distance};
 
 /// Whether a fight worth `ours` hit points against `theirs` is one to walk
 /// into. Nothing to fight is always one to walk into.
@@ -382,52 +358,6 @@ pub(super) fn blocker_at(threats: &[Threat], cell: (u16, u16)) -> Option<&Threat
         .min_by_key(|threat| (distance(threat.cell, cell), threat.entity_id))
 }
 
-/// Side of one bucket, in cells.
-const BUCKET_CELLS: u16 = 16;
-
-fn bucket_of(cell: (u16, u16)) -> (u16, u16) {
-    (cell.0 / BUCKET_CELLS, cell.1 / BUCKET_CELLS)
-}
-
-/// The enemies that can shoot, bucketed by cell: a unit costs the enemies
-/// around it, not the enemies on the map.
-#[derive(Default)]
-struct ThreatIndex {
-    buckets: BTreeMap<(u16, u16), Vec<Threat>>,
-}
-
-impl ThreatIndex {
-    fn insert(&mut self, threat: Threat) {
-        self.buckets
-            .entry(bucket_of(threat.cell))
-            .or_default()
-            .push(threat);
-    }
-
-    /// Every enemy within `radius` of `cell`, nearest first.
-    fn near(&self, cell: (u16, u16), radius: i32) -> Vec<Threat> {
-        let span = i32::from(BUCKET_CELLS).max(1);
-        let reach = u16::try_from((radius + span - 1) / span).unwrap_or(1);
-        let (bx, by) = bucket_of(cell);
-        let mut found = Vec::new();
-        for y in by.saturating_sub(reach)..=by.saturating_add(reach) {
-            for x in bx.saturating_sub(reach)..=bx.saturating_add(reach) {
-                let Some(bucket) = self.buckets.get(&(x, y)) else {
-                    continue;
-                };
-                found.extend(
-                    bucket
-                        .iter()
-                        .copied()
-                        .filter(|threat| distance(cell, threat.cell) <= radius),
-                );
-            }
-        }
-        found.sort_by_key(|threat| (distance(cell, threat.cell), threat.entity_id));
-        found
-    }
-}
-
 /// The house's own fighting weight, bucketed the same way.
 #[derive(Default)]
 struct FriendIndex {
@@ -496,7 +426,7 @@ pub(super) fn run(
             points,
         });
     }
-    if index.buckets.is_empty() {
+    if index.is_empty() {
         return;
     }
     let mut friends = FriendIndex::default();

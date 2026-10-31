@@ -112,6 +112,7 @@ pub(super) mod micro;
 pub(super) mod orders;
 pub(super) mod plan;
 pub(super) mod squads;
+pub(super) mod threats;
 pub(super) mod tracked;
 pub(super) mod walls;
 

@@ -48,7 +48,7 @@ const MAX_STEP_CELLS: i32 = 4;
 /// One shot as the dodge decision needs it: where it lands, when, and how far
 /// its damage reaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Threat {
+pub(super) struct Shell {
     pub(super) impact: (i32, i32),
     pub(super) frames: u32,
     /// `CellSpread=` in whole cells: `0.4` hurts the cell it lands in, `2.0`
@@ -61,14 +61,14 @@ pub(super) struct Threat {
 ///
 /// Chebyshev on purpose: retail's spread test is a box, not a circle, so a
 /// diagonal step has to clear it the same as a straight one.
-pub(super) fn exposure(cell: (i32, i32), threat: &Threat) -> i32 {
+pub(super) fn exposure(cell: (i32, i32), threat: &Shell) -> i32 {
     let dx = (cell.0 - threat.impact.0).abs();
     let dy = (cell.1 - threat.impact.1).abs();
     (threat.spread + 1 - dx.max(dy)).max(0)
 }
 
 /// The total exposure of `cell` to every shot in `threats`.
-pub(super) fn exposure_to_all(cell: (i32, i32), threats: &[Threat]) -> i32 {
+pub(super) fn exposure_to_all(cell: (i32, i32), threats: &[Shell]) -> i32 {
     threats.iter().map(|threat| exposure(cell, threat)).sum()
 }
 
@@ -87,7 +87,7 @@ pub(super) fn exposure_to_all(cell: (i32, i32), threats: &[Threat]) -> i32 {
 /// the unit stands in the blast it was told to leave.
 pub(super) fn escape_cell(
     cell: (u16, u16),
-    threats: &[Threat],
+    threats: &[Shell],
     extent: (u16, u16),
 ) -> Option<(u16, u16)> {
     let here = (i32::from(cell.0), i32::from(cell.1));
@@ -160,14 +160,14 @@ pub(super) fn run(
     out: &mut Outbox,
 ) {
     let tick = obs.tick();
-    let mut by_target: BTreeMap<u64, Vec<Threat>> = BTreeMap::new();
+    let mut by_target: BTreeMap<u64, Vec<Shell>> = BTreeMap::new();
     // Guided shots, kept apart: a step does not make one miss, so a walker
     // takes the hit, but an airframe that leaves the launcher's range or the
     // missile's turn circle does outfly it. Air gets them; the ground does not.
-    let mut homing: BTreeMap<u64, Vec<Threat>> = BTreeMap::new();
+    let mut homing: BTreeMap<u64, Vec<Shell>> = BTreeMap::new();
     for (target, shot) in obs.shots_in_flight() {
         let spread = obs.warhead_spread_cells(rules, shot.warhead);
-        let threat = Threat {
+        let threat = Shell {
             impact: (i32::from(shot.impact.0), i32::from(shot.impact.1)),
             frames: shot.frames,
             spread,
@@ -212,7 +212,7 @@ pub(super) fn run(
         // shot it cannot step out of.
         let airborne = ty.category == ObjectCategory::Aircraft
             || ty.movement_zone == crate::rules::locomotor_type::MovementZone::Fly;
-        let threats: Vec<Threat> = match (by_target.get(&unit.entity_id), airborne) {
+        let threats: Vec<Shell> = match (by_target.get(&unit.entity_id), airborne) {
             (Some(list), _) => list.clone(),
             (None, true) => homing.get(&unit.entity_id).cloned().unwrap_or_default(),
             (None, false) => continue,
@@ -275,8 +275,8 @@ pub(super) fn run(
 mod tests {
     use super::*;
 
-    fn shot(impact: (i32, i32), frames: u32, spread: i32) -> Threat {
-        Threat {
+    fn shot(impact: (i32, i32), frames: u32, spread: i32) -> Shell {
+        Shell {
             impact,
             frames,
             spread,

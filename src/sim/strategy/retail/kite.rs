@@ -36,6 +36,7 @@ use crate::sim::control::brain::Outbox;
 use crate::sim::control::observation::Observation;
 
 use super::RetailBrain;
+use super::threats::{Threat, ThreatIndex, covers};
 use super::tracked::TrackedKind;
 
 /// How far from the unit an enemy is considered at all, in cells. Further than
@@ -61,21 +62,6 @@ const STEPS: [(i32, i32); 8] = [
     (-1, 1),
     (1, 1),
 ];
-
-/// An enemy that can shoot at a cell, with the reach that makes it one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct Threat {
-    pub(super) cell: (u16, u16),
-    pub(super) reach: i32,
-}
-
-/// Whether a weapon reaching `reach` cells from `origin` covers `cell`.
-///
-/// The one reach test: the exposure below, the step out of it, and the
-/// avoidance layer's zones all measure "inside the guns" with it.
-pub(super) fn covers(cell: (u16, u16), origin: (u16, u16), reach: i32) -> bool {
-    chebyshev(cell, origin) <= reach
-}
 
 /// What a cell has to put up with: how many enemies reach it, and how far the
 /// nearest of them is.
@@ -152,49 +138,7 @@ pub(super) fn step_out(
 }
 
 pub(super) fn chebyshev(a: (u16, u16), b: (u16, u16)) -> i32 {
-    i32::from(a.0)
-        .abs_diff(i32::from(b.0))
-        .max(i32::from(a.1).abs_diff(i32::from(b.1))) as i32
-}
-
-/// Enemies bucketed by cell, built once a frame: a unit costs the enemies
-/// around it, not the enemies on the map.
-#[derive(Default)]
-struct ThreatIndex {
-    buckets: BTreeMap<(u16, u16), Vec<Threat>>,
-}
-
-impl ThreatIndex {
-    fn bucket_of(cell: (u16, u16)) -> (u16, u16) {
-        (cell.0 / BUCKET_CELLS, cell.1 / BUCKET_CELLS)
-    }
-
-    fn insert(&mut self, threat: Threat) {
-        self.buckets
-            .entry(Self::bucket_of(threat.cell))
-            .or_default()
-            .push(threat);
-    }
-
-    /// Every enemy whose reach could cover `cell`.
-    fn near(&self, cell: (u16, u16)) -> impl Iterator<Item = &Threat> + '_ {
-        let (bx, by) = Self::bucket_of(cell);
-        let buckets = i32::from(BUCKET_CELLS);
-        let radius = u16::try_from((THREAT_REACH_CELLS + buckets - 1) / buckets).unwrap_or(1);
-        let mut found: Vec<&Threat> = Vec::new();
-        for y in by.saturating_sub(radius)..=by.saturating_add(radius) {
-            for x in bx.saturating_sub(radius)..=bx.saturating_add(radius) {
-                if let Some(bucket) = self.buckets.get(&(x, y)) {
-                    found.extend(
-                        bucket
-                            .iter()
-                            .filter(|threat| chebyshev(cell, threat.cell) <= THREAT_REACH_CELLS),
-                    );
-                }
-            }
-        }
-        found.into_iter()
-    }
+    super::threats::distance(a, b)
 }
 
 /// Whether any weapon `ty` carries has a `Parasite=yes` warhead.
@@ -270,10 +214,7 @@ pub(super) fn run(
         let reach = super::advance::weapon_range_cells(rules, ty, false);
         enemy_cell.insert(enemy.entity_id, (enemy.cell, reach));
         if reach > 0 {
-            index.insert(Threat {
-                cell: enemy.cell,
-                reach,
-            });
+            index.insert(Threat::gun(enemy.entity_id, enemy.cell, reach));
         }
         if reach > 0 && carries_parasite(rules, ty) {
             parasites.push((enemy.cell, reach));
@@ -375,7 +316,7 @@ pub(super) fn run(
                 .map(|enemy| enemy.cell)
         });
 
-        let threats: Vec<Threat> = index.near(unit.cell).copied().collect();
+        let threats: Vec<Threat> = index.near(unit.cell, THREAT_REACH_CELLS);
 
         if obs.weapon_ready(unit.entity_id) {
             // Loaded. If the target is out of reach, walk back in: the micro
@@ -450,7 +391,7 @@ mod tests {
     use super::*;
 
     fn threat(cell: (u16, u16), reach: i32) -> Threat {
-        Threat { cell, reach }
+        Threat::gun(0, cell, reach)
     }
 
     /// A tank on the left of the unit, the building it is shooting in front:
