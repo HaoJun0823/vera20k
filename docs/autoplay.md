@@ -527,7 +527,7 @@ Three invariants, and the migration that establishes them one slice at a time:
 | S2 | Refusal loop (unreachable is in; not-ready, budget and preemption follow) | units idle with no intent |
 | S3 | Honest perception, shadow mode first | difference list |
 | S4 | Army groups replace the per-unit loops in `advance` and `forces` | units under one task stop acting alone |
-| S5 | Capability tags and the pilot table | 1–3 unit-level tests per capability |
+| S5 | Capability tags and the pilot table: Crush (movement), Parasite/Subdue/Gunner (target preference) | 1–3 unit-level tests per capability |
 | S6 | `--trace <id>`, behaviour fingerprints, golden replays | every change shows its diff |
 
 Status (2026-11-01): S0, S1, S2, S3, S4 (advance + forces), S5 (tables) and S6 (trace) are in the
