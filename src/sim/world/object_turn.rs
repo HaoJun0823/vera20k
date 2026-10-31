@@ -1166,9 +1166,11 @@ impl Simulation {
             outcome.bridge_state_changed |= receipt.bridge_state_changed;
             outcome.destroyed_structure |= receipt.structure_destroyed;
             // UnitAI736689 Reload+424 follows FireAtTarget/Facing and
-            // precedes the second Ready/Commence. Aircraft/Infantry have
-            // no corresponding ordinary Reload dispatch here. The native
-            // post-Foot alive gate precedes firing; no second gate is added.
+            // precedes the second Ready/Commence. Infantry take theirs from
+            // the Ares hook above; an Aircraft has no class Reload at all
+            // (its rounds come from the airfield's RELOAD handover, which
+            // starts the same clock). The native post-Foot alive gate
+            // precedes firing; no second gate is added.
             if let Some(entity) = sim.substrate.entities.get_mut(stable_id)
                 && entity.category() == EntityCategory::Unit
                 && let Some(obj) = sim.interner.object_type(entity.type_ref(), rules)
