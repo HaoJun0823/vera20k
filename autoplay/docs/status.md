@@ -42,6 +42,20 @@ a type name.
 twenty-minute mark (0x5EED 16 own vs 299; 10 27 vs 294; 19 lost at 11103). The
 retail policy on 0x5EED lost at 11361.
 
+## The two hard maps, as they stand
+
+12000 ticks, one seed, the same binary:
+
+| Map | Own | Enemy | Stuck | Reading |
+|---|---|---|---|---|
+| xcc_maps/xeb1.map | 30 | 27 | 1 | the army holds its side; no wall was opened, walls=0 |
+| xcc_maps/xtsunami.map | 35 | 42 | 28 | most of the army is frozen: the target is on another island and nothing gives it a second destination |
+
+The island number is the clearest failure the policy has: twenty-eight units
+holding a move job and not moving, counted, not guessed. The fix is the
+Unreachable ladder the spec asks for: a target the path cannot reach abandons
+and re-targets instead of holding the unit forever.
+
 ## Known gaps
 
 - The army still only defends or attack-moves; there is no retreat, no
