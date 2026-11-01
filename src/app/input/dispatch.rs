@@ -1807,10 +1807,7 @@ fn toggle_auto_play(state: &mut AppState) {
     if all_on {
         state.match_state.auto_play = None;
     } else {
-        install_auto_play(
-            state,
-            crate::sim::control::board::AutoPlayDomains::ALL,
-        );
+        install_auto_play(state, crate::sim::control::board::AutoPlayDomains::ALL);
     }
     post_auto_play_state(state);
 }
@@ -1828,13 +1825,24 @@ fn install_auto_play(
     else {
         return false;
     };
-    let mut host = crate::sim::autoplay::AutoPlayHost::new(
-        Box::new(crate::sim::strategy::retail::RetailBrain::new(
-            AUTO_PLAY_POLICY_SEED,
-        )),
-        owner,
-        AUTO_PLAY_COMMANDS_PER_FRAME,
-    );
+    // Which policy drives the house. The retail port is the default; the
+    // crate outside the engine is selected with an environment variable until
+    // it reaches parity, so one build shows both.
+    let brain: Box<dyn crate::sim::control::brain::Brain> =
+        if std::env::var("VERA20K_BRAIN").is_ok_and(|value| value.eq_ignore_ascii_case("v2")) {
+            match state.match_state.sim_runtime.as_ref() {
+                Some(runtime) => Box::new(autoplay::policy::Policy::new(&runtime.resources.rules)),
+                None => Box::new(crate::sim::strategy::retail::RetailBrain::new(
+                    AUTO_PLAY_POLICY_SEED,
+                )),
+            }
+        } else {
+            Box::new(crate::sim::strategy::retail::RetailBrain::new(
+                AUTO_PLAY_POLICY_SEED,
+            ))
+        };
+    let mut host =
+        crate::sim::autoplay::AutoPlayHost::new(brain, owner, AUTO_PLAY_COMMANDS_PER_FRAME);
     host.set_domains(domains);
     state.match_state.auto_play = Some(host);
     true
@@ -1975,9 +1983,7 @@ fn dispatch_retail_hotkey(state: &mut AppState, command: HotkeyCommand) {
         // VERA's own: auto play is on while a host is installed; the second key
         // flips only the forces half.
         HotkeyCommand::ToggleAutoPlay => toggle_auto_play(state),
-        HotkeyCommand::AutoPlayBuild => {
-            toggle_auto_play_switch(state, AutoPlaySwitch::Production)
-        }
+        HotkeyCommand::AutoPlayBuild => toggle_auto_play_switch(state, AutoPlaySwitch::Production),
         HotkeyCommand::ToggleAutoPlayForces => {
             toggle_auto_play_switch(state, AutoPlaySwitch::Forces)
         }
