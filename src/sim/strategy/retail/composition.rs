@@ -304,7 +304,7 @@ fn product_for<'r>(
         // one that stands. The war factory spends one cycle on it, and it walks
         // out and deploys where the house has ground of its own
         // (`super::expand`).
-        if super::expand::wants_a_maker(brain, budget)
+        if super::expand::wants_a_maker(brain, rules, obs, budget)
             && let Some(maker) = super::expand::yard_maker(rules, obs)
         {
             return Some(maker);

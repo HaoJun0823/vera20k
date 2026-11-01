@@ -1180,6 +1180,31 @@ impl<'a> Observation<'a> {
         )
     }
 
+    /// Whether the ground takes a yard deployed from `cell`.
+    ///
+    /// The deploy's own origin (the foundation's corner, shifted a cell
+    /// north-west on a foundation wider than two) and the clear-to-build test
+    /// at that origin: the same question the placement asks, asked about a
+    /// cell the maker has not reached yet.
+    pub(crate) fn clear_for_deploy(
+        &self,
+        rules: &RuleSet,
+        ty: &ObjectType,
+        cell: (u16, u16),
+    ) -> bool {
+        let origin = crate::sim::world::deploy_origin(cell, ty);
+        crate::sim::build_site::can_place_building_at(
+            self.sim,
+            rules,
+            Some(rules.overlay_registry()),
+            ty,
+            origin,
+            Some(self.house),
+            None,
+            None,
+        )
+    }
+
     /// Whether a hand other than this policy already owns `entity_id`, so the
     /// policy orders it nothing at all: a unit in one of the player's control
     /// groups, or a unit a `TeamClass` script of this house has recruited.

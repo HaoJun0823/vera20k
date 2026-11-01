@@ -46,7 +46,18 @@ pub(super) const EXPAND_MIN_CREDITS: i32 = 4_000;
 const EXPAND_MIN_CELLS: i32 = 10;
 
 /// How far out that search looks, in cells.
-const EXPAND_SCAN_CELLS: i32 = 24;
+///
+/// A second base goes to the next patch of ground that takes a yard, which
+/// is a long way off when the house stands on an ore field: the first yard's
+/// own ground is all ore, and the ground that is not ore is the other field.
+const EXPAND_SCAN_CELLS: i32 = 48;
+
+/// How long a probe's answer is kept, in frames.
+///
+/// The search asks the deploy's question cell by cell over the map, so it is
+/// a probe rather than a per-frame question: four seconds is a maker's own
+/// pace, and a cell that has become unusable is re-asked on the next probe.
+const EXPAND_PROBE_FRAMES: u64 = 60;
 
 /// Whether `ty` is a Construction Yard maker: its `DeploysInto=` is the
 /// building the rules' `[AI] BuildConst=` list holds. `UnitType`'s
@@ -184,7 +195,12 @@ pub(super) fn deploy_yard_maker(
 /// it has, and a wallet that can still build once the maker is paid for. The
 /// type itself comes from the same `CanBuild` answer the sidebar reads
 /// ([`Self::yard_maker`]), so a house that cannot build one simply does not.
-pub(super) fn wants_a_maker(brain: &RetailBrain, budget: &Budget) -> bool {
+pub(super) fn wants_a_maker(
+    brain: &mut RetailBrain,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    budget: &Budget,
+) -> bool {
     if !yard_stands(&brain.census) || owns_yard_maker(&brain.census) {
         return false;
     }
@@ -199,7 +215,31 @@ pub(super) fn wants_a_maker(brain: &RetailBrain, budget: &Budget) -> bool {
     if !brain.census.harvesters_served() {
         return false;
     }
+    // And ground to put it on. A maker that cannot deploy is a maker the
+    // house paid 2500 credits for and then watches stand in the factory's
+    // doorway for the rest of the match, so the house only buys one when
+    // there is a patch of ground a second yard fits on.
+    let Some(yard) = yard_type(rules, obs) else {
+        return false;
+    };
+    // Without a map there is no answer, and no answer is not a refusal: the
+    // fixtures and the headless harness run without one.
+    if obs.map_extent().0 > 0 && expansion_site(brain, rules, obs, yard).is_none() {
+        return false;
+    }
     budget.free >= EXPAND_MIN_CREDITS
+}
+
+/// The yard type the house's maker deploys into, when the house has one.
+fn yard_type<'r>(rules: &'r RuleSet, obs: &Observation<'_>) -> Option<&'r ObjectType> {
+    super::build::all_class_types(rules, obs, ObjectCategory::Vehicle)
+        .filter(|(ty, _)| makes_a_yard(rules, ty))
+        .filter_map(|(maker, _)| {
+            rules
+                .object(maker.deploys_into.as_deref()?)
+                .filter(|yard| yard.build_const_eligible)
+        })
+        .next()
 }
 
 /// Drive a maker the house bought for a second base out, and deploy it there.
@@ -216,48 +256,27 @@ fn deploy_second_yard(
     cell: (u16, u16),
     yard: &ObjectType,
 ) {
-    let Some(home) = brain.census.base_cell else {
+    // The cell the house decided on: a patch of ground a second yard fits
+    // on, away from the first base. The same probe the purchase gate asked,
+    // so the maker walks to the ground the house already knows about.
+    let Some(target) = expansion_site(brain, rules, obs, yard) else {
         return;
     };
-    // Far enough out, and on ground the yard fits: then it is the player's own
-    // D press. Whether the deploy is admitted is the simulation's answer once
-    // the maker is standing there, not something this pass can know from a
-    // distance — the deploy shifts the foundation off the unit's own cell.
-    if cell_distance(cell, home) >= EXPAND_MIN_CELLS
-        && obs.deploy_site_admits(rules, entity_id, yard)
-    {
+    // Standing on it, and the deploy is admitted there: that is the player's
+    // own D press.
+    if cell_distance(cell, target) <= 1 && obs.deploy_site_admits(rules, entity_id, yard) {
         super::orders::issue(brain, out, rules, obs, entity_id, Goal::Deploy);
         return;
     }
     // A maker already walking is a maker whose cell has been chosen: the
-    // sweep is over the whole ring and costs a foundation test per cell, so
+    // walk is over the map's ground and costs a foundation test per cell, so
     // it is asked when the unit stands still and not once a frame while it
     // drives.
     if obs.destination(entity_id).is_some() {
         return;
     }
-    // Beside the stop before anywhere on the map: the maker may already be
-    // standing next to ground the deploy would take, and the sweep's own cell
-    // is ranked by the foundation's corner rather than by the cell the unit
-    // would stand on. Two cells that answer yes here is the difference
-    // between a second base and a maker pacing for the rest of the match.
-    if cell_distance(cell, home) >= EXPAND_MIN_CELLS {
-        if let Some(target) = near_deploy_cell(rules, obs, entity_id, cell, yard)
-            && target != cell
-        {
-            super::orders::issue(brain, out, rules, obs, entity_id, Goal::Move { cell: target });
-            return;
-        }
-    }
-    if let Some(target) = expansion_cell(brain, rules, obs, entity_id, home, yard) {
-        super::orders::issue(
-            brain,
-            out,
-            rules,
-            obs,
-            entity_id,
-            Goal::Move { cell: target },
-        );
+    if cell != target {
+        super::orders::issue(brain, out, rules, obs, entity_id, Goal::Move { cell: target });
     }
 }
 
@@ -277,6 +296,7 @@ fn near_deploy_cell(
     obs: &Observation<'_>,
     entity_id: u64,
     from: (u16, u16),
+    home: (u16, u16),
     yard: &ObjectType,
 ) -> Option<(u16, u16)> {
     for ring in 0..=DEPLOY_SITE_RING {
@@ -291,6 +311,9 @@ fn near_deploy_cell(
                 ) else {
                     continue;
                 };
+                if cell_distance((rx, ry), home) < EXPAND_MIN_CELLS {
+                    continue;
+                }
                 if obs.deploy_admits_at(rules, entity_id, yard, (rx, ry)) {
                     return Some((rx, ry));
                 }
@@ -308,12 +331,52 @@ fn near_deploy_cell(
 /// maker clear of what the house has already built. Ore is not a factor yet:
 /// the rules' overlay is not reachable from [`Observation`], and guessing at a
 /// field from the truck's path is not evidence.
-fn expansion_cell(
-    brain: &RetailBrain,
+pub(super) fn expansion_site(
+    brain: &mut RetailBrain,
     rules: &RuleSet,
     obs: &Observation<'_>,
-    entity_id: u64,
+    yard: &ObjectType,
+) -> Option<(u16, u16)> {
+    let tick = obs.tick();
+    if let Some((at, cell)) = brain.expansion_probe
+        && tick.saturating_sub(at) < EXPAND_PROBE_FRAMES
+    {
+        return cell;
+    }
+    let Some(home) = brain.census.base_cell else {
+        brain.expansion_probe = Some((tick, None));
+        return None;
+    };
+    let found = search_expansion_site(rules, obs, home, &brain.census.home_cells, yard);
+    brain.expansion_probe = Some((tick, found));
+    found
+}
+
+/// Whether `cell` is far enough from the house's own buildings to be a
+/// second base's yard.
+///
+/// A maker that deploys beside the first yard is the same base with more of
+/// it, and the point of the walk is to leave.
+fn is_a_second_base_cell(home_cells: &[(u16, u16)], cell: (u16, u16)) -> bool {
+    home_cells
+        .iter()
+        .all(|home| cell_distance(*home, cell) >= EXPAND_MIN_CELLS)
+}
+
+/// The nearest cell a second yard may be deployed on: away from the house's
+/// own base, on ground the yard fits, and clear of everything that stands
+/// there.
+///
+/// The search asks the deploy's own question -- the foundation's origin and
+/// the clear-to-build test at that origin -- and not the sidebar's build-area
+/// adjacency: a second base is outside the first base's build area by
+/// definition, so asking the placement question answered No for every cell
+/// and the maker stood where the factory put it.
+fn search_expansion_site(
+    rules: &RuleSet,
+    obs: &Observation<'_>,
     home: (u16, u16),
+    home_cells: &[(u16, u16)],
     yard: &ObjectType,
 ) -> Option<(u16, u16)> {
     let (width, height) = obs.map_extent();
@@ -322,7 +385,6 @@ fn expansion_cell(
     if width == 0 || height == 0 {
         return None;
     }
-    let home_cells = &brain.census.home_cells;
     for ring in EXPAND_MIN_CELLS..=EXPAND_SCAN_CELLS {
         for dy in -ring..=ring {
             for dx in -ring..=ring {
@@ -338,27 +400,13 @@ fn expansion_cell(
                 if rx >= width || ry >= height || !obs.is_ground_walkable(rx, ry) {
                     continue;
                 }
-                // The maker *deploys*, and a deploy asks only whether the
-                // ground is clear — not whether it is inside the build area.
-                // Asking the placement question sent the second-base sweep
-                // looking for a cell it could never find: every cell far
-                // enough from home to be a second base is outside the first
-                // base's build area, so the search answered `None` for a whole
-                // match and the maker stood where it was bought.
-                // The question is the deploy's, at the cell the maker would
-                // stand on: the foundation's corner shifts a cell north-west
-                // on a foundation wider than two, so a clear corner cell is
-                // not a clear stand. `deploy_admits_at` is the same answer
-                // `deploy_site_admits` gives on arrival.
-                if !obs.deploy_admits_at(rules, entity_id, yard, (rx, ry)) {
-                    continue;
-                }
                 // Not inside a base the house already has: that is where the
                 // first yard is, and the point of the walk is to leave it.
-                if home_cells
-                    .iter()
-                    .any(|cell| cell_distance(*cell, (rx, ry)) < EXPAND_MIN_CELLS)
-                {
+                if !is_a_second_base_cell(home_cells, (rx, ry)) {
+                    continue;
+                }
+                // And the ground has to take a yard.
+                if !obs.clear_for_deploy(rules, yard, (rx, ry)) {
                     continue;
                 }
                 return Some((rx, ry));
@@ -536,7 +584,7 @@ mod tests {
             brain.rebuild_census(&rules, &obs);
             let budget = super::super::plan::budget(&rules, &obs, &brain.census, None);
             assert!(
-                wants_a_maker(&brain, &budget),
+                wants_a_maker(&mut brain, &rules, &obs, &budget),
                 "a house with a yard, its trucks and a full wallet wants a second one"
             );
         }
@@ -549,45 +597,25 @@ mod tests {
             brain.census = Default::default();
             brain.rebuild_census(&rules, &obs);
             let budget = super::super::plan::budget(&rules, &obs, &brain.census, None);
-            assert!(!wants_a_maker(&brain, &budget), "one expansion at a time");
+            assert!(
+                !wants_a_maker(&mut brain, &rules, &obs, &budget),
+                "one expansion at a time"
+            );
         }
     }
 
-    /// The second base's ground is outside the first base's build area: the
-    /// sweep has to ask the deploy question (is the ground clear) and not the
-    /// sidebar's placement one (is it near a building of mine). It asked the
-    /// placement question, every candidate it looked at was refused, and the
-    /// maker it bought for the expansion stood where the factory put it for
-    /// the rest of the match.
+    /// A second base is not the first base with more of it: the cell has to be
+    /// clear of every building the house already holds.
     #[test]
-    fn the_second_base_sweep_finds_ground_outside_the_build_area() {
-        let Some((mut sim, rules, owner)) = arena(0xA19) else {
-            return;
-        };
-        let _ = sim.spawn_object("GACNST", "Americans", 16, 16, 255, &rules);
-        let maker = sim
-            .spawn_object("AMCV", "Americans", 26, 26, 255, &rules)
-            .expect("a yard maker");
-        let mut brain = RetailBrain::new(0xA19);
-        let obs = Observation::new(&sim, owner);
-        brain.rebuild_census(&rules, &obs);
-        let yard = rules.object("GACNST").expect("the yard");
-        let (width, height) = obs.map_extent();
-        if width < 48 || height < 48 {
-            return;
-        }
+    fn a_second_base_is_not_inside_the_first_one() {
+        let homes = [(10, 10), (12, 10)];
         assert!(
-            !obs.placement_admits(&rules, yard, 40, 40),
-            "the sidebar refuses a yard this far from the base"
+            is_a_second_base_cell(&homes, (40, 40)),
+            "a cell far away is a second base's"
         );
         assert!(
-            obs.clear_for_building(&rules, yard, 40, 40),
-            "but the ground itself is clear, which is what a deploy asks"
-        );
-        let cell = expansion_cell(&brain, &rules, &obs, maker, (16, 16), yard);
-        assert!(
-            cell.is_some(),
-            "the sweep has to find a cell for the second base: {cell:?}"
+            !is_a_second_base_cell(&homes, (14, 10)),
+            "and a cell beside the first yard is not"
         );
     }
 }

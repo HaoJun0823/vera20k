@@ -295,6 +295,13 @@ pub struct RetailBrain {
     /// change between frames, so without a cursor the units at its end would
     /// never be looked at at all.
     pub(super) avoid_cursor: usize,
+    /// The cell the second base's maker was last sent to, and the frame the
+    /// search that found it ran.
+    ///
+    /// The search is a walk over the map's ground asking the deploy's own
+    /// question cell by cell, and the map is big: the answer is kept between
+    /// probes instead of being recomputed every frame the maker stands still.
+    pub(super) expansion_probe: Option<(u64, Option<(u16, u16)>)>,
     /// The frame `think` last ran on.
     ///
     /// Refusals arrive after `think` returns, and a refused command has to be
@@ -366,6 +373,7 @@ impl RetailBrain {
             super_at: BTreeMap::new(),
             income: plan::IncomeMeter::new(),
             avoid_cursor: 0,
+            expansion_probe: None,
             last_tick: 0,
             progress: BTreeMap::new(),
             stuck_retried: BTreeSet::new(),
