@@ -36,6 +36,10 @@ impl Roles {
     pub const REFINERY: Self = Self(1 << 7);
     pub const ARMED: Self = Self(1 << 8);
     pub const STRUCTURE: Self = Self(1 << 9);
+    /// A structure whose factory produces infantry (`Factory=InfantryType`).
+    pub const TRAINS_INFANTRY: Self = Self(1 << 10);
+    /// A structure whose factory produces vehicles (`Factory=UnitType`).
+    pub const BUILDS_VEHICLES: Self = Self(1 << 11);
 
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 != 0
@@ -58,6 +62,8 @@ impl Roles {
             ("refinery", Roles::REFINERY),
             ("armed", Roles::ARMED),
             ("structure", Roles::STRUCTURE),
+            ("trains-infantry", Roles::TRAINS_INFANTRY),
+            ("builds-vehicles", Roles::BUILDS_VEHICLES),
         ];
         ALL.iter()
             .filter(|(_, role)| self.contains(*role))
@@ -151,6 +157,15 @@ impl UnitProfile {
         }
         if ty.category == ObjectCategory::Building {
             roles = roles.with(Roles::STRUCTURE);
+        }
+        match ty.factory_type() {
+            Some(vera20k_core::rules::object_type::FactoryType::InfantryType) => {
+                roles = roles.with(Roles::TRAINS_INFANTRY);
+            }
+            Some(vera20k_core::rules::object_type::FactoryType::UnitType) => {
+                roles = roles.with(Roles::BUILDS_VEHICLES);
+            }
+            _ => {}
         }
 
         let mut weapons = Vec::new();

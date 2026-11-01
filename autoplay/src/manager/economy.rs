@@ -2,9 +2,9 @@
 //!
 //! Three decisions, all read off the profile rather than a type name: put the
 //! maker down where it can stand, keep every harvester working, and raise the
-//! next building the house needs — a plant while the house is short of power, a
-//! refinery while it has none. The building it buys is the cheapest profile
-//! that supplies the need.
+//! next building the house needs. The need is a role — a refinery, a barracks,
+//! a war factory, more power — and the building that satisfies it is the
+//! cheapest buildable profile carrying that role.
 
 use vera20k_core::rules::object_type::ObjectCategory;
 use vera20k_core::sim::control::intent::Intent;
@@ -47,14 +47,7 @@ impl Economy {
             if !profile.roles.contains(Roles::DEPLOYER) || !unit.orderable {
                 continue;
             }
-            if ctx.obs.is_deployed(unit.entity_id) {
-                continue;
-            }
-            // Whether the yard fits is the order gate's question, not a second
-            // copy of it here: the deploy is refused at the door and the job
-            // comes back to us, which is the one admission path every order
-            // takes.
-            if ty.deploys_into.is_none() {
+            if ctx.obs.is_deployed(unit.entity_id) || ty.deploys_into.is_none() {
                 continue;
             }
             out.jobs.push(Proposal {
@@ -105,13 +98,15 @@ impl Economy {
         }
     }
 
-    /// The next building: power while the house is short of it, a refinery
-    /// while it has none.
+    /// The next building, in the order a house opens: a refinery, a barracks, a
+    /// war factory, then power whenever the base is short of it.
     fn build(&self, ctx: &Ctx<'_>, out: &mut Demands) {
         if ctx.obs.building_in_production().is_some() {
             return;
         }
         let mut refinery: Option<&UnitProfile> = None;
+        let mut infantry_factory: Option<&UnitProfile> = None;
+        let mut vehicle_factory: Option<&UnitProfile> = None;
         let mut power: Option<&UnitProfile> = None;
         for ty in ctx.rules.all_objects() {
             let Some(profile) = ctx.profiles.get(&ty.id) else {
@@ -128,21 +123,32 @@ impl Economy {
             }
             if profile.roles.contains(Roles::REFINERY) {
                 refinery = Self::cheaper(refinery, profile);
+            } else if profile.roles.contains(Roles::TRAINS_INFANTRY) {
+                infantry_factory = Self::cheaper(infantry_factory, profile);
+            } else if profile.roles.contains(Roles::BUILDS_VEHICLES) {
+                vehicle_factory = Self::cheaper(vehicle_factory, profile);
             } else if profile.power > 0 {
                 power = Self::cheaper(power, profile);
             }
         }
-        let has_refinery = ctx.obs.own_entities().any(|unit| {
-            ctx.obs
-                .object_type(ctx.rules, unit.type_id)
-                .and_then(|ty| ctx.profiles.get(&ty.id))
-                .is_some_and(|profile| profile.roles.contains(Roles::REFINERY))
-        });
-        // With no refinery the tree is still unopened, so the plant comes
-        // first: a refinery whose prerequisites are unmet is not buildable, and
-        // the only building this house can raise is the one that opens it.
-        let want = if !has_refinery {
-            power.or(refinery)
+
+        let has = |role: Roles| {
+            ctx.obs.own_entities().any(|unit| {
+                ctx.obs
+                    .object_type(ctx.rules, unit.type_id)
+                    .and_then(|ty| ctx.profiles.get(&ty.id))
+                    .is_some_and(|profile| profile.roles.contains(role))
+            })
+        };
+
+        // Each need falls back to a plant: power is what the next building
+        // usually waits on, and a plant is always cheaper than a stalled base.
+        let want = if !has(Roles::REFINERY) {
+            refinery.or(power)
+        } else if !has(Roles::TRAINS_INFANTRY) {
+            infantry_factory.or(power)
+        } else if !has(Roles::BUILDS_VEHICLES) {
+            vehicle_factory.or(power)
         } else if ctx.obs.power_balance() < POWER_MARGIN {
             power
         } else {

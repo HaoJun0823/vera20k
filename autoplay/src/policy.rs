@@ -94,6 +94,8 @@ impl Policy {
     fn expected_mission(kind: JobKind) -> Option<MissionId> {
         match kind {
             JobKind::Harvest => Some(MissionId::from_known(MissionType::Harvest)),
+            JobKind::Assault => Some(MissionId::from_known(MissionType::Attack)),
+            JobKind::Defend => Some(MissionId::from_known(MissionType::AreaGuard)),
             _ => None,
         }
     }
@@ -101,6 +103,8 @@ impl Policy {
     fn goal(job: &Job) -> Option<Goal> {
         match (job.kind, job.target) {
             (JobKind::Harvest, Target::Cell(cell)) => Some(Goal::Harvest { cell }),
+            (JobKind::Assault, Target::Cell(cell)) => Some(Goal::AttackMove { cell }),
+            (JobKind::Defend, Target::Cell(cell)) => Some(Goal::GuardAt { cell }),
             (JobKind::Deploy, _) => Some(Goal::Deploy),
             _ => None,
         }
@@ -223,7 +227,12 @@ impl Brain for Policy {
             let Some(profile) = self.profiles.get(&ty.id) else {
                 continue;
             };
-            if unit.orderable && obs.inside_transport(unit.entity_id).is_none() {
+            // A structure takes house-level intents, not a unit job: counting
+            // one as unowned would hide the units that really are.
+            if unit.orderable
+                && !profile.roles.contains(Roles::STRUCTURE)
+                && obs.inside_transport(unit.entity_id).is_none()
+            {
                 eligible.push((unit.entity_id, profile.roles));
             }
         }
