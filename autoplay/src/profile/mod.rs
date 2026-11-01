@@ -38,8 +38,12 @@ impl Roles {
     pub const STRUCTURE: Self = Self(1 << 9);
     /// A structure whose factory produces infantry (`Factory=InfantryType`).
     pub const TRAINS_INFANTRY: Self = Self(1 << 10);
-    /// A structure whose factory produces vehicles (`Factory=UnitType`).
+    /// A structure whose factory produces land vehicles (`Factory=UnitType`).
     pub const BUILDS_VEHICLES: Self = Self(1 << 11);
+    /// A structure whose factory produces ships (`Factory=UnitType` and
+    /// `Naval=yes`): a shipyard is not a war factory, and treating it as one
+    /// leaves a base with no way to build a truck.
+    pub const BUILDS_NAVAL: Self = Self(1 << 12);
 
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 != 0
@@ -64,6 +68,7 @@ impl Roles {
             ("structure", Roles::STRUCTURE),
             ("trains-infantry", Roles::TRAINS_INFANTRY),
             ("builds-vehicles", Roles::BUILDS_VEHICLES),
+            ("builds-naval", Roles::BUILDS_NAVAL),
         ];
         ALL.iter()
             .filter(|(_, role)| self.contains(*role))
@@ -163,7 +168,11 @@ impl UnitProfile {
                 roles = roles.with(Roles::TRAINS_INFANTRY);
             }
             Some(vera20k_core::rules::object_type::FactoryType::UnitType) => {
-                roles = roles.with(Roles::BUILDS_VEHICLES);
+                roles = roles.with(if ty.naval {
+                    Roles::BUILDS_NAVAL
+                } else {
+                    Roles::BUILDS_VEHICLES
+                });
             }
             _ => {}
         }

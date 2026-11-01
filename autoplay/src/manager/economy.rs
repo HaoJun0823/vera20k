@@ -28,6 +28,7 @@ impl Manager for Economy {
         self.maker(ctx, out);
         self.harvesters(ctx, out);
         self.place(ctx, out);
+        self.harvesters_for_refineries(ctx, out);
         self.build(ctx, out);
     }
 }
@@ -88,7 +89,17 @@ impl Economy {
     fn place(&self, ctx: &Ctx<'_>, out: &mut Demands) {
         for ready in ctx.obs.ready_buildings() {
             let placement = Placement::new(ctx.obs, ctx.rules);
-            let Some(cell) = placement.cell_for(ready.type_id, 0) else {
+            // The search answers a different cell per attempt; one attempt that
+            // finds nothing is a base that stays blocked, because a ready
+            // building holds its factory until it is placed.
+            let mut cell = None;
+            for attempt in 0..8 {
+                if let Some(found) = placement.cell_for(ready.type_id, attempt) {
+                    cell = Some(found);
+                    break;
+                }
+            }
+            let Some(cell) = cell else {
                 if ctx.tick % 600 == 0 {
                     log::info!("economy: no site for a ready building at {}", ctx.tick);
                 }
@@ -104,7 +115,17 @@ impl Economy {
     /// The next building, in the order a house opens: a refinery, a barracks, a
     /// war factory, then power whenever the base is short of it.
     fn build(&self, ctx: &Ctx<'_>, out: &mut Demands) {
-        if ctx.obs.building_in_production().is_some() {
+        if let Some((type_id, ready)) = ctx.obs.building_in_production() {
+            if ctx.tick % 1200 == 0 {
+                log::info!(
+                    "economy: building in production at {}: {:?} ready={ready} credits={}",
+                    ctx.tick,
+                    ctx.obs
+                        .object_type(ctx.rules, type_id)
+                        .map_or("?", |ty| ty.id.as_str()),
+                    ctx.obs.credits()
+                );
+            }
             return;
         }
         let mut refinery: Option<&UnitProfile> = None;
@@ -187,12 +208,70 @@ impl Economy {
             None
         };
         let Some(want) = want else {
+            if ctx.tick % 1200 == 0 {
+                log::info!(
+                    "economy: nothing to build at {} credits={} refineries={} defenses={} in_production={:?}",
+                    ctx.tick,
+                    ctx.obs.credits(),
+                    count(Roles::REFINERY),
+                    defenses,
+                    ctx.obs.building_in_production()
+                );
+            }
             return;
         };
         let Some(type_id) = ctx.obs.type_id(&want.id) else {
             return;
         };
         if ctx.obs.in_production(ctx.rules, type_id) {
+            return;
+        }
+        // Starting a build the wallet cannot finish strands the factory: the
+        // house pays as it builds, and a stall is a base that never grows.
+        if !Self::affordable(ctx, want) {
+            return;
+        }
+        out.intents.push(Intent::QueueProduction { type_id });
+    }
+
+    /// One harvester per refinery, replaced as they die. A refinery with no
+    /// truck is the quietest way for a house to stop earning.
+    fn harvesters_for_refineries(&self, ctx: &Ctx<'_>, out: &mut Demands) {
+        let mut harvesters = 0;
+        let mut refineries = 0;
+        for unit in ctx.obs.own_entities() {
+            if let Some(profile) = ctx
+                .obs
+                .object_type(ctx.rules, unit.type_id)
+                .and_then(|ty| ctx.profiles.get(&ty.id))
+            {
+                harvesters += usize::from(profile.roles.contains(Roles::HARVESTER));
+                refineries += usize::from(profile.roles.contains(Roles::REFINERY));
+            }
+        }
+        if refineries == 0 || harvesters >= refineries {
+            return;
+        }
+        let mut want: Option<&UnitProfile> = None;
+        for ty in ctx.rules.all_objects() {
+            let Some(profile) = ctx.profiles.get(&ty.id) else {
+                continue;
+            };
+            if !profile.roles.contains(Roles::HARVESTER) {
+                continue;
+            }
+            if ctx.obs.can_build(ctx.rules, ty, false) != CanBuild::Yes {
+                continue;
+            }
+            want = Self::cheaper(want, profile);
+        }
+        let Some(want) = want else {
+            return;
+        };
+        let Some(type_id) = ctx.obs.type_id(&want.id) else {
+            return;
+        };
+        if ctx.obs.in_production(ctx.rules, type_id) || !Self::affordable(ctx, want) {
             return;
         }
         out.intents.push(Intent::QueueProduction { type_id });
