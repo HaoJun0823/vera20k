@@ -408,6 +408,53 @@ mod tests {
     }
 
     #[test]
+    fn roles_come_from_the_factory_and_the_deploy_keys() {
+        let Some(rules) = retail() else {
+            return;
+        };
+        let profiles = Profiles::build(&rules);
+        if let Some(barracks) = profiles.get("GAPILE") {
+            assert!(
+                barracks.roles.contains(Roles::TRAINS_INFANTRY),
+                "a barracks trains infantry"
+            );
+        }
+        if let Some(factory) = profiles.get("GAWEAP") {
+            assert!(
+                factory.roles.contains(Roles::BUILDS_VEHICLES),
+                "a war factory builds vehicles"
+            );
+        }
+        if let Some(refinery) = profiles.get("GAREFN") {
+            assert!(refinery.roles.contains(Roles::REFINERY));
+        }
+        if let Some(maker) = profiles.get("AMCV") {
+            assert!(
+                maker.roles.contains(Roles::DEPLOYER),
+                "a maker deploys into something"
+            );
+        }
+    }
+
+    #[test]
+    fn a_capability_is_true_only_where_the_rules_say_so() {
+        let Some(rules) = retail() else {
+            return;
+        };
+        let profiles = Profiles::build(&rules);
+        let Some(gi) = profiles.get("E1") else {
+            return;
+        };
+        let Some(grizzly) = profiles.get("MTNK") else {
+            return;
+        };
+        assert!(gi.roles.contains(Roles::OCCUPIER), "a GI can garrison");
+        assert!(!gi.roles.contains(Roles::HARVESTER));
+        assert!(grizzly.roles.contains(Roles::ARMED));
+        assert!(!grizzly.roles.contains(Roles::TRANSPORT));
+    }
+
+    #[test]
     fn an_armor_class_the_warhead_cannot_touch_is_not_hurt() {
         let Some(rules) = retail() else {
             return;
