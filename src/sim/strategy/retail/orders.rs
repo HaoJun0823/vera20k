@@ -1313,6 +1313,16 @@ pub(super) fn walks_into_buildings(rules: &RuleSet, ty: &ObjectType) -> bool {
 /// back as soon as it is healthy again, so the threshold is the whole rule.
 const RETREAT_HEALTH_PERMILLE: u16 = 300;
 
+/// How much the house's army has to outweigh what stands around a hurt unit
+/// before the unit stays in the fight, in permille.
+///
+/// Half again is a clear trade, not a close one: the retreat is for the
+/// exchange being lost, and a unit that pulls out of a fight the house is
+/// winning is the "拉扯" that makes a push a string of small fights instead
+/// of one. The margin is stricter than the push's own (1.2), because the
+/// push may wait for a better moment and this unit cannot.
+const RETREAT_SUPERIORITY_PERMILLE: i32 = 1_500;
+
 /// Hand the house's hurt fighters back to a depot, or home when it has none.
 ///
 /// With a `UnitRepair=` building standing, the retreat is the click a player
@@ -1359,6 +1369,20 @@ pub(super) fn managed(
         .iter()
         .filter(|unit| unit.traits.combat && !unit.hand && unit.orderable)
         .filter(|unit| unit.health_permille <= RETREAT_HEALTH_PERMILLE)
+        // A hurt unit in a fight the house is winning stays in it. The
+        // comparison is the push's own, with a stricter margin: the push may
+        // wait for a better moment, this unit cannot, and a third of the
+        // attackers walking home mid-exchange is what makes a push a series
+        // of small fights that each one can be lost.
+        .filter(|unit| {
+            !super::squads::winning_fight(
+                &brain.census,
+                rules,
+                obs,
+                unit.cell,
+                RETREAT_SUPERIORITY_PERMILLE,
+            )
+        })
         .map(|unit| (unit.entity_id, unit.cell, unit.mission))
         .collect();
     for (entity_id, cell, mission) in retreating {
@@ -2230,6 +2254,57 @@ mod tests {
                 .map(|order| order.goal),
             Some(Goal::Enter { target: depot }),
             "the hurt tank clicks the bay, it does not walk at its cell"
+        );
+    }
+    /// And the other half of the retreat rule: a hurt unit in a fight the
+    /// house is winning stays in it.
+    ///
+    /// Every hurt unit walking home is a third of the attackers peeling off
+    /// mid-exchange, which is what makes a push a string of small fights
+    /// instead of one. The house's army outweighs what stands around the
+    /// unit, so the unit keeps fighting.
+    #[test]
+    fn a_hurt_unit_in_a_won_fight_stays_in_it() {
+        let rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
+            "[VehicleTypes]\n0=TANK\n\n\
+             [TANK]\nStrength=100\nSpeed=5\nPrimary=Gun\nArmor=none\n\
+             Locomotor={4A582741-9839-11d1-B709-00A024DDAFD1}\n\
+             [Gun]\nDamage=10\nROF=20\nRange=4\nWarhead=SA\nProjectile=Bullet\n\
+             [SA]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n",
+        ))
+        .expect("tank rules");
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xA17);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let owner = sim.interner.intern("Americans");
+        let tank = sim
+            .spawn_object("TANK", "Americans", 6, 20, 64, &rules)
+            .expect("a tank");
+        sim.substrate
+            .entities
+            .get_mut(tank)
+            .expect("the tank")
+            .health
+            .set_for_test(20);
+        // Two more of ours, whole, and one of theirs across the field.
+        sim.spawn_object("TANK", "Americans", 9, 20, 64, &rules)
+            .expect("a tank");
+        sim.spawn_object("TANK", "Americans", 12, 20, 64, &rules)
+            .expect("a tank");
+        sim.spawn_object("TANK", "Russians", 7, 20, 64, &rules)
+            .expect("an enemy tank");
+
+        let obs = Observation::new(&sim, owner);
+        let mut brain = RetailBrain::new(0xA17);
+        brain.rebuild_census(&rules, &obs);
+        let mut out = Outbox::default();
+        managed(&mut brain, &rules, &obs, 0, &mut out);
+
+        assert!(
+            !out.orders
+                .iter()
+                .any(|order| order.actor == tank && matches!(order.goal, Goal::Enter { .. })),
+            "the hurt tank stays in a fight the house is winning"
         );
     }
 

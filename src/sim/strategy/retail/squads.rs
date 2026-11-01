@@ -117,6 +117,30 @@ pub(super) fn outguns(
     ours.saturating_mul(1_000) >= theirs.saturating_mul(PUSH_SUPERIORITY_PERMILLE)
 }
 
+/// Whether the fight around `cell` is one the house is winning: there is
+/// something to fight there, and the house's army outweighs it by the margin.
+///
+/// The empty case is the difference from [`outguns`]: nothing standing around
+/// a unit is not a fight it is winning, and a hurt unit with an empty field
+/// around it is exactly the unit that walks home to be repaired. The margin
+/// is the argument because there are two questions and one comparison: the
+/// push asks whether it can win (1.2), and the retreat asks whether the
+/// exchange this unit is in is one worth staying in (1.5).
+pub(super) fn winning_fight(
+    census: &Census,
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    cell: (u16, u16),
+    permille: i32,
+) -> bool {
+    let theirs = census.enemy_points(rules, obs, cell, PUSH_MEET_CELLS);
+    if theirs == 0 {
+        return false;
+    }
+    let ours = census.army_points();
+    ours.saturating_mul(1_000) >= theirs.saturating_mul(permille)
+}
+
 /// What a team is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Role {
