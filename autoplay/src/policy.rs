@@ -260,6 +260,14 @@ impl Brain for Policy {
 
         self.issue(obs, out);
 
+        if tick % 600 == 0 && self.stats.unowned > 0 {
+            let idle: Vec<String> = obs
+                .own_entities()
+                .filter(|unit| self.jobs.get(unit.entity_id).is_none())
+                .filter_map(|unit| obs.object_type(rules, unit.type_id).map(|ty| ty.id.clone()))
+                .collect();
+            log::info!("policy v2: unowned at {tick}: {:?}", idle);
+        }
         if tick % 600 == 0 {
             log::info!(
                 "policy v2: tick={tick} proposals={} intents={} assigned={} issued={} unowned={} refused={}",

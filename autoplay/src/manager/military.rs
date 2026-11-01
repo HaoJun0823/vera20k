@@ -16,7 +16,7 @@ use crate::profile::{Roles, UnitProfile};
 use crate::registry::JobKind;
 
 /// How many armed units the house wants before it attacks.
-const ARMY_TO_ATTACK: usize = 6;
+const ARMY_TO_ATTACK: usize = 12;
 /// Below this the house keeps its credits for buildings.
 const UNIT_SPEND_FLOOR: i32 = 900;
 
@@ -103,6 +103,10 @@ impl Military {
                     .unwrap_or(i32::MAX)
             })
             .map(|enemy| enemy.cell);
+        // A house with no structure yet holds the ground its own units stand
+        // on: the starting force is the whole army until the yard is up, and a
+        // unit with no post is a unit nobody owns.
+        let home = home.or_else(|| soldiers.first().map(|unit| unit.cell));
         let Some(home) = home else {
             return;
         };

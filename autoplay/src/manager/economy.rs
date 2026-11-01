@@ -108,6 +108,7 @@ impl Economy {
         let mut infantry_factory: Option<&UnitProfile> = None;
         let mut vehicle_factory: Option<&UnitProfile> = None;
         let mut power: Option<&UnitProfile> = None;
+        let mut defense: Option<&UnitProfile> = None;
         for ty in ctx.rules.all_objects() {
             let Some(profile) = ctx.profiles.get(&ty.id) else {
                 continue;
@@ -127,19 +128,26 @@ impl Economy {
                 infantry_factory = Self::cheaper(infantry_factory, profile);
             } else if profile.roles.contains(Roles::BUILDS_VEHICLES) {
                 vehicle_factory = Self::cheaper(vehicle_factory, profile);
+            } else if profile.roles.contains(Roles::ARMED) && profile.cost <= 1200 {
+                // A structure with a gun: the cheapest one the house can raise.
+                defense = Self::cheaper(defense, profile);
             } else if profile.power > 0 {
                 power = Self::cheaper(power, profile);
             }
         }
 
-        let has = |role: Roles| {
-            ctx.obs.own_entities().any(|unit| {
-                ctx.obs
-                    .object_type(ctx.rules, unit.type_id)
-                    .and_then(|ty| ctx.profiles.get(&ty.id))
-                    .is_some_and(|profile| profile.roles.contains(role))
-            })
+        let count = |role: Roles| {
+            ctx.obs
+                .own_entities()
+                .filter(|unit| {
+                    ctx.obs
+                        .object_type(ctx.rules, unit.type_id)
+                        .and_then(|ty| ctx.profiles.get(&ty.id))
+                        .is_some_and(|profile| profile.roles.contains(role))
+                })
+                .count()
         };
+        let has = |role: Roles| count(role) > 0;
 
         // Each need falls back to a plant: power is what the next building
         // usually waits on, and a plant is always cheaper than a stalled base.
@@ -149,6 +157,10 @@ impl Economy {
             infantry_factory.or(power)
         } else if !has(Roles::BUILDS_VEHICLES) {
             vehicle_factory.or(power)
+        } else if count(Roles::REFINERY) < 3 && ctx.obs.credits() > 2_500 {
+            refinery
+        } else if count(Roles::ARMED) < 4 && ctx.obs.credits() > 1_200 {
+            defense
         } else if ctx.obs.power_balance() < POWER_MARGIN {
             power
         } else {

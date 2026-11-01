@@ -38,6 +38,10 @@ RESULT = re.compile(r"(won|timeout|lost) at tick (\d+)")
 CRATE = re.compile(r"crate picked up at (\(\d+, \d+\)) by house (\S+)")
 BUILD_LIST = re.compile(r"the build list answers (\w+) for ([A-Z0-9]+)")
 STANDING = re.compile(r"(\d+) standing")
+# The census row the match prints every interval: tick, credits, enemy credits,
+# power, own, enemy, ready, rejected, not-ready.
+CENSUS = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$", re.M)
+UNOWNED = re.compile(r"unowned=(\d+)")
 
 
 @dataclass
@@ -53,6 +57,9 @@ class MatchReport:
     yards: int = 0
     walls: int = 0
     map: str = ""
+    own: int = 0
+    enemy: int = 0
+    unowned: int = 0
 
     @property
     def won(self) -> bool:
@@ -77,6 +84,13 @@ def parse_report(seed: str, text: str, seconds: float) -> MatchReport:
         for item, name in BUILD_LIST.findall(text)
         if item == "Superweapon"
     })
+    rows = CENSUS.findall(text)
+    if rows:
+        report.own = int(rows[-1][4])
+        report.enemy = int(rows[-1][5])
+    # The last reading, not the worst: the starting force is unowned until the
+    # first post exists, and a maximum reports that first frame forever.
+    report.unowned = int(UNOWNED.findall(text)[-1]) if UNOWNED.findall(text) else 0
     report.yards = max((int(value) for value in re.findall(r"yard=(\d+)", text)), default=0)
     report.walls = max((int(value) for value in STANDING.findall(text)), default=0)
     return report
@@ -201,7 +215,8 @@ def main(argv: list[str] | None = None) -> int:
     print("", flush=True)
     for report in reports:
         print(f"{report.map} seed {report.seed} [{args.brain}]: {report.result} in {report.seconds:.0f}s", flush=True)
-        print(f"  yards={report.yards} walls={report.walls}", flush=True)
+        print(f"  own={report.own} enemy={report.enemy} yards={report.yards} "
+              f"walls={report.walls} unowned={report.unowned}", flush=True)
         if report.plots:
             print(f"  superweapon plots: {', '.join(report.plots)}", flush=True)
         if report.crates:
