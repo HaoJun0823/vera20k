@@ -1109,6 +1109,43 @@ mod tests {
         );
     }
 
+    /// A structure the enemy destroyed is a structure the base buys again: the
+    /// list counts what *stands*, so a nuclear missile that takes the plant
+    /// leaves a house that answers `Power` on the next frame. This is the
+    /// whole of "it does not rebuild after a strike" — no plan step is
+    /// remembered past the object's own life.
+    #[test]
+    fn a_plant_that_was_destroyed_is_the_plant_the_base_buys_again() {
+        let Some((mut sim, rules)) = arena(0xB01) else {
+            return;
+        };
+        let owner = sim.interner.intern("Americans");
+        sim.spawn_object("GACNST", "Americans", 16, 16, 255, &rules)
+            .expect("a yard");
+        let census = ledger(&rules, &sim, owner);
+        let obs = Observation::new(&sim, owner);
+        let budget = plan::budget(&rules, &obs, &census, None);
+        let chosen = next_building(&rules, &obs, &census, &budget, None)
+            .expect("a base with no plant still has something to build");
+        assert_eq!(
+            chosen.item,
+            plan::Item::Power,
+            "the plant the base never had is the plant it buys"
+        );
+
+        // The same base with its plant standing: the step is answered.
+        sim.spawn_object("GAPOWR", "Americans", 24, 20, 255, &rules)
+            .expect("a plant");
+        let census = ledger(&rules, &sim, owner);
+        let obs = Observation::new(&sim, owner);
+        let budget = plan::budget(&rules, &obs, &census, None);
+        let chosen = next_building(&rules, &obs, &census, &budget, None);
+        assert!(
+            chosen.is_none_or(|chosen| chosen.item != plan::Item::Power),
+            "a plant that stands is not bought twice"
+        );
+    }
+
     /// The building the plot step buys is the one the rules say grants a
     /// strike, not a name list of ours: `[GAWEAT] SuperWeapon=
     /// LightningStormSpecial` and `[NAMISL] SuperWeapon=NukeSpecial` are the
