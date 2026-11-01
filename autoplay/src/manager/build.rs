@@ -1,13 +1,13 @@
 //! Build: placement, walls, repairs.
 //!
-//! Not implemented yet. See docs/autoplay-v2.md, step 4.
+//! A stub so the registry names a manager that exists; the work lands one phase
+//! at a time. See autoplay/docs/spec.md.
 
-use super::Manager;
-use crate::job::Proposal;
+use super::{Ctx, Demands, Manager};
 
 #[derive(Debug, Default)]
 pub struct Build;
 
 impl Manager for Build {
-    fn propose(&mut self, _out: &mut Vec<Proposal>) {}
+    fn propose(&mut self, _ctx: &Ctx<'_>, _out: &mut Demands) {}
 }

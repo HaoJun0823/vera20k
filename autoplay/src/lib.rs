@@ -7,6 +7,7 @@
 
 pub mod job;
 pub mod manager;
+pub mod policy;
 pub mod profile;
 pub mod registry;
 

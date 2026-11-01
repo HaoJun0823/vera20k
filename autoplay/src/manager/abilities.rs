@@ -2,12 +2,11 @@
 //!
 //! Not implemented yet. See docs/autoplay-v2.md, step 6.
 
-use super::Manager;
-use crate::job::Proposal;
+use super::{Ctx, Demands, Manager};
 
 #[derive(Debug, Default)]
 pub struct Abilities;
 
 impl Manager for Abilities {
-    fn propose(&mut self, _out: &mut Vec<Proposal>) {}
+    fn propose(&mut self, _ctx: &Ctx<'_>, _out: &mut Demands) {}
 }

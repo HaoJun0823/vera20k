@@ -52,6 +52,7 @@ class MatchReport:
     plots: list[str] = field(default_factory=list)
     yards: int = 0
     walls: int = 0
+    map: str = ""
 
     @property
     def won(self) -> bool:
@@ -94,23 +95,47 @@ def match_binary() -> Path | None:
         return None
     candidates = sorted(owned.glob("*/fast/autoplay-match.exe"))
     candidates += sorted(owned.glob("*/fast/autoplay-match"))
-    return candidates[0] if candidates else None
+    # Both packages ship a binary with this name; the newest is the one the
+    # build in this run just wrote.
+    return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
 
 
-def run_match(binary: Path, seed: str, map_name: str, ticks: int, log_dir: Path) -> MatchReport:
-    """Run one match and read its log."""
-    log = log_dir / f"match-{seed}.log"
+def run_match(
+    binary: Path,
+    seed: str,
+    map_name: str,
+    ticks: int,
+    log_dir: Path,
+    brain: str = "retail",
+    opponents: int = 1,
+) -> MatchReport:
+    """Run one match and read its log.
+
+    Every run is its own process, so the matrix is the pool: one process per
+    map and seed, all of them side by side.
+    """
+    stem = map_name.replace("/", "_").replace("\\", "_")
+    log = log_dir / f"match-{stem}-{seed}-{brain}.log"
     started = time.monotonic()
     with log.open("w", encoding="utf-8") as handle:
         subprocess.call(
-            [str(binary), "--map", map_name, "--ticks", str(ticks), "--seed", seed],
+            [
+                str(binary),
+                "--map", map_name,
+                "--ticks", str(ticks),
+                "--seed", seed,
+                "--brain", brain,
+                "--opponents", str(opponents),
+            ],
             cwd=ROOT,
             stdout=handle,
             stderr=subprocess.STDOUT,
             env={**os.environ, "RUST_LOG": "info"},
         )
     seconds = time.monotonic() - started
-    return parse_report(seed, log.read_text(encoding="utf-8", errors="replace"), seconds)
+    report = parse_report(seed, log.read_text(encoding="utf-8", errors="replace"), seconds)
+    report.map = map_name
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -118,6 +143,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seeds", default=",".join(DEFAULT_SEEDS),
                         help="comma separated match seeds, run side by side")
     parser.add_argument("--map", default=DEFAULT_MAP, help="the map to play")
+    parser.add_argument("--maps", default="",
+                        help="comma separated maps, one match per map and seed")
+    parser.add_argument("--brain", default="retail", choices=["retail", "v2"],
+                        help="which policy drives the local house")
+    parser.add_argument("--opponents", type=int, default=1,
+                        help="computer houses against the local one")
     parser.add_argument("--ticks", type=int, default=DEFAULT_TICKS, help="how many frames a match runs")
     parser.add_argument("--jobs", type=int, default=0, help="how many matches at once (0: one per seed)")
     parser.add_argument("--skip-build", action="store_true", help="use the binary as it is")
@@ -132,8 +163,11 @@ def main(argv: list[str] | None = None) -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.skip_build:
-        code = run_command([sys.executable, "-m", "tools.cargo_run", "--", "build",
-                            "--profile", "fast", "--bin", "autoplay-match"])
+        build = [sys.executable, "-m", "tools.cargo_run", "--", "build", "--profile", "fast"]
+        if args.brain == "v2":
+            build += ["-p", "vera20k-autoplay", "--features", "retail-fixture"]
+        build += ["--bin", "autoplay-match"]
+        code = run_command(build)
         if code != 0:
             print("the build failed; the matches would be the old binary", flush=True)
             return code
@@ -152,16 +186,21 @@ def main(argv: list[str] | None = None) -> int:
         print("RA2_DIR is not set: the matches are skipped", flush=True)
         return 0
 
-    jobs = args.jobs or len(seeds)
+    maps = [name.strip() for name in args.maps.split(",") if name.strip()] or [args.map]
+    combos = [(name, seed) for name in maps for seed in seeds]
+    jobs = args.jobs or len(combos)
     with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
         reports = list(pool.map(
-            lambda seed: run_match(binary, seed, args.map, args.ticks, log_dir),
-            seeds,
+            lambda combo: run_match(
+                binary, combo[1], combo[0], args.ticks, log_dir,
+                args.brain, args.opponents,
+            ),
+            combos,
         ))
 
     print("", flush=True)
     for report in reports:
-        print(f"seed {report.seed}: {report.result} in {report.seconds:.0f}s", flush=True)
+        print(f"{report.map} seed {report.seed} [{args.brain}]: {report.result} in {report.seconds:.0f}s", flush=True)
         print(f"  yards={report.yards} walls={report.walls}", flush=True)
         if report.plots:
             print(f"  superweapon plots: {', '.join(report.plots)}", flush=True)

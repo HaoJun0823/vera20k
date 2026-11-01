@@ -9,6 +9,8 @@ publish = false
 # consumer that decides anything.
 [dependencies]
 vera20k-core = { path = "../src" }
+# The harness installs a stderr logger; the policy itself never logs.
+log = "0.4"
 
 [dev-dependencies]
 # The retail fixture reads RULESMD.INI through the production reader; tests that
@@ -22,6 +24,13 @@ retail-fixture = ["vera20k-core/test-support"]
 [[bin]]
 name = "autoplay-profiles"
 path = "src/bin/profiles.rs"
+required-features = ["retail-fixture"]
+
+# One harness for both brains: the ported retail policy and this crate's, so a
+# comparison run is the same binary with one flag.
+[[bin]]
+name = "autoplay-match"
+path = "src/bin/match.rs"
 required-features = ["retail-fixture"]
 
 [lib]

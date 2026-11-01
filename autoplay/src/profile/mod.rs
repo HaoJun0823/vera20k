@@ -140,7 +140,10 @@ impl UnitProfile {
         if ty.passengers > 0 {
             roles = roles.with(Roles::TRANSPORT);
         }
-        if ty.deployer || ty.undeploys_into.is_some() {
+        // A maker carries `DeploysInto=`; a deployment-form unit carries
+        // `UndeploysInto=` or `Deployer=`. All three mean "this unit becomes
+        // something else where it stands".
+        if ty.deployer || ty.deploys_into.is_some() || ty.undeploys_into.is_some() {
             roles = roles.with(Roles::DEPLOYER);
         }
         if ty.refinery {

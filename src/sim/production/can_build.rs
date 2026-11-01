@@ -37,7 +37,7 @@ mod thief_capture_tests;
 
 /// `HouseClass::CanBuild`'s answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CanBuild {
+pub enum CanBuild {
     /// 0.
     No,
     /// 1.

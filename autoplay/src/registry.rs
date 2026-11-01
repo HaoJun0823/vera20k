@@ -54,6 +54,8 @@ pub enum JobKind {
     Scout,
     Transport,
     Retreat,
+    /// Deploy or pack up one unit: an MCV into a yard, a deployment-form change.
+    Deploy,
 }
 
 impl JobKind {
@@ -61,7 +63,7 @@ impl JobKind {
     /// nobody can ask for.
     pub const fn manager(self) -> Manager {
         match self {
-            Self::Harvest | Self::ReturnOre => Manager::Economy,
+            Self::Harvest | Self::ReturnOre | Self::Deploy => Manager::Economy,
             Self::Repair => Manager::Build,
             Self::Capture | Self::Garrison | Self::Transport => Manager::Abilities,
             Self::Breach | Self::Assault | Self::Defend | Self::Scout | Self::Retreat => {
@@ -93,6 +95,7 @@ pub const JOBS: &[JobKind] = &[
     JobKind::Scout,
     JobKind::Transport,
     JobKind::Retreat,
+    JobKind::Deploy,
 ];
 
 #[cfg(test)]
