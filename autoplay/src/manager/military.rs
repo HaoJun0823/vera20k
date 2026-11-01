@@ -16,7 +16,7 @@ use crate::profile::{Roles, UnitProfile};
 use crate::registry::JobKind;
 
 /// How many armed units the house wants before it attacks.
-const ARMY_TO_ATTACK: usize = 12;
+const ARMY_TO_ATTACK: usize = 24;
 /// Below this the house keeps its credits for buildings.
 const UNIT_SPEND_FLOOR: i32 = 900;
 
@@ -33,7 +33,22 @@ impl Manager for Military {
 impl Military {
     /// One unit at a time, cheapest first, while the wallet allows it.
     fn produce(&self, ctx: &Ctx<'_>, out: &mut Demands) {
-        if ctx.obs.credits() < UNIT_SPEND_FLOOR {
+        // The army does not spend the money the economy is saving: while the
+        // house still wants a refinery, its cost stays in the wallet, and only
+        // what is left over buys units. Without this the two managers bid
+        // against each other every frame and the refinery never lands.
+        let refineries = ctx
+            .obs
+            .own_entities()
+            .filter(|unit| {
+                ctx.obs
+                    .object_type(ctx.rules, unit.type_id)
+                    .and_then(|ty| ctx.profiles.get(&ty.id))
+                    .is_some_and(|profile| profile.roles.contains(Roles::REFINERY))
+            })
+            .count();
+        let reserve = if refineries < 2 { 1_500 } else { 0 };
+        if ctx.obs.credits() < UNIT_SPEND_FLOOR + reserve {
             return;
         }
         let mut infantry: Option<&UnitProfile> = None;

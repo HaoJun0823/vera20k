@@ -89,6 +89,9 @@ impl Economy {
         for ready in ctx.obs.ready_buildings() {
             let placement = Placement::new(ctx.obs, ctx.rules);
             let Some(cell) = placement.cell_for(ready.type_id, 0) else {
+                if ctx.tick % 600 == 0 {
+                    log::info!("economy: no site for a ready building at {}", ctx.tick);
+                }
                 continue;
             };
             out.intents.push(Intent::PlaceBuilding {
@@ -148,6 +151,21 @@ impl Economy {
                 .count()
         };
         let has = |role: Roles| count(role) > 0;
+        // A defences count is structures with a gun. ARMED alone counts every
+        // soldier, so the base never bought one.
+        let defenses = ctx
+            .obs
+            .own_entities()
+            .filter(|unit| {
+                ctx.obs
+                    .object_type(ctx.rules, unit.type_id)
+                    .and_then(|ty| ctx.profiles.get(&ty.id))
+                    .is_some_and(|profile| {
+                        profile.roles.contains(Roles::ARMED)
+                            && profile.roles.contains(Roles::STRUCTURE)
+                    })
+            })
+            .count();
 
         // Each need falls back to a plant: power is what the next building
         // usually waits on, and a plant is always cheaper than a stalled base.
@@ -157,9 +175,11 @@ impl Economy {
             infantry_factory.or(power)
         } else if !has(Roles::BUILDS_VEHICLES) {
             vehicle_factory.or(power)
-        } else if count(Roles::REFINERY) < 3 && ctx.obs.credits() > 2_500 {
+        } else if count(Roles::REFINERY) < 3
+            && refinery.is_some_and(|want| Self::affordable(ctx, want))
+        {
             refinery
-        } else if count(Roles::ARMED) < 4 && ctx.obs.credits() > 1_200 {
+        } else if defenses < 4 && defense.is_some_and(|want| Self::affordable(ctx, want)) {
             defense
         } else if ctx.obs.power_balance() < POWER_MARGIN {
             power
@@ -176,6 +196,12 @@ impl Economy {
             return;
         }
         out.intents.push(Intent::QueueProduction { type_id });
+    }
+
+    /// Whether the wallet can pay for this and still have change: the margin
+    /// covers the next harvester or a repair.
+    fn affordable(ctx: &Ctx<'_>, profile: &UnitProfile) -> bool {
+        ctx.obs.credits() >= profile.cost + 200
     }
 
     fn cheaper<'a>(
