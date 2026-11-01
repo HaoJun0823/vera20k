@@ -99,7 +99,7 @@ Timing the agent must be written against:
 | `src/sim/autoplay/autoplay_tests.rs` | Implemented: 36 tests over the envelope, the gate's three rejections, the per-frame cap, input lock, the release schedule, the observation, the retail chain (MCV → yard → the plan's first buildings → army), the wallet's price bands, the yard recovery chain, the player's own units being left alone, the order funnel, managed mode and the external schema. Several run on synthetic rules so they hold without `RA2_DIR`; the rest need it to spawn real object types. |
 | `docs/ai-layers.md` | The three-layer contract: boundaries, module inventory, data ownership, the direct/managed split and the reserved external seam. |
 | `vera20k` hotkey category | Groundwork, delivered separately: `catalog::VERA_CATEGORY_KEY` is declared in the input layer and listed after every category the retail commands carry. |
-| AutoPlay hotkey | Implemented, three keys. `HotkeyCommand::ToggleAutoPlay` installs `RetailBrain` on the local house with both halves on, or removes the host; `HotkeyCommand::AutoPlayBuild` and `HotkeyCommand::ToggleAutoPlayForces` switch the production and the forces half on their own. All three sit in the `vera20k` category with **no default key** — `KEYBOARDMD.INI` has no entry for them, so the player assigns them. |
+| AutoPlay hotkey | Implemented, four keys. `HotkeyCommand::ToggleAutoPlay` is all-or-nothing: any switch off turns the whole thing on, everything on takes the host down. `HotkeyCommand::AutoPlayBuild`, `HotkeyCommand::ToggleAutoPlayForces` and `HotkeyCommand::AutoPlayAbilities` switch the base, the army and the abilities (superweapon launches: a missile, a paradrop, a spy plane) on their own. All four sit in the `vera20k` category with **no default key** — `KEYBOARDMD.INI` has no entry for them, so the player assigns them. Auto play starts **off in every match**: the host is the app's, not the world's, so a new scenario clears it. |
 | Frame-loop wiring | Implemented: `advance_one_simulation_frame` steps the host immediately before `take_due_commands`, when one is installed. A match with no host takes the unchanged path. |
 | Anything in `sim::ai_*` | Read by the policy through the same pure generators the computer AI uses; no AI code was changed. |
 
@@ -324,8 +324,8 @@ Three reasons:
 - It depends on `sim` only, so the `sim/` → `render|ui|audio|net` rule holds.
 
 `src/sim/autoplay/` is the facade over those three: `AutoPlayHost` (installed by the
-hotkey, stepped by the frame loop), `AutoPlayDomains` (the two switches),
-`ScriptedPolicy` (the test brain) and the tests.
+hotkey, stepped by the frame loop), `AutoPlayDomains` (the three switches: base, army,
+abilities), `ScriptedPolicy` (the test brain) and the tests.
 
 ## The three layers
 

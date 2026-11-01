@@ -614,6 +614,7 @@ fn the_two_switches_split_building_from_troops() {
     host.set_domains(crate::sim::autoplay::AutoPlayDomains {
         production: true,
         forces: false,
+        abilities: false,
     });
     host.step(&mut sim, &rules);
     let queued = sim.pending_command_snapshot();
@@ -636,6 +637,7 @@ fn the_two_switches_split_building_from_troops() {
     host.set_domains(crate::sim::autoplay::AutoPlayDomains {
         production: false,
         forces: true,
+        abilities: false,
     });
     host.step(&mut sim, &rules);
     let queued = sim.pending_command_snapshot();
@@ -1238,6 +1240,7 @@ fn the_forces_switch_stops_managed_stepping() {
     host.set_domains(AutoPlayDomains {
         production: true,
         forces: false,
+        abilities: false,
     });
     assert!(host.attach(tank, MicroKind::Kite, MicroParams::default(), None));
 

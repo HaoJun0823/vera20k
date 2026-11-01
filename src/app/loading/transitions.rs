@@ -485,6 +485,11 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
     // loading preserves the process Theme state until ThemeLoad721040.
     state.audio.cancel_scenario_theme_request();
     crate::app::reset_scenario_exit_runtime(state);
+    // Auto play starts off in every match. The host outlives a match because
+    // the app keeps one `MatchState` for the process, so a host left running
+    // from the last match would drive this one from its first frame — the
+    // player's "it carried over into the next game".
+    state.match_state.auto_play = None;
     let startup = result.scenario.startup;
     let returns_scenario_rng_to_multiplayer_shell = startup.launch_session().is_some();
     // A loaded world is not timed until the launch handoff reaches InGame.

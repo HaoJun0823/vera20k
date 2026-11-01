@@ -70,6 +70,10 @@ pub(crate) enum HotkeyCommand {
     /// independent switches — the base and the army — and
     /// [`Self::ToggleAutoPlay`] stays the one key that runs both.
     AutoPlayBuild,
+    /// VERA's own: the abilities half on its own — the superweapon launches, a
+    /// paradrop and a spy plane among them — so a player can keep the army
+    /// running and fire the missile themselves.
+    AutoPlayAbilities,
     /// VeraX: load the selection into nearby transports. Registered in the
     /// `vera20k` keyboard category with the Ctrl+D default.
     AutoLoad,

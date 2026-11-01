@@ -50,45 +50,87 @@ const MOBILE_CATEGORIES: [ProductionCategory; 4] = [
     ProductionCategory::Ship,
 ];
 
-/// Which half of the work the player lets auto play do.
+/// Which part of the work the player lets auto play do.
 ///
-/// Two keys, two switches: the master toggle installs the board with both, and
-/// a second key flips the forces half on its own, so a player can keep the base
-/// growing while commanding the troops, or hand the troops over and take
-/// building back. Turning one off stops new commands of that kind; it never
-/// undoes what was already issued or queued.
+/// Three switches and one master key: the base, the troops, and the abilities
+/// (a paradrop, a spy plane, a missile). Each key flips its own switch, so a
+/// player can keep the base growing while commanding the troops, hand the
+/// troops over and take building back, or keep the superweapons for themselves
+/// while everything else runs. Turning one off stops new commands of that kind;
+/// it never undoes what was already issued or queued.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AutoPlayDomains {
     /// Production, building and placement: the base's own work.
     pub production: bool,
-    /// Unit orders, superweapon use and managed routines.
+    /// Unit orders and managed routines: what the army does.
     pub forces: bool,
+    /// Abilities: the superweapon launches, a paradrop and a spy plane among
+    /// them. Their own switch because a player who wants the army but not the
+    /// missile is not asking for half an army.
+    pub abilities: bool,
 }
 
 impl AutoPlayDomains {
     pub const ALL: Self = Self {
         production: true,
         forces: true,
+        abilities: true,
     };
+
+    pub const NONE: Self = Self {
+        production: false,
+        forces: false,
+        abilities: false,
+    };
+
+    /// Whether any switch is on: a host with none is a host driving nothing.
+    pub const fn any(&self) -> bool {
+        self.production || self.forces || self.abilities
+    }
 
     /// Whether a command of this kind may leave the board now.
     pub fn admits(&self, command: &Command) -> bool {
         if belongs_to_production(command) {
             self.production
+        } else if belongs_to_abilities(command) {
+            self.abilities
         } else {
             self.forces
         }
     }
 
-    /// The switch as a player-facing phrase, for the message line.
-    pub fn describe(&self) -> &'static str {
-        match (self.production, self.forces) {
-            (true, true) => "build + forces",
-            (true, false) => "build only",
-            (false, true) => "forces only",
-            (false, false) => "paused",
+    /// The switches as a player-facing phrase, for the message line.
+    pub fn describe(&self) -> String {
+        let mut on: Vec<&str> = Vec::new();
+        if self.production {
+            on.push("build");
         }
+        if self.forces {
+            on.push("forces");
+        }
+        if self.abilities {
+            on.push("abilities");
+        }
+        if on.is_empty() {
+            return "paused".to_string();
+        }
+        on.join(" + ")
     }
+}
+
+/// Whether a command is an ability rather than the army's own work.
+///
+/// A superweapon launch is the house's whole hand out of a sidebar button —
+/// the missile, the paradrop, the spy plane — and it is the one kind of order
+/// a player may want to keep for themselves while the army runs.
+fn belongs_to_abilities(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::LaunchSuperWeapon { .. }
+            | Command::BeginPaidSuperWeapon { .. }
+            | Command::CompletePaidSuperWeapon { .. }
+            | Command::CancelPaidSuperWeapon { .. }
+    )
 }
 
 /// Whether a command is the base's work rather than the troops'.
@@ -585,6 +627,59 @@ mod tests {
         Some((sim, rules))
     }
 
+
+    /// The three switches own three kinds of order, and the abilities switch
+    /// owns the superweapon launches alone: a player who takes the missile
+    /// back keeps the army, and a player who takes the army back keeps the
+    /// missile.
+    #[test]
+    fn the_switches_own_their_own_kinds_of_order() {
+        let launch = Command::LaunchSuperWeapon {
+            sw_type_id: crate::sim::intern::InternedId::from_index(0),
+            target_rx: 10,
+            target_ry: 10,
+        };
+        let march = Command::Move {
+            entity_id: 1,
+            target_rx: 10,
+            target_ry: 10,
+        };
+        let queue = Command::QueueProduction {
+            type_id: crate::sim::intern::InternedId::from_index(0),
+        };
+
+        let abilities_only = AutoPlayDomains {
+            production: false,
+            forces: false,
+            abilities: true,
+        };
+        assert!(abilities_only.admits(&launch), "the missile is the abilities'");
+        assert!(!abilities_only.admits(&march), "and not the army's");
+        assert!(!abilities_only.admits(&queue), "and not the base's");
+
+        let forces_only = AutoPlayDomains {
+            production: false,
+            forces: true,
+            abilities: false,
+        };
+        assert!(forces_only.admits(&march));
+        assert!(!forces_only.admits(&launch), "the missile stays with the player");
+
+        let build_only = AutoPlayDomains {
+            production: true,
+            forces: false,
+            abilities: false,
+        };
+        assert!(build_only.admits(&queue));
+        assert!(!build_only.admits(&march));
+        assert!(!build_only.admits(&launch));
+
+        assert!(AutoPlayDomains::ALL.admits(&launch));
+        assert!(!AutoPlayDomains::NONE.any(), "nothing on is a host driving nothing");
+        assert_eq!(AutoPlayDomains::ALL.describe(), "build + forces + abilities");
+        assert_eq!(abilities_only.describe(), "abilities");
+        assert_eq!(AutoPlayDomains::NONE.describe(), "paused");
+    }
     /// A march does not replace a gun that is firing: `Assign_Target_Command`
     /// clears the target on any mission but AttackMove, so the Move does not
     /// pause the attack — it deletes it. A one-step reposition still preempts,

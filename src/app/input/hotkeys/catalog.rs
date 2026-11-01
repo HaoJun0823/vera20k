@@ -780,7 +780,7 @@ const RETAIL_COMMANDS: [CommandMetadata; 87] = [
 /// to showing the key. The category must stay the one `VERA_CATEGORY_KEY`
 /// names, or these commands open a second category of their own — the macro
 /// takes a literal, so a test pins the two together.
-const AUTOPLAY_COMMANDS: [CommandMetadata; 3] = [
+const AUTOPLAY_COMMANDS: [CommandMetadata; 4] = [
     command!(
         HotkeyCommand::ToggleAutoPlay,
         "AutoPlay",
@@ -808,6 +808,16 @@ const AUTOPLAY_COMMANDS: [CommandMetadata; 3] = [
         "VERA:AutoPlayBuild",
         "vera20k",
         "VERA:AutoPlayBuildDesc",
+        None
+    ),
+    // The abilities half: the superweapon launches on a switch of their own,
+    // so the army can run while the player keeps the missile.
+    command!(
+        HotkeyCommand::AutoPlayAbilities,
+        "AutoPlayAbilities",
+        "VERA:AutoPlayAbilities",
+        "vera20k",
+        "VERA:AutoPlayAbilitiesDesc",
         None
     ),
 ];

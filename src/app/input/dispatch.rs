@@ -1784,8 +1784,10 @@ const AUTO_PLAY_COMMANDS_PER_FRAME: usize = 512;
 const AUTO_PLAY_POLICY_SEED: u64 = 0x5EED_2_1;
 
 /// VERA's own: auto play runs exactly while a host is installed, so there is no
-/// second switch that has to be kept in step with it. Installing brings both
-/// halves — building and forces — on.
+/// second switch that has to be kept in step with it. Installing brings all
+/// three halves — building, forces and abilities — on, and the master key is
+/// all-or-nothing: from a host that is missing any switch it turns all three
+/// on, and from a host that has them all it takes the host down.
 ///
 /// The installed brain is the retail one (`RetailBrain`): it generates the
 /// native BasePlan from the loaded rules — `AI_RecalcBuildOptions` — and plays
@@ -1793,8 +1795,18 @@ const AUTO_PLAY_POLICY_SEED: u64 = 0x5EED_2_1;
 /// place it, keep the harvesters coming. `docs/autoplay.md` carries the scope
 /// and the residuals.
 fn toggle_auto_play(state: &mut AppState) {
-    let previous = state.match_state.auto_play.take();
-    if previous.is_none() {
+    // All or nothing: any switch off means the key turns the whole thing on,
+    // and a host with everything on is what the key turns off. A player who
+    // has taken one half back and presses the master key wants the whole
+    // thing running, not the whole thing stopped.
+    let all_on = state
+        .match_state
+        .auto_play
+        .as_ref()
+        .is_some_and(|host| host.domains() == crate::sim::control::board::AutoPlayDomains::ALL);
+    if all_on {
+        state.match_state.auto_play = None;
+    } else {
         install_auto_play(
             state,
             crate::sim::control::board::AutoPlayDomains::ALL,
@@ -1828,32 +1840,40 @@ fn install_auto_play(
     true
 }
 
-/// One half's switch, so the base and the army are two decisions.
+/// One switch's key, so the base, the army and the abilities are three
+/// independent decisions.
 ///
-/// With no host running it installs one on that half alone; with one running
-/// it flips that half; and with both halves off it takes the host down, so the
-/// two keys never leave a host driving nothing. Turning the forces half off
-/// stops new unit orders while orders already given keep running, so a player
-/// can take the troops back without the units dropping their work.
-fn toggle_auto_play_half(state: &mut AppState, production: bool) {
+/// With no host running it installs one with that switch alone on; with one
+/// running it flips that switch; and with every switch off it takes the host
+/// down, so the keys never leave a host driving nothing. Turning a switch off
+/// stops new commands of that kind while orders already given keep running, so
+/// a player can take the troops back without the units dropping their work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoPlaySwitch {
+    Production,
+    Forces,
+    Abilities,
+}
+
+fn toggle_auto_play_switch(state: &mut AppState, switch: AutoPlaySwitch) {
     let Some(mut host) = state.match_state.auto_play.take() else {
-        install_auto_play(
-            state,
-            crate::sim::control::board::AutoPlayDomains {
-                production,
-                forces: !production,
-            },
-        );
+        let mut domains = crate::sim::control::board::AutoPlayDomains::NONE;
+        match switch {
+            AutoPlaySwitch::Production => domains.production = true,
+            AutoPlaySwitch::Forces => domains.forces = true,
+            AutoPlaySwitch::Abilities => domains.abilities = true,
+        }
+        install_auto_play(state, domains);
         post_auto_play_state(state);
         return;
     };
     let mut domains = host.domains();
-    if production {
-        domains.production = !domains.production;
-    } else {
-        domains.forces = !domains.forces;
+    match switch {
+        AutoPlaySwitch::Production => domains.production = !domains.production,
+        AutoPlaySwitch::Forces => domains.forces = !domains.forces,
+        AutoPlaySwitch::Abilities => domains.abilities = !domains.abilities,
     }
-    if domains.production || domains.forces {
+    if domains.any() {
         host.set_domains(domains);
         state.match_state.auto_play = Some(host);
     }
@@ -1955,8 +1975,15 @@ fn dispatch_retail_hotkey(state: &mut AppState, command: HotkeyCommand) {
         // VERA's own: auto play is on while a host is installed; the second key
         // flips only the forces half.
         HotkeyCommand::ToggleAutoPlay => toggle_auto_play(state),
-        HotkeyCommand::AutoPlayBuild => toggle_auto_play_half(state, true),
-        HotkeyCommand::ToggleAutoPlayForces => toggle_auto_play_half(state, false),
+        HotkeyCommand::AutoPlayBuild => {
+            toggle_auto_play_switch(state, AutoPlaySwitch::Production)
+        }
+        HotkeyCommand::ToggleAutoPlayForces => {
+            toggle_auto_play_switch(state, AutoPlaySwitch::Forces)
+        }
+        HotkeyCommand::AutoPlayAbilities => {
+            toggle_auto_play_switch(state, AutoPlaySwitch::Abilities)
+        }
         HotkeyCommand::ScatterObject => queue_scatter_for_selected(state),
         HotkeyCommand::AllToCheer => queue_house_cheer(state),
         HotkeyCommand::VeterancyNav => selection_navigation::execute_category_navigation(
