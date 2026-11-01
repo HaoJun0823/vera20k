@@ -56,6 +56,8 @@ struct Args {
     progress: u64,
     per_frame: usize,
     opponent: LaunchCountry,
+    /// The local house's country: the side the policy plays.
+    country: LaunchCountry,
     /// How many computer houses play against the local one.
     opponents: usize,
     difficulty: AiDifficulty,
@@ -83,6 +85,7 @@ fn parse_args() -> Result<Args, String> {
     let mut progress = DEFAULT_PROGRESS;
     let mut per_frame = DEFAULT_PER_FRAME;
     let mut opponent = LaunchCountry::Russia;
+    let mut country = LaunchCountry::America;
     let mut opponents = 1_usize;
     let mut difficulty = AiDifficulty::Normal;
     let mut dump = 0_u64;
@@ -109,6 +112,7 @@ fn parse_args() -> Result<Args, String> {
                 per_frame = value()?.parse().map_err(|_| "per-frame is a usize".to_string())?
             }
             "--opponent" => opponent = parse_country(&value()?)?,
+            "--country" => country = parse_country(&value()?)?,
             "--opponents" => {
                 opponents = value()?.parse().map_err(|_| "opponents is a count".to_string())?
             }
@@ -138,6 +142,7 @@ fn parse_args() -> Result<Args, String> {
         progress,
         per_frame,
         opponent,
+        country,
         opponents,
         difficulty,
         dump,
@@ -181,6 +186,8 @@ autoplay-match: a headless skirmish with auto play on the local house
   --progress <u64>   a progress line every this many frames (default 1800)
   --per-frame <n>    commands the control layer admits per frame (default 8)
   --opponent <name>  the computer house's country (default russia)
+  --country <name>   the local house's country: what the policy plays
+                     (default america)
   --difficulty <n>   easy | normal | hard (default normal)
   --dump <n>         print the brain's orders for the first n frames
   --dump-teams <n>   print the native team pipeline (teams, scripts, cursors,
@@ -526,7 +533,7 @@ fn main() -> Result<(), String> {
         args.opponents.max(1),
     )
     .collect();
-    let session = headless_scenario::battle_session(&args.map, &seats);
+    let session = headless_scenario::battle_session_for_country(&args.map, &seats, args.country);
     let mut scenario = headless_scenario::load_session(&args.ra2_dir, &args.map, args.seed, session)?;
     let sim = &scenario.runtime.simulation;
 

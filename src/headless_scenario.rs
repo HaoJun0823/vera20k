@@ -41,6 +41,18 @@ pub fn battle_session(
     selected_map_file: &str,
     opponents: &[(LaunchCountry, AiDifficulty)],
 ) -> SkirmishLaunchSession {
+    battle_session_for_country(selected_map_file, opponents, LaunchCountry::America)
+}
+
+/// The same session with the local house's country chosen by the caller.
+///
+/// One harness plays the same map as the Allies, the Soviets and Yuri in
+/// parallel; the local slot is the only thing that changes.
+pub fn battle_session_for_country(
+    selected_map_file: &str,
+    opponents: &[(LaunchCountry, AiDifficulty)],
+    local_country: LaunchCountry,
+) -> SkirmishLaunchSession {
     use crate::skirmish_launch::{
         BATTLE_MODE_ID, LaunchStartPosition, LaunchTeam, PreFillHouseRoster, SkirmishAiSlot,
         SkirmishLaunchMode, SkirmishLaunchOptions, SkirmishLocalSlot,
@@ -53,7 +65,7 @@ pub fn battle_session(
             raw_slot_index: Some(0),
             name: "Player".to_string(),
             slot: SkirmishLocalSlot {
-                country: LaunchCountry::America,
+                country: local_country,
                 country_random: false,
                 color_index: 0,
                 color_random: false,

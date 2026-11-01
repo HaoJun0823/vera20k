@@ -21,7 +21,9 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+import json
 import os
+from datetime import datetime
 from pathlib import Path
 import re
 import subprocess
@@ -62,6 +64,7 @@ class MatchReport:
     enemy: int = 0
     unowned: int = 0
     stuck: int = 0
+    country: str = ""
 
     @property
     def won(self) -> bool:
@@ -100,6 +103,44 @@ def parse_report(seed: str, text: str, seconds: float) -> MatchReport:
     return report
 
 
+def commit_id() -> str:
+    """The commit a run was built from, so a row can be traced back to code."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def append_history(reports: list[MatchReport], args, path: Path) -> None:
+    """Append one JSON line per match, so two runs can be compared later."""
+    stamp = datetime.now().isoformat(timespec="seconds")
+    commit = commit_id()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        for report in reports:
+            handle.write(json.dumps({
+                "when": stamp,
+                "commit": commit,
+                "brain": args.brain,
+                "map": report.map,
+                "country": report.country,
+                "seed": report.seed,
+                "opponents": args.opponents,
+                "ticks": args.ticks,
+                "result": report.result,
+                "tick": report.tick,
+                "own": report.own,
+                "enemy": report.enemy,
+                "unowned": report.unowned,
+                "stuck": report.stuck,
+                "yards": report.yards,
+                "walls": report.walls,
+                "seconds": round(report.seconds, 1),
+            }) + "\n")
+
+
 def run_command(args: list[str]) -> int:
     """Run a command, streaming its output."""
     print("$", " ".join(args), flush=True)
@@ -126,6 +167,7 @@ def run_match(
     log_dir: Path,
     brain: str = "retail",
     opponents: int = 1,
+    country: str = "america",
 ) -> MatchReport:
     """Run one match and read its log.
 
@@ -133,7 +175,7 @@ def run_match(
     map and seed, all of them side by side.
     """
     stem = map_name.replace("/", "_").replace("\\", "_")
-    log = log_dir / f"match-{stem}-{seed}-{brain}.log"
+    log = log_dir / f"match-{stem}-{seed}-{brain}-{country}.log"
     started = time.monotonic()
     with log.open("w", encoding="utf-8") as handle:
         subprocess.call(
@@ -144,6 +186,7 @@ def run_match(
                 "--seed", seed,
                 "--brain", brain,
                 "--opponents", str(opponents),
+                "--country", country,
             ],
             cwd=ROOT,
             stdout=handle,
@@ -153,6 +196,7 @@ def run_match(
     seconds = time.monotonic() - started
     report = parse_report(seed, log.read_text(encoding="utf-8", errors="replace"), seconds)
     report.map = map_name
+    report.country = country
     return report
 
 
@@ -165,6 +209,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="comma separated maps, one match per map and seed")
     parser.add_argument("--brain", default="retail", choices=["retail", "v2"],
                         help="which policy drives the local house")
+    parser.add_argument("--countries", default="",
+                        help="comma separated local factions: america,russia,yuri,...")
+    parser.add_argument("--history", default="",
+                        help="append every result here (default target/autoplay-results/history.jsonl)")
     parser.add_argument("--opponents", type=int, default=1,
                         help="computer houses against the local one")
     parser.add_argument("--ticks", type=int, default=DEFAULT_TICKS, help="how many frames a match runs")
@@ -205,26 +253,32 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     maps = [name.strip() for name in args.maps.split(",") if name.strip()] or [args.map]
-    combos = [(name, seed) for name in maps for seed in seeds]
+    countries = [name.strip() for name in args.countries.split(",") if name.strip()] or ["america"]
+    combos = [(name, country, seed) for name in maps for country in countries for seed in seeds]
     jobs = args.jobs or len(combos)
     with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
         reports = list(pool.map(
             lambda combo: run_match(
-                binary, combo[1], combo[0], args.ticks, log_dir,
-                args.brain, args.opponents,
+                binary, combo[2], combo[0], args.ticks, log_dir,
+                args.brain, args.opponents, combo[1],
             ),
             combos,
         ))
 
     print("", flush=True)
     for report in reports:
-        print(f"{report.map} seed {report.seed} [{args.brain}]: {report.result} in {report.seconds:.0f}s", flush=True)
+        print(f"{report.map} {report.country} seed {report.seed} [{args.brain}]: "
+              f"{report.result} in {report.seconds:.0f}s", flush=True)
         print(f"  own={report.own} enemy={report.enemy} yards={report.yards} "
               f"walls={report.walls} unowned={report.unowned} stuck={report.stuck}", flush=True)
         if report.plots:
             print(f"  superweapon plots: {', '.join(report.plots)}", flush=True)
         if report.crates:
             print(f"  crates picked up: {', '.join(report.crates)}", flush=True)
+
+    history = Path(args.history) if args.history else ROOT / "target" / "autoplay-results" / "history.jsonl"
+    append_history(reports, args, history)
+    print(f"\nhistory: {history}", flush=True)
     return 0
 
 
