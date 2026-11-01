@@ -141,16 +141,20 @@ impl Policy {
                 priority: proposal.priority,
                 given: tick,
             };
-            match self.jobs.give(unit, job) {
-                Some(previous) if previous.kind != proposal.kind => {
-                    self.stats.assigned += 1;
-                    self.issued.remove(&unit);
-                }
-                Some(_) => {}
-                None => {
-                    self.stats.assigned += 1;
-                    self.issued.remove(&unit);
-                }
+            // The strongest proposal wins: a later, weaker one must not
+            // overwrite the job the unit was just given.
+            if let Some(current) = self.jobs.get(unit)
+                && current.priority >= job.priority
+            {
+                continue;
+            }
+            let changed = match self.jobs.give(unit, job) {
+                Some(previous) => previous.kind != proposal.kind,
+                None => true,
+            };
+            if changed {
+                self.stats.assigned += 1;
+                self.issued.remove(&unit);
             }
         }
     }

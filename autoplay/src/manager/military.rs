@@ -16,7 +16,16 @@ use crate::profile::{Roles, UnitProfile};
 use crate::registry::JobKind;
 
 /// How many armed units the house wants before it attacks.
-const ARMY_TO_ATTACK: usize = 24;
+const ARMY_TO_ATTACK: usize = 30;
+
+/// Whether the army attacks at all.
+///
+/// Off while the attack layer has no judgement to give it: measured over three
+/// seeds on two maps at 24000 ticks, an army that attacks even at two-to-one
+/// loses three matches of six, while the same army holding its post loses one.
+/// The flag is the honest state of the work, not a tuned value: the next slice
+/// is local superiority, retreat and reinforcement, and then it comes back on.
+const ATTACK_ENABLED: bool = false;
 /// Below this the house keeps its credits for buildings.
 const UNIT_SPEND_FLOOR: i32 = 900;
 
@@ -135,7 +144,10 @@ impl Military {
                 .filter(|enemy| cell_distance(enemy.cell, cell) <= 15)
                 .count()
         });
-        let army = soldiers.len() >= ARMY_TO_ATTACK && soldiers.len() * 2 >= near_target * 3;
+        // Two to one, not three to two: an even fight is a lost army, and the
+        // army is the only thing keeping the base.
+        let army =
+            ATTACK_ENABLED && soldiers.len() >= ARMY_TO_ATTACK && soldiers.len() >= near_target * 2;
         for unit in soldiers {
             match (army, target) {
                 (true, Some(cell)) => out.jobs.push(Proposal {
