@@ -125,7 +125,17 @@ impl Military {
         let Some(home) = home else {
             return;
         };
-        let army = soldiers.len() >= ARMY_TO_ATTACK;
+        // Enough to go is not enough to win: the group commits only when it
+        // outnumbers what stands within reach of the target, at three to two.
+        // An army that walks into twice its number is an army the house loses
+        // in one fight.
+        let near_target = target.map_or(0, |cell| {
+            ctx.obs
+                .enemy_entities()
+                .filter(|enemy| cell_distance(enemy.cell, cell) <= 15)
+                .count()
+        });
+        let army = soldiers.len() >= ARMY_TO_ATTACK && soldiers.len() * 2 >= near_target * 3;
         for unit in soldiers {
             match (army, target) {
                 (true, Some(cell)) => out.jobs.push(Proposal {
