@@ -42,6 +42,7 @@ use crate::sim::mission::{MissionId, MissionType};
 
 use super::RetailBrain;
 use super::census::{Census, Unit};
+use super::squared_distance;
 
 /// How large the army has to be before it is worth pushing with: the teams'
 /// own number ([`super::squads::ARMY_TO_ATTACK`]), because "how big is big
@@ -91,6 +92,30 @@ fn searching_cell(obs: &Observation<'_>, anchor: (u16, u16)) -> Option<(u16, u16
     }
     let (width, height) = obs.map_extent();
     (width > 0 && height > 0).then_some((width / 2, height / 2))
+}
+
+/// How near a crate has to be to the cell the army walks to for the walk to
+/// go over it, in cells.
+///
+/// Three is the crate's own reach plus a cell: the box is on the way, not on
+/// the target.
+const CRATE_ON_THE_WAY_CELLS: i32 = 3;
+
+/// The crate the walk to `cell` passes, if there is one.
+///
+/// The nearest one wins, so the army takes the first box on its way and not
+/// the one across the map.
+fn crate_on_the_way(
+    rules: &RuleSet,
+    obs: &Observation<'_>,
+    cell: (u16, u16),
+) -> Option<(u16, u16)> {
+    obs.crate_cells(rules)
+        .into_iter()
+        .filter(|crate_cell| {
+            squared_distance(*crate_cell, cell) <= CRATE_ON_THE_WAY_CELLS * CRATE_ON_THE_WAY_CELLS
+        })
+        .min_by_key(|crate_cell| (squared_distance(*crate_cell, cell), *crate_cell))
 }
 
 /// How few enemy objects are left before the strength gate stops asking. Below
@@ -269,6 +294,14 @@ pub(super) fn advance(
     // demolition order.
     let (target_id, target_cell) = neutral_blocker(&brain.census, anchor, target.cell)
         .unwrap_or((target.entity_id, target.cell));
+    // A crate on the way is a crate the army walks over.
+    //
+    // The box is a bonus and not a job, and the walk to the structure passes
+    // it: the unit stands on the cell, the map takes it, and the next frame
+    // the army is at the structure with the money. A crate the army walked
+    // past because it was busy shooting is a crate the play test reports as
+    // "it never picks the boxes up".
+    let target_cell = crate_on_the_way(rules, obs, target_cell).unwrap_or(target_cell);
     // And a fist big enough to take it. The size gate above counts heads; this
     // one weighs them against what is standing there, and an army that cannot
     // win the fight stays home and grows instead of being spent.

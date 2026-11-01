@@ -1146,8 +1146,12 @@ pub(super) fn harvesters(
     }
 }
 
-/// How near a crate has to be for a scout to detour for it, in cells. It is a
-/// bonus, not a job: a crate across the map is not worth the scan it costs.
+/// How near a crate has to be for it to be a detour, in cells.
+///
+/// A crate next to the unit is a bonus it takes on its way past, and any
+/// unit may take it. A crate further away is a job, and the house does not
+/// give a unit one: measured, a fighter that walked thirty cells for a box
+/// turned a win into a timeout.
 const CRATE_SEEK_CELLS: i32 = 8;
 
 /// Send an idle scout to a nearby crate it can actually reach.
@@ -1168,13 +1172,10 @@ pub(super) fn crates(
     if cells.is_empty() {
         return;
     }
-    // A crate is within a walk, so any idle unit that can reach it takes it —
-    // not only the dog. The scout-only list was the reason a house with no dog
-    // never picked one up: the map was full of crates and the army walked past
-    // them, which is exactly what a play test reports. The condition that
-    // matters is the one below (nothing else to do, near, reachable), and it
-    // does not care what the unit is.
-    let scouts: Vec<(u64, (u16, u16), MovementZone)> = brain
+    // A crate is a bonus and not a job, and the unit that takes it is one
+    // with nothing else to do: not a unit the push owns, not a unit that is
+    // already walking somewhere, not a unit that is fighting.
+    let idle: Vec<(u64, (u16, u16), MovementZone, bool)> = brain
         .census
         .units
         .iter()
@@ -1203,25 +1204,46 @@ pub(super) fn crates(
             let zone = obs
                 .object_type(rules, unit.type_id)
                 .map_or(MovementZone::Infantry, |ty| ty.movement_zone);
-            Some((unit.entity_id, unit.cell, zone))
+            Some((unit.entity_id, unit.cell, zone, unit.traits.scout))
         })
         .collect();
-    for (id, from, zone) in scouts {
+    if idle.is_empty() {
+        return;
+    }
+    // The crates, nearest the house first: the box closest to home is the
+    // one a player sends for first, and the one further out is a walk only
+    // worth it once the near one is taken.
+    let anchor = brain.census.rally.or(brain.census.base_cell).unwrap_or((0, 0));
+    let mut crates = cells;
+    crates.sort_by_key(|cell| (squared_distance(anchor, *cell), *cell));
+    let mut sent: BTreeSet<u64> = BTreeSet::new();
+    for cell in crates {
+        // The nearest idle unit that can walk there. The unit's own movement
+        // zone: a tank and a dog reach different ground, and asking with the
+        // infantry's zone for everybody sends vehicles at cells they cannot
+        // walk to.
+        //
+        // One range, and it is the detour a unit takes on its way past. A
+        // crate across the map is a walk, and the house that walks across
+        // the map for it is a house that is not fighting: measured, sending a
+        // fighter thirty cells for a box turned a win into a timeout.
+        let reachable = |unit: &(u64, (u16, u16), MovementZone, bool), range: i32| {
+            squared_distance(unit.1, cell) <= range * range
+                && obs.can_reach(unit.2, unit.1, cell)
+        };
+        let picked = idle
+            .iter()
+            .filter(|(id, _, _, _)| !sent.contains(id))
+            .filter(|unit| reachable(unit, CRATE_SEEK_CELLS))
+            .min_by_key(|(id, from, _, _)| (squared_distance(*from, cell), *id))
+            .copied();
+        let Some((id, from, zone, _)) = picked else {
+            continue;
+        };
+        sent.insert(id);
         if ordered_this_frame(out, id) {
             continue;
         }
-        let Some(cell) = cells
-            .iter()
-            .copied()
-            .filter(|cell| squared_distance(from, *cell) <= CRATE_SEEK_CELLS * CRATE_SEEK_CELLS)
-            // The unit's own movement zone: a tank and a dog reach different
-            // ground, and asking with the infantry's zone for everybody sends
-            // vehicles at cells they cannot walk to.
-            .filter(|cell| obs.can_reach(zone, from, *cell))
-            .min_by_key(|cell| (squared_distance(from, *cell), *cell))
-        else {
-            continue;
-        };
         if !brain
             .tracked
             .admits(tick, id, TrackedKind::Move, None, Some(cell))
@@ -3087,6 +3109,50 @@ mod tests {
         // Ten cells east: past `CRATE_SEEK_CELLS`, so not a detour.
         *sim.crate_authority_mut_for_test().slot_mut_for_test(0) = CrateSlot {
             cell_x: 20,
+            cell_y: 10,
+            ..CrateSlot::default()
+        };
+
+        let obs = Observation::new(&sim, owner);
+        let mut brain = RetailBrain::new(0xA17);
+        brain.rebuild_census(&rules, &obs);
+        let mut out = Outbox::default();
+        crates(&mut brain, &rules, &obs, &mut out);
+
+        assert!(out.orders.is_empty(), "{:?}", out.orders);
+    }
+
+    /// A crate that is not next to the unit is a job, and the house does not
+    /// give one: a fighter that walks thirty cells for a box is a fighter
+    /// that is not fighting, and the army that sent it is the army that lost
+    /// the match. Measured on the pinned map: sending one across turned a win
+    /// at 22915 into a timeout at 36000.
+    #[test]
+    fn a_crate_across_the_map_is_not_a_job_for_a_fighter_either() {
+        use crate::sim::crates::CrateSlot;
+
+        let rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
+            "[InfantryTypes]\n0=DOG\n\
+             [DOG]\nStrength=100\nSpeed=6\nNotHuman=yes\nNatural=yes\n\
+             Locomotor={4A582744-9839-11D1-B709-00A024DDAFD1}\n\
+             [VehicleTypes]\n0=TANK\n\
+             [TANK]\nStrength=100\nSpeed=5\nPrimary=Gun\nArmor=none\n\
+             Locomotor={4A582741-9839-11d1-B709-00A024DDAFD1}\n\
+             [Gun]\nDamage=10\nROF=20\nRange=4\nWarhead=SA\nProjectile=Bullet\n\
+             [SA]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n",
+        ))
+        .expect("crate rules");
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xA17);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let owner = sim.interner.intern("Americans");
+        sim.spawn_object("DOG", "Americans", 10, 10, 64, &rules)
+            .expect("a scout");
+        sim.spawn_object("TANK", "Americans", 11, 10, 64, &rules)
+            .expect("a tank");
+        // Twenty cells east: a walk, not a detour.
+        *sim.crate_authority_mut_for_test().slot_mut_for_test(0) = CrateSlot {
+            cell_x: 30,
             cell_y: 10,
             ..CrateSlot::default()
         };
