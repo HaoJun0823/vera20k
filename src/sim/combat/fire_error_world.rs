@@ -89,7 +89,7 @@ fn answer(
             world,
             rules,
             overlay_registry: Some(rules.overlay_registry()),
-            fog: Some(world.fog.fire_view(world.house_alliances.as_map())),
+            fog: Some(world.fog.fire_view(world.house_alliances())),
             firer: entity,
             obj,
             target: Some(TargetKind::Entity(target)),
