@@ -318,6 +318,30 @@ impl<'a> Observation<'a> {
         ))
     }
 
+    /// How many passengers the object carries. Zero for anything that is not a
+    /// transport, and for a transport standing empty.
+    ///
+    /// The policy asks this before it loads or unloads: a transport with no
+    /// room is not a destination, and a transport that is already full is not
+    /// one either.
+    pub fn passenger_count(&self, entity_id: u64) -> u32 {
+        self.sim
+            .entities()
+            .get(entity_id)
+            .map_or(0, |entity| entity.passenger_role.passenger_count())
+    }
+
+    /// The transport this object is inside, if any.
+    ///
+    /// A unit inside one is not on the map to be ordered; the policy reads this
+    /// so a loaded passenger is not sent a second job every frame.
+    pub fn inside_transport(&self, entity_id: u64) -> Option<u64> {
+        self.sim
+            .entities()
+            .get(entity_id)
+            .and_then(|entity| entity.passenger_role.inside_transport_id())
+    }
+
     /// Full strength of a type, from the frozen rules an object was built with.
     pub fn max_health(&self, rules: &RuleSet, type_id: InternedId) -> Option<i32> {
         self.sim.object_type(type_id, rules).map(|ty| ty.strength)

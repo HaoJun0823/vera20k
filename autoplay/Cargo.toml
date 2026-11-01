@@ -8,6 +8,21 @@ publish = false
 # command ingress and the read-only projection, and this crate is the only
 # consumer that decides anything.
 [dependencies]
+vera20k-core = { path = "../src" }
+
+[dev-dependencies]
+# The retail fixture reads RULESMD.INI through the production reader; tests that
+# need real object types use it, and skip without RA2_DIR.
+vera20k-core = { path = "../src", features = ["test-support"] }
+
+[features]
+# The retail rules fixture, for the profile dump. Not part of a normal build.
+retail-fixture = ["vera20k-core/test-support"]
+
+[[bin]]
+name = "autoplay-profiles"
+path = "src/bin/profiles.rs"
+required-features = ["retail-fixture"]
 
 [lib]
 name = "autoplay"

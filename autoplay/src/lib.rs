@@ -9,3 +9,6 @@ pub mod job;
 pub mod manager;
 pub mod profile;
 pub mod registry;
+
+#[cfg(test)]
+mod transport_tests;

@@ -2976,6 +2976,9 @@ dependencies = [
 [[package]]
 name = "vera20k-autoplay"
 version = "0.1.0"
+dependencies = [
+ "vera20k-core",
+]
 
 [[package]]
 name = "vera20k-core"
