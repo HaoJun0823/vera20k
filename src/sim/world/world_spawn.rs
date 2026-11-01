@@ -2453,11 +2453,33 @@ impl Simulation {
         let Some(entity) = self.substrate.entities.get(stable_id) else {
             return false;
         };
-        let origin = deploy_origin_from_unit_cell(
-            entity.position.rx(),
-            entity.position.ry(),
-            &yard.foundation,
-        );
+        self.deploy_site_admits_at(
+            stable_id,
+            rules,
+            yard,
+            (entity.position.rx(), entity.position.ry()),
+        )
+    }
+
+    /// The same question asked about a cell the unit is not standing on: would
+    /// a deploy land if the unit walked to `cell` first.
+    ///
+    /// The deploy's origin is not the cell the search ranks — the foundation
+    /// shifts a cell north-west on a foundation wider than two — so a walk to
+    /// a cell whose *foundation corner* was clear can arrive at a cell whose
+    /// *centre* is not. That is the maker pacing between two cells beside a
+    /// clear patch: the search was answering a different question.
+    pub(crate) fn deploy_site_admits_at(
+        &self,
+        stable_id: u64,
+        rules: &RuleSet,
+        yard: &ObjectType,
+        cell: (u16, u16),
+    ) -> bool {
+        if self.substrate.entities.get(stable_id).is_none() {
+            return false;
+        }
+        let origin = deploy_origin_from_unit_cell(cell.0, cell.1, &yard.foundation);
         let lifted = crate::sim::build_site::LiftedUnit::read(self, stable_id);
         crate::sim::build_site::can_place_building_at(
             self,

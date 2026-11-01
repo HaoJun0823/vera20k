@@ -351,8 +351,22 @@ pub(super) fn run(
             // a harvester is worth the tank that was going to be bought with
             // the load it is carrying.
             Role::Harass => {
-                let Some((_, cell)) = enemy_economy(rules, obs, &brain.census, item.cell) else {
-                    continue;
+                // A raid with nothing to raid has not looked yet. The
+                // economy is in no ledger the house can see until somebody
+                // has been there, so the raiders are the eyes: they walk at
+                // the nearest ground the shroud still covers, and the ore
+                // field they find is the raid's next target. Standing in the
+                // base because the enemy's ore is unknown is the "it never
+                // scouts" a play test reports, and it is the same walk a
+                // player makes with the first few tanks.
+                let cell = match enemy_economy(rules, obs, &brain.census, item.cell) {
+                    Some((_, cell)) => cell,
+                    None => {
+                        let Some(cell) = nearest_unexplored(obs, item.cell, item.zone) else {
+                            continue;
+                        };
+                        cell
+                    }
                 };
                 // Attack-move, not attack: the walk is the point, and what
                 // stands in the way on the way is dealt with by the engage

@@ -390,7 +390,9 @@ fn build_next(
     // a house with no infantry loses the army while it is saving. Only the
     // entries whose whole point is what they unlock are worth that price.
     brain.yard_reserve = match chosen.item {
-        Item::Aircraft | Item::Radar | Item::Tech => price.saturating_sub(budget.free).max(0),
+        Item::Aircraft | Item::Radar | Item::Tech | Item::Superweapon => {
+            price.saturating_sub(budget.free).max(0)
+        }
         _ => 0,
     };
     // The budget, not the wallet: what a line has been promised is spent
@@ -622,6 +624,63 @@ pub(super) fn tech_building<'r>(
     class_types(rules, obs, ObjectCategory::Building)
         .filter(|(ty, _)| rules.build_tech_types.iter().any(|name| *name == ty.id))
         .min_by_key(|(ty, id)| (u8::from(!grants_support(rules, ty)), *id))
+}
+
+/// Whether a building grants a power that changes the map: a missile, a
+/// storm, a shield over the army, a warp.
+///
+/// The split is the same one [grants_support] makes, from the other side.
+/// A support power is a look or a delivery and the lab already carries one;
+/// a strike is what a superweapon plot is bought for, and the plot is a
+/// building like any other -- [GAWEAT] SuperWeapon=WeatherStormSpecial,
+/// [GACSPH] SuperWeapon=ChronoSphereSpecial, [NAMISL] NukeSilo=yes -- so the
+/// rules answer which building this house may put up, and no name list has
+/// to.
+fn grants_a_strike(rules: &RuleSet, ty: &ObjectType) -> bool {
+    ty.nuke_silo
+        || [ty.super_weapon.as_deref(), ty.super_weapon2.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|name| rules.super_weapon(name))
+            .any(|power| {
+                // The offensive ones. Iron Curtain and Force Shield are left
+                // out on purpose: both are a shield over the house's own army,
+                // the lab already grants the Force Shield ([GATECH]
+                // SuperWeapon=ForceShieldSpecial), and counting the lab as a
+                // plot made the step see itself as already answered.
+                matches!(
+                    power.kind,
+                    SuperWeaponKind::MultiMissile
+                        | SuperWeaponKind::LightningStorm
+                        | SuperWeaponKind::ChronoSphere
+                        | SuperWeaponKind::PsychicDominator
+                        | SuperWeaponKind::GeneticConverter
+                )
+            })
+}
+
+/// The building that would put a strike in the sidebar, when one may be built
+/// now. None before the tree is open, which is the same answer the sidebar
+/// gives.
+pub(super) fn superweapon_building<'r>(
+    rules: &'r RuleSet,
+    obs: &Observation<'_>,
+) -> Option<(&'r ObjectType, InternedId)> {
+    class_types(rules, obs, ObjectCategory::Building).find(|(ty, _)| grants_a_strike(rules, ty))
+}
+
+/// How many of the house's standing buildings grant a strike, counting what is
+/// on the map and not what is queued.
+pub(super) fn superweapons(rules: &RuleSet, obs: &Observation<'_>, census: &Census) -> usize {
+    census
+        .by_type
+        .iter()
+        .filter(|(type_id, _)| {
+            obs.object_type(rules, **type_id)
+                .is_some_and(|ty| grants_a_strike(rules, ty))
+        })
+        .map(|(_, count)| *count)
+        .sum()
 }
 
 /// Whether a building authorises one of the powers this brain aims at
@@ -1048,5 +1107,28 @@ mod tests {
             !plan::power_short(&rules, &obs, &census),
             "the plant it is building is the plant it was short of"
         );
+    }
+
+    /// The building the plot step buys is the one the rules say grants a
+    /// strike, not a name list of ours: `[GAWEAT] SuperWeapon=
+    /// LightningStormSpecial` and `[NAMISL] SuperWeapon=NukeSpecial` are the
+    /// same answer through different keys, and a power plant grants nothing.
+    #[test]
+    fn a_superweapon_plot_grants_a_strike_and_a_power_plant_does_not() {
+        let Some(rules) = crate::rules::retail_ini_fixture::retail_unlayered_rules() else {
+            return;
+        };
+        let weather = rules.object("GAWEAT").expect("the allied plot");
+        assert!(
+            grants_a_strike(&rules, weather),
+            "the weather controller is a strike"
+        );
+        let plant = rules.object("GAPOWR").expect("the plant");
+        assert!(
+            !grants_a_strike(&rules, plant),
+            "a power plant is not"
+        );
+        let lab = rules.object("GATECH").expect("the lab");
+        assert!(!grants_a_strike(&rules, lab), "and neither is the lab");
     }
 }

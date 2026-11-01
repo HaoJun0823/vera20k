@@ -31,6 +31,8 @@
 //! down for the frame; a house that has not got an army yet keeps holding its
 //! base, which is what a player does with five tanks and no plan.
 
+use std::collections::BTreeSet;
+
 use crate::rules::object_type::{ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
 use crate::sim::control::Goal;
@@ -117,7 +119,29 @@ pub(super) fn advance(
     // stands": the same list every pass below reads, instead of each pass
     // filtering the ledger its own way.
     let army = super::army::Army::of(&brain.census, obs);
-    let mut fighters: Vec<&Unit> = army.members.clone();
+    // The fist, not the whole army: the teams already answer who holds the
+    // base and who raids, and a push that takes everyone with it is a base
+    // left empty the moment the front moves. A house with no team yet (the
+    // first frames) still pushes with everyone, which is the opening it is.
+    //
+    // This is the line the squads draw: Defend stays where it is, Harass has
+    // its own orders, and what is left is the advance's. Reading `army.members`
+    // here meant every raider and every defender walked at the same structure
+    // as the push, so the two teams existed only in the ledger.
+    let fist: Option<&BTreeSet<u64>> = brain
+        .squads
+        .squad(super::squads::Role::Attack)
+        .map(|squad| &squad.members)
+        .filter(|members| !members.is_empty());
+    let mut fighters: Vec<&Unit> = match fist {
+        Some(members) => army
+            .members
+            .iter()
+            .copied()
+            .filter(|unit| members.contains(&unit.entity_id))
+            .collect(),
+        None => army.members.clone(),
+    };
     if fighters.len() < super::squads::ARMY_TO_ATTACK
         || !super::build::can_replace_units(rules, obs, &brain.census)
         || !super::build::base_defended(rules, obs, &brain.census)

@@ -181,6 +181,9 @@ pub(super) enum Item {
     /// What the yard maker's `Prerequisite=` list asks for: the way back from
     /// a lost yard.
     Support,
+    /// A building that grants a power which changes the map (`SuperWeapon=`,
+    /// `NukeSilo=`): the plot a house buys once its wallet outruns its lines.
+    Superweapon,
 }
 
 /// When a step of the list is allowed to answer.
@@ -321,6 +324,16 @@ pub(super) const STEPS: &[Step] = &[
         item: Item::Support,
         want: 1,
         gate: Gate::Free(build::SUPPORT_MIN_CREDITS),
+    },
+    // The plot, once there is money the lines cannot spend: a superweapon is
+    // the one purchase that takes a base apart, and a house that owns one wins
+    // the fight it was losing. Last, because nothing below it needs it and a
+    // strike building before an army is a base that dies with the plot half
+    // built.
+    Step {
+        item: Item::Superweapon,
+        want: 1,
+        gate: Gate::Surplus,
     },
 ];
 
@@ -513,6 +526,7 @@ fn owned(rules: &RuleSet, obs: &Observation<'_>, census: &Census, item: Item) ->
         Item::Support => 0,
         // One shed is enough: it repairs a whole army, one unit at a time.
         Item::Repair => usize::from(census.repair_building.is_some()),
+        Item::Superweapon => build::superweapons(rules, obs, census),
     }
 }
 
@@ -534,6 +548,7 @@ fn pick<'r>(
         Item::Aircraft => build::line_factory(rules, obs, census, ProductionCategory::Aircraft),
         Item::Support => expand::yard_maker_support(rules, obs, census),
         Item::Repair => build::unit_repair_building(rules, obs),
+        Item::Superweapon => build::superweapon_building(rules, obs),
     }
 }
 

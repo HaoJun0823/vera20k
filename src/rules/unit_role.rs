@@ -251,7 +251,6 @@ impl RoleTable {
         self.profile(type_id)
             .map_or_else(RoleWeights::default, |profile| profile.weights)
     }
-
 }
 
 /// What one type is, before it is put on the table's scale: how well aimed
@@ -374,9 +373,8 @@ fn assess(rules: &RuleSet, ty: &ObjectType) -> RawProfile {
 
     // Seeing and moving is its own job, and it is the whole job of a type
     // that carries nothing to shoot with.
-    let mobility = (f64::from(ty.speed) / SCOUT_SPEED_SCALE
-        + f64::from(ty.sight) / SCOUT_SIGHT_SCALE)
-        / 2.0;
+    let mobility =
+        (f64::from(ty.speed) / SCOUT_SPEED_SCALE + f64::from(ty.sight) / SCOUT_SIGHT_SCALE) / 2.0;
     let unarmed = if dps <= 0.0 { 1.5 } else { 1.0 };
     aim[Role::Scout.index()] = mobility.max(0.0) * unarmed;
     aim[Role::Support.index()] =
@@ -496,8 +494,7 @@ mod tests {
             "and a rifle is the other way round: {e1:?}"
         );
         assert!(
-            table.weights("SREF").get(Role::Artillery)
-                > table.weights("MTNK").get(Role::Artillery),
+            table.weights("SREF").get(Role::Artillery) > table.weights("MTNK").get(Role::Artillery),
             "a Prism tank reaches past the line and a Grizzly does not"
         );
     }

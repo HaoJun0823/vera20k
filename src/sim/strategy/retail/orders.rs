@@ -800,6 +800,25 @@ pub(super) fn issue(
         );
         return false;
     }
+    // An aircraft out of ammunition has its own way home: the engine's return
+    // to the airfield, the rearm and the take-off again are one mission, and an
+    // `Attack` issued over it replaces that mission with a flight at the target
+    // — the plane arrives with empty racks, turns around, and does it again.
+    // That is the "it keeps taking off and reloading" a play test reports, and
+    // it costs the house an aircraft every time the target shoots back.
+    //
+    // Only the flying case: an `Ammo=` on a ground type is not a reload cycle
+    // with a building behind it, and grounding those would be a new rule about
+    // types the rules never wrote one for.
+    if matches!(goal, Goal::Attack { .. } | Goal::AttackMove { .. })
+        && obs.out_of_ammo(unit)
+        && obs
+            .entity_type(rules, unit)
+            .is_some_and(|ty| ty.category == ObjectCategory::Aircraft)
+    {
+        log::debug!("auto play: {goal:?} for {unit} waits for the rearm");
+        return false;
+    }
     if !admits(rules, obs, unit, &goal) {
         log::debug!(
             "auto play: {} refused for {unit}: the target is not one it can act on",
@@ -1149,12 +1168,18 @@ pub(super) fn crates(
     if cells.is_empty() {
         return;
     }
+    // A crate is within a walk, so any idle unit that can reach it takes it —
+    // not only the dog. The scout-only list was the reason a house with no dog
+    // never picked one up: the map was full of crates and the army walked past
+    // them, which is exactly what a play test reports. The condition that
+    // matters is the one below (nothing else to do, near, reachable), and it
+    // does not care what the unit is.
     let scouts: Vec<(u64, (u16, u16))> = brain
         .census
         .units
         .iter()
         .filter(|unit| {
-            unit.traits.scout
+            (unit.traits.scout || unit.traits.combat)
                 && !unit.hand
                 && unit.orderable
                 && !unit.in_service()

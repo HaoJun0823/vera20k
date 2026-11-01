@@ -339,6 +339,9 @@ mod tests {
             table.record_outcome(7, ApplyOutcome::Rejected);
             table.record_outcome(7, ApplyOutcome::NotReady);
         }
-        assert!(table.get(7).is_some(), "the wait keeps resetting the streak");
+        assert!(
+            table.get(7).is_some(),
+            "the wait keeps resetting the streak"
+        );
     }
 }

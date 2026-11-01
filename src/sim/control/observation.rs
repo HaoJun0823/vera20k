@@ -624,6 +624,25 @@ impl<'a> Observation<'a> {
             .is_some_and(|entity| entity.rearm_timer.remaining(frame) <= 0)
     }
 
+    /// Whether `entity_id` has emptied its rack: it carries an ammo count and
+    /// that count is zero.
+    ///
+    /// Only a type with `Ammo=` has one, and retail sets the key on aircraft
+    /// (`[ORCA]`, `[ASW]`, `[BPLN]`, `[SPYP]`, `[CAAIRP]`) — the rules' own
+    /// note is "aircraft are hard wired to require ammo". A negative count is
+    /// the rules' "unlimited", so the test is exactly zero.
+    ///
+    /// The answer a caller needs is not "cannot shoot right now": it is that
+    /// the object has its own way home to reload, and an `Attack` issued over
+    /// that is the take-off, turnaround, take-off loop a play test reports.
+    pub fn out_of_ammo(&self, entity_id: u64) -> bool {
+        self.sim
+            .entities()
+            .get(entity_id)
+            .and_then(|entity| entity.ammo())
+            .is_some_and(|ammo| ammo.current() == 0)
+    }
+
     /// The blast radius of a warhead, in whole cells: `CellSpread=` floored, so
     /// a `0.4` shell hurts only the cell it lands in and a `2.0` one reaches two
     /// cells out.
@@ -1059,6 +1078,23 @@ impl<'a> Observation<'a> {
         self.sim.deploy_site_admits(entity_id, rules, yard)
     }
 
+    /// Whether a deploy would land if `entity_id` walked to `cell` first.
+    ///
+    /// The search for a second base ranks *cells*, and a deploy's origin is
+    /// the foundation's corner rather than the unit's cell, so a cell whose
+    /// corner is clear can be a cell whose centre is not. Asked here, the
+    /// answer is about the cell the unit would stand on, which is the one the
+    /// walk aims at.
+    pub fn deploy_admits_at(
+        &self,
+        rules: &RuleSet,
+        entity_id: u64,
+        yard: &ObjectType,
+        cell: (u16, u16),
+    ) -> bool {
+        self.sim.deploy_site_admits_at(entity_id, rules, yard, cell)
+    }
+
     /// Whether `HouseClass::Place_Production` would accept `ty` with its
     /// top-left cell here: the sidebar's build-area adjacency and the
     /// building's own `CanPlaceAt` clear-to-build, the two predicates that
@@ -1079,6 +1115,33 @@ impl<'a> Observation<'a> {
             rx,
             ry,
         ) && crate::sim::build_site::can_place_building_at(
+            self.sim,
+            rules,
+            None,
+            ty,
+            (rx as i16, ry as i16),
+            Some(self.house),
+            None,
+            None,
+        )
+    }
+
+    /// Whether a building of `ty` may stand with its top-left cell here,
+    /// ignoring the sidebar's build-area adjacency.
+    ///
+    /// This is the question an MCV's deploy asks, not the one a factory's
+    /// placement asks: a second base is by definition outside the first base's
+    /// build area, and `placement_admits` is false for every cell of it. The
+    /// clear-to-build predicate is what is left, and it is the same one
+    /// `deploy_site_admits` runs for the cell the maker already stands on.
+    pub(crate) fn clear_for_building(
+        &self,
+        rules: &RuleSet,
+        ty: &ObjectType,
+        rx: u16,
+        ry: u16,
+    ) -> bool {
+        crate::sim::build_site::can_place_building_at(
             self.sim,
             rules,
             None,
