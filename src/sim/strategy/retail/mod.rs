@@ -546,9 +546,32 @@ impl Brain for RetailBrain {
                 .iter()
                 .filter(|enemy| obs.is_cell_revealed(enemy.cell.0, enemy.cell.1))
                 .count();
+            // What the army is made of, by name: "it still only makes IFVs"
+            // and "it is all one tank" are questions about the roster, and
+            // the counts alone cannot answer them. The three commonest types
+            // are enough to see a line that has stopped rotating.
+            let mut types: Vec<(crate::sim::intern::InternedId, usize)> = self
+                .census
+                .by_type
+                .iter()
+                .map(|(type_id, count)| (*type_id, *count))
+                .filter(|(_, count)| *count > 0)
+                .collect();
+            types.sort_by_key(|(type_id, count)| (std::cmp::Reverse(*count), *type_id));
+            let roster: Vec<String> = types
+                .iter()
+                .take(3)
+                .map(|(type_id, count)| {
+                    let name = obs
+                        .object_type(rules, *type_id)
+                        .map_or("?", |ty| ty.id.as_str());
+                    format!("{name}:{count}")
+                })
+                .collect();
             log::info!(
-                "auto play: {} income={}/min seen={}/{}",
+                "auto play: {} roster=[{}] income={}/min seen={}/{}",
                 self.census.describe(),
+                roster.join(","),
                 budget.income.map_or(-1, |rate| rate),
                 seen,
                 self.census.enemies.len()
