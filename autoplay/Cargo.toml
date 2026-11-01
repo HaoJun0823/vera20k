@@ -1,0 +1,14 @@
+[package]
+name = "vera20k-autoplay"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The policy crate. It sits outside vera20k-core on purpose: core keeps the
+# command ingress and the read-only projection, and this crate is the only
+# consumer that decides anything.
+[dependencies]
+
+[lib]
+name = "autoplay"
+path = "src/lib.rs"
