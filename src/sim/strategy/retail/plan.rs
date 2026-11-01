@@ -301,6 +301,12 @@ pub(super) const STEPS: &[Step] = &[
     },
     // Ground to stand on, once the tree is open: before that the same money
     // unlocks the rest of the tree, which is worth more than a second tower.
+    //
+    // Six, not two. Two towers is a 1v1's ring; seven houses send seven times
+    // the raids, and the towers are the only exchange that costs the house
+    // nothing but credits — measured, a 1v7 with two towers lost its war
+    // factory and barracks in the first ten minutes, stopped replacing its
+    // army, and its fighters fell from 95 to 10.
     Step {
         item: Item::Defense,
         want: 2,
@@ -378,7 +384,7 @@ pub(super) fn answer<'r>(
     // that the gate has closed with the wallet that opened it.
     if let Some(step) = held
         && let Some(entry) = STEPS.get(step)
-        && owned(rules, obs, census, entry.item) < entry.want
+        && owned(rules, obs, census, entry.item) < want(entry, census)
         && let Some((ty, type_id)) = pick(rules, obs, census, entry.item)
     {
         return Some(Chosen {
@@ -392,7 +398,7 @@ pub(super) fn answer<'r>(
         .iter()
         .enumerate()
         .filter(|(_, step)| open(step.gate, rules, obs, census, budget))
-        .filter(|(_, step)| owned(rules, obs, census, step.item) < step.want)
+        .filter(|(_, step)| owned(rules, obs, census, step.item) < want(step, census))
         .find_map(|(step, entry)| {
             pick(rules, obs, census, entry.item).map(|(ty, type_id)| Chosen {
                 step: Some(step),
@@ -401,6 +407,22 @@ pub(super) fn answer<'r>(
                 type_id,
             })
         })
+}
+
+/// How many of `step`'s item the base wants, which for towers is a question
+/// about the war and not about the plan.
+///
+/// Two towers is a 1v1's ring: one house sends the raid the two of them meet.
+/// Seven houses send seven times the raiding, and the towers are the only
+/// exchange that costs the house nothing but credits — measured, a 1v7 with
+/// two towers lost its production in the first ten minutes, stopped replacing
+/// its army, and its fighters fell from 95 to 10 while the enemy's count did
+/// not move. Every twelve hostiles the house can see is one more tower.
+fn want(step: &Step, census: &Census) -> usize {
+    match step.item {
+        Item::Defense => step.want + census.enemies.len() / 12,
+        _ => step.want,
+    }
 }
 
 /// Whether the base needs another plant, counting the plants that are still

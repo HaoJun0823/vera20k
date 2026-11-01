@@ -118,6 +118,13 @@ fn crate_on_the_way(
         .min_by_key(|crate_cell| (squared_distance(*crate_cell, cell), *crate_cell))
 }
 
+/// How long the fist keeps the structure it committed to, in frames: two
+/// minutes at the simulation's fifteen a second.
+///
+/// Long enough to walk there and take it apart, short enough that a target the
+/// army cannot reach stops holding it.
+const PUSH_LOCK_FRAMES: u64 = 1_800;
+
 /// How few enemy objects are left before the strength gate stops asking. Below
 /// this the enemy is a clean-up job, not a fight: the army goes in and finishes
 /// it instead of waiting for a comparison it can only lose by arithmetic.
@@ -167,11 +174,27 @@ pub(super) fn advance(
             .collect(),
         None => army.members.clone(),
     };
-    if fighters.len() < super::squads::ARMY_TO_ATTACK
-        || !super::build::can_replace_units(rules, obs, &brain.census)
-        || !super::build::base_defended(rules, obs, &brain.census)
-        || base_under_threat(&brain.census)
+    // Which gate holds the army home, for the census line: seven gates that
+    // all answer "not this frame" are indistinguishable in a log that only
+    // counts what the house has.
+    let gate = if fighters.len() < super::squads::ARMY_TO_ATTACK {
+        "too-small"
+    } else if !super::build::can_replace_units(rules, obs, &brain.census) {
+        "cannot-replace"
+    } else if !super::build::base_defended(rules, obs, &brain.census) {
+        "base-defended"
+    } else if base_under_threat(&brain.census) && !super::build::base_defended(rules, obs, &brain.census)
     {
+        // A raid the walls can hold is the walls' job; a raid with no walls is
+        // the army's, and that is the branch above. With seven houses attacking,
+        // "an enemy inside the ring" is true for most of the match, and an army
+        // that reads it as "never leave" guards its yard for forty minutes.
+        "threat"
+    } else {
+        "push"
+    };
+    brain.push_gate = gate;
+    if gate != "push" {
         return false;
     }
     let tick = obs.tick();
@@ -257,6 +280,7 @@ pub(super) fn advance(
         // appears" is missing. The cell is the nearest ground nobody has
         // seen yet, so the march is also the scouting pass.
         let Some(cell) = searching_cell(obs, army.anchor) else {
+            brain.push_gate = "nowhere-to-look";
             return false;
         };
         targets.push(EnemyEntity {
@@ -269,10 +293,18 @@ pub(super) fn advance(
     // One target for the whole army, not the nearest for each unit: units
     // pointed at their own nearest structure arrive one at a time and are
     // killed one at a time. A fist is what takes a base.
+    //
+    // The target is re-read every frame, and that is deliberate: committing
+    // the fist to one structure for a term was measured on the pinned 1v1 and
+    // turned its win into a timeout — a structure the army cannot reach held
+    // it for the whole term while the nearest one moved with the army.
     let anchor = army.anchor;
+    let tick = obs.tick();
     let Some(nearest) = nearest_target(&targets, anchor) else {
+        brain.push_gate = "no-target";
         return false;
     };
+    brain.push_target = Some((nearest.entity_id, tick, nearest.cell));
     // The enemy's defenses before its economy while they cover the target: a
     // tesla coil or a pillbox in range of the structure the fist walks at is
     // what kills the fist before it fires a shot, and a spy's blackout only
@@ -319,6 +351,7 @@ pub(super) fn advance(
     let searching = target.entity_id == 0;
     if !mopping_up && !searching && !super::squads::outguns(&brain.census, rules, obs, target.cell)
     {
+        brain.push_gate = "outgunned";
         return false;
     }
 

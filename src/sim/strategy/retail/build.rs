@@ -455,6 +455,21 @@ fn next_building<'r>(
     budget: &Budget,
     held: Option<usize>,
 ) -> Option<plan::Chosen<'r>> {
+    // A house with no tower at all builds one before anything else: the gate
+    // that holds the army home waits for a tower to stand, and with seven
+    // houses attacking the plan's Defense step sat behind a refinery that kept
+    // being rebuilt instead — measured, a 1v7 held its army in the yard for
+    // the whole match because `base_defended` was false in 24 of 59 samples.
+    if !base_defended(rules, obs, census) {
+        if let Some((ty, type_id)) = defense_building(rules, obs) {
+            return Some(plan::Chosen {
+                step: None,
+                item: Item::Defense,
+                ty,
+                type_id,
+            });
+        }
+    }
     // A brownout is the one state that stops everything else: production
     // runs at a crawl and the defenses go offline. Whatever else the base
     // wants, a plant comes first, and it comes first even when nothing else
@@ -718,7 +733,33 @@ pub(super) fn superweapon_building<'r>(
     rules: &'r RuleSet,
     obs: &Observation<'_>,
 ) -> Option<(&'r ObjectType, InternedId)> {
-    class_types(rules, obs, ObjectCategory::Building).find(|(ty, _)| grants_a_strike(rules, ty))
+    // The one that takes a base apart first. A Chronosphere is a strike by
+    // the rules' classification and a teleport by its kind: it moves an army
+    // and kills nothing, and it was the plot the house bought first because
+    // it comes first in the array. A storm or a missile is what a plot is
+    // bought for.
+    class_types(rules, obs, ObjectCategory::Building)
+        .filter(|(ty, _)| grants_a_strike(rules, ty))
+        .min_by_key(|(ty, id)| (u8::from(!damages_a_base(rules, ty)), *id))
+}
+
+/// Whether a strike building's power takes hit points off a base rather than
+/// moving the house's own army: a storm, a missile, a dominator.
+fn damages_a_base(rules: &RuleSet, ty: &ObjectType) -> bool {
+    ty.nuke_silo
+        || [ty.super_weapon.as_deref(), ty.super_weapon2.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|name| rules.super_weapon(name))
+            .any(|power| {
+                matches!(
+                    power.kind,
+                    SuperWeaponKind::MultiMissile
+                        | SuperWeaponKind::LightningStorm
+                        | SuperWeaponKind::PsychicDominator
+                        | SuperWeaponKind::GeneticConverter
+                )
+            })
 }
 
 /// How many of the house's standing buildings grant a strike, counting what is

@@ -56,6 +56,8 @@ struct Args {
     progress: u64,
     per_frame: usize,
     opponent: LaunchCountry,
+    /// How many computer houses play against the local one.
+    opponents: usize,
     difficulty: AiDifficulty,
     /// Print what the brain asks for, from a separate brain reading the same
     /// state, for the first this many frames. Diagnostics only: the run itself
@@ -78,6 +80,7 @@ fn parse_args() -> Result<Args, String> {
     let mut progress = DEFAULT_PROGRESS;
     let mut per_frame = DEFAULT_PER_FRAME;
     let mut opponent = LaunchCountry::Russia;
+    let mut opponents = 1_usize;
     let mut difficulty = AiDifficulty::Normal;
     let mut dump = 0_u64;
     let mut dump_teams = 0_u64;
@@ -102,6 +105,9 @@ fn parse_args() -> Result<Args, String> {
                 per_frame = value()?.parse().map_err(|_| "per-frame is a usize".to_string())?
             }
             "--opponent" => opponent = parse_country(&value()?)?,
+            "--opponents" => {
+                opponents = value()?.parse().map_err(|_| "opponents is a count".to_string())?
+            }
             "--difficulty" => difficulty = parse_difficulty(&value()?)?,
             "--dump" => dump = value()?.parse().map_err(|_| "dump is a u64".to_string())?,
             "--dump-teams" => {
@@ -122,6 +128,7 @@ fn parse_args() -> Result<Args, String> {
         progress,
         per_frame,
         opponent,
+        opponents,
         difficulty,
         dump,
         dump_teams,
@@ -182,15 +189,30 @@ struct Snapshot {
     not_ready: usize,
 }
 
-fn snapshot(sim: &Simulation, local: InternedId, enemy: InternedId, tick: u64, host: &AutoPlayHost) -> Snapshot {
+fn snapshot(
+    sim: &Simulation,
+    local: InternedId,
+    enemies: &[InternedId],
+    tick: u64,
+    host: &AutoPlayHost,
+) -> Snapshot {
     let obs = Observation::new(sim, local);
+    // The whole other side, so a 1v7 reads as seven houses and not one.
+    let enemy_credits = enemies
+        .iter()
+        .map(|enemy| Observation::new(sim, *enemy).credits())
+        .sum();
+    let enemy = enemies
+        .iter()
+        .map(|enemy| Observation::new(sim, *enemy).own_entities().count())
+        .sum();
     Snapshot {
         tick,
         credits: obs.credits(),
-        enemy_credits: Observation::new(sim, enemy).credits(),
+        enemy_credits,
         power: obs.power_balance(),
         own: obs.own_entities().count(),
-        enemy: Observation::new(sim, enemy).own_entities().count(),
+        enemy,
         ready: obs.ready_buildings().count(),
         rejected: host.rejected(),
         not_ready: host.not_ready(),
@@ -488,7 +510,12 @@ fn main() -> Result<(), String> {
         }
     };
 
-    let session = headless_scenario::battle_session(&args.map, &[(args.opponent, args.difficulty)]);
+    let seats: Vec<(LaunchCountry, AiDifficulty)> = std::iter::repeat_n(
+        (args.opponent, args.difficulty),
+        args.opponents.max(1),
+    )
+    .collect();
+    let session = headless_scenario::battle_session(&args.map, &seats);
     let mut scenario = headless_scenario::load_session(&args.ra2_dir, &args.map, args.seed, session)?;
     let sim = &scenario.runtime.simulation;
 
@@ -496,13 +523,29 @@ fn main() -> Result<(), String> {
         .session()
         .current_house()
         .ok_or("the launch has no local house")?;
-    let enemy = sim
+    // Every computer house on the map is an opponent: the run is won when they
+    // are all defeated, which on a 1v7 is seven bases and not one.
+    //
+    // The passive houses are not: the Neutral and Special owners hold the map's
+    // civilians and the scripted props, nobody can defeat them, and counting
+    // them turned every run into a timeout the moment the list stopped being
+    // "the first computer house".
+    let enemies: Vec<InternedId> = sim
         .houses()
         .order()
         .iter()
         .copied()
-        .find(|id| *id != local && sim.houses().get(id).is_some_and(|house| !house.is_human()))
-        .ok_or("the launch has no computer opponent")?;
+        .filter(|id| {
+            *id != local
+                && sim
+                    .houses()
+                    .get(id)
+                    .is_some_and(|house| !house.is_human() && !house.multiplay_passive())
+        })
+        .collect();
+    if enemies.is_empty() {
+        return Err("the launch has no computer opponent".to_string());
+    }
 
     println!(
         "autoplay-match: {} on {}, seed {:#x}, {} ticks, {} per frame",
@@ -536,7 +579,7 @@ fn main() -> Result<(), String> {
         local,
         args.per_frame,
     );
-    let mut last = snapshot(sim, local, enemy, 0, &host);
+    let mut last = snapshot(sim, local, &enemies, 0, &host);
     println!(
         "{:>6} {:>9} {:>9} {:>7} {:>6} {:>6} {:>6} {:>9} {:>9}",
         last.tick, last.credits, last.enemy_credits, last.power, last.own, last.enemy, last.ready,
@@ -544,7 +587,8 @@ fn main() -> Result<(), String> {
     );
 
     // Both sides, so the report says who is fighting, not just how much.
-    let houses = [local, enemy];
+    let mut houses = vec![local];
+    houses.extend(enemies.iter().copied());
     // Per house, each team's script cursor at the previous sample. Diagnostic
     // scratch only: it never feeds back into the simulation.
     let mut team_cursors: BTreeMap<InternedId, BTreeMap<u64, i32>> = BTreeMap::new();
@@ -594,7 +638,7 @@ fn main() -> Result<(), String> {
             .map_err(|error| format!("tick {tick}: {error}"))?;
 
         let sim = &scenario.runtime.simulation;
-        let won = is_defeated(sim, enemy);
+        let won = enemies.iter().all(|enemy| is_defeated(sim, *enemy));
         let lost = is_defeated(sim, local);
         if lost {
             outcome = "lost";
@@ -606,12 +650,12 @@ fn main() -> Result<(), String> {
             if tick <= args.dump_teams {
                 report_teams(sim, rules, &houses, tick, &mut team_cursors);
             } else {
-                for house in houses {
+                for house in &houses {
                     let census =
-                        census_teams(sim, rules, &[house], team_cursors.entry(house).or_default());
+                        census_teams(sim, rules, &[*house], team_cursors.entry(*house).or_default());
                     println!(
                         "  teams@{tick} {}: {}",
-                        sim.interner().resolve(house),
+                        sim.interner().resolve(*house),
                         census.line()
                     );
                 }
@@ -641,7 +685,11 @@ fn main() -> Result<(), String> {
                 // us", and the types are the sim's own names for them.
                 let mut theirs: std::collections::BTreeMap<String, usize> =
                     std::collections::BTreeMap::new();
-                for entity in Observation::new(sim, enemy).own_entities() {
+                for entity in enemies.iter().flat_map(|enemy| {
+                    Observation::new(sim, *enemy)
+                        .own_entities()
+                        .collect::<Vec<_>>()
+                }) {
                     *theirs
                         .entry(sim.interner().resolve(entity.type_id).to_owned())
                         .or_default() += 1;
@@ -684,13 +732,19 @@ fn main() -> Result<(), String> {
                         .collect::<Vec<_>>()
                         .join(" ")
                 };
+                let their_lines: Vec<String> = enemies
+                    .iter()
+                    .map(|enemy| {
+                        format!("{}: {}", sim.interner().resolve(*enemy), factories(*enemy))
+                    })
+                    .collect();
                 println!(
                     "  spend@{tick}: yard {yard} | own {} | enemy {}",
                     factories(local),
-                    factories(enemy),
+                    their_lines.join(" "),
                 );
             }
-            last = snapshot(sim, local, enemy, tick, &host);
+            last = snapshot(sim, local, &enemies, tick, &host);
             println!(
                 "{:>6} {:>9} {:>9} {:>7} {:>6} {:>6} {:>6} {:>9} {:>9}",
                 last.tick,
@@ -734,7 +788,11 @@ fn main() -> Result<(), String> {
                 obs.in_production(&scenario.runtime.resources.rules, entity.type_id)
             );
         }
-        for entity in Observation::new(sim, enemy).own_entities() {
+        for entity in enemies.iter().flat_map(|enemy| {
+            Observation::new(sim, *enemy)
+                .own_entities()
+                .collect::<Vec<_>>()
+        }) {
             println!(
                 "  enemy: {} at {:?} health {}",
                 sim.interner().resolve(entity.type_id),

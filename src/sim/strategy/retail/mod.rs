@@ -302,6 +302,20 @@ pub struct RetailBrain {
     /// question cell by cell, and the map is big: the answer is kept between
     /// probes instead of being recomputed every frame the maker stands still.
     pub(super) expansion_probe: Option<(u64, Option<(u16, u16)>)>,
+    /// Why the push did not leave this frame, as the gate that refused it:
+    /// `push` when it did. Read by the forty-second census line — the question
+    /// "why is the army standing in its yard" is otherwise unanswerable from a
+    /// log that only counts what the house has.
+    pub(super) push_gate: &'static str,
+    /// The structure the fist committed to, and the frame the commitment may be
+    /// re-made: `(entity, until)`. Seven bases make "the nearest structure" a
+    /// different answer every time the army moves, and an army that re-picks
+    /// every frame walks between seven bases and takes none of them.
+    pub(super) push_target: Option<(u64, u64, (u16, u16))>,
+    /// Orders issued so far, by kind: attack, attack-move, move, guard, other.
+    /// A census that counts what the house has cannot answer "what is the army
+    /// being told to do", and that is the question a stalled push asks.
+    pub(super) issued: [usize; 5],
     /// The frame `think` last ran on.
     ///
     /// Refusals arrive after `think` returns, and a refused command has to be
@@ -374,6 +388,9 @@ impl RetailBrain {
             income: plan::IncomeMeter::new(),
             avoid_cursor: 0,
             expansion_probe: None,
+            push_gate: "none",
+            push_target: None,
+            issued: [0; 5],
             last_tick: 0,
             progress: BTreeMap::new(),
             stuck_retried: BTreeSet::new(),
@@ -578,11 +595,24 @@ impl Brain for RetailBrain {
                 .collect();
             let crates: Vec<(u16, u16)> = obs.crate_cells(rules);
             log::info!(
-                "auto play: {} roster=[{}] crates={}{:?} income={}/min seen={}/{}",
+                "auto play: {} roster=[{}] crates={}{:?} push={} target={} at {:?} squads={:?} orders={:?} pts={}/{} income={}/min seen={}/{}",
                 self.census.describe(),
                 roster.join(","),
                 crates.len(),
                 crates,
+                self.push_gate,
+                self.push_target.map_or(0, |(entity, _, _)| entity),
+                self.push_target.map(|(_, _, cell)| cell),
+                self.squads
+                    .all()
+                    .iter()
+                    .map(|squad| squad.members.len())
+                    .collect::<Vec<_>>(),
+                self.issued,
+                self.census.army_points(),
+                self.push_target.map_or(0, |(_, _, cell)| {
+                    self.census.enemy_points(rules, obs, cell, 18)
+                }),
                 budget.income.map_or(-1, |rate| rate),
                 seen,
                 self.census.enemies.len()
@@ -654,6 +684,19 @@ impl Brain for RetailBrain {
         // replaced are refusals like any other — the caller that made them
         // recorded an intent for an order the engine never saw, and leaving
         // that record in place is the unit waiting out a term for nothing.
+        // What the army was told this frame, counted by kind: the census line
+        // reports the totals, so "the army is standing in its yard" can be
+        // told apart from "the army is being told to guard".
+        for order in &out.orders {
+            let slot = match order.goal {
+                Goal::Attack { .. } => 0,
+                Goal::AttackMove { .. } => 1,
+                Goal::Move { .. } => 2,
+                Goal::Guard => 3,
+                _ => 4,
+            };
+            self.issued[slot] += 1;
+        }
         let replaced = out.resolve();
         if !replaced.is_empty() {
             self.orders_refused(&replaced);
