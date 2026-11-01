@@ -36,6 +36,8 @@ pub struct Stats {
     pub issued: usize,
     pub unowned: usize,
     pub refused: usize,
+    /// Units that have not changed cell for six seconds while holding a job.
+    pub stuck: usize,
 }
 
 pub struct Policy {
@@ -44,6 +46,9 @@ pub struct Policy {
     jobs: Assignments,
     last_term: Option<u64>,
     issued: BTreeMap<u64, JobKind>,
+    /// Where each unit stood when it last moved, and when: the stuck counter
+    /// reads this, so "a unit that does nothing" is a number, not an opinion.
+    stood: BTreeMap<u64, ((u16, u16), u64)>,
     stats: Stats,
 }
 
@@ -60,6 +65,7 @@ impl Policy {
             jobs: Assignments::default(),
             last_term: None,
             issued: BTreeMap::new(),
+            stood: BTreeMap::new(),
             stats: Stats::default(),
         }
     }
@@ -252,6 +258,37 @@ impl Brain for Policy {
             out.intent(intent);
         }
 
+        // A unit that has not moved for six seconds while holding a job is
+        // stuck: the one reading the old policy had no way to report.
+        const STUCK_FRAMES: u64 = 90;
+        self.stats.stuck = 0;
+        let mut stood = BTreeMap::new();
+        for unit in obs.own_entities() {
+            // Holding a post is standing still on purpose; only a job that
+            // names somewhere to be counts as stuck when the cell stops
+            // changing.
+            let held = self.jobs.get(unit.entity_id).is_some_and(|job| {
+                matches!(
+                    job.kind,
+                    JobKind::Harvest
+                        | JobKind::ReturnOre
+                        | JobKind::Assault
+                        | JobKind::Breach
+                        | JobKind::Scout
+                        | JobKind::Transport
+                )
+            });
+            let since = match self.stood.get(&unit.entity_id) {
+                Some((cell, since)) if *cell == unit.cell => *since,
+                _ => tick,
+            };
+            if held && tick.saturating_sub(since) >= STUCK_FRAMES {
+                self.stats.stuck += 1;
+            }
+            stood.insert(unit.entity_id, (unit.cell, since));
+        }
+        self.stood = stood;
+
         // A unit with no job is the failure this policy exists to prevent.
         self.stats.unowned = eligible
             .iter()
@@ -270,13 +307,14 @@ impl Brain for Policy {
         }
         if tick % 600 == 0 {
             log::info!(
-                "policy v2: tick={tick} proposals={} intents={} assigned={} issued={} unowned={} refused={}",
+                "policy v2: tick={tick} proposals={} intents={} assigned={} issued={} unowned={} refused={} stuck={}",
                 self.stats.proposals,
                 self.stats.intents,
                 self.stats.assigned,
                 self.stats.issued,
                 self.stats.unowned,
-                self.stats.refused
+                self.stats.refused,
+                self.stats.stuck
             );
         }
     }
