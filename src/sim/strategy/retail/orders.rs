@@ -1164,7 +1164,7 @@ pub(super) fn crates(
     out: &mut Outbox,
 ) {
     let tick = obs.tick();
-    let cells: Vec<(u16, u16)> = obs.crate_cells().collect();
+    let cells: Vec<(u16, u16)> = obs.crate_cells(rules);
     if cells.is_empty() {
         return;
     }
@@ -1174,7 +1174,7 @@ pub(super) fn crates(
     // them, which is exactly what a play test reports. The condition that
     // matters is the one below (nothing else to do, near, reachable), and it
     // does not care what the unit is.
-    let scouts: Vec<(u64, (u16, u16))> = brain
+    let scouts: Vec<(u64, (u16, u16), MovementZone)> = brain
         .census
         .units
         .iter()
@@ -1184,10 +1184,29 @@ pub(super) fn crates(
                 && unit.orderable
                 && !unit.in_service()
                 && !holds_or_fights(unit.mission)
+                // And not a unit the push owns: the crate's walk is the
+                // weakest order in the ladder, so a unit that is already
+                // walking at something is given that instead, and the crate
+                // is never reached. A unit that is fighting is not a unit
+                // that collects a box on the way past.
+                && !brain.tracked.stands(
+                    tick,
+                    unit.entity_id,
+                    &[
+                        TrackedKind::Attack,
+                        TrackedKind::AttackMove,
+                        TrackedKind::Engage,
+                    ],
+                )
         })
-        .map(|unit| (unit.entity_id, unit.cell))
+        .filter_map(|unit| {
+            let zone = obs
+                .object_type(rules, unit.type_id)
+                .map_or(MovementZone::Infantry, |ty| ty.movement_zone);
+            Some((unit.entity_id, unit.cell, zone))
+        })
         .collect();
-    for (id, from) in scouts {
+    for (id, from, zone) in scouts {
         if ordered_this_frame(out, id) {
             continue;
         }
@@ -1195,7 +1214,10 @@ pub(super) fn crates(
             .iter()
             .copied()
             .filter(|cell| squared_distance(from, *cell) <= CRATE_SEEK_CELLS * CRATE_SEEK_CELLS)
-            .filter(|cell| obs.can_reach(MovementZone::Infantry, from, *cell))
+            // The unit's own movement zone: a tank and a dog reach different
+            // ground, and asking with the infantry's zone for everybody sends
+            // vehicles at cells they cannot walk to.
+            .filter(|cell| obs.can_reach(zone, from, *cell))
             .min_by_key(|cell| (squared_distance(from, *cell), *cell))
         else {
             continue;
@@ -1210,6 +1232,10 @@ pub(super) fn crates(
             brain
                 .tracked
                 .record(tick, id, TrackedKind::Move, None, Some(cell));
+            log::info!(
+                "auto play: unit {id} goes for the crate at {cell:?} taken={}",
+                obs.ground_object_cells(rules).contains(&cell)
+            );
         }
     }
 }

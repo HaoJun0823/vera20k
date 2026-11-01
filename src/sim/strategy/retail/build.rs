@@ -354,6 +354,18 @@ fn build_next(
             },
         ));
     }
+    // The build list's answer, with the type it names: the one line that says
+    // what the house is building and why, next to the placement that follows
+    // it. A plot that was asked for and never stands is visible here.
+    // Logged when the answer changes: the list is asked every frame the line
+    // is free, and a line per frame is a log nobody reads.
+    if chosen.step != held.map(|(step, _)| step) {
+        log::info!(
+            "auto play: the build list answers {:?} for {}",
+            chosen.item,
+            chosen.ty.id
+        );
+    }
     let ty = chosen.ty;
     let type_id = chosen.type_id;
     // A defense is made by the Defense factory, not the Buildings one, so the
@@ -505,6 +517,15 @@ fn next_building<'r>(
 ///
 /// An empty list is no evidence and keeps the type available: a mod that
 /// names no country is not a mod that forbids the type.
+///
+/// This is the native AI's own gate, bit for bit: `HouseClass__FirstBuildableFromArray`
+/// (`0x005051E0`) tests `Owner=` against the house's *owner* mask (the parent
+/// country) and `RequiredHouses=` against the *actual* one, and this is the
+/// first half of that test. It is deliberately not in the simulation's
+/// `can_build`: native's `HouseClass::CanBuild` (`0x004F7976`) reads only
+/// `RequiredHouses=` and `ForbiddenHouses=`, because `Owner=` is the sidebar's
+/// and the AI selector's gate. This brain is the AI's selector for its house,
+/// so the gate belongs here.
 pub(super) fn house_owns(rules: &RuleSet, obs: &Observation<'_>, ty: &ObjectType) -> bool {
     if ty.owner.is_empty() {
         return true;
