@@ -38,8 +38,9 @@ a type name.
 | Barrel.mmx | 19 | survives (20 vs 69) |
 | Barrel.mmx | 10 | survives (29 vs 45) |
 
-1v7 hard, Death.mmx, 12000 ticks, seed 0x5EED: survives. The retail policy on
-the same seed lost at 11361.
+1v7 hard, Death.mmx, 12000 ticks, three seeds: two of three survive the
+twenty-minute mark (0x5EED 16 own vs 299; 10 27 vs 294; 19 lost at 11103). The
+retail policy on 0x5EED lost at 11361.
 
 ## Known gaps
 
