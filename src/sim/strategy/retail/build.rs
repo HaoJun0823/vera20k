@@ -505,7 +505,7 @@ fn next_building<'r>(
 ///
 /// An empty list is no evidence and keeps the type available: a mod that
 /// names no country is not a mod that forbids the type.
-fn house_owns(rules: &RuleSet, obs: &Observation<'_>, ty: &ObjectType) -> bool {
+pub(super) fn house_owns(rules: &RuleSet, obs: &Observation<'_>, ty: &ObjectType) -> bool {
     if ty.owner.is_empty() {
         return true;
     }
@@ -1176,7 +1176,6 @@ mod tests {
             "a plant that stands is not bought twice"
         );
     }
-
 
     /// The country gate is the rules': the GI's Owner list names the Allied
     /// countries and the conscript's names the Soviet ones, so an American

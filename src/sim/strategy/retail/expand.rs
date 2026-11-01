@@ -378,7 +378,21 @@ pub(super) fn yard_maker<'r>(
     obs: &Observation<'_>,
 ) -> Option<(&'r ObjectType, InternedId)> {
     super::build::class_types(rules, obs, ObjectCategory::Vehicle)
-        .find(|(ty, _)| makes_a_yard(rules, ty))
+        .find(|(ty, _)| makes_a_yard(rules, ty) && yard_is_ours(rules, obs, ty))
+}
+
+/// Whether the yard a maker deploys into belongs to the house's own country.
+///
+/// The maker's own type is the vehicle; the country it belongs to is the yard
+/// it becomes (`DeploysInto=`), and that is the type whose country list is
+/// the rules' own gate. A house that bought the other side's maker would be
+/// holding a vehicle it cannot deploy.
+fn yard_is_ours(rules: &RuleSet, obs: &Observation<'_>, maker: &ObjectType) -> bool {
+    maker
+        .deploys_into
+        .as_deref()
+        .and_then(|name| rules.object(name))
+        .is_some_and(|yard| super::build::house_owns(rules, obs, yard))
 }
 
 /// A building the yard maker's own `Prerequisite=` list asks for and the
@@ -399,7 +413,7 @@ pub(super) fn yard_maker_support<'r>(
     census: &Census,
 ) -> Option<(&'r ObjectType, InternedId)> {
     super::build::all_class_types(rules, obs, ObjectCategory::Vehicle)
-        .filter(|(ty, _)| makes_a_yard(rules, ty))
+        .filter(|(ty, _)| makes_a_yard(rules, ty) && yard_is_ours(rules, obs, ty))
         .find_map(|(maker, _)| missing_prerequisite(rules, obs, census, maker))
 }
 
@@ -432,6 +446,59 @@ mod tests {
     use crate::sim::strategy::retail::RetailBrain;
     use crate::sim::world::Simulation;
 
+
+    /// The maker belongs to the yard it becomes: an American house's maker
+    /// deploys into the Allied yard and a Russian house's into the Soviet
+    /// one, and the yard's own country list is the rules' answer.
+    #[test]
+    fn the_yard_maker_is_the_house_s_own_country_s() {
+        let Some(rules) = crate::rules::retail_ini_fixture::retail_unlayered_rules() else {
+            return;
+        };
+        let mut sim = crate::sim::world::Simulation::new();
+        let american = sim.interner.intern("Americans");
+        let russian = sim.interner.intern("Russians");
+        sim.houses.register(crate::sim::house_state::HouseState::new(
+            american,
+            0,
+            Some(american),
+            true,
+            0,
+            10,
+        ));
+        sim.houses.register(crate::sim::house_state::HouseState::new(
+            russian,
+            0,
+            Some(russian),
+            false,
+            0,
+            10,
+        ));
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let allied = rules.object("AMCV").expect("the Allied maker");
+        let soviet = rules.object("SMCV").expect("the Soviet maker");
+
+        let obs = Observation::new(&sim, american);
+        assert!(
+            yard_is_ours(&rules, &obs, allied),
+            "the Allied maker deploys into the Allied yard"
+        );
+        assert!(
+            !yard_is_ours(&rules, &obs, soviet),
+            "and the Soviet maker does not"
+        );
+
+        let obs = Observation::new(&sim, russian);
+        assert!(
+            yard_is_ours(&rules, &obs, soviet),
+            "the Soviet maker deploys into the Soviet yard"
+        );
+        assert!(
+            !yard_is_ours(&rules, &obs, allied),
+            "and the Allied maker does not"
+        );
+    }
     /// The flat arena with the computer `Russians` and the human `Americans`.
     fn arena(seed: u64) -> Option<(Simulation, RuleSet, InternedId)> {
         let rules = crate::rules::retail_ini_fixture::retail_unlayered_rules()?;
