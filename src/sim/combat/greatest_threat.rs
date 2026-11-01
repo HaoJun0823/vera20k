@@ -98,7 +98,6 @@ use super::threat_mask::{self, InfantryScanner};
 use super::threat_range::{ScanRange, scan_range};
 use crate::map::cell_index::{NativeCellIdentity, square_ring_cells};
 use crate::map::entities::EntityCategory;
-use crate::map::houses::HouseAllianceMap;
 use crate::map::resolved_terrain::{NativeCellQuery, ResolvedTerrainGrid};
 use crate::rules::object_type::{ObjectType, VhpScan};
 use crate::rules::ruleset::RuleSet;
@@ -106,6 +105,7 @@ use crate::rules::weapon_type::WeaponType;
 use crate::sim::components::DriveCoord;
 use crate::sim::entity_store::EntityStore;
 use crate::sim::game_entity::{DistributedFireCandidate, GameEntity};
+use crate::sim::house_diplomacy::HouseAlliances;
 use crate::sim::intern::{InternedId, StringInterner};
 use crate::sim::mission::MissionType;
 use crate::sim::movement::ground_pose::{object_get_coords, position_world_coord};
@@ -203,22 +203,15 @@ impl ThreatCoefficients {
     ) -> Self {
         let general = &rules.general;
         if scorer_house_byte_set {
+            // CalculateThreatScore70CD10 loads the five stored type
+            // doubles. ReadINI71551E..715720 already resolved their defaults.
+            let coefficients = scorer_type.threat_coefficients();
             Self {
-                my_effectiveness: scorer_type
-                    .my_effectiveness_coefficient
-                    .unwrap_or(general.my_effectiveness_coefficient_default),
-                target_effectiveness: scorer_type
-                    .target_effectiveness_coefficient
-                    .unwrap_or(general.target_effectiveness_coefficient_default),
-                target_special_threat: scorer_type
-                    .target_special_threat_coefficient
-                    .unwrap_or(general.target_special_threat_coefficient_default),
-                target_strength: scorer_type
-                    .target_strength_coefficient
-                    .unwrap_or(general.target_strength_coefficient_default),
-                target_distance: scorer_type
-                    .target_distance_coefficient
-                    .unwrap_or(general.target_distance_coefficient_default),
+                my_effectiveness: coefficients.my_effectiveness(),
+                target_effectiveness: coefficients.target_effectiveness(),
+                target_special_threat: coefficients.target_special_threat(),
+                target_strength: coefficients.target_strength(),
+                target_distance: coefficients.target_distance(),
             }
         } else {
             Self {
@@ -338,7 +331,7 @@ pub(crate) fn calculate_threat_score(
     rules: &RuleSet,
     interner: &StringInterner,
     terrain: Option<&ResolvedTerrainGrid>,
-    alliances: Option<&HouseAllianceMap>,
+    alliances: Option<&HouseAlliances>,
     coefficients: ThreatCoefficients,
     reference: ThreatReference,
     scorer_enemy_house: Option<InternedId>,
@@ -756,7 +749,7 @@ impl ScanContext<'_> {
         })
     }
 
-    fn alliances(&self) -> Option<&HouseAllianceMap> {
+    fn alliances(&self) -> Option<&HouseAlliances> {
         self.los.alliances
     }
 
@@ -2713,9 +2706,7 @@ fn probe_is_illegal(
         world,
         rules: ctx.rules,
         overlay_registry: ctx.los.overlay_registry,
-        fog: ctx
-            .fog
-            .map(|fog| fog.fire_view(world.house_alliances.as_map())),
+        fog: ctx.fog.map(|fog| fog.fire_view(&world.house_alliances)),
         firer,
         obj: ctx.attacker_obj,
         target: Some(super::TargetKind::Entity(candidate.stable_id())),
@@ -3157,3 +3148,7 @@ mod unarmed_tests;
 #[cfg(test)]
 #[path = "greatest_threat_healer_guard_tests.rs"]
 mod healer_guard_tests;
+
+#[cfg(test)]
+#[path = "greatest_threat_coefficient_tests.rs"]
+mod coefficient_tests;

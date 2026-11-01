@@ -20,6 +20,20 @@ pub(crate) struct SensorCloakReevaluation {
     pub(crate) reassigned_targeters: Vec<u64>,
 }
 
+impl Simulation {
+    /// InfantryLoad521A0C and the other Techno class loads call NoInit6F4300
+    /// for every retained object. Invoke this at the player-file boundary;
+    /// internal continuations retain their progress clocks.
+    pub fn restart_cloak_progress_after_player_load(&mut self) {
+        let frame = self.session.binary_frame() as i32;
+        for entity in self.substrate.entities.values_mut() {
+            if let Some(cloak) = entity.cloak.as_mut() {
+                cloak.restart_progress_after_player_load(frame);
+            }
+        }
+    }
+}
+
 fn stock_cloak_tick_facts(
     sim: &Simulation,
     id: u64,
@@ -552,7 +566,7 @@ pub(crate) fn uncloak_on_sensor_neighbour_after_cell_entry(
             continue;
         };
         if crate::sim::combat::combat_weapon::is_ally_by_object(
-            Some(sim.house_alliances.as_map()),
+            Some(&sim.house_alliances),
             &sim.interner,
             other.owner(),
             owner,

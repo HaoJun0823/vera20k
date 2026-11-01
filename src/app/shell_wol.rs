@@ -19,6 +19,8 @@
 pub(crate) mod buddies;
 pub(crate) mod buddy;
 mod live_service;
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) use live_service::lobby_base_url;
 pub(crate) mod lobby;
 mod login;
 pub(crate) mod my_info;
@@ -34,6 +36,8 @@ pub(crate) use live_service::OnlineCleanup;
 pub(crate) use live_service::RELEASES_URL;
 #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
 pub(crate) use live_service::discard_spawned_visit;
+#[cfg(not(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown")))]
+pub(crate) use live_service::retire_visit_for_exit;
 pub(crate) use live_service::{
     DecodedRelayGrant, begin_spawned_match, decode_external_relay_grant, end_spawned_match,
 };
@@ -223,6 +227,10 @@ pub(crate) struct WolVisit {
     /// the match and cleared on runner entry (`0x00787973`); the chat sinks
     /// show nothing while it is set.
     in_game: bool,
+    /// VERA: this match started from VERA's own game room, which stays
+    /// joined through the match so its players return to it afterwards
+    /// (`finish` asks the lobby for it back).
+    pub(crate) back_to_room: bool,
     /// `![0xB77DC0]`: connected to a server. A WOLAPI creation
     /// (`0x00786485`) and a failed login clear it, a connect sets it, and a
     /// lost connection outside a match clears it.
@@ -287,6 +295,7 @@ impl WolVisit {
             motd: None,
             last_pager: None,
             in_game: false,
+            back_to_room: false,
             connected: false,
             disconnected: false,
             relogin: None,
@@ -498,6 +507,15 @@ pub(crate) fn open_lobby(state: &mut AppState, postmatch: bool) {
 /// mode-loop apply (`0x0077B402`) and the lobby runner with postmatch set
 /// (`0x0077B44B`) follow.
 pub(crate) fn reenter_after_match(state: &mut AppState) {
+    if let Some(visit) = state.frontend.wol.as_mut()
+        && matches!(
+            visit.mode,
+            Some(WolMode::QuickMatch | WolMode::QuickCoop | WolMode::PlayBuddy)
+        )
+    {
+        // VERA's kept game room returns only to the custom lobby runner.
+        visit.back_to_room = false;
+    }
     live_service::match_returned(state);
     persona::enter_wol_main(state);
     read_wol_settings(state);

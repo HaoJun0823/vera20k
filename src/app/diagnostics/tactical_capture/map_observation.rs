@@ -351,7 +351,7 @@ fn diplomacy_row(sim: &crate::sim::world::Simulation, owner: &str) -> Value {
         .map(|&house| sim.interner().resolve(house))
         .filter(|house| {
             !house.eq_ignore_ascii_case(owner)
-                && crate::map::houses::is_allied_with(sim.house_alliances(), owner, house)
+                && crate::map::houses::is_allied_with(sim.house_alliances().as_map(), owner, house)
         })
         .collect();
     let enemy = crate::sim::house_state::house_state_for_owner(sim.houses(), owner, sim.interner())
@@ -3665,7 +3665,7 @@ impl TacticalCaptureSession {
                         let routed = gadgets.out.consumed_by.or(gadgets.focus.sticky);
                         expected.is_some() && routed == expected && !mouse.captured
                     } else if scheduled.gesture.is_minimap() {
-                        state.match_state.input.minimap_dragging && !mouse.captured
+                        state.match_state.input.minimap_press_active() && !mouse.captured
                     } else {
                         mouse.captured
                     };

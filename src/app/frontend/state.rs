@@ -23,6 +23,9 @@ pub(crate) struct FrontendState {
     pub(crate) external_match_result: Option<crate::app::cncnet::ExternalMatchResult>,
     /// Frames, duration and opponent departure for the launch report.
     pub(crate) external_progress: crate::app::cncnet::ExternalLaunchProgress,
+    /// The game is closing and waits until this for its network goodbyes
+    /// (`App::poll_network_goodbye`).
+    pub(crate) network_goodbye_deadline: Option<crate::util::time::Instant>,
     /// Browser launch is closing its network owners before engine exit.
     #[cfg(all(feature = "wasm", target_arch = "wasm32", target_os = "unknown"))]
     pub(crate) browser_exit_pending: bool,
@@ -57,12 +60,11 @@ pub(crate) struct FrontendState {
     pub(crate) main_menu_movie_last_step: Instant,
     /// Terminal menu failure; retained for the error screen and input gate.
     pub(crate) main_menu_shell_error: Option<String>,
+    /// The config and settings files the error screen names (`initialize`).
+    pub(crate) startup_files: crate::app::initialize::StartupFiles,
     /// Set by each status-screen draw and taken by the frame's cursor owner:
     /// the card has no retail art, so the window's own cursor shows over it.
     pub(crate) status_screen_drawn: bool,
-    /// Numeric internal-version string used by the bottom-right main-menu line.
-    /// Resolution follows the retail 16-byte/CR-only cached contract.
-    pub(crate) version_txt: String,
     /// Active shell first-paint controls-reveal slide (presentation only). gamemd
     /// plays this on the first paint of every shell dialog (menu / single-player /
     /// skirmish); the wave swaps each owner-draw button's SDBTNANM frame index.
@@ -143,6 +145,13 @@ pub(crate) struct FrontendState {
         Option<crate::app::shell_network_setup::NetworkSetupProtocol>,
     /// BC/BD control interaction; values are projected from MatchSession.
     pub(crate) multiplayer_setup: Option<crate::ui::multiplayer_setup::MultiplayerSetupState>,
+    /// The host's last Create Game choices, which its next VERA room takes.
+    pub(crate) room_limits: crate::ui::room_limits::RoomLimits,
+    /// The host's last Room name in VERA's online lobby, which its next
+    /// Create Game shows; `None` until one is typed.
+    pub(crate) wol_room_name: Option<String>,
+    /// VERA: how this player returns to its LAN room after the match.
+    pub(crate) lan_rematch: Option<crate::app::shell_lan::LanRematch>,
     /// Options' Network child D7, retained until its teardown completes.
     pub(crate) network_options: Option<crate::ui::network_options::NetworkOptionsState>,
     /// `0x10E`'s background and icon art (`0x0072C7E0`).
@@ -244,6 +253,8 @@ pub(crate) struct FrontendState {
     /// persistence of the old app field. Match paths read the runtime-bound
     /// copy via `overlay_registry()`.
     pub(crate) shell_preview_overlay_registry: Option<OverlayTypeRegistry>,
+    /// The online map library's catalog and Choose Map's map download.
+    pub(crate) map_library: crate::app::map_library::MapLibrary,
     /// The release check, its main-menu offer and the download (desktop only).
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub(crate) updater: crate::app::updater::Updater,

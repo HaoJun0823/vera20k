@@ -80,6 +80,9 @@ pub(crate) enum NetworkSetupRequest {
     RequestAcceptance,
     Kick {
         name: String,
+        /// VERA's rooms: the host's own kick, which keeps the player out of
+        /// the room for five minutes. Joins the host turns away do not.
+        keep_out: bool,
     },
     Leave,
     Chat(Vec<u16>),
@@ -876,10 +879,14 @@ fn install_setup(
                     .set_network_vacancy(row as u8, vacancy)?;
             }
         }
-        // A VERA room opens its spectator row, but for Quick Match's
-        // matchbot game.
+        // A VERA room holds the people its host allowed at Create Game and
+        // opens its spectator row if spectators may join, but for Quick
+        // Match's matchbot game.
         if dialog.modern && !quick_match {
-            state.match_state.session.set_network_spectators(true)?;
+            let limits = state.frontend.room_limits;
+            let session = &mut state.match_state.session;
+            session.set_network_people_limit(limits.players)?;
+            session.set_network_spectators(limits.spectators)?;
         }
         if let Some(file) = state
             .match_state
@@ -896,11 +903,13 @@ fn install_setup(
     }
     state.frontend.lan = None;
     let mut setup_ui = MultiplayerSetupState::default();
-    if let Some(row) = state
-        .match_state
-        .session
-        .network_setup()
-        .and_then(|launch| launch.local_player().raw_slot_index)
+    // VERA's rooms list their players first, from the first page.
+    if !dialog.modern
+        && let Some(row) = state
+            .match_state
+            .session
+            .network_setup()
+            .and_then(|launch| launch.local_player().raw_slot_index)
     {
         setup_ui.show_row(usize::from(row), dialog.rows_per_page());
     }
@@ -1064,7 +1073,7 @@ pub(crate) fn return_after_match(state: &mut AppState) {
         crate::app::shell_wol::reenter_after_match(state);
     } else {
         crate::app::lan_service::restart_lobby_visit(state);
-        App::open_lan_lobby(state);
+        App::reopen_lan_room(state);
     }
 }
 
@@ -1113,6 +1122,42 @@ fn leave_setup(state: &mut AppState) -> SetupDialog {
     }
     state.match_state.session.return_to_network_lobby();
     dialog
+}
+
+/// VERA asks first: a guest's online room offers its map before the
+/// transfer downloads it (`shell_wol::live_service::maps`).
+pub(crate) fn offer_missing_map(state: &mut AppState, name: String, message: String) {
+    if let Some(ui) = state.frontend.multiplayer_setup.as_mut() {
+        ui.map_offer = Some(crate::ui::multiplayer_setup::MapOffer {
+            name,
+            message,
+            downloading: false,
+            opened: Instant::now(),
+        });
+        // The offer takes the pointer from a row's open list too.
+        ui.cancel_pointer();
+        ui.popup.close();
+    }
+    state.platform.window.request_redraw();
+}
+
+/// The offer's map arrived, changed, or its transfer ended.
+pub(crate) fn close_missing_map_offer(state: &mut AppState) {
+    if let Some(ui) = state.frontend.multiplayer_setup.as_mut()
+        && ui.map_offer.take().is_some()
+    {
+        state.platform.window.request_redraw();
+    }
+}
+
+/// Whether the player pressed Download; the offer then shows the download.
+pub(crate) fn missing_map_download_agreed(state: &AppState) -> bool {
+    state
+        .frontend
+        .multiplayer_setup
+        .as_ref()
+        .and_then(|ui| ui.map_offer.as_ref())
+        .is_some_and(|offer| offer.downloading)
 }
 
 /// The shared CE owner admitted its OK/default key.

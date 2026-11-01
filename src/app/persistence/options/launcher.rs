@@ -36,10 +36,15 @@ pub(crate) fn launcher_values_from_profile(
         yr_original_style: profile.yr_original_style,
         render_interpolation: profile.render_interpolation,
         mouse_wheel_zoom: profile.mouse_wheel_zoom,
+        right_click_orders: profile.right_click_orders,
+        lock_cursor: profile.lock_cursor,
         shift_queue: profile.shift_queue,
         wol_test_service: profile.wol_test_service,
         fps_counter: false,
         skip_startup_logo: profile.skip_startup_logo,
+        custom_end_game_banner: profile.custom_end_game_banner,
+        custom_end_game_score: profile.custom_end_game_score,
+        custom_end_game_movie: profile.custom_end_game_movie,
         sidebar: profile.sidebar,
         // The slider's position is the stored level less the retail strength,
         // so gamemd's own bands sit at the left end.
@@ -96,10 +101,18 @@ pub(crate) trait LauncherPreviewOperations: AudioVolumeOperations {
     fn store_yr_original_style(&mut self, yr_original_style: bool);
     fn store_render_interpolation(&mut self, enabled: bool);
     fn store_mouse_wheel_zoom(&mut self, enabled: bool);
+    fn store_right_click_orders(&mut self, enabled: bool);
+    fn store_lock_cursor(&mut self, locked: bool);
     fn store_shift_queue(&mut self, shift_queue: bool);
     fn store_wol_test_service(&mut self, wol_test_service: bool);
     fn set_fps_counter(&mut self, shown: bool);
     fn store_skip_startup_logo(&mut self, skip: bool);
+    /// Whether a finished match draws the country's own end-game picture.
+    fn store_custom_end_game_banner(&mut self, enabled: bool);
+    /// Whether a finished match starts the country's own end-game music.
+    fn store_custom_end_game_score(&mut self, enabled: bool);
+    /// Whether the exit lets the closing commander clip finish.
+    fn store_custom_end_game_movie(&mut self, enabled: bool);
     /// VERA's team-colour strength, as the level the profile stores.
     fn store_house_color_strength(&mut self, strength: u8);
 }
@@ -131,6 +144,10 @@ pub(crate) fn dispatch_launcher_preview_event(
         LauncherOptionsEvent::MouseWheelZoomChanged(enabled) => {
             operations.store_mouse_wheel_zoom(enabled);
         }
+        LauncherOptionsEvent::RightClickOrdersChanged(enabled) => {
+            operations.store_right_click_orders(enabled);
+        }
+        LauncherOptionsEvent::LockCursorChanged(locked) => operations.store_lock_cursor(locked),
         LauncherOptionsEvent::ShiftQueueChanged(shift_queue) => {
             operations.store_shift_queue(shift_queue);
         }
@@ -140,6 +157,15 @@ pub(crate) fn dispatch_launcher_preview_event(
         LauncherOptionsEvent::FpsCounterChanged(shown) => operations.set_fps_counter(shown),
         LauncherOptionsEvent::SkipStartupLogoChanged(skip) => {
             operations.store_skip_startup_logo(skip);
+        }
+        LauncherOptionsEvent::CustomEndGameBannerChanged(enabled) => {
+            operations.store_custom_end_game_banner(enabled);
+        }
+        LauncherOptionsEvent::CustomEndGameScoreChanged(enabled) => {
+            operations.store_custom_end_game_score(enabled);
+        }
+        LauncherOptionsEvent::CustomEndGameMovieChanged(enabled) => {
+            operations.store_custom_end_game_movie(enabled);
         }
         LauncherOptionsEvent::HouseColorStrengthChanged(strength) => {
             operations.store_house_color_strength(strength);

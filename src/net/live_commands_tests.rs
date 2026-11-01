@@ -1847,6 +1847,110 @@ fn production_frame(sim: &mut Simulation, rules: &RuleSet, boundary: &Boundary) 
 }
 
 #[test]
+fn retail_infantry_plan_finishes_both_moves_over_lan() {
+    use crate::sim::command::Command;
+
+    let Some(retail) = crate::rules::retail_ini_fixture::retail_battle_rules() else {
+        return;
+    };
+    let rules = retail.rules;
+    let scene = || {
+        let mut sim = Simulation::with_seed(73);
+        crate::sim::arena_fixture::flat_ground(&mut sim, &rules);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        for (index, name) in ["Alpha", "Beta"].iter().enumerate() {
+            let owner = sim.interner.intern(name);
+            sim.houses
+                .register(HouseState::new(owner, index as u8, None, true, 0, 10));
+        }
+        let owner = sim.interner.get("Alpha").unwrap();
+        sim.session.set_current_house_for_test(Some(owner));
+        sim.session.set_game_mode(ScenarioGameMode::Lan);
+        sim.session.install_network_timing(10);
+        sim.session
+            .install_network_command_timing(0, std::num::NonZeroU8::new(5).unwrap(), [0, 1]);
+        sim.session.game_options_mut_for_test().short_game = false;
+        let actor = sim.spawn_object("E1", "Alpha", 12, 12, 0, &rules).unwrap();
+        sim.spawn_object("E1", "Beta", 28, 28, 0, &rules).unwrap();
+        (sim, owner, actor)
+    };
+    let (mut a, owner, actor) = scene();
+    let (mut b, _, _) = scene();
+    let (a_live, b_live) = pair(73);
+    let (a_boundary, b_boundary) = (Boundary::new(a_live), Boundary::new(b_live));
+    for target_rx in [13, 14] {
+        let record = a
+            .encode_planning_order_record(
+                owner,
+                &Command::Move {
+                    entity_id: actor,
+                    target_rx,
+                    target_ry: 12,
+                },
+                None,
+            )
+            .unwrap();
+        assert!(a.issue_local_command(CommandEnvelope::synchronized(record, a.session.tick())));
+    }
+    for frame in 0..=180 {
+        if frame == 15 {
+            // The ordinary orders must reach both peers before the player
+            // commits. The generated flag2 events then use DoList directly.
+            for sim in [&a, &b] {
+                assert_eq!(sim.planning_paths(owner)[0].cells, [(13, 12), (14, 12)]);
+            }
+            let record = a.encode_plan_commit_record(owner).unwrap();
+            assert!(a.issue_local_command(CommandEnvelope::synchronized(record, a.session.tick())));
+        }
+        let start = Instant::now();
+        let mut completed = [false; 2];
+        let mut checksums = [None; 2];
+        while !completed.iter().all(|done| *done) {
+            for (index, (sim, boundary)) in [(&mut a, &a_boundary), (&mut b, &b_boundary)]
+                .into_iter()
+                .enumerate()
+            {
+                if completed[index] {
+                    continue;
+                }
+                boundary
+                    .now
+                    .set(1000 + frame * 10 + (start.elapsed().as_millis() / 16) as u32);
+                let output = production_frame(sim, &rules, boundary);
+                assert!(output.network_failure.is_none());
+                if let Some(sync) = output.multiplayer_checksum {
+                    checksums[index] = Some(sync.checksum.unwrap().value);
+                }
+                completed[index] = output.tick.frame_committed;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "plan frame {frame} stalled"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(checksums[0], checksums[1], "plan frame {frame} CRC");
+    }
+    for (sim, boundary) in [(&a, &a_boundary), (&b, &b_boundary)] {
+        let applied = boundary.applied.borrow();
+        let generated: Vec<_> = applied
+            .iter()
+            .filter(|(_, record, _)| record.opcode() == 4 && record.payload()[22] == 2)
+            .collect();
+        assert_eq!(
+            generated.len(),
+            2,
+            "both planned moves must survive dispatch"
+        );
+        assert!(generated.iter().all(|(_, _, ok)| *ok));
+        let entity = sim.entities().get(actor).unwrap();
+        assert_eq!((entity.position.rx(), entity.position.ry()), (14, 12));
+        assert!(sim.planning_paths(owner).is_empty());
+    }
+}
+
+#[test]
 fn solo_wol_commands_apply_without_ahead_or_batching_across_timing_updates() {
     let (mut sim, rules, actor) = stop_scene();
     sim.session.set_game_mode(ScenarioGameMode::Wol);
@@ -3597,6 +3701,78 @@ fn sequenced_push_is_probed_again_after_three_lost_replies() {
             .all(|boundary| boundary.live.borrow().sequenced_timing().is_some()),
         "a relay that answers a later probe delivers by push"
     );
+}
+
+/// A client that runs fewer frames than the relay seals slows the match to a
+/// Game Speed rate it can drain its waiting frames at. Both clients pace at
+/// it and get one line naming the slow player, the slow one catches up, and
+/// the simulation keeps the certificate's rate.
+#[test]
+fn a_client_that_cannot_keep_up_slows_both_clients_until_it_catches_up() {
+    use crate::net::live_commands::MatchSpeedChange;
+    use crate::net::udp::test_support::MAX_DATAGRAM;
+
+    let (mut worlds, rules, _, boundaries, socket, mut relay) = sequenced_pair();
+    let mut now_ms = 16_000;
+    let mut changes = [Vec::new(), Vec::new()];
+    for step in 0..1200 {
+        now_ms += 16;
+        let unix = 100 + (now_ms - 16_000) / 1000;
+        relay.advance_clock(now_ms, unix);
+        for (world, boundary) in worlds.iter_mut().zip(&boundaries) {
+            boundary.now.set((now_ms >> 4) as u32);
+            boundary.live.borrow_mut().service_pending_commands(
+                &mut world.network_command_queues(),
+                (now_ms >> 4) as u32,
+            );
+        }
+        let mut replies = Vec::new();
+        let mut bytes = [0; MAX_DATAGRAM + 1];
+        while let Ok((length, std::net::SocketAddr::V4(source))) = socket.recv_from(&mut bytes) {
+            replies.extend(
+                relay
+                    .process_at(source, &bytes[..length], unix, now_ms)
+                    .unwrap_or_default(),
+            );
+        }
+        replies.extend(relay.drain_ordering_push(now_ms, unix));
+        for packet in replies {
+            socket.send_to(&packet.bytes, packet.endpoint).unwrap();
+        }
+        // The second PC runs one frame in three 16 ms wakes: 21 a second
+        // against the certificate's 30.
+        for (index, (world, boundary)) in worlds.iter_mut().zip(&boundaries).enumerate() {
+            if index == 0 || step % 3 == 0 {
+                production_frame(world, &rules, boundary);
+            }
+        }
+        for (seen, boundary) in changes.iter_mut().zip(&boundaries) {
+            seen.extend(boundary.live.borrow_mut().take_speed_changes());
+        }
+    }
+    // 21 a second leaves 15 the only rate with a tenth to spare.
+    for (seen, boundary) in changes.iter().zip(&boundaries) {
+        assert_eq!(boundary.live.borrow().relay_frames_per_second(), Some(15));
+        assert_eq!(seen, &[MatchSpeedChange::SlowedBy(1)]);
+    }
+    let [fast, slow] = worlds
+        .each_ref()
+        .map(|world| world.session().binary_frame());
+    assert!(
+        fast - slow <= 2,
+        "the slow client is {} frames behind",
+        fast - slow
+    );
+    for world in &worlds {
+        assert_eq!(
+            world
+                .session()
+                .network_command_timing()
+                .unwrap()
+                .frames_per_second(),
+            30
+        );
+    }
 }
 
 #[test]

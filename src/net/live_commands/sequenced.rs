@@ -6,7 +6,8 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use vera20k_relay_protocol::{
-    ORDERING_BATCH_CAPACITY, OrderEntry, OrderError, OrderEvent, OrderingCertificate,
+    ORDERING_BATCH_CAPACITY, OrderEntry, OrderError, OrderEvent, OrderPace, OrderingCertificate,
+    paced_rates,
 };
 
 use super::{LiveCommandError, StartupAgreement, StartupError};
@@ -35,6 +36,9 @@ const COMMAND_TRACE_HISTORY: usize = 256;
 // repeating it. Silence alone never ends a match.
 const UNREADABLE_LIMIT_MS: u32 = 5_000;
 const UNREADABLE_REPEAT_MS: u32 = 1_000;
+const PACE_REPORT_INTERVAL_MS: i32 = 1_000;
+// Frames must wait here this long before this PC counts as lagging.
+const PACE_BACKLOG_MS: u32 = 2_000;
 
 /// App diagnostics for one local command batch: its first transmission, the
 /// relay's frame assignment and the contiguous receipt of that sealed frame.
@@ -70,6 +74,74 @@ pub struct MultiplayerPauseStatus {
     pub frame: u32,
     pub epoch: u64,
     pub pending: bool,
+}
+
+/// A relay rate change, released when its first frame dispatches. The relay
+/// slows a match whose player cannot keep up (relay README, Pace).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchSpeedChange {
+    /// This House's PC could not keep up, so the match runs slower.
+    SlowedBy(i8),
+    /// The match runs at its own speed again.
+    Normal,
+}
+
+/// This PC's progress against the relay's clock, reported about once a
+/// second. Lagging means frames waited here for `PACE_BACKLOG_MS`; behind
+/// also means two report windows in a row with frames waiting ran fewer
+/// than the clock sealed, but some: a world that ran none was held by
+/// something other than speed.
+#[derive(Debug, Default)]
+struct PaceMeter {
+    backlog_since: Option<u32>,
+    last_report: Option<u32>,
+    dispatched: u32,
+    slow_windows: u8,
+    // A minimised or covered window may be throttled by its system.
+    hidden: bool,
+}
+
+impl PaceMeter {
+    /// Samples the frames waiting here and returns the report due now, with
+    /// the frames run per second since the last report.
+    fn report(
+        &mut self,
+        now: u32,
+        buffered: usize,
+        pace_fps: u16,
+        measured: bool,
+    ) -> Option<(OrderPace, u16)> {
+        if measured && !self.hidden && buffered >= usize::from(pace_fps / 8).max(4) {
+            self.backlog_since.get_or_insert(now);
+        } else {
+            self.backlog_since = None;
+        }
+        if !service_due(self.last_report, now, PACE_REPORT_INTERVAL_MS) {
+            return None;
+        }
+        let ran = self.last_report.map_or(pace_fps, |last| {
+            (u64::from(self.dispatched) * 1000 / u64::from(now.wrapping_sub(last).max(1)))
+                .min(u64::from(u16::MAX)) as u16
+        });
+        self.slow_windows = if ran > 0 && ran < pace_fps && self.backlog_since.is_some() {
+            self.slow_windows.saturating_add(1)
+        } else {
+            0
+        };
+        self.last_report = Some(now);
+        self.dispatched = 0;
+        let lagging = self
+            .backlog_since
+            .is_some_and(|since| now.wrapping_sub(since) >= PACE_BACKLOG_MS);
+        Some((
+            match (lagging, self.slow_windows >= 2) {
+                (false, _) => OrderPace::KeepingUp,
+                (true, true) => OrderPace::Behind,
+                (true, false) => OrderPace::CatchingUp,
+            },
+            ran,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -119,6 +191,10 @@ fn trace_mut(
         .find(|trace| trace.batch_id == batch_id)
 }
 
+/// How long a running match's ordered stream may stand still before the
+/// client shows Reconnecting (and Quit leaves without the stream).
+const STALL_MS: u32 = 5_000;
+
 fn service_due(last: Option<u32>, now: u32, interval: i32) -> bool {
     last.is_none_or(|last| super::probe_due(last, now, interval))
 }
@@ -154,6 +230,8 @@ struct CommittedFrame {
     reports: Vec<(u32, u32)>,
     // Remote Houses whose connection the relay ended in this frame.
     lost: Vec<i8>,
+    // A rate marker after the previous frame.
+    speed: Option<MatchSpeedChange>,
 }
 
 #[derive(Debug)]
@@ -161,11 +239,19 @@ pub(super) struct SequencedSession {
     houses: [Option<i8>; 30],
     local_source: u8,
     agreement: [u8; 32],
-    pub(super) fps: u16,
+    /// The certificate's rate, which the simulation keeps.
+    fps: u16,
+    /// The relay's current sealing rate, which paces playout.
+    pub(super) pace_fps: u16,
+    pace_meter: PaceMeter,
     started: bool,
     head_frame: u32,
     error: Option<LiveCommandError>,
     last_response: Option<u32>,
+    /// When the ordered stream last moved (its head, next sequence or our
+    /// cursor). A relay can keep answering while its stream stands still:
+    /// federated relays whose link failed.
+    last_progress: Option<(u32, (u32, u64, u64))>,
     first_service: Option<u32>,
     statuses: u64,
     unreadable: Option<Unreadable>,
@@ -196,6 +282,10 @@ pub(super) struct SequencedSession {
     // frame and the rest of its stream is ignored.
     refused: u32,
     next_batch: u64,
+    // This process replaces one that left a match under way. Its batch counter
+    // lies in the history it is reading, so it submits nothing until caught up.
+    restoring: bool,
+    last_restore_log: Option<u32>,
     accepted_batch: u64,
     submissions: VecDeque<Submission>,
     sample_sent: Option<u32>,
@@ -207,6 +297,7 @@ pub(super) struct SequencedSession {
     command_traces: VecDeque<CommandDeliveryTrace>,
     // Released when their frame dispatches; the app posts each line.
     lost: Vec<i8>,
+    speed_changes: Vec<MatchSpeedChange>,
 }
 
 impl SequencedSession {
@@ -257,10 +348,13 @@ impl SequencedSession {
             local_source,
             agreement,
             fps,
+            pace_fps: fps,
+            pace_meter: PaceMeter::default(),
             started: false,
             head_frame: 0,
             error: None,
             last_response: None,
+            last_progress: None,
             first_service: None,
             statuses: 0,
             unreadable: None,
@@ -292,6 +386,8 @@ impl SequencedSession {
             last_batch: [0; 30],
             refused: 0,
             next_batch: 1,
+            restoring: false,
+            last_restore_log: None,
             accepted_batch: 0,
             submissions: VecDeque::new(),
             sample_sent: None,
@@ -300,12 +396,50 @@ impl SequencedSession {
             sent_commands: 0,
             command_traces: VecDeque::new(),
             lost: Vec::new(),
+            speed_changes: Vec::new(),
         }
+    }
+
+    pub(super) fn begin_restore(&mut self) {
+        self.restoring = true;
+    }
+
+    pub(super) fn restoring(&self) -> bool {
+        self.restoring
+    }
+
+    /// Ends a restore once the world at `frame` has reached the shared one.
+    /// A status can only postdate the last batch the departed process sent,
+    /// so history read past that status holds this source's final batch ID.
+    fn settle_restore(&mut self, frame: u32) -> Result<(), SequencedError> {
+        if self.statuses > 0
+            && self.next_sequence >= self.remote_next_sequence
+            && self.head_frame.saturating_sub(frame) <= u32::from(self.pace_fps) / 2
+        {
+            let last = self.last_batch[usize::from(self.local_source)];
+            self.next_batch = last.checked_add(1).ok_or(SequencedError::InvalidTimeline)?;
+            self.accepted_batch = last;
+            self.restoring = false;
+            log::info!(
+                "Rejoined the match at frame {frame}; next batch {}",
+                self.next_batch
+            );
+        }
+        Ok(())
     }
 
     /// Remote Houses whose connection the relay ended in dispatched frames.
     pub(super) fn take_lost(&mut self) -> Vec<i8> {
         std::mem::take(&mut self.lost)
+    }
+
+    /// The relay's rate changes in dispatched frames.
+    pub(super) fn take_speed_changes(&mut self) -> Vec<MatchSpeedChange> {
+        std::mem::take(&mut self.speed_changes)
+    }
+
+    pub(super) fn set_presentation_hidden(&mut self, hidden: bool) {
+        self.pace_meter.hidden = hidden;
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -396,6 +530,21 @@ impl SequencedSession {
 
     pub(super) fn service(&mut self, transport: &mut LanUdpTransport, now: u32) {
         self.first_service.get_or_insert(now);
+        if self.restoring && service_due(self.last_restore_log, now, 5000) {
+            self.last_restore_log = Some(now);
+            log::info!(
+                "Rejoin: frame {:?}, frontier {}, head {}, next sequence {} of {}, buffered {}, started {}, statuses {}, push {:?}",
+                self.current.map(|(context, done)| (context.frame, done)),
+                self.frontier(),
+                self.head_frame,
+                self.next_sequence,
+                self.remote_next_sequence,
+                self.frames.len(),
+                self.started,
+                self.statuses,
+                self.push,
+            );
+        }
         while let Some(received) = transport.pop_ordering_received_with_time() {
             self.last_response = Some(now);
             if matches!(received.event, OrderEvent::Unrecognized) {
@@ -420,8 +569,17 @@ impl SequencedSession {
             self.error = Some(error.into());
             return;
         }
+        let position = (
+            self.head_frame,
+            self.remote_next_sequence,
+            self.next_sequence,
+        );
+        if self.last_progress.is_none_or(|(_, last)| last != position) {
+            self.last_progress = Some((now, position));
+        }
         self.service_delivery(transport, now);
         self.service_pause(transport, now);
+        self.service_pace(transport, now);
         for pending in &mut self.submissions {
             // An unready route or failed local send cannot start the remote
             // receipt timer. The next service retries the same retained bytes.
@@ -475,6 +633,20 @@ impl SequencedSession {
         {
             self.last_pause_control = Some(now);
             self.pause_probe_attempts = self.pause_probe_attempts.saturating_add(1);
+        }
+    }
+
+    fn service_pace(&mut self, transport: &mut LanUdpTransport, now: u32) {
+        if !self.started {
+            return;
+        }
+        let measured = !self.restoring && !self.pause.paused && !self.keep_running_for_exit;
+        if let Some((pace, ran)) =
+            self.pace_meter
+                .report(now, self.frames.len(), self.pace_fps, measured)
+        {
+            // A lost report only goes stale at the relay.
+            let _ = transport.report_ordering_pace(pace, ran);
         }
     }
 
@@ -552,7 +724,7 @@ impl SequencedSession {
         // healthy delivery must not turn every watermark into another Pull.
         let gap_ready = if gap {
             let since = *self.repair_gap_since.get_or_insert(now);
-            now.wrapping_sub(since) >= 1000_u32.div_ceil(u32::from(self.fps))
+            now.wrapping_sub(since) >= 1000_u32.div_ceil(u32::from(self.pace_fps))
         } else {
             self.repair_gap_since = None;
             false
@@ -571,6 +743,8 @@ impl SequencedSession {
         if pull_needed && service_due(self.last_control, now, interval) {
             if !self.started {
                 let _ = transport.configure_ordering(self.agreement);
+                // Before the first request that can bring back an entry.
+                transport.set_ordering_restore(self.restoring);
             }
             if transport.pull_ordering(self.next_sequence).is_ok() {
                 self.last_control = Some(now);
@@ -648,6 +822,11 @@ impl SequencedSession {
                 if status.oldest_seq > self.next_sequence {
                     return Err(SequencedError::HistoryExpired);
                 }
+                if status.started && !self.started {
+                    // Frame 1 is sealed a frame period after the start, so
+                    // the stall clock starts now, not when loading did.
+                    self.last_progress = None;
+                }
                 self.started |= status.started;
                 self.head_frame = self.head_frame.max(status.head_frame);
                 self.remote_next_sequence = self.remote_next_sequence.max(status.next_seq);
@@ -711,7 +890,9 @@ impl SequencedSession {
                         frame,
                         ..
                     } => {
-                        if *source == self.local_source {
+                        // A returning process's own source in the stream is
+                        // the process it replaces.
+                        if *source == self.local_source && !self.restoring {
                             self.accept_through(*batch_id)?;
                             self.trace_assignment(*batch_id, *frame, received_at);
                         }
@@ -719,7 +900,8 @@ impl SequencedSession {
                     }
                     OrderEntry::FrameEnd { sequence, .. }
                     | OrderEntry::Departure { sequence, .. }
-                    | OrderEntry::Pause { sequence, .. } => *sequence,
+                    | OrderEntry::Pause { sequence, .. }
+                    | OrderEntry::Rate { sequence, .. } => *sequence,
                 };
                 if sequence >= self.next_sequence && sequence - self.next_sequence < REORDER_WINDOW
                 {
@@ -772,8 +954,20 @@ impl SequencedSession {
         if now.wrapping_sub(last) > 3_000 {
             return Some(super::NetworkRecoveryStatus::Reconnecting);
         }
+        // Every running frame ends with a FrameEnd entry, so a started,
+        // unpaused match whose stream has stood still while this client
+        // waits for it is stalled even though the relay answers.
+        if self.started
+            && !self.pause.paused
+            && current_frame >= self.head_frame
+            && self
+                .last_progress
+                .is_some_and(|(at, _)| now.wrapping_sub(at) > STALL_MS)
+        {
+            return Some(super::NetworkRecoveryStatus::Reconnecting);
+        }
         let frames = self.head_frame.saturating_sub(current_frame);
-        (frames > u32::from(self.fps) / 2)
+        (frames > u32::from(self.pace_fps) / 2)
             .then_some(super::NetworkRecoveryStatus::CatchingUp { frames })
     }
 
@@ -904,7 +1098,7 @@ impl SequencedSession {
                     self.latest_frame_receipt = Some(SequencedTiming {
                         frame,
                         received_at,
-                        frames_per_second: self.fps,
+                        frames_per_second: self.pace_fps,
                         clock_epoch: self.pause.epoch,
                     });
                 }
@@ -940,11 +1134,42 @@ impl SequencedSession {
                         self.latest_frame_receipt = Some(SequencedTiming {
                             frame,
                             received_at: self.contiguous_received_at.expect("consumed resume"),
-                            frames_per_second: self.fps,
+                            frames_per_second: self.pace_fps,
                             clock_epoch: epoch,
                         });
                     }
                     self.finish_pause_request();
+                }
+                OrderEntry::Rate {
+                    frame,
+                    frames_per_second,
+                    source,
+                    ..
+                } => {
+                    // Slowdowns name a player; raises name nobody.
+                    let slowed_by = source.map(|source| self.houses[usize::from(source)]);
+                    if frame.checked_add(1) != Some(self.assembling.frame)
+                        || !self.assembling.records.is_empty()
+                        || !self.assembling.reports.is_empty()
+                        || !paced_rates(self.fps).contains(&frames_per_second)
+                        || frames_per_second == self.pace_fps
+                        || slowed_by.is_some() != (frames_per_second < self.pace_fps)
+                        || slowed_by.is_some_and(|house| house.is_none())
+                    {
+                        return Err(SequencedError::InvalidTimeline);
+                    }
+                    self.pace_fps = frames_per_second;
+                    self.assembling.speed = match slowed_by.flatten() {
+                        Some(house) => Some(MatchSpeedChange::SlowedBy(house)),
+                        None => (frames_per_second == self.fps).then_some(MatchSpeedChange::Normal),
+                    };
+                    // Later frames arrive at the new rate from this receipt.
+                    self.latest_frame_receipt = Some(SequencedTiming {
+                        frame,
+                        received_at: self.contiguous_received_at.expect("consumed rate marker"),
+                        frames_per_second,
+                        clock_epoch: self.pause.epoch,
+                    });
                 }
             }
         }
@@ -981,6 +1206,26 @@ impl SequencedSession {
         context: NetworkQueueContext,
         now: u32,
     ) -> Result<(), LiveCommandError> {
+        if self.restoring {
+            self.settle_restore(context.frame)?;
+            if !self.restoring {
+                transport.set_ordering_restore(false);
+            }
+        }
+        if self.restoring {
+            // Orders given to a world still replaying the past are dropped
+            // here, the one boundary every local command crosses.
+            let records: Vec<_> = queues
+                .local_records_after(std::iter::empty())
+                .map_err(super::CommandExchangeError::from)?
+                .into_iter()
+                .cloned()
+                .collect();
+            queues
+                .commit_local_submission(&records)
+                .map_err(super::CommandExchangeError::from)?;
+            return Ok(());
+        }
         while self
             .submissions
             .front()
@@ -1137,6 +1382,11 @@ impl SequencedSession {
             }
         }
         self.lost.extend(frame.lost);
+        self.pace_meter.dispatched = self.pace_meter.dispatched.saturating_add(1);
+        // A rejoining world replays the past without its lines.
+        if !self.restoring {
+            self.speed_changes.extend(frame.speed);
+        }
         self.current = Some((context, true));
         Ok(NetworkQueuePass::Dispatch)
     }
@@ -1211,6 +1461,102 @@ mod service_clock_tests {
         assert!(service_due(Some(1018), 1118, 100));
         assert!(!service_due(Some(u32::MAX - 50), 48, 100));
         assert!(service_due(Some(u32::MAX - 50), 49, 100));
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use vera20k_relay_protocol::OrderStatus;
+
+    fn status(next_seq: u64, head_frame: u32) -> OrderEvent {
+        OrderEvent::Status(OrderStatus {
+            head_frame,
+            oldest_seq: 1,
+            next_seq,
+            active_sources: 3,
+            tick_hz: 30,
+            start_delay_ms: 0,
+            started: true,
+        })
+    }
+
+    /// The counter the departed process reached comes from the history: its
+    /// own first ID would make the relay end this client's match (`BatchGap`).
+    #[test]
+    fn resumes_the_batch_counter_only_once_the_world_caught_up() {
+        let mut houses = [None; 30];
+        houses[..2].copy_from_slice(&[Some(0), Some(1)]);
+        let mut session = SequencedSession::with_roster(houses, 0, [7; 32], 30);
+        session.begin_restore();
+        session.last_batch[0] = 41;
+        session.next_sequence = 500;
+
+        // Nothing is known of the relay yet.
+        session.settle_restore(0).unwrap();
+        assert!(session.restoring());
+        session.receive(status(900, 1000), Instant::now()).unwrap();
+        // History still to read, then a world still far behind it.
+        session.settle_restore(1000).unwrap();
+        assert!(session.restoring());
+        session.next_sequence = 900;
+        session.settle_restore(900).unwrap();
+        assert!(session.restoring());
+
+        session.settle_restore(990).unwrap();
+        assert!(!session.restoring());
+        assert_eq!((session.next_batch, session.accepted_batch), (42, 41));
+    }
+}
+
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+
+    /// Federated relays whose link failed still answer, but the ordered
+    /// stream stops: a running, unpaused match shows Reconnecting, so Quit
+    /// leaves without waiting on that stream.
+    #[test]
+    fn a_stream_that_stands_still_while_its_relay_answers_is_reconnecting() {
+        let mut houses = [None; 30];
+        houses[..2].copy_from_slice(&[Some(0), Some(1)]);
+        let mut session = SequencedSession::with_roster(houses, 0, [0; 32], 30);
+        session.started = true;
+        session.head_frame = 40;
+        session.last_progress = Some((1_000, (40, 90, 90)));
+        session.last_response = Some(1_000 + STALL_MS);
+        assert_eq!(session.recovery_status(1_000 + STALL_MS, 40), None);
+        assert_eq!(
+            session.recovery_status(1_000 + STALL_MS + 1, 40),
+            Some(super::super::NetworkRecoveryStatus::Reconnecting)
+        );
+        session.pause.paused = true;
+        assert_eq!(session.recovery_status(1_000 + STALL_MS + 1, 40), None);
+    }
+
+    /// Loading leaves the position still for many seconds; the start itself
+    /// must not read as a stall before frame 1 arrives.
+    #[test]
+    fn the_start_of_a_match_is_not_a_stall() {
+        let mut houses = [None; 30];
+        houses[..2].copy_from_slice(&[Some(0), Some(1)]);
+        let mut session = SequencedSession::with_roster(houses, 0, [0; 32], 30);
+        session.last_progress = Some((1_000, (0, 1, 1)));
+        let now = 1_000 + 40_000;
+        session.last_response = Some(now);
+        let status = vera20k_relay_protocol::OrderStatus {
+            head_frame: 0,
+            oldest_seq: 1,
+            next_seq: 1,
+            active_sources: 3,
+            tick_hz: 30,
+            start_delay_ms: 0,
+            started: true,
+        };
+        session
+            .receive(OrderEvent::Status(status), Instant::now())
+            .unwrap();
+        assert_eq!(session.recovery_status(now, 0), None);
     }
 }
 
@@ -1468,5 +1814,80 @@ mod departure_tests {
             .collect();
         assert!(session.frames.len() > 2);
         assert_eq!(records, [(EXIT_OPCODE, 1)]);
+    }
+}
+
+#[cfg(test)]
+mod pace_tests {
+    use super::*;
+
+    /// Lagging needs frames waiting two seconds; behind also needs two report
+    /// windows in a row that ran some frames but fewer than the clock sealed.
+    /// A world that ran none, or one running faster, only catches up; a
+    /// hidden window starts over.
+    #[test]
+    fn a_pc_is_behind_only_while_frames_wait_and_it_runs_some_but_too_few() {
+        use OrderPace::*;
+        let mut meter = PaceMeter::default();
+        let window = |meter: &mut PaceMeter, now: u32, ran: u32| {
+            meter.dispatched = ran;
+            meter.report(now, 10, 30, true)
+        };
+        assert_eq!(meter.report(0, 10, 30, true), Some((KeepingUp, 30)));
+        assert_eq!(meter.report(500, 3, 30, true), None);
+        assert_eq!(window(&mut meter, 1000, 20), Some((KeepingUp, 20)));
+        assert_eq!(window(&mut meter, 2000, 20), Some((KeepingUp, 20)));
+        assert_eq!(window(&mut meter, 3000, 20), Some((Behind, 20)));
+        assert_eq!(window(&mut meter, 4000, 0), Some((CatchingUp, 0)));
+        assert_eq!(window(&mut meter, 5000, 20), Some((CatchingUp, 20)));
+        assert_eq!(window(&mut meter, 6000, 60), Some((CatchingUp, 60)));
+        meter.hidden = true;
+        assert_eq!(window(&mut meter, 7000, 20), Some((KeepingUp, 20)));
+    }
+
+    /// A rate marker paces the frames after it, keeps the simulation's
+    /// rate, and names the slow player in the first frame it applies to.
+    #[test]
+    fn a_rate_marker_paces_later_frames_and_names_the_slow_player() {
+        let mut houses = [None; 30];
+        houses[..2].copy_from_slice(&[Some(0), Some(4)]);
+        let mut session = SequencedSession::with_roster(houses, 0, [0; 32], 30);
+        let rate = |sequence, frame, frames_per_second, source| OrderEntry::Rate {
+            sequence,
+            frame,
+            frames_per_second,
+            source,
+        };
+        let frame_end = |sequence, frame| OrderEntry::FrameEnd { sequence, frame };
+        for entry in [
+            frame_end(1, 1),
+            rate(2, 1, 15, Some(1)),
+            frame_end(3, 2),
+            rate(4, 2, 30, None),
+            frame_end(5, 3),
+        ] {
+            session
+                .receive(OrderEvent::Entry(entry), Instant::now())
+                .unwrap();
+        }
+        session.assemble().unwrap();
+        let speeds: Vec<_> = session.frames.iter().map(|frame| frame.speed).collect();
+        assert_eq!(
+            speeds,
+            [
+                None,
+                Some(MatchSpeedChange::SlowedBy(4)),
+                Some(MatchSpeedChange::Normal)
+            ]
+        );
+        assert_eq!((session.fps, session.pace_fps), (30, 30));
+        // Ten frames a second is three rows below this match's thirty.
+        session
+            .receive(OrderEvent::Entry(rate(6, 3, 10, Some(1))), Instant::now())
+            .unwrap();
+        assert!(matches!(
+            session.assemble(),
+            Err(SequencedError::InvalidTimeline)
+        ));
     }
 }

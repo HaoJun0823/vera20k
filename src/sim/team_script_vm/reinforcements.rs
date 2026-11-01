@@ -28,14 +28,17 @@ use crate::sim::world::{FrameEffects, PlacementEvidence, Simulation, UninitConte
 
 impl Simulation {
     /// GetHouse6F2070: fixed Country attachment, otherwise the native
-    /// Scenario1180 start-slot mapping used by Player@A..H510ED0. Country
+    /// Scenario1180 start-slot mapping used by Player@A..H510ED0 (VERA
+    /// extends this to A..AD). Country
     /// resolution uses House array order502D30, never sorted owner names.
     fn team_type_house(&self, team_type: InternedId, rules: &RuleSet) -> Option<InternedId> {
         match self.team_script_vm.team_type_ini.get(&team_type)?.house? {
             TeamTypeHouse::Country(country) => self.house_by_country_index(country, rules),
-            TeamTypeHouse::PlayerAt(slot) => {
-                self.house_by_trigger_selector(0x117B + i32::from(slot), rules)
-            }
+            TeamTypeHouse::PlayerAt(slot) => self.house_by_trigger_selector(
+                crate::rules::native_processing::HOUSE_TYPE_PLAYER_AT_SELECTORS.start
+                    + i32::from(slot),
+                rules,
+            ),
         }
     }
 
@@ -244,11 +247,9 @@ impl Simulation {
             .current_house()
             .filter(|&current| {
                 placed
-                    && crate::map::houses::is_allied_with(
-                        self.house_alliances.as_map(),
-                        self.interner.resolve(owner),
-                        self.interner.resolve(current),
-                    )
+                    && self
+                        .house_alliances
+                        .is_allied(&self.interner, owner, current)
             })
             .map(|_| origin);
         //65DB9C returns true regardless of PlaceMembers' result. Ordinary
@@ -493,11 +494,8 @@ impl Simulation {
             self.session
                 .current_house()
                 .filter(|&current| {
-                    crate::map::houses::is_allied_with(
-                        self.house_alliances.as_map(),
-                        self.interner.resolve(owner),
-                        self.interner.resolve(current),
-                    )
+                    self.house_alliances
+                        .is_allied(&self.interner, owner, current)
                 })
                 .map(|_| origin)
         });

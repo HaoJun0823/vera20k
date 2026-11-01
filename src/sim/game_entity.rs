@@ -2192,26 +2192,75 @@ impl GameEntity {
         self.fall.rate()
     }
 
+    /// Object+84: the retained attached-Anim flag consumed by ObjectAI5F3FB2.
     pub(crate) fn is_parachuted(&self) -> bool {
         self.fall.parachuted()
+    }
+
+    pub(crate) fn set_attached_anim_flag(&mut self, attached: bool) {
+        self.fall.set_attached_anim_flag(attached);
     }
 
     pub(crate) fn parachute_animation(&self) -> Option<u64> {
         self.fall.parachute_animation()
     }
 
-    pub(crate) fn set_parachute_animation(&mut self, animation: Option<u64>) {
-        self.fall.set_parachute_animation(animation);
+    /// Paradrop5F5AF1 publishes the new canopy at Object+88, through
+    /// [`EntityStore::write_held_anim`](crate::sim::entity_store::EntityStore::write_held_anim).
+    pub(crate) fn hold_parachute_animation(
+        &mut self,
+        animation: u64,
+        _: crate::sim::entity_store::AnimHolderAuthority,
+    ) {
+        self.fall.set_parachute_animation(Some(animation));
+    }
+
+    /// Paradrop without a constructed canopy leaves Object+88 empty.
+    pub(crate) fn clear_parachute_animation(&mut self) {
+        self.fall.set_parachute_animation(None);
     }
 
     pub(crate) fn parachute_animation_expired(&mut self, animation: u64) {
         self.fall.parachute_animation_expired(animation);
     }
 
-    /// Paradrop5F5940 raises +84/+8D and resets +2C before placement.
+    /// The Anims held in the fields `Simulation::notify_anim_pointer_expired`
+    /// clears when an Anim expires: Object+88's parachute (the owner's
+    /// Detach710410 reaching5F6DA0), the Ares EMP sparkle, the Ares
+    /// attached-effect Anims (10058770) and its ParasiteClass's grapple Anim
+    /// (Anim4's holder announcement725A16..725A4C, PointerExpired
+    /// 62A484..62A490). A field one of those callbacks compares must be
+    /// named here, and stored only through
+    /// [`EntityStore::write_held_anim`](crate::sim::entity_store::EntityStore::write_held_anim).
+    pub(crate) fn held_anims(&self) -> impl Iterator<Item = u64> + '_ {
+        let held = [
+            self.parachute_animation(),
+            self.emp_sparkle(),
+            self.parasite.class().and_then(|class| class.grapple_anim()),
+        ]
+        .into_iter()
+        .flatten();
+        #[cfg(feature = "ares")]
+        let held = held.chain(self.attached_effect_anims());
+        held
+    }
+
+    /// Retail gamemd.exe TechnoClass::Detach710410, then
+    /// ObjectClass::DetachParachute5F6DA0: owner+60 clears only matching
+    /// retained Anim identities, before the child's owner reference clears.
+    pub(crate) fn attached_anim_expired(&mut self, animation: u64) {
+        self.expire_behind_anim(animation);
+        self.drain.expire_anim(animation);
+        self.mind_control.anim_pointer_expired(animation);
+        self.expire_deploy_anim(animation);
+        self.parachute_animation_expired(animation);
+    }
+
+    /// Paradrop5F5965 raises +8D. SetOwnerObject424C30 owns +84; Paradrop
+    /// preserves the rate retained from any preceding fall.
     pub(crate) fn begin_parachute_fall(&mut self, z: i32) {
         self.position.put_z(z);
-        self.fall.begin_parachute();
+        self.fall.begin_fall();
     }
 
     /// DropAsBomb5F416A/71 writes neither Location nor FallRate nor +84.

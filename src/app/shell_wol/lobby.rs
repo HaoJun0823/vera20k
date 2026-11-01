@@ -32,6 +32,8 @@ use crate::app::shell_network_setup as setup;
 use crate::app::{App, AppState};
 use crate::ui::lan_shell::{LanChatLine, LanEditKey};
 use crate::ui::main_menu_dialogs::options::LauncherCue;
+use crate::ui::room_limits::RoomLimitsPress;
+use crate::ui::shell::geom::ShellScale;
 use crate::ui::wol_chat::{self, WolChatFilter, WolChatLine, WolLobbyChatLine};
 use crate::ui::wol_lobby::*;
 use crate::ui::wol_shell::{BOX_NO, BOX_OK, BOX_YES, WAIT_CHECK_STATUS, WAIT_DISCONNECT};
@@ -132,6 +134,9 @@ enum Step {
         name: String,
         deadline: Instant,
     },
+    /// VERA: after a match from VERA's own room, behind a wait box until the
+    /// lobby gives the room back or closes it.
+    ReturningToRoom,
 }
 
 /// Correlation for the online provider only. The lobby step continues to own
@@ -857,6 +862,16 @@ fn show_box(state: &mut AppState, key: &str, yes_no: bool, then: BoxThen) {
     put_box(state, message, then);
 }
 
+/// Replace the open lobby box's text, for a VERA-specific reason.
+pub(super) fn replace_box_body(state: &mut AppState, body: &str) -> bool {
+    let Some((message, _)) = lobby_mut(state).and_then(|lobby| lobby.message.as_mut()) else {
+        return false;
+    };
+    message.body = body.to_owned();
+    state.platform.window.request_redraw();
+    true
+}
+
 fn put_box(state: &mut AppState, message: WolMessageBox, then: BoxThen) {
     let dialog = message.dialog();
     let Some(lobby) = lobby_mut(state) else {
@@ -887,6 +902,8 @@ pub(crate) fn open(state: &mut AppState, postmatch: bool) {
         // 0x007879B6: after a lost connection the runner logs in again
         // first, and a failed login ends it (the welcome).
         visit.relogin = Some(postmatch);
+        // The lost connection took the kept game room with it.
+        visit.back_to_room = false;
         visit.lobby = None;
         visit.page = WolPage::Backdrop { wait: None };
         state.frontend.wol_lobby_art = None;
@@ -909,6 +926,7 @@ pub(crate) fn open(state: &mut AppState, postmatch: bool) {
         .shell_controller
         .reset_to(super::WOL_LOBBY_DIALOG, false);
     let now = Instant::now();
+    let returning = postmatch && visit.back_to_room;
     let resume = !postmatch && visit.lobby.is_some();
     if resume {
         let lobby = visit.lobby.as_deref_mut().expect("checked");
@@ -948,6 +966,9 @@ pub(crate) fn open(state: &mut AppState, postmatch: bool) {
         for line in crate::rules::ini_value::strtok(&motd, &['\n']) {
             message_line(state, line.to_owned());
         }
+        if modern_lobby(state) {
+            message_line(state, JOINED_LOBBY_LINE.to_owned());
+        }
         message_line(state, "\n".to_owned());
     }
     show_wait(state, "GUI:LoginComplete");
@@ -956,9 +977,119 @@ pub(crate) fn open(state: &mut AppState, postmatch: bool) {
     // 0x00787B33..0x00787B53: the user's own squad.
     request_squad(state, 0);
     super::buddies::restart(state);
+    if returning {
+        await_room(state);
+    } else {
+        list_lobbies(state);
+    }
+    state.platform.window.request_redraw();
+}
+
+/// The runner's first list (`ListChannels(0, 0)`) behind `TXT_REQ_CHANLIST`.
+fn list_lobbies(state: &mut AppState) {
     show_wait(state, "TXT_REQ_CHANLIST");
     request(state, WolServiceRequest::ListChannels { kind: 0, flags: 0 });
-    state.platform.window.request_redraw();
+}
+
+/// VERA: the match came from VERA's own room, which stayed joined. The
+/// lobby gives it back once every player has finished; until then a wait
+/// box shows, whose button gives up the room for the chat lobby.
+fn await_room(state: &mut AppState) {
+    if let Some(lobby) = lobby_mut(state) {
+        lobby.step = Step::ReturningToRoom;
+    }
+    // The chat lobbies still come, so leaving the room later finds one.
+    request(state, WolServiceRequest::ListChannels { kind: 0, flags: 0 });
+    show_wait(state, "TXT_REQ_CHANLIST");
+    let cancel = service::resolve(state, "GUI:Cancel");
+    if let Some(wait) = lobby_mut(state).and_then(|lobby| lobby.wait.as_mut()) {
+        wait.text = "Returning to the game room...".to_owned();
+        wait.disconnect = cancel;
+    }
+}
+
+/// VERA: the lobby refused to keep the room (one from before rooms came
+/// back), so a runner waiting for it goes on to the chat lobby.
+pub(super) fn room_refused(state: &mut AppState) {
+    if awaiting_room(state) {
+        room_not_returned(state, false);
+    }
+}
+
+fn awaiting_room(state: &AppState) -> bool {
+    lobby(state).is_some_and(|lobby| matches!(lobby.step, Step::ReturningToRoom))
+}
+
+/// VERA: the kept room is gone (it closed, or the player gave up waiting).
+/// The runner goes on as after any match: the chat-lobby list, then a join.
+/// The join itself leaves the room on the lobby if it is still there.
+fn room_not_returned(state: &mut AppState, closed: bool) {
+    if let Some(visit) = state.frontend.wol.as_mut() {
+        visit.back_to_room = false;
+    }
+    let Some(lobby) = lobby_mut(state) else {
+        return;
+    };
+    lobby.current = None;
+    lobby.members.clear();
+    // The next waits take their own box, with its Disconnect again.
+    lobby.wait = None;
+    lobby.step = Step::ListingLobbies {
+        deadline: Instant::now() + LIST_WAIT,
+    };
+    if closed {
+        message_line(state, "The game room closed.".to_owned());
+    }
+    list_lobbies(state);
+}
+
+/// VERA: the lobby gave back the room this player stayed in, owner first.
+/// Its owner opens the host's setup again from the settings it started
+/// with; the others enter it as after a join.
+fn room_reopened(state: &mut AppState, joined: WolJoined) {
+    if !awaiting_room(state) {
+        // The player gave up waiting; the chat-lobby join leaves the room.
+        log::debug!("WOL room reopened after the wait ended");
+        return;
+    }
+    if let Some(visit) = state.frontend.wol.as_mut() {
+        visit.back_to_room = false;
+    }
+    let me = nickname(state);
+    let host = joined
+        .members
+        .iter()
+        .any(|member| member.flags & MEMBER_OPERATOR != 0 && member.name.eq_ignore_ascii_case(&me));
+    let listed = joined.members.clone();
+    let channel = joined.channel.clone();
+    if let Some(lobby) = lobby_mut(state) {
+        lobby.step = Step::Ready;
+    }
+    sort_lobby(state, |lobby, sort, rank| {
+        lobby.users_listed(channel, joined.members, sort, rank);
+    });
+    request_listed(state, &listed);
+    close_wait(state);
+    if host {
+        let observe = state
+            .frontend
+            .multiplayer_shell_runtime
+            .lan_create_observer();
+        commit_create(state, observe);
+        // The players who came back take rows as joiners would, in the
+        // lobby's order, so the host's options name them all.
+        for name in listed
+            .iter()
+            .map(|member| member.name.clone())
+            .filter(|name| !name.eq_ignore_ascii_case(&me))
+        {
+            if let Err(error) = setup::user_joined(state, name) {
+                log::warn!("WOL reopened room: {error:#}");
+            }
+        }
+    } else {
+        enter_game_as_guest(state);
+    }
 }
 
 fn new_runner(
@@ -1449,6 +1580,31 @@ fn left_channel(state: &mut AppState) {
     message_line(state, text);
 }
 
+/// VERA's line after the MOTD, once per sign-in, in its chat lobby, which
+/// has no `TXT_JOINED_S` line (VERA's own addition; gamemd's reads "You
+/// joined channel %s").
+const JOINED_LOBBY_LINE: &str = "You have joined VERA lobby.";
+
+/// The Room name VERA's online Create Game starts with; OK with it unchanged
+/// creates gamemd's own name.
+fn default_room_name(nickname: &str) -> String {
+    format!("{nickname}'s game")
+}
+
+/// VERA's line for a guest entering a modern-lobby game room (gamemd's C9
+/// prints none): it names the room's operator, its host, and the room's own
+/// name when the host gave it one. `users` is the room's user list without
+/// the local player, as `(name, operator)`.
+fn joined_game_line(users: &[(String, bool)], room: &str) -> Option<String> {
+    let (host, _) = users.iter().find(|(_, operator)| *operator)?;
+    // gamemd's own name is "%s's_game" (`0x00789B60`).
+    Some(if !room.eq_ignore_ascii_case(&format!("{host}'s_game")) {
+        format!("You have joined {host}'s game ({room}).")
+    } else {
+        format!("You have joined {host}'s game.")
+    })
+}
+
 fn modern_lobby(state: &AppState) -> bool {
     lobby(state).is_some_and(|lobby| lobby.ui.is_modern())
 }
@@ -1780,6 +1936,7 @@ pub(crate) fn republish_channel(state: &mut AppState) -> Option<WolChannel> {
 fn create_confirmed(
     state: &mut AppState,
     password: String,
+    name: Option<String>,
     clan: bool,
     limit: bool,
     observe: bool,
@@ -1790,7 +1947,11 @@ fn create_confirmed(
     globals.limit_resolution = limit;
     let lobby_number = globals.lobby_number;
     let ex_info = ex_info(state);
-    let channel = created_channel(&nickname, clan, limit, width, lobby_number, ex_info);
+    let mut channel = created_channel(&nickname, clan, limit, width, lobby_number, ex_info);
+    // VERA's online lobby names the room as its host typed.
+    if let Some(name) = name {
+        channel.name = name;
+    }
     // The key goes to +0xD7 with spaces made '_'; the popup's observe byte
     // becomes the observer preference [0xAC10C8].
     let key = password.replace(' ', "_");
@@ -1932,7 +2093,18 @@ fn popup_action(state: &mut AppState, action: WolPopupAction) {
             clan,
             limit,
             observe,
-        } => create_confirmed(state, password, clan, limit, observe),
+            room,
+            name,
+        } => {
+            if let Some(room) = room {
+                state.frontend.room_limits = room;
+            }
+            // An untouched Room name keeps gamemd's "%s's_game".
+            let default = default_room_name(&nickname(state));
+            let name = name.filter(|name| *name != default);
+            state.frontend.wol_room_name = name.clone();
+            create_confirmed(state, password, name, clan, limit, observe)
+        }
         WolPopupAction::CreateCancelled => {
             if let Some(lobby) = lobby_mut(state) {
                 lobby.ui.popup = None;
@@ -2098,14 +2270,22 @@ pub(super) fn begin_create(state: &mut AppState) {
     }
     let limit = globals.limit_resolution;
     let squad = squad_id(state);
+    let room = state.frontend.room_limits;
+    let name = state
+        .frontend
+        .wol_room_name
+        .clone()
+        .unwrap_or_else(|| default_room_name(&nickname(state)));
     let Some(lobby) = lobby_mut(state) else {
         return;
     };
     lobby.ui.disable_commands();
     lobby.ui.game_list.selected = None;
     lobby.covered = true;
-    // +0x13 starts as [0xAC10C8] == 1.
-    lobby.ui.popup = Some(WolLobbyPopup::create(width, limit, squad, observer));
+    // +0x13 starts as [0xAC10C8] == 1. VERA's lobby also offers its room's
+    // limits and name, from the host's last choice.
+    let room = lobby.ui.is_modern().then_some((room, name.as_str()));
+    lobby.ui.popup = Some(WolLobbyPopup::create(width, limit, squad, observer, room));
     state
         .frontend
         .shell_controller
@@ -2274,6 +2454,12 @@ pub(super) fn box_command(state: &mut AppState, control: u16) {
         }
         WAIT_DISCONNECT
             if lobby.wait.as_ref().is_some_and(|wait| wait.shown)
+                && matches!(lobby.step, Step::ReturningToRoom) =>
+        {
+            room_not_returned(state, false);
+        }
+        WAIT_DISCONNECT
+            if lobby.wait.as_ref().is_some_and(|wait| wait.shown)
                 && lobby.runner == Runner::QuickMatch =>
         {
             // Event 0: the runner's exit.
@@ -2410,46 +2596,14 @@ fn joined(state: &mut AppState, result: Result<WolJoined, u32>) {
     });
     request_listed(state, &listed);
     if joined.channel.kind == GAME_CHANNEL {
-        // The guest dialog C9 over a hidden 0x113; the observer preference
-        // [0xAC10C8] makes the local node an observer.
         close_wait(state);
-        let observer = state.frontend.multiplayer_shell_runtime.lan_observer();
-        let mut local = state.frontend.multiplayer_shell_runtime.local_participant();
-        if observer {
-            local.role = crate::skirmish_launch::LaunchHumanRole::Observer;
-        }
-        // [0x8316A4] = 7 until the host's "O<n>" arrives.
-        App::open_wol_joined_setup(state, local, Some(7));
-        // The user-list sink 0x7A7110: the others as nodes, then the
-        // persona's Country and Color as the MultiPlayer picks
-        // (0x69B760/0x69B7E0) and the first R.
-        let me = nickname(state);
-        let users: Vec<(String, bool)> = lobby(state)
-            .map(|lobby| {
-                lobby
-                    .members
-                    .iter()
-                    .filter(|member| !member.name.eq_ignore_ascii_case(&me))
-                    .map(|member| (member.name.clone(), member.flags & MEMBER_OPERATOR != 0))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if setup::guest_users_listed(state, &users) {
-            super::persona::take_side_and_color(state, &me);
-            setup::send_first_choices(state);
-            if quick_match_runner(state) {
-                super::quick_match::game_joined(state, true);
-            }
-        } else {
-            // 0x7A782A..0x7A788D: no operator, the local tail 0x785740.
-            setup_channel_left(state);
-        }
+        enter_game_as_guest(state);
         return;
     }
     // A chat lobby: its number (0x7A5EFD, any type-0 name), the
-    // TXT_JOINED_S line (not in the modern lobby, which never names its one
-    // chat lobby), the controls back with Join as the selected game admits
-    // for either role.
+    // TXT_JOINED_S line (not in the modern lobby, which prints its own
+    // line once with the MOTD), the controls back with Join as the selected
+    // game admits for either role.
     state.frontend.wol_lobby_globals.lobby_number = joined.channel.joined_lobby_number();
     if quick_match_runner(state) {
         // 0x7A5E86..0x7A5EC8: no TXT_JOINED_S in modes 1-3; the wait closes
@@ -2485,6 +2639,50 @@ fn joined(state: &mut AppState, result: Result<WolJoined, u32>) {
     }
 }
 
+/// A joined game channel: the guest dialog C9 over a hidden 0x113; the
+/// observer preference [0xAC10C8] makes the local node an observer.
+fn enter_game_as_guest(state: &mut AppState) {
+    let observer = state.frontend.multiplayer_shell_runtime.lan_observer();
+    let mut local = state.frontend.multiplayer_shell_runtime.local_participant();
+    if observer {
+        local.role = crate::skirmish_launch::LaunchHumanRole::Observer;
+    }
+    // [0x8316A4] = 7 until the host's "O<n>" arrives.
+    App::open_wol_joined_setup(state, local, Some(7));
+    // The user-list sink 0x7A7110: the others as nodes, then the
+    // persona's Country and Color as the MultiPlayer picks
+    // (0x69B760/0x69B7E0) and the first R.
+    let me = nickname(state);
+    let users: Vec<(String, bool)> = lobby(state)
+        .map(|lobby| {
+            lobby
+                .members
+                .iter()
+                .filter(|member| !member.name.eq_ignore_ascii_case(&me))
+                .map(|member| (member.name.clone(), member.flags & MEMBER_OPERATOR != 0))
+                .collect()
+        })
+        .unwrap_or_default();
+    let modern = modern_lobby(state) && !quick_match_runner(state);
+    if setup::guest_users_listed(state, &users) {
+        super::persona::take_side_and_color(state, &me);
+        setup::send_first_choices(state);
+        if quick_match_runner(state) {
+            super::quick_match::game_joined(state, true);
+        }
+        let room = lobby(state)
+            .and_then(|lobby| lobby.current.as_ref())
+            .map(|channel| channel.name.clone())
+            .unwrap_or_default();
+        if modern && let Some(line) = joined_game_line(&users, &room) {
+            message_line(state, line);
+        }
+    } else {
+        // 0x7A782A..0x7A788D: no operator, the local tail 0x785740.
+        setup_channel_left(state);
+    }
+}
+
 /// `0x007A5890`'s HRESULT branches in Custom Match.
 /// How `0x007A5890` answers a failed join.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2505,6 +2703,15 @@ enum JoinErrorReply {
     Chat,
 }
 
+/// VERA's lobby refused a join because the host kicked this player within
+/// five minutes: 0x80040072 with the HRESULT customer bit, so it shows the
+/// join ban's text without the channel ban's exit from the lobby.
+pub(crate) const KEPT_OUT_JOIN_ERROR: u32 = 0xA004_0072;
+
+/// VERA's lobby refused a Create because another open room has that name.
+pub(crate) const ROOM_NAME_TAKEN: u32 = 0xA004_0073;
+const ROOM_NAME_TAKEN_TEXT: &str = "That room name is already in use. Choose another one.";
+
 fn join_error_reply(code: u32, pending: bool) -> JoinErrorReply {
     let reply = |key, close, forget, next_lobby| JoinErrorReply::Box {
         key,
@@ -2518,6 +2725,7 @@ fn join_error_reply(code: u32, pending: bool) -> JoinErrorReply {
         0x8004_0071 => reply("TXT_BADPASS", false, false, false),
         0x8004_006E => reply("TXT_CHANNEL_FULL", !pending, false, false),
         0x8004_0072 => reply("TXT_JOINBAN", true, false, true),
+        KEPT_OUT_JOIN_ERROR => reply("TXT_JOINBAN", false, false, false),
         _ => JoinErrorReply::Chat,
     }
 }
@@ -2606,6 +2814,9 @@ fn created(state: &mut AppState, result: Result<Vec<WolMember>, u32>) {
                 BoxThen::CreateFailed
             };
             show_box(state, key, false, then);
+            if code == ROOM_NAME_TAKEN {
+                replace_box_body(state, ROOM_NAME_TAKEN_TEXT);
+            }
         }
         Ok(members) => {
             close_wait(state);
@@ -2763,6 +2974,8 @@ pub(super) fn service_event(state: &mut AppState, event: WolServiceEvent) {
                 log::warn!("WOL game-channel leave: {error:#}");
             }
         }
+        WolServiceEvent::RoomReopened(joined) => room_reopened(state, joined),
+        WolServiceEvent::ChannelLeft if awaiting_room(state) => room_not_returned(state, true),
         WolServiceEvent::ChannelLeft if in_setup_channel(state) => setup_channel_left(state),
         WolServiceEvent::ChannelLeft => leave_finished(state, true),
         WolServiceEvent::PlayerChoices {
@@ -3279,6 +3492,8 @@ pub(super) fn page_received(state: &mut AppState, from: WolMember, text: Vec<u16
 
 pub(crate) fn update_geometry(state: &mut AppState) {
     let layout = layout(state);
+    let create_rects = create_layout(state);
+    let password_rect = password_layout(state).password;
     let font = &state.renderer.bit_font;
     let Some(lobby) = state
         .frontend
@@ -3303,27 +3518,23 @@ pub(crate) fn update_geometry(state: &mut AppState) {
         .scroll_to_caret((scale.base_rect(layout.chat).w - 3).max(0) as u32, |text| {
             font.text_width(text)
         });
-    let modern = ui.is_modern();
     if let Some(popup) = ui.popup.as_mut() {
-        let (width, height) = (
-            state.renderer.gpu.config.width as i32,
-            state.renderer.gpu.config.height as i32,
-        );
-        let rect = match popup.kind {
-            WolPopupKind::Create(_) => {
-                crate::ui::shell::modal::wol_create_game_layout(width, height, modern).password
-            }
-            WolPopupKind::Password(_) => {
-                crate::ui::shell::modal::wol_channel_password_layout(width, height).password
-            }
-        };
-        let available = (rect.w - 3).max(0) as u32;
+        // Text widths are in the box's authored pixels.
+        let available =
+            |rect: crate::ui::shell::geom::RectPx| (scale.base_rect(rect).w - 3).max(0) as u32;
         match &mut popup.kind {
-            WolPopupKind::Create(create) => create
-                .password
-                .scroll_to_caret(available, |text| font.text_width(text)),
+            WolPopupKind::Create(create) => {
+                create
+                    .password
+                    .scroll_to_caret(available(create_rects.password), |text| {
+                        font.text_width(text)
+                    });
+                if let (Some(name), Some((_, rect))) = (create.name.as_mut(), create_rects.name) {
+                    name.scroll_to_caret(available(rect), |text| font.text_width(text));
+                }
+            }
             WolPopupKind::Password(edit) => {
-                edit.scroll_to_caret(available, |text| font.text_width(text))
+                edit.scroll_to_caret(available(password_rect), |text| font.text_width(text))
             }
         }
     }
@@ -3380,14 +3591,9 @@ pub(crate) fn key_press(state: &mut AppState, code: Option<KeyCode>, text: Optio
 /// The popup control under the pointer.
 fn popup_control(state: &AppState, popup: &WolLobbyPopup) -> Option<u16> {
     let (x, y) = state.match_state.input.cursor_px();
-    let (width, height) = (
-        state.renderer.gpu.config.width as i32,
-        state.renderer.gpu.config.height as i32,
-    );
     let controls = match popup.kind {
         WolPopupKind::Create(_) => {
-            let layout =
-                crate::ui::shell::modal::wol_create_game_layout(width, height, modern_lobby(state));
+            let layout = create_layout(state);
             [
                 Some((POPUP_OK, layout.ok)),
                 Some((POPUP_CANCEL, layout.cancel)),
@@ -3395,13 +3601,14 @@ fn popup_control(state: &AppState, popup: &WolLobbyPopup) -> Option<u16> {
                 Some((CREATE_LIMIT, layout.limit)),
                 layout.observe.map(|rect| (CREATE_OBSERVE, rect)),
                 Some((POPUP_PASSWORD, layout.password)),
+                layout.name.map(|(_, rect)| (CREATE_NAME, rect)),
             ]
             .into_iter()
             .flatten()
             .collect()
         }
         WolPopupKind::Password(_) => {
-            let layout = crate::ui::shell::modal::wol_channel_password_layout(width, height);
+            let layout = password_layout(state);
             vec![
                 (POPUP_OK, layout.ok),
                 (POPUP_CANCEL, layout.cancel),
@@ -3415,17 +3622,54 @@ fn popup_control(state: &AppState, popup: &WolLobbyPopup) -> Option<u16> {
         .map(|(id, _)| id)
 }
 
+/// The popups follow the lobby page's shell mapping, so they grow with it.
+pub(crate) fn popup_scale(state: &AppState) -> ShellScale {
+    layout(state).page.scale
+}
+
+fn popup_screen(state: &AppState) -> (i32, i32) {
+    (
+        state.renderer.gpu.config.width as i32,
+        state.renderer.gpu.config.height as i32,
+    )
+}
+
+fn create_layout(state: &AppState) -> crate::ui::shell::modal::WolCreateGameLayout {
+    let (width, height) = popup_screen(state);
+    crate::ui::shell::modal::wol_create_game_layout_on(
+        width,
+        height,
+        modern_lobby(state),
+        popup_scale(state),
+    )
+}
+
+fn password_layout(state: &AppState) -> crate::ui::shell::modal::WolChannelPasswordLayout {
+    let (width, height) = popup_screen(state);
+    crate::ui::shell::modal::wol_channel_password_layout_on(width, height, popup_scale(state))
+}
+
+/// Where VERA's online Create Game has its room's limits.
+fn popup_room_layout(state: &AppState) -> Option<crate::ui::room_limits::RoomLimitsLayout> {
+    create_layout(state).room
+}
+
 pub(super) fn cursor_moved(state: &mut AppState) {
     let layout = layout(state);
     let (x, y) = state.match_state.input.cursor_px();
     let popup_over = lobby(state)
         .and_then(|lobby| lobby.ui.popup.as_ref())
         .map(|popup| popup_control(state, popup));
+    let room = popup_room_layout(state);
+    let popup_scale = popup_scale(state);
     let Some(lobby) = lobby_mut(state) else {
         return;
     };
     if let (Some(over), Some(popup)) = (popup_over, lobby.ui.popup.as_mut()) {
         popup.buttons.hovered = over;
+        if let (Some(picker), Some(room)) = (popup.room_mut(), room) {
+            picker.drag(&room, popup_scale, x);
+        }
         state.platform.window.request_redraw();
         return;
     }
@@ -3465,14 +3709,13 @@ pub(super) fn mouse(state: &mut AppState, pressed: bool) {
     let scale = layout.page.scale;
     if let Some(popup) = lobby(state).and_then(|lobby| lobby.ui.popup.clone()) {
         let over = popup_control(state, &popup);
-        let (width, height) = (
-            state.renderer.gpu.config.width as i32,
-            state.renderer.gpu.config.height as i32,
-        );
+        let rects = create_layout(state);
         let lobby = lobby_mut(state).expect("checked");
-        let modern = lobby.ui.is_modern();
         let popup = lobby.ui.popup.as_mut().expect("checked");
         if !pressed {
+            if let Some(picker) = popup.room_mut() {
+                picker.release();
+            }
             let action = popup
                 .buttons
                 .release(over)
@@ -3483,20 +3726,21 @@ pub(super) fn mouse(state: &mut AppState, pressed: bool) {
             state.platform.window.request_redraw();
             return;
         }
-        let press = match over {
-            Some(control @ (CREATE_CLAN | CREATE_LIMIT | CREATE_OBSERVE)) => {
-                let rect = crate::ui::shell::modal::wol_create_game_layout(width, height, modern);
+        let picked = popup
+            .room_mut()
+            .zip(rects.room)
+            .map(|(picker, room)| picker.press(&room, scale, x, y));
+        let press = match (picked, over) {
+            (Some(RoomLimitsPress::Players), _) => Press::Nothing,
+            (Some(RoomLimitsPress::Spectators), _) => Press::Cue(LauncherCue::Checkbox),
+            (_, Some(control @ (CREATE_CLAN | CREATE_LIMIT | CREATE_OBSERVE))) => {
                 let window = match control {
-                    CREATE_CLAN => rect.clan,
-                    CREATE_LIMIT => Some(rect.limit),
-                    _ => rect.observe,
+                    CREATE_CLAN => rects.clan,
+                    CREATE_LIMIT => Some(rects.limit),
+                    _ => rects.observe,
                 };
                 if window.is_some_and(|window| {
-                    crate::ui::skirmish_shell::checkbox_icon_rect(
-                        window,
-                        crate::ui::shell::geom::ShellScale::RETAIL,
-                    )
-                    .contains(x, y)
+                    crate::ui::skirmish_shell::checkbox_icon_rect(window, scale).contains(x, y)
                 }) && popup.toggle(control)
                 {
                     Press::Cue(LauncherCue::Checkbox)
@@ -3504,9 +3748,14 @@ pub(super) fn mouse(state: &mut AppState, pressed: bool) {
                     Press::Nothing
                 }
             }
-            Some(control @ (POPUP_OK | POPUP_CANCEL)) if popup.enabled(control) => {
+            (_, Some(control @ (POPUP_OK | POPUP_CANCEL))) if popup.enabled(control) => {
                 popup.buttons.press(Some(control));
                 Press::Button
+            }
+            (_, Some(control @ (POPUP_PASSWORD | CREATE_NAME))) => {
+                popup.focus(control);
+                popup.buttons.press(None);
+                Press::Nothing
             }
             _ => {
                 popup.buttons.press(None);
@@ -3954,6 +4203,20 @@ mod tests {
     }
 
     #[test]
+    fn a_joined_game_line_names_the_operator_not_the_first_user() {
+        let users = [("Guest".to_owned(), false), ("Host".to_owned(), true)];
+        assert_eq!(
+            joined_game_line(&users, "Host's_game").as_deref(),
+            Some("You have joined Host's game.")
+        );
+        assert_eq!(
+            joined_game_line(&users, "No rush").as_deref(),
+            Some("You have joined Host's game (No rush).")
+        );
+        assert_eq!(joined_game_line(&users[..1], "No rush"), None);
+    }
+
+    #[test]
     fn saved_test_preference_cannot_load_demo_games_in_ordinary_play() {
         let saved_test_service = true;
         assert_eq!(
@@ -4120,6 +4383,15 @@ mod tests {
                 close: true,
                 forget: false,
                 next_lobby: true
+            }
+        );
+        assert_eq!(
+            join_error_reply(KEPT_OUT_JOIN_ERROR, true),
+            JoinErrorReply::Box {
+                key: "TXT_JOINBAN",
+                close: false,
+                forget: false,
+                next_lobby: false
             }
         );
         assert_eq!(join_error_reply(0x8000_4005, true), JoinErrorReply::Chat);

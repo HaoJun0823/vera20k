@@ -459,6 +459,18 @@ pub(crate) fn handle_mouse_button_event(
     if crate::app::input::campaign_input::is_locked(state) {
         return GadgetConsume::Consumed;
     }
+    // VERA's radar order owns one button. The retail gadget's sticky byte
+    // releases on either button, so keep unrelated edges out of that walk
+    // until the owning release; otherwise capture can escape to the map.
+    if state.persistence.options_profile.right_click_orders
+        && state
+            .match_state
+            .input
+            .minimap_press_button()
+            .is_some_and(|owner| owner != button)
+    {
+        return GadgetConsume::Consumed;
+    }
     let Some(view) = current_sidebar_view(state).cloned() else {
         return GadgetConsume::NotConsumed;
     };
@@ -488,7 +500,7 @@ pub(crate) fn idle_tick(state: &mut AppState) {
         return;
     }
     let _ = run_tick(state, &view, 0);
-    crate::app::presentation::sidebar_render::refresh_sidebar_projection(state);
+    crate::app::presentation::sidebar_render::republish_sidebar_projection(state);
 }
 
 fn run_tick(state: &mut AppState, view: &SidebarView, key: u16) -> GadgetConsume {

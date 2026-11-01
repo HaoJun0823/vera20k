@@ -67,12 +67,17 @@ pub(crate) const ORIGINAL_SHAPE_LABEL: &str = "Original 4:3 Shape";
 pub(crate) const ORIGINAL_SHAPE_HELP: &str =
     "Battles keep the original 4:3 shape, with bars on wide screens.";
 pub(crate) const YR_ORIGINAL_STYLE_LABEL: &str = "Original YR Style";
-pub(crate) const YR_ORIGINAL_STYLE_HELP: &str =
-    "Use Yuri's Revenge's loading screen and menu movie, plus the Skirmish and multiplayer lobby backgrounds.";
+pub(crate) const YR_ORIGINAL_STYLE_HELP: &str = "Use Yuri's Revenge's loading screen and menu movie, plus the Skirmish and multiplayer lobby backgrounds.";
 pub(crate) const RENDER_INTERPOLATION_LABEL: &str = "Render Interpolation";
 pub(crate) const RENDER_INTERPOLATION_HELP: &str = "Smooth motion between simulation frames. Adds one frame of visual latency; does not increase simulation speed.";
 pub(crate) const MOUSE_WHEEL_ZOOM_LABEL: &str = "Mouse Wheel Zoom";
 pub(crate) const MOUSE_WHEEL_ZOOM_HELP: &str = "Use the mouse wheel to zoom battles in or out. Turning this off restores the normal view distance.";
+pub(crate) const RIGHT_CLICK_ORDERS_LABEL: &str = "Right-Click Orders";
+pub(crate) const RIGHT_CLICK_ORDERS_HELP: &str =
+    "Left-click to select; right-click to give orders.";
+pub(crate) const LOCK_CURSOR_LABEL: &str = "Lock Cursor to Window";
+pub(crate) const LOCK_CURSOR_HELP: &str =
+    "Keep the mouse inside the game window. Ctrl+Alt+L frees it until you click in the game.";
 pub(crate) const SHIFT_QUEUE_LABEL: &str = "Shift-Click Batch Queue";
 pub(crate) const DEVELOPER_OPTIONS_LABEL: &str = "Developer Options";
 pub(crate) const WOL_TEST_SERVICE_LABEL: &str = "Offline Internet Test Service";
@@ -83,6 +88,16 @@ pub(crate) const SKIP_STARTUP_LOGO_HELP: &str =
     "Start without the logo movie; the loading screen still shows. Applies at the next start.";
 pub(crate) const FPS_COUNTER_LABEL: &str = "FPS Counter";
 pub(crate) const FPS_COUNTER_HELP: &str = "Show frames per second in the top-left corner. Off at every start; Ctrl+Alt+F also switches it.";
+/// VERA's end-game switches, the pair of `[EndGameScreens]` presentation
+/// stages. The verdict is what the match shows where it is decided; the score
+/// page is the dialog after it. Each stage owns its picture *and* its music, so
+/// a player can keep one stage and drop the other.
+pub(crate) const CUSTOM_END_GAME_BANNER_LABEL: &str = "Custom End Game Banner";
+pub(crate) const CUSTOM_END_GAME_BANNER_HELP: &str = "Show the victory or defeat picture a rules set gives your country over the battlefield, and start its music with it. Untick to keep the standard banner and theme.";
+pub(crate) const CUSTOM_END_GAME_SCORE_LABEL: &str = "Custom End Game Score";
+pub(crate) const CUSTOM_END_GAME_SCORE_HELP: &str = "Use the same country picture as the score screen's background and its music as the score theme. Untick to keep the standard score screen.";
+pub(crate) const CUSTOM_END_GAME_MOVIE_LABEL: &str = "Custom End Game Movie";
+pub(crate) const CUSTOM_END_GAME_MOVIE_HELP: &str = "Let a beaten computer commander's losing clip finish before the victory or defeat picture and the score screen. Skirmish only. Untick to show them at once, which cuts the clip.";
 pub(crate) const SHIFT_QUEUE_HELP: &str =
     "Shift-click an infantry, vehicle or aircraft cameo to queue several at once.";
 pub(crate) const DISPLAY_LABEL: &str = "Display";
@@ -497,6 +512,11 @@ pub(crate) enum LauncherCheckboxId {
     RenderInterpolation,
     /// VERA's local camera option: the wheel changes battle view distance.
     MouseWheelZoom,
+    /// VERA-only alternative controls: left selects, right commands.
+    RightClickOrders,
+    /// VERA's cursor lock: the pointer stays inside the game window. It
+    /// applies at once and is saved.
+    LockCursor,
     /// VERA's developer box: the window's FPS readout. Like Full Screen it
     /// shows and changes live state at once, and is never saved: the readout
     /// starts hidden at every launch.
@@ -504,6 +524,20 @@ pub(crate) enum LauncherCheckboxId {
     /// VERA's developer box: the next launch skips `Init_Game`'s logo movie
     /// (`0x0052C5E2`); the splash and the first-run intro still play.
     SkipStartupLogo,
+    /// VERA's box: the score page draws the country's own victory or defeat
+    /// picture from `[EndGameScreens]` instead of the side's `MP*SCRN` art. On
+    /// by default — a rules set that names pictures shows them — and it covers
+    /// the picture only. The next finished match reads it, so it needs no live
+    /// apply.
+    CustomEndGameBanner,
+    /// VERA's box: the score page starts the country's own
+    /// `VictoryMusic=`/`DefeatMusic=` theme instead of the side's. Also read
+    /// once per finished match.
+    CustomEndGameScore,
+    /// VERA's box: a finished match waits for a beaten computer commander's
+    /// losing clip before the score page opens and the battle is torn down.
+    /// Read when the match ends, so it needs no live apply either.
+    CustomEndGameMovie,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -541,8 +575,13 @@ pub(crate) enum LauncherOptionsEvent {
     WolTestServiceChanged(bool),
     RenderInterpolationChanged(bool),
     MouseWheelZoomChanged(bool),
+    RightClickOrdersChanged(bool),
+    LockCursorChanged(bool),
     FpsCounterChanged(bool),
     SkipStartupLogoChanged(bool),
+    CustomEndGameBannerChanged(bool),
+    CustomEndGameScoreChanged(bool),
+    CustomEndGameMovieChanged(bool),
     /// VERA's team-colour strength, as the level the profile stores.
     HouseColorStrengthChanged(u8),
     ScorePreview(f32),
@@ -585,11 +624,22 @@ pub(crate) struct LauncherOptionsValues {
     pub(crate) yr_original_style: bool,
     pub(crate) render_interpolation: bool,
     pub(crate) mouse_wheel_zoom: bool,
+    pub(crate) right_click_orders: bool,
+    pub(crate) lock_cursor: bool,
     pub(crate) shift_queue: bool,
     pub(crate) wol_test_service: bool,
     /// The FPS readout's live state when the page opened, then each toggle.
     pub(crate) fps_counter: bool,
     pub(crate) skip_startup_logo: bool,
+    /// The country's own end-game picture is allowed; see
+    /// [`LauncherCheckboxId::CustomEndGameBanner`].
+    pub(crate) custom_end_game_banner: bool,
+    /// The country's own end-game music is allowed; see
+    /// [`LauncherCheckboxId::CustomEndGameScore`].
+    pub(crate) custom_end_game_score: bool,
+    /// The exit waits for the closing commander clip; see
+    /// [`LauncherCheckboxId::CustomEndGameMovie`].
+    pub(crate) custom_end_game_movie: bool,
     /// The Sidebar list's choice; like Zoom, it applies at once.
     pub(crate) sidebar: SidebarSize,
     /// VERA's team-colour strength as the slider's position,
@@ -615,10 +665,15 @@ impl Default for LauncherOptionsValues {
             yr_original_style: false,
             render_interpolation: false,
             mouse_wheel_zoom: false,
+            right_click_orders: false,
+            lock_cursor: true,
             shift_queue: false,
             wol_test_service: false,
             fps_counter: false,
             skip_startup_logo: false,
+            custom_end_game_banner: true,
+            custom_end_game_score: true,
+            custom_end_game_movie: true,
             sidebar: SidebarSize::Normal,
             house_color_position: 0,
             score_position: 4,
@@ -981,8 +1036,13 @@ impl OptionsDialogState {
             LauncherCheckboxId::WolTestService => &mut self.values.wol_test_service,
             LauncherCheckboxId::RenderInterpolation => &mut self.values.render_interpolation,
             LauncherCheckboxId::MouseWheelZoom => &mut self.values.mouse_wheel_zoom,
+            LauncherCheckboxId::RightClickOrders => &mut self.values.right_click_orders,
+            LauncherCheckboxId::LockCursor => &mut self.values.lock_cursor,
             LauncherCheckboxId::FpsCounter => &mut self.values.fps_counter,
             LauncherCheckboxId::SkipStartupLogo => &mut self.values.skip_startup_logo,
+            LauncherCheckboxId::CustomEndGameBanner => &mut self.values.custom_end_game_banner,
+            LauncherCheckboxId::CustomEndGameScore => &mut self.values.custom_end_game_score,
+            LauncherCheckboxId::CustomEndGameMovie => &mut self.values.custom_end_game_movie,
         };
         *slot = !*slot;
         let checked = *slot;
@@ -1010,12 +1070,27 @@ impl OptionsDialogState {
             LauncherCheckboxId::MouseWheelZoom => self
                 .pending_events
                 .push(LauncherOptionsEvent::MouseWheelZoomChanged(checked)),
+            LauncherCheckboxId::RightClickOrders => self
+                .pending_events
+                .push(LauncherOptionsEvent::RightClickOrdersChanged(checked)),
+            LauncherCheckboxId::LockCursor => self
+                .pending_events
+                .push(LauncherOptionsEvent::LockCursorChanged(checked)),
             LauncherCheckboxId::FpsCounter => self
                 .pending_events
                 .push(LauncherOptionsEvent::FpsCounterChanged(checked)),
             LauncherCheckboxId::SkipStartupLogo => self
                 .pending_events
                 .push(LauncherOptionsEvent::SkipStartupLogoChanged(checked)),
+            LauncherCheckboxId::CustomEndGameBanner => self
+                .pending_events
+                .push(LauncherOptionsEvent::CustomEndGameBannerChanged(checked)),
+            LauncherCheckboxId::CustomEndGameScore => self
+                .pending_events
+                .push(LauncherOptionsEvent::CustomEndGameScoreChanged(checked)),
+            LauncherCheckboxId::CustomEndGameMovie => self
+                .pending_events
+                .push(LauncherOptionsEvent::CustomEndGameMovieChanged(checked)),
             LauncherCheckboxId::Tooltips
             | LauncherCheckboxId::TargetLines
             | LauncherCheckboxId::ShowHidden => {}

@@ -638,6 +638,13 @@ impl LanUdpTransport {
         })
     }
 
+    /// See `ClientSession::set_ordering_restore`.
+    pub(super) fn set_ordering_restore(&mut self, restoring: bool) {
+        if let Some(route) = self.lock().relay.as_mut() {
+            route.session.set_ordering_restore(restoring);
+        }
+    }
+
     pub fn submit_ordering(&mut self, batch_id: u64, bytes: &[u8]) -> io::Result<()> {
         self.send_ordering(|route| {
             route
@@ -675,6 +682,18 @@ impl LanUdpTransport {
                 paused,
                 &mut route.encoded,
             )
+        })
+    }
+
+    pub fn report_ordering_pace(
+        &mut self,
+        pace: vera20k_relay_protocol::OrderPace,
+        frames_per_second: u16,
+    ) -> io::Result<()> {
+        self.send_ordering(|route| {
+            route
+                .session
+                .report_ordering_pace(pace, frames_per_second, &mut route.encoded)
         })
     }
 

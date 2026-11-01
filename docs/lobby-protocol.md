@@ -30,6 +30,13 @@ Failed requests return `{error:{code,message}}`; messages must not echo credenti
 Clients show a 426 `message` (plain text, at most 160 characters) to the player with
 the releases link, so it should name the version players need; older clients show a
 fixed line.
+While the operator has closed sign-ins for maintenance, `POST /v1/sessions` returns 503
+`maintenance` with the operator's one-line `message` (at most 160 characters), which
+clients show in place of their "could not connect" text; other 503s mean the lobby is
+unavailable. Players already signed in keep their sessions.
+A client in the lobby, outside a match, whose event polls fail for about a minute tells
+its player the connection was lost and stops polling; its next sign-in logs the old
+session out first.
 The HTTP paths retain `/v1`; `protocol:4` is the required client capability.
 Older/missing capabilities cannot enter new games. Existing v3 sessions may poll, renew an active lease and finish/leave/logout; their active match is preserved.
 Lobby capability4 adds the signed fixed-clock ordering capability.
@@ -81,7 +88,9 @@ Channel: `{id,kind,max_users,users,tournament,flags,game_flags,ping,name,ex_info
 from the creator: 256 when a game has a password, which clients show as a lock and
 ask for before joining, otherwise 0. `max_users` (1–30) from `create` and the host's
 `advertise` is the room's join limit, never below its current members; a join past
-it fails with `room_full`. The other fields are presentation metadata, not authority. `name` identifies a channel uniquely for compatibility with the
+it fails with `room_full`. A host `kick` with `keep_out:true` keeps that player out of
+the room for five minutes, by account and by name without case: their `join` fails
+with 403 `room_kept_out`, which clients show with the join ban's text while staying in the lobby. The other fields are presentation metadata, not authority. `name` identifies a channel uniquely for compatibility with the
 existing shell. Member: `{player_id,name,flags,squad,clan_name,clan_tag}`. Flags bit 0
 is the channel owner, bit 1 voice; the client adds its own local bit 32768. Servers
 set identity and flags from the authenticated membership, never from user payloads.
@@ -105,7 +114,7 @@ Commands and their payloads:
 | `map_status` | `{status,revision,version,rules_digest,map_digest,effective_map_digest,staging_digest}` |
 | `advertise` | `{channel:<Channel>}` |
 | `start` | `{users:[name],revision,version,rules_digest,effective_map_digest,staging_digest}` |
-| `finish` | `{match_id}` |
+| `finish` | `{match_id,back_to_room?}` |
 | `relay_ready` | `{match_id}` |
 | `latency_ready` | `{match_id,pings:[{source_index,round_trip_ms}]}` |
 | `renew_relay` | `{match_id}` |
@@ -116,7 +125,7 @@ Commands and their payloads:
 | `set_locale` | `{locale}` |
 | `buddies` | `{}` |
 | `add_buddy` / `remove_buddy` / `locate` | `{name}` |
-| `kick` | `{name}` |
+| `kick` | `{name,keep_out?}` |
 
 HostOptions is `{launch,map_metadata,vacancies,observer_row,cooperative_difficulty,seed}`.
 Generated maps add `random_map:{start_staging,preview:{source_sha256,byte_length}}`.
@@ -145,6 +154,7 @@ Event kinds and payloads:
 | --- | --- |
 | `joined` / `created` | `{channel:<Channel>,members:[Member]}` |
 | `channel_left` | `{}` |
+| `room_reopened` | `{channel:<Channel>,members:[Member]}` |
 | `member_joined` | `{member:<Member>}` |
 | `member_left` | `{name}` |
 | `options` | `{revision,options:<HostOptions>}` |
@@ -315,10 +325,53 @@ Generated capacity equals the staged start count (2–8); observers consume only
 transport slots. Start admission also compares the canonical staging digest, so clients cannot
 agree on seed bytes while using different generated start cells.
 
-The existing shell leaves its game channel during the successful start. The service
-therefore retains the match admission independently of channel membership until
-finish/timeout. Postmatch the shell rejoins chat and may create or join another game;
-this is a fresh match with fresh relay credentials. A channel owner leaving before
+The service may keep a map library: custom maps its operator adds, each kept once under
+its SHA-256. Players never add maps; room uploads stay out of it. When the host selects
+a map the library holds (same `source_sha256` and length, not `map_metadata.official`,
+not a generated map), the service sends `map_available` with the settings, before any
+upload, and members download it through the same `GET /v1/maps/…` chunks. When the
+service does not copy it (it could not read a correct copy within about 2 seconds, or is
+busy copying others), it sends no `map_available` and the host uploads as usual. A host that hears `map_available` for its current map stops uploading; an upload
+sent anyway is accepted. Other custom maps go from host to members as before. A member
+whose game lacks the room's map is asked first: Download fetches it and saves it in
+VERA's own `Maps` folder (beside its settings, never the game folder); Leave leaves the
+room.
+
+`GET /v1/library/catalog` lists every library map:
+`{revision,maps:[{sha256,name,file_name,players,byte_length,header}]}`, where `name` is
+the map's `[Basic] Name=`, `file_name` the `.yrm` name to save it under, and `header`
+the base64 of the map's own `[Basic]`, `[Preview]`, `[PreviewPack]`, `[Waypoints]`,
+`[Header]` and `[RandomMap]` lines, byte for byte. No two library maps share a
+`file_name` without case: one whose name would, or whose name has nothing left to save
+under, ends in `-<first 8 hex of its SHA-256>.yrm`. The catalog carries
+`ETag: "lib-<revision>-<16 hex>"`, the hex from its content (catalogs written before:
+`"lib-<revision>"`), and answers 304 to a matching `If-None-Match`, weak or not, or `*`.
+`GET /v1/library/maps/<sha256>` downloads one map, and
+`GET /v1/library/maps?search=<text>&players=<n>&page=<n>` searches them (newest first,
+50 a page). The catalog and downloads also answer HEAD, and 503 `service_unavailable`
+when the library's storage fails. All three are public, and the search is limited per
+network; the service keeps no player, session or address with a map. The game reads the catalog
+when the player goes online and keeps it for the run once it arrives; a failed read is
+tried once more in that visit, and again on the next. In an online room (not one that
+takes only official maps), Choose Map lists under its Online Maps row each map the
+player does not have, starred maps first: a file of its name in the game folder or
+VERA's `Maps` folder that holds its bytes means the player has it. Use Map on one asks
+to download it, checks its length and SHA-256, and saves it in VERA's `Maps` folder,
+where it is an ordinary map in every game type's list. A map whose name another map
+already holds is saved as `<stem>-<first 8 hex of its SHA-256>.yrm`; no file is ever
+replaced.
+
+The match admission is retained independently of channel membership until
+finish/timeout. The original-style shell leaves its game room at the start and
+postmatch rejoins chat, where it may create or join another game. VERA's own room
+stays joined through the match, and its `finish` sets `back_to_room: true`. When
+the last player finishes, the players still in the room who asked for it get it
+back: `room_reopened` (owner first) and then `options` with the host's settings
+and every readiness cleared. Players who finished without asking are dropped from
+it silently. If the owner is not among them, or a newer room took its name, the
+room closes for them with `error` `host_left` and `channel_left`; an expired match
+closes it with `channel_left`. Each rematch is a fresh match with fresh relay
+credentials. A channel owner leaving before
 start closes the room and emits a failure/leave event to the guests. Membership,
 authorization, readiness, sequence history and idle expiration are server-owned.
 Idle lobby visits expire after 120 seconds. An unfinished v4 playing membership
@@ -326,9 +379,14 @@ survives that idle interval while another unfinished player of the match is onli
 (a request or stream ack in the last 120 seconds), and otherwise through 10 minutes of silence, until
 explicit finish/leave or the match/session lifetime; lost internet does not remove
 its gameplay source. Names held by crashed clients therefore free once nobody else
-in their match is online. A lobby outage or overload is not player silence: these
+in their match is online. Sooner, a sign-in from the session's own network takes its
+name back once the session has made no request for 30 seconds and has no open
+stream: a running game reaches the lobby at least every 15 seconds, so that session
+belongs to a game that closed or crashed. Its match is finished for it and its bearer
+answers 401. A lobby outage or overload is not player silence: these
 intervals count from the later of the player's last request and the lobby's first
-request after 30 seconds without any or its latest 429 `busy` refusal.
+request after 90 seconds in which it neither served a request nor ran its
+once-a-minute alarm, or its latest 429 `busy` refusal.
 
 `POST /v1/translate` accepts exactly `{text,target}` from a v4 bearer and returns
 `{text}`: `text` translated into `target`, a language tag such as `en` or `zh-Hans`.
