@@ -577,9 +577,10 @@ impl Brain for RetailBrain {
                 })
                 .collect();
             log::info!(
-                "auto play: {} roster=[{}] income={}/min seen={}/{}",
+                "auto play: {} roster=[{}] crates={} income={}/min seen={}/{}",
                 self.census.describe(),
                 roster.join(","),
+                obs.crate_cells(rules).len(),
                 budget.income.map_or(-1, |rate| rate),
                 seen,
                 self.census.enemies.len()

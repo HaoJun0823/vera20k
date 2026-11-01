@@ -224,7 +224,7 @@ pub(super) fn wants_a_maker(
     };
     // Without a map there is no answer, and no answer is not a refusal: the
     // fixtures and the headless harness run without one.
-    if obs.map_extent().0 > 0 && expansion_site(brain, rules, obs, yard).is_none() {
+    if obs.map_extent().0 > 0 && expansion_site(brain, rules, obs, yard, None).is_none() {
         return false;
     }
     budget.free >= EXPAND_MIN_CREDITS
@@ -256,18 +256,28 @@ fn deploy_second_yard(
     cell: (u16, u16),
     yard: &ObjectType,
 ) {
-    // The cell the house decided on: a patch of ground a second yard fits
-    // on, away from the first base. The same probe the purchase gate asked,
-    // so the maker walks to the ground the house already knows about.
-    let Some(target) = expansion_site(brain, rules, obs, yard) else {
+    let Some(home) = brain.census.base_cell else {
         return;
     };
-    // Standing on it, and the deploy is admitted there: that is the player's
-    // own D press.
-    if cell_distance(cell, target) <= 1 && obs.deploy_site_admits(rules, entity_id, yard) {
+    // Standing on ground that takes a yard, far enough from home to be a
+    // second base: that is the player's own D press.
+    //
+    // The maker does not have to reach the cell the house picked: any ground it
+    // passes that takes a yard is ground it can take, and a maker that walks
+    // past a dozen of them and keeps looking for the one it was told about
+    // never deploys at all.
+    if cell_distance(cell, home) >= EXPAND_MIN_CELLS
+        && obs.deploy_site_admits(rules, entity_id, yard)
+    {
         super::orders::issue(brain, out, rules, obs, entity_id, Goal::Deploy);
         return;
     }
+    // The cell the house decided on: a patch of ground a second yard fits on,
+    // away from the first base. The same probe the purchase gate asked, so the
+    // maker walks to ground the house already knows about.
+    let Some(target) = expansion_site(brain, rules, obs, yard, Some(entity_id)) else {
+        return;
+    };
     // A maker already walking is a maker whose cell has been chosen: the
     // walk is over the map's ground and costs a foundation test per cell, so
     // it is asked when the unit stands still and not once a frame while it
@@ -275,53 +285,15 @@ fn deploy_second_yard(
     if obs.destination(entity_id).is_some() {
         return;
     }
-    if cell != target {
-        super::orders::issue(brain, out, rules, obs, entity_id, Goal::Move { cell: target });
+    if cell != target
+        && !super::orders::issue(brain, out, rules, obs, entity_id, Goal::Move { cell: target })
+    {
+        // The walk was refused: that ground is not reachable, so the house
+        // picks another patch instead of asking for the same one every frame.
+        brain.expansion_probe = None;
     }
 }
 
-/// How far from the maker the side-step search looks, in cells.
-///
-/// Four is one foundation plus the step: a maker that missed the patch by a
-/// cell or two finds it, and one that missed it by more is the sweep's job.
-const DEPLOY_SITE_RING: i32 = 4;
-
-/// The nearest cell around `from` at which the deploy would actually be
-/// admitted, `from` itself first.
-///
-/// The order is the ring, then the row, then the column, so the answer does
-/// not depend on hash order and a replay picks the same cell.
-fn near_deploy_cell(
-    rules: &RuleSet,
-    obs: &Observation<'_>,
-    entity_id: u64,
-    from: (u16, u16),
-    home: (u16, u16),
-    yard: &ObjectType,
-) -> Option<(u16, u16)> {
-    for ring in 0..=DEPLOY_SITE_RING {
-        for dy in -ring..=ring {
-            for dx in -ring..=ring {
-                if dx.abs().max(dy.abs()) != ring {
-                    continue;
-                }
-                let (Some(rx), Some(ry)) = (
-                    u16::try_from(i32::from(from.0) + dx).ok(),
-                    u16::try_from(i32::from(from.1) + dy).ok(),
-                ) else {
-                    continue;
-                };
-                if cell_distance((rx, ry), home) < EXPAND_MIN_CELLS {
-                    continue;
-                }
-                if obs.deploy_admits_at(rules, entity_id, yard, (rx, ry)) {
-                    return Some((rx, ry));
-                }
-            }
-        }
-    }
-    None
-}
 
 /// The nearest cell a second yard may be deployed on: away from the house's own
 /// base, on ground a unit can stand on, and a cell a yard of this type fits on.
@@ -336,18 +308,35 @@ pub(super) fn expansion_site(
     rules: &RuleSet,
     obs: &Observation<'_>,
     yard: &ObjectType,
+    maker: Option<u64>,
 ) -> Option<(u16, u16)> {
     let tick = obs.tick();
-    if let Some((at, cell)) = brain.expansion_probe
-        && tick.saturating_sub(at) < EXPAND_PROBE_FRAMES
+    // The deploy's own answer for this cell. With a maker on the field the
+    // question is asked with the maker's body lifted -- the deploy lifts it
+    // -- and without one the ground has to be clear of everything.
+    let admits = |cell: (u16, u16)| match maker {
+        Some(id) => obs.deploy_admits_at(rules, id, yard, cell),
+        None => obs.clear_for_deploy(rules, yard, cell),
+    };
+    // A cached answer is used while it still holds: the probe walks the
+    // map's ground, and a maker that re-aims on every probe spends the match
+    // walking between two patches instead of reaching one.
+    if let Some((_, cell)) = brain.expansion_probe
+        && let Some(cell) = cell
+        && admits(cell)
     {
-        return cell;
+        return Some(cell);
     }
     let Some(home) = brain.census.base_cell else {
         brain.expansion_probe = Some((tick, None));
         return None;
     };
-    let found = search_expansion_site(rules, obs, home, &brain.census.home_cells, yard);
+    let found = search_expansion_site(rules, obs, home, &brain.census.home_cells, yard, &admits);
+    if found.is_some() {
+        log::info!(
+            "auto play: second base site at {found:?}",
+        );
+    }
     brain.expansion_probe = Some((tick, found));
     found
 }
@@ -378,6 +367,7 @@ fn search_expansion_site(
     home: (u16, u16),
     home_cells: &[(u16, u16)],
     yard: &ObjectType,
+    admits: &dyn Fn((u16, u16)) -> bool,
 ) -> Option<(u16, u16)> {
     let (width, height) = obs.map_extent();
     // No map, no expansion: the headless harness and the fixtures run without
@@ -406,7 +396,7 @@ fn search_expansion_site(
                     continue;
                 }
                 // And the ground has to take a yard.
-                if !obs.clear_for_deploy(rules, yard, (rx, ry)) {
+                if !admits((rx, ry)) {
                     continue;
                 }
                 return Some((rx, ry));

@@ -847,22 +847,38 @@ impl<'a> Observation<'a> {
 
     /// The cells the map currently holds a crate on.
     ///
-    /// The map owns the slots and the coordinate pair is the only emptiness
-    /// discriminator (`sim::crates::CrateSlot::is_empty`). A policy only needs
-    /// where they are: entering the cell is the pickup, so the answer is a
-    /// walk target.
-    pub fn crate_cells(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+    /// The crate is an overlay on the map and the pickup reads that overlay
+    /// (`CellClass::PickupCrate`), so the answer is the overlay's: the
+    /// authority's slot says where a crate was placed, and the overlay says
+    /// whether it is still there. A slot whose overlay is gone -- tiberium over
+    /// it, a structure on it -- is not a crate to walk to, and a house that
+    /// walks to it walks to nothing.
+    ///
+    /// Without an overlay grid there is no overlay to read, and the slots are
+    /// the whole of what is known.
+    pub fn crate_cells(&self, rules: &RuleSet) -> Vec<(u16, u16)> {
+        let registry = rules.overlay_registry();
         self.sim
             .crate_authority()
             .slots()
             .iter()
             .filter(|slot| !slot.is_empty())
             .filter_map(|slot| {
-                Some((
+                let cell = (
                     u16::try_from(slot.cell_x).ok()?,
                     u16::try_from(slot.cell_y).ok()?,
-                ))
+                );
+                let crate_here = match self.sim.overlay_grid.as_ref() {
+                    Some(grid) => grid
+                        .cell(cell.0, cell.1)
+                        .overlay_id
+                        .and_then(|id| registry.flags(id))
+                        .is_some_and(|flags| flags.crate_type),
+                    None => true,
+                };
+                crate_here.then_some(cell)
             })
+            .collect()
     }
 
     /// Whether `firer` may be sent at `target` at all:
