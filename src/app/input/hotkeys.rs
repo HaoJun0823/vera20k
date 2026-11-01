@@ -693,6 +693,37 @@ mod tests {
         );
     }
 
+    /// The three switches are three commands in the same category, each with
+    /// its own ini name, so a player can bind the base, the army and the
+    /// abilities to three different keys.
+    #[test]
+    fn every_auto_play_switch_is_registered_on_its_own() {
+        let registered = catalog::registered_commands();
+        for (command, name) in [
+            (HotkeyCommand::ToggleAutoPlay, "AutoPlay"),
+            (HotkeyCommand::AutoPlayBuild, "AutoPlayBuild"),
+            (HotkeyCommand::ToggleAutoPlayForces, "AutoPlayForces"),
+            (HotkeyCommand::AutoPlayAbilities, "AutoPlayAbilities"),
+        ] {
+            let row = registered
+                .iter()
+                .find(|row| row.command == command)
+                .unwrap_or_else(|| panic!("{name} is registered"));
+            assert_eq!(row.category_key, catalog::VERA_CATEGORY_KEY, "{name}");
+            assert_eq!(row.ini_name, name);
+        }
+        let defaults = HotkeyBindings::reload_from_ini_bytes(None);
+        assert!(
+            !defaults.by_key.values().any(|command| matches!(
+                command,
+                HotkeyCommand::AutoPlayBuild
+                    | HotkeyCommand::ToggleAutoPlayForces
+                    | HotkeyCommand::AutoPlayAbilities
+            )),
+            "the switches ship unbound"
+        );
+    }
+
     #[test]
     fn registered_catalog_matches_original_objects_and_metadata_getters() {
         let fixture = native_keyboard_fixture();
