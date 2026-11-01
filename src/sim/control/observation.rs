@@ -1153,6 +1153,33 @@ impl<'a> Observation<'a> {
         )
     }
 
+    /// Whether a wall of `ty` may stand with its cell at `(rx, ry)`.
+    ///
+    /// The same clear-to-build test the placement asks, and the same overlay
+    /// registry it asks with: a cell that carries a tiberium overlay refuses a
+    /// wall, and a plan that cannot ask that question keeps naming the same
+    /// ore cell and losing every wall it builds. The sidebar's build-area
+    /// adjacency is deliberately not part of it — a wall is built at the edge
+    /// of the base, which is outside that area by definition.
+    pub(crate) fn wall_site_admits(
+        &self,
+        rules: &RuleSet,
+        ty: &ObjectType,
+        rx: u16,
+        ry: u16,
+    ) -> bool {
+        crate::sim::build_site::can_place_building_at(
+            self.sim,
+            rules,
+            Some(rules.overlay_registry()),
+            ty,
+            (rx as i16, ry as i16),
+            Some(self.house),
+            None,
+            None,
+        )
+    }
+
     /// Whether a hand other than this policy already owns `entity_id`, so the
     /// policy orders it nothing at all: a unit in one of the player's control
     /// groups, or a unit a `TeamClass` script of this house has recruited.

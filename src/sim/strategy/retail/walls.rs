@@ -253,11 +253,18 @@ pub(super) fn next_segment(
     // moved out of the way either — the plan goes round them, and comes back
     // for the cell once they have walked.
     let occupied = obs.ground_object_cells(rules);
+    // The wall type, before the cells are judged: a cell that carries a
+    // tiberium overlay refuses a wall, and a plan that cannot ask that
+    // question keeps naming the same ore cell. Every wall the plan had
+    // queued was refused at the same two cells, which is what this answers.
+    let wall = wall_type(brain, rules, obs)?;
+    let wall_ty = obs.object_type(rules, wall);
     let free = |x: u16, y: u16| {
         !blocked.contains(&(x, y))
             && !occupied.contains(&(x, y))
             && obs.wall_owner_at(x, y).is_none()
             && obs.is_ground_walkable(x, y)
+            && wall_ty.is_some_and(|ty| obs.wall_site_admits(rules, ty, x, y))
     };
     // The ring is `planned_ring`'s — the same cells `clear_the_ring` moves a
     // unit off, so the plan and the unblocking pass cannot disagree about the
@@ -286,7 +293,6 @@ pub(super) fn next_segment(
         i32::from(enemy.0) - i32::from(centre.0),
         i32::from(enemy.1) - i32::from(centre.1),
     );
-    let wall = wall_type(brain, rules, obs)?;
     // How far the engine looks for this house's own wall when it fills a gap:
     // the wall type's own `GuardRange`, in cells. A type without one closes
     // nothing, and the plan falls back to the cell beside the last one.
@@ -648,6 +654,28 @@ pub(super) fn queue_segment(
 mod tests {
     use super::*;
 
+
+    /// The plan asks the placement's own question about a cell.
+    ///
+    /// Every wall the plan had queued was refused at the same two cells, and
+    /// the plan went on naming them: a cell that carries tiberium refuses a
+    /// wall, and a plan that cannot see that keeps drawing the same ore.
+    #[test]
+    fn a_wall_cell_is_one_the_placement_admits() {
+        let Some(rules) = crate::rules::retail_ini_fixture::retail_unlayered_rules() else {
+            return;
+        };
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xB04);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let owner = sim.interner.intern("Americans");
+        let obs = Observation::new(&sim, owner);
+        let wall = rules.object("GAWALL").expect("the wall");
+        assert!(
+            obs.wall_site_admits(&rules, wall, 10, 10),
+            "flat ground takes a wall"
+        );
+    }
     /// The ring around a 2x2 foundation is twelve cells: the eight sides plus
     /// the four corners, all one cell out.
     #[test]
