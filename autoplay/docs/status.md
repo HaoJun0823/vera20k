@@ -40,17 +40,18 @@ a type name.
 1v7 hard, Death.mmx, 12000 ticks, three seeds: two of three survive. The retail
 policy on 0x5EED lost at 11361.
 
-## The hard maps, measured before the assignment fix
+## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |
 |---|---|---|---|---|
-| xcc_maps/xeb1.map | 30 | 27 | 1 | holds its side; no wall opened (walls=0) |
-| xcc_maps/xtsunami.map | 35 | 42 | 28 | the army is frozen: the target is on another island |
+| xcc_maps/xeb1.map | 30 | 36 | 1 | holds its side; no wall opened (walls=0) |
+| xcc_maps/xtsunami.map | 35 | 43 | 0 | never leaves the starting island |
 
-The island reading is the clearest failure the policy has: twenty-eight units
-holding a move job and not moving. A reachability ladder was tried and reverted
-(two minutes of "this target is unreachable" made the wall map worse), so this
-is still open.
+Before the assignment fix the island run read 28 stuck: the army was being sent
+at a target it could not reach and froze there. It now holds instead, so the
+number is zero and the failure has moved to where it belongs — the policy has no
+transport job at all. Boarding itself is proven (the Enter mission boards an
+IFV in a test), so this is policy work, not an engine gap.
 
 ## Known gaps
 
