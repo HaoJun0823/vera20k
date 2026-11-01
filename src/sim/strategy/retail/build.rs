@@ -491,6 +491,35 @@ fn next_building<'r>(
     Some(chosen)
 }
 
+/// Whether the house's own country owns `ty`: `Owner=` is the rules' list of
+/// the countries a type belongs to, and it is the country gate the native
+/// AI's own build selector reads (`HouseClass__FirstBuildableFromArray`).
+///
+/// The units carry it — `[E1] Owner=British,French,Germans,Americans,Alliance`
+/// is the GI and `[CONA] Owner=Russians,Confederation,Africans,Arabs,YuriCountry`
+/// is the conscript — while the structures name every country, because the
+/// structure a country builds is the one its own build list names. A brain
+/// that picks out of the rules array without this can hand the war factory
+/// the other side's tank: the factory refuses it, the order is spent, and
+/// the line that was going to make a tank makes nothing.
+///
+/// An empty list is no evidence and keeps the type available: a mod that
+/// names no country is not a mod that forbids the type.
+fn house_owns(rules: &RuleSet, obs: &Observation<'_>, ty: &ObjectType) -> bool {
+    if ty.owner.is_empty() {
+        return true;
+    }
+    let Some(country) = obs.country() else {
+        return true;
+    };
+    let mask = rules.house_type_mask(&ty.owner);
+    if mask == 0 {
+        // Names the rules do not know are not a refusal.
+        return true;
+    }
+    mask & rules.country_owner_mask(&country) != 0
+}
+
 /// The type from `names` the house may build now, in list order.
 ///
 /// `can_build` is the production path's own test, so a type of another side,
@@ -504,7 +533,8 @@ pub(super) fn first_buildable<'r>(
     names.iter().find_map(|name| {
         let ty = rules.object(name)?;
         let type_id = obs.type_id(name)?;
-        (obs.can_build(rules, ty, true) != CanBuild::No).then_some((ty, type_id))
+        (obs.can_build(rules, ty, true) != CanBuild::No && house_owns(rules, obs, ty))
+            .then_some((ty, type_id))
     })
 }
 
@@ -548,6 +578,7 @@ pub(super) fn class_types<'r>(
 ) -> impl Iterator<Item = (&'r ObjectType, InternedId)> {
     all_class_types(rules, obs, category)
         .filter(|(ty, _)| obs.can_build(rules, ty, true) != CanBuild::No)
+        .filter(|(ty, _)| house_owns(rules, obs, ty))
 }
 
 /// The `[AI]` base-defense list of the house's own side: what the native
@@ -1146,6 +1177,61 @@ mod tests {
         );
     }
 
+
+    /// The country gate is the rules': the GI's Owner list names the Allied
+    /// countries and the conscript's names the Soviet ones, so an American
+    /// house does not own a conscript and a Russian house does not own a GI.
+    #[test]
+    fn a_house_does_not_own_the_other_side_s_units() {
+        let Some(rules) = crate::rules::retail_ini_fixture::retail_unlayered_rules() else {
+            return;
+        };
+        let mut sim = crate::sim::world::Simulation::new();
+        let american = sim.interner.intern("Americans");
+        let russian = sim.interner.intern("Russians");
+        sim.houses.register(crate::sim::house_state::HouseState::new(
+            american,
+            0,
+            Some(american),
+            true,
+            0,
+            10,
+        ));
+        sim.houses.register(crate::sim::house_state::HouseState::new(
+            russian,
+            0,
+            Some(russian),
+            false,
+            0,
+            10,
+        ));
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let gi = rules.object("E1").expect("the GI");
+        let cona = rules.object("CONA").expect("the conscript");
+
+        let obs = Observation::new(&sim, american);
+        assert_eq!(
+            obs.country().as_deref(),
+            Some("Americans"),
+            "the house has a country"
+        );
+        assert!(
+            house_owns(&rules, &obs, gi),
+            "the GI is the American house's own"
+        );
+        assert!(
+            !house_owns(&rules, &obs, cona),
+            "and the conscript is not"
+        );
+
+        let obs = Observation::new(&sim, russian);
+        assert!(
+            house_owns(&rules, &obs, cona),
+            "the conscript is the Russian house's own"
+        );
+        assert!(!house_owns(&rules, &obs, gi), "and the GI is not");
+    }
     /// The building the plot step buys is the one the rules say grants a
     /// strike, not a name list of ours: `[GAWEAT] SuperWeapon=
     /// LightningStormSpecial` and `[NAMISL] SuperWeapon=NukeSpecial` are the
