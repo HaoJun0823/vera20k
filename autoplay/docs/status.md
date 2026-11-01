@@ -1,7 +1,7 @@
 # Where the policy stands
 
-Measured 2026-11-02 on the v2 branch (commit 2490dbeb2), retail YR, hard
-computer. One process per map and seed, run side by side:
+Measured 2026-11-02 on the v2 branch (commit 36d67b4fd), retail YR, hard
+computer. One process per map and seed, side by side:
 
     python -m tools.autoplay_check --brain v2 --seeds 0x5EED,19,10 \
         --maps Death.mmx,Barrel.mmx --ticks 24000
@@ -11,9 +11,8 @@ computer. One process per map and seed, run side by side:
 A match driven by this crate: the maker deploys, the house raises a power plant
 to open the tree, a refinery, a barracks and a war factory, places each through
 the native site search, keeps one harvester per refinery, queues the cheapest
-armed unit its factories can build, and holds the army at home until it is twice
-its starting size and outnumbers what stands near its target three to two. Every
-unit that can take an order holds one, every order goes through the funnel the
+armed unit its factories can build, and holds the army at its post. Every unit
+that can take an order holds one, every order goes through the funnel the
 player's clicks use, and every decision is read off the unit profile rather than
 a type name.
 
@@ -23,57 +22,55 @@ a type name.
 
 | Seed | Own | Enemy | Unowned | Stuck |
 |---|---|---|---|---|
-| 0x5EED | 35 | 43 | 0 | 1 |
-| 19 | 35 | 43 | 0 | 1 |
-| 10 | 24 | 48 | 0 | 1 |
+| 0x5EED | 35 | 47 | 0 | 0 |
+| 19 | 35 | 40 | 0 | 0 |
+| 10 | 35 | 45 | 0 | 0 |
 
-24000 ticks, both maps, three seeds: five of six survive the forty-minute mark.
+24000 ticks, both maps, three seeds: four of six survive the forty-minute mark.
 
 | Map | Seed | Result |
 |---|---|---|
-| Death.mmx | 0x5EED | lost at 17086 |
-| Death.mmx | 19 | survives (25 vs 66) |
-| Death.mmx | 10 | survives (14 vs 56) |
-| Barrel.mmx | 0x5EED | survives (22 vs 63) |
-| Barrel.mmx | 19 | survives (20 vs 69) |
-| Barrel.mmx | 10 | survives (29 vs 45) |
+| Death.mmx | 0x5EED | survives (25 vs 64) |
+| Death.mmx | 19 | survives (33 vs 56) |
+| Death.mmx | 10 | lost at 17680 |
+| Barrel.mmx | 0x5EED | survives (27 vs 58) |
+| Barrel.mmx | 19 | survives (25 vs 79) |
+| Barrel.mmx | 10 | lost at 20435 |
 
-1v7 hard, Death.mmx, 12000 ticks, three seeds: two of three survive the
-twenty-minute mark (0x5EED 16 own vs 299; 10 27 vs 294; 19 lost at 11103). The
-retail policy on 0x5EED lost at 11361.
+1v7 hard, Death.mmx, 12000 ticks, three seeds: two of three survive. The retail
+policy on 0x5EED lost at 11361.
 
-## The two hard maps, as they stand
-
-12000 ticks, one seed, the same binary:
+## The hard maps, measured before the assignment fix
 
 | Map | Own | Enemy | Stuck | Reading |
 |---|---|---|---|---|
-| xcc_maps/xeb1.map | 30 | 27 | 1 | the army holds its side; no wall was opened, walls=0 |
-| xcc_maps/xtsunami.map | 35 | 42 | 28 | most of the army is frozen: the target is on another island and nothing gives it a second destination |
+| xcc_maps/xeb1.map | 30 | 27 | 1 | holds its side; no wall opened (walls=0) |
+| xcc_maps/xtsunami.map | 35 | 42 | 28 | the army is frozen: the target is on another island |
 
-The island number is the clearest failure the policy has: twenty-eight units
-holding a move job and not moving, counted, not guessed. The fix is the
-Unreachable ladder the spec asks for: a target the path cannot reach abandons
-and re-targets instead of holding the unit forever.
+The island reading is the clearest failure the policy has: twenty-eight units
+holding a move job and not moving. A reachability ladder was tried and reverted
+(two minutes of "this target is unreachable" made the wall map worse), so this
+is still open.
 
 ## Known gaps
 
-- The army still only defends or attack-moves; there is no retreat, no
-  reinforcement, no focus fire, no defence construction.
+- The army does not attack. Attacking is behind a flag that is off, because an
+  army that attacks at two-to-one loses three matches of six. Local
+  superiority, retreat and reinforcement are the next slice.
 - The economy stalls on some seeds: a refinery queued near the wallet floor can
-  leave the house with zero income and no way back. Three attempts to fix this
-  made the matrix worse and were reverted.
-- One harvester loops (stuck=1 on every run): a truck alternating SearchOre and
+  leave the house with zero income. Three attempted fixes made the matrix worse
+  and were reverted.
+- One harvester loops now and then (stuck=1): a truck alternating SearchOre and
   ReturnToRefinery without docking.
 - The shipyard counts as a war factory. Splitting the role improved Death.mmx
   and lost every Barrel.mmx seed, so the split was reverted.
-- Nothing yet for walls, transports, garrisons, superweapons, scouting, or
+- Nothing for walls, transports, garrisons, superweapons, scouting, crates, or
   defence placement.
 
 ## How a change is judged
 
 A change is kept when the matrix improves: own count up at a fixed tick, no seed
 lost that survived before, unowned zero, stuck not up. One change per
-measurement. Three of the last four experiments (shipyard role, refinery
-reserve, truck-first ordering) each improved one reading and lost seeds on the
-other map, and were reverted.
+measurement. Five of the experiments in this session improved one reading and
+lost seeds on another map, and were reverted; the assignment bug above is why
+one of them looked like a win.
