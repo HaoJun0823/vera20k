@@ -45,6 +45,11 @@ STANDING = re.compile(r"(\d+) standing")
 CENSUS = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$", re.M)
 UNOWNED = re.compile(r"unowned=(\d+)")
 STUCK = re.compile(r"stuck=(\d+)")
+# The opening a run starts from: without it two results are not comparable.
+START = re.compile(
+    r"start: map=(\S+) country=(\S+) credits=(-?\d+) unit_count=(-?\d+) "
+    r"tech=(-?\d+) own=(\d+) enemies=(\d+) roster=\[([^\]]*)\]"
+)
 
 
 @dataclass
@@ -65,6 +70,11 @@ class MatchReport:
     unowned: int = 0
     stuck: int = 0
     country: str = ""
+    start_credits: int = 0
+    start_own: int = 0
+    start_units: int = 0
+    start_tech: int = 0
+    roster: str = ""
 
     @property
     def won(self) -> bool:
@@ -137,6 +147,11 @@ def append_history(reports: list[MatchReport], args, path: Path) -> None:
                 "stuck": report.stuck,
                 "yards": report.yards,
                 "walls": report.walls,
+                "start_credits": report.start_credits,
+                "start_own": report.start_own,
+                "start_units": report.start_units,
+                "start_tech": report.start_tech,
+                "roster": report.roster,
                 "seconds": round(report.seconds, 1),
             }) + "\n")
 
@@ -168,6 +183,9 @@ def run_match(
     brain: str = "retail",
     opponents: int = 1,
     country: str = "america",
+    start_credits: int | None = None,
+    start_units: int | None = None,
+    start_tech: int | None = None,
 ) -> MatchReport:
     """Run one match and read its log.
 
@@ -177,24 +195,40 @@ def run_match(
     stem = map_name.replace("/", "_").replace("\\", "_")
     log = log_dir / f"match-{stem}-{seed}-{brain}-{country}.log"
     started = time.monotonic()
+    command = [
+        str(binary),
+        "--map", map_name,
+        "--ticks", str(ticks),
+        "--seed", seed,
+        "--brain", brain,
+        "--opponents", str(opponents),
+        "--country", country,
+    ]
+    for flag, value in (
+        ("--credits", start_credits),
+        ("--units", start_units),
+        ("--tech", start_tech),
+    ):
+        if value is not None:
+            command += [flag, str(value)]
     with log.open("w", encoding="utf-8") as handle:
         subprocess.call(
-            [
-                str(binary),
-                "--map", map_name,
-                "--ticks", str(ticks),
-                "--seed", seed,
-                "--brain", brain,
-                "--opponents", str(opponents),
-                "--country", country,
-            ],
+            command,
             cwd=ROOT,
             stdout=handle,
             stderr=subprocess.STDOUT,
             env={**os.environ, "RUST_LOG": "info"},
         )
     seconds = time.monotonic() - started
-    report = parse_report(seed, log.read_text(encoding="utf-8", errors="replace"), seconds)
+    text = log.read_text(encoding="utf-8", errors="replace")
+    report = parse_report(seed, text, seconds)
+    start = START.search(text)
+    if start:
+        report.start_credits = int(start.group(3))
+        report.start_units = int(start.group(4))
+        report.start_tech = int(start.group(5))
+        report.start_own = int(start.group(6))
+        report.roster = start.group(8)
     report.map = map_name
     report.country = country
     return report
@@ -211,6 +245,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="which policy drives the local house")
     parser.add_argument("--countries", default="",
                         help="comma separated local factions: america,russia,yuri,...")
+    parser.add_argument("--start-credits", type=int, default=None,
+                        help="starting credits (default: the rules' Battle default)")
+    parser.add_argument("--start-units", type=int, default=None,
+                        help="starting units per house")
+    parser.add_argument("--start-tech", type=int, default=None,
+                        help="starting tech level")
     parser.add_argument("--history", default="",
                         help="append every result here (default target/autoplay-results/history.jsonl)")
     parser.add_argument("--opponents", type=int, default=1,
@@ -261,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
             lambda combo: run_match(
                 binary, combo[2], combo[0], args.ticks, log_dir,
                 args.brain, args.opponents, combo[1],
+                args.start_credits, args.start_units, args.start_tech,
             ),
             combos,
         ))
@@ -269,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
     for report in reports:
         print(f"{report.map} {report.country} seed {report.seed} [{args.brain}]: "
               f"{report.result} in {report.seconds:.0f}s", flush=True)
+        print(f"  start credits={report.start_credits} units={report.start_units} "
+              f"tech={report.start_tech} roster=[{report.roster}]", flush=True)
         print(f"  own={report.own} enemy={report.enemy} yards={report.yards} "
               f"walls={report.walls} unowned={report.unowned} stuck={report.stuck}", flush=True)
         if report.plots:

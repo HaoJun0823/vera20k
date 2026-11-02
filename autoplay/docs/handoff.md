@@ -1,0 +1,146 @@
+# Handoff: the auto-play rewrite
+
+Written 2026-11-02 for an agent taking this over. Everything below is measured
+on this branch; nothing here is a plan that has not been run.
+
+## Where the work is
+
+- Branch: feature/autoplay-v2 (fork HaoJun0823/vera20k, upstream
+  YuriPlanet/vera20k). upstream/main was merged in (204 commits) and one
+  merged call site fixed.
+- The new policy lives in the workspace member autoplay/, outside the engine
+  crate. vera20k-core still owns the engine; the policy reads a projection and
+  answers through the same command funnel a player's click uses.
+- The old policy (src/sim/strategy/retail/) is untouched and still the default.
+  The new one is selected by name, never in place of it.
+
+## Build and run
+
+    # play build (client)
+    python -m tools.cargo_run -- build --profile fast
+    target/owned-worktrees/<id>/fast/vera20k.exe
+    # the new policy in the client:
+    set VERA20K_BRAIN=v2
+
+    # headless match matrix: one process per map, faction and seed
+    python -m tools.autoplay_check --brain v2 --seeds 0x5EED,19,10 --countries america,russia,yuri --maps Death.mmx,Barrel.mmx --ticks 24000
+
+    # the policy crate's tests
+    RA2_DIR=<retail> python -m tools.cargo_run -- test -p vera20k-autoplay --lib
+
+RA2_DIR points at the retail install. The maps used by the matrix are
+Death.mmx and Barrel.mmx (game root) and xcc_maps/xeb1.map and
+xcc_maps/xtsunami.map.
+
+## What the policy does today
+
+One term is 15 frames. Managers propose, the assignment gives each unit at most
+one job, and the outbox answers:
+
+- deploys the maker, raises a power plant to open the tree, a refinery, a
+  barracks and a war factory, places each through the native site search;
+- keeps one harvester per refinery and buys the cheapest armed unit its
+  factories can build;
+- holds the army at its post (attacking is behind a flag that is off, below);
+- every fact about a type comes from autoplay/src/profile/mod.rs, derived from
+  RULESMD.INI through the production reader. No type name in the policy.
+
+## Verified engine facts (do not re-derive)
+
+| Question | Answer |
+|---|---|
+| Can a unit board a transport? | Yes: Goal::Enter (Command::MegaMission, mission Enter, destination = the transport). MoveToObject does not board. |
+| Can the policy place a building? | Yes: control::placement::Placement::cell_for. |
+| Can it ask whether a build is allowed? | Yes: Observation::can_build, which returns production::CanBuild (made public for this). |
+| Can it see cargo? | Yes: Observation::passenger_count and inside_transport were added for it. |
+| Is there a path-finding API? | Yes (sim/pathfinding, A*). It routes around static obstacles only; threats are the policy's job. |
+| Does the client need a change to use the new policy? | One line: src/app/input/dispatch.rs reads VERA20K_BRAIN. |
+
+## Measured baseline (2026-11-02, retail YR, hard computer)
+
+Death.mmx 1v1, 12000 ticks, three seeds: own 35 / 35 / 35, enemy 47 / 40 / 45,
+unowned 0, stuck 0. 24000 ticks over Death.mmx and Barrel.mmx: four of six
+survive. 1v7 at 12000 ticks: two of three survive (the retail policy lost at
+11361 on the same seed).
+
+Faction sweep, Death.mmx 0x5EED, 12000 ticks, v2: america 35 own / 47 enemy,
+russia 51 / 48, yuri 29 / 46. The 40-unit spread between factions is unexplained
+and is the first thing worth chasing: the unit picker is "cheapest armed unit",
+which quietly means "each faction's best-value unit", so every army ends up one
+type.
+
+Hard maps: xeb1.map holds its side and opens no wall; xtsunami.map never leaves
+the starting island. Both are expected failures until the breach and transport
+jobs exist.
+
+## The measurement harness
+
+tools/autoplay_check.py runs one process per map, faction and seed, all in
+parallel, and appends one JSON line per match to
+target/autoplay-results/history.jsonl: when, commit, brain, map, country, seed,
+opponents, ticks, result, tick, own, enemy, unowned, stuck, yards, walls, start
+credits / units / tech / roster, seconds. Two runs are compared by reading the
+file.
+
+Not built yet, and the first cheap win: --baseline <file> --compare, which
+prints the deltas and marks the cells that got worse. Without it, "did this
+change break something" is answered by remembering a table.
+
+## Method that worked, and the trap in it
+
+- One change per measurement, over at least three seeds and two maps.
+- A change is kept when the matrix improves: own up at a fixed tick, no seed lost
+  that survived before, unowned still zero, stuck not up.
+- Five experiments in this session improved one reading and lost seeds on the
+  other map, and were reverted: shipyard role, refinery reserve, truck-first
+  ordering, defence-before-refinery, unreachable-target ladder.
+
+The trap: a change can look like a win because the behaviour it was supposed to
+enable never ran. The assignment gave a unit every proposal in turn, so the
+weakest proposal landed last and won: the army was told to attack and to hold at
+the same time and always held. An "attack threshold" change then looked like a
+big survival improvement because the army had never attacked. Fix the semantics
+first, then measure behaviour.
+
+## Open work, in the order it should be done
+
+1. Economy reliability. A refinery queued near the wallet floor leaves the house
+   with zero income and no way back; the log line "economy: building in
+   production at ..." is the reading. Replace the fixed reserves with the real
+   cost of the cheapest harvester, and buy a replacement truck before any
+   building.
+2. The army as units. Military holds no state: it recomputes who is a soldier
+   every term. It needs squads (membership on a term), local superiority per
+   squad, retreat, reinforcement and focus fire. Attacking is off until that
+   exists (ATTACK_ENABLED in autoplay/src/manager/military.rs), because at
+   two-to-one the army loses three matches of six while holding loses one.
+3. Composition by role, not by price. Front line, ranged, anti-air quotas; this
+   fixes the one-type armies and the faction spread at once.
+4. Compare mode for the harness (see above).
+5. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
+   proven; the job is missing.
+6. Per-unit decision reasons in the log (unit 1234: job=defend
+   target=(80,90) reason=outnumbered), and a replay of one match, so a "the
+   unit did nothing" report is actionable.
+
+## The spec and the design
+
+- autoplay/docs/spec.md: every wish as an observable criterion, with the
+  historical failures as counters (H1-H18) and the priority ladder.
+- autoplay/docs/design.md: why the layer is shaped this way.
+- autoplay/docs/status.md: the measured state, the known gaps, and the reverted
+  experiments.
+
+The wish list itself is G:/Documents/autoplay-v2.txt (the user's file; it is not
+in the repository).
+
+## House rules that matter here
+
+- The contract is AGENTS.md. Run cargo through python -m tools.cargo_run --;
+  every cargo test uses --lib; format edited leaf files only.
+- Retail behaviour is the authority: a change cites the native function and
+  address next to the code, and the mechanism must already exist in the engine
+  before the policy uses it.
+- One owner per state. The policy owns its jobs; the engine owns the
+  simulation. Do not add a second copy of a decision.
+- Determinism: integer maths in decisions, stable iteration, no f32.

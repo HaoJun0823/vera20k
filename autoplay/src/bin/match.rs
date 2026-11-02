@@ -26,7 +26,7 @@ use vera20k_core::sim::intern::InternedId;
 use vera20k_core::sim::production::ProductionCategory;
 use vera20k_core::sim::strategy::retail::RetailBrain;
 use vera20k_core::sim::world::Simulation;
-use vera20k_core::skirmish_launch::{AiDifficulty, LaunchCountry};
+use vera20k_core::skirmish_launch::{AiDifficulty, LaunchCountry, SkirmishLaunchOptions};
 
 /// The map main's own match bench loads by default, so it is known to have the
 /// ore, the starts and the trigger data a match needs.
@@ -58,6 +58,11 @@ struct Args {
     opponent: LaunchCountry,
     /// The local house's country: the side the policy plays.
     country: LaunchCountry,
+    /// Starting credits: the opening every result is relative to.
+    credits: Option<i32>,
+    /// Starting units, and the tech level the match begins at.
+    units: Option<i32>,
+    tech: Option<i32>,
     /// How many computer houses play against the local one.
     opponents: usize,
     difficulty: AiDifficulty,
@@ -86,6 +91,9 @@ fn parse_args() -> Result<Args, String> {
     let mut per_frame = DEFAULT_PER_FRAME;
     let mut opponent = LaunchCountry::Russia;
     let mut country = LaunchCountry::America;
+    let mut credits: Option<i32> = None;
+    let mut units: Option<i32> = None;
+    let mut tech: Option<i32> = None;
     let mut opponents = 1_usize;
     let mut difficulty = AiDifficulty::Normal;
     let mut dump = 0_u64;
@@ -113,6 +121,11 @@ fn parse_args() -> Result<Args, String> {
             }
             "--opponent" => opponent = parse_country(&value()?)?,
             "--country" => country = parse_country(&value()?)?,
+            "--credits" => {
+                credits = Some(value()?.parse().map_err(|_| "credits is an i32".to_string())?)
+            }
+            "--units" => units = Some(value()?.parse().map_err(|_| "units is an i32".to_string())?),
+            "--tech" => tech = Some(value()?.parse().map_err(|_| "tech is an i32".to_string())?),
             "--opponents" => {
                 opponents = value()?.parse().map_err(|_| "opponents is a count".to_string())?
             }
@@ -143,6 +156,9 @@ fn parse_args() -> Result<Args, String> {
         per_frame,
         opponent,
         country,
+        credits,
+        units,
+        tech,
         opponents,
         difficulty,
         dump,
@@ -188,6 +204,9 @@ autoplay-match: a headless skirmish with auto play on the local house
   --opponent <name>  the computer house's country (default russia)
   --country <name>   the local house's country: what the policy plays
                      (default america)
+  --credits <n>      starting credits (default: the rules' Battle default)
+  --units <n>        starting units per house
+  --tech <n>         starting tech level
   --difficulty <n>   easy | normal | hard (default normal)
   --dump <n>         print the brain's orders for the first n frames
   --dump-teams <n>   print the native team pipeline (teams, scripts, cursors,
@@ -533,7 +552,20 @@ fn main() -> Result<(), String> {
         args.opponents.max(1),
     )
     .collect();
-    let session = headless_scenario::battle_session_for_country(&args.map, &seats, args.country);
+    let mut options = SkirmishLaunchOptions::default();
+    if let Some(credits) = args.credits {
+        options.starting_credits = credits;
+    }
+    if let Some(units) = args.units {
+        options.unit_count = units;
+    }
+    if let Some(tech) = args.tech {
+        options.tech_level = tech;
+    }
+    let start_units = options.unit_count;
+    let start_tech = options.tech_level;
+    let session =
+        headless_scenario::battle_session_with_options(&args.map, &seats, args.country, options);
     let mut scenario = headless_scenario::load_session(&args.ra2_dir, &args.map, args.seed, session)?;
     let sim = &scenario.runtime.simulation;
 
@@ -563,6 +595,33 @@ fn main() -> Result<(), String> {
         .collect();
     if enemies.is_empty() {
         return Err("the launch has no computer opponent".to_string());
+    }
+
+    // The opening is part of the result: a run that does not say what it
+    // started with cannot be compared with the next one.
+    {
+        let obs = Observation::new(sim, local);
+        let mut roster: BTreeMap<String, usize> = BTreeMap::new();
+        for entity in obs.own_entities() {
+            *roster
+                .entry(sim.interner().resolve(entity.type_id).to_owned())
+                .or_default() += 1;
+        }
+        let units: Vec<String> = roster
+            .iter()
+            .map(|(name, count)| format!("{name}:{count}"))
+            .collect();
+        log::info!(
+            "start: map={} country={:?} credits={} unit_count={} tech={} own={} enemies={} roster=[{}]",
+            args.map,
+            args.country,
+            obs.credits(),
+            start_units,
+            start_tech,
+            roster.values().sum::<usize>(),
+            enemies.len(),
+            units.join(",")
+        );
     }
 
     println!(

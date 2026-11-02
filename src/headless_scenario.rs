@@ -53,6 +53,24 @@ pub fn battle_session_for_country(
     opponents: &[(LaunchCountry, AiDifficulty)],
     local_country: LaunchCountry,
 ) -> SkirmishLaunchSession {
+    battle_session_with_options(
+        selected_map_file,
+        opponents,
+        local_country,
+        crate::skirmish_launch::SkirmishLaunchOptions::default(),
+    )
+}
+
+/// The same session with the skirmish options named.
+///
+/// Starting credits and the starting unit count decide the whole opening, so a
+/// run that reports its result without them cannot be compared with another.
+pub fn battle_session_with_options(
+    selected_map_file: &str,
+    opponents: &[(LaunchCountry, AiDifficulty)],
+    local_country: LaunchCountry,
+    options: crate::skirmish_launch::SkirmishLaunchOptions,
+) -> SkirmishLaunchSession {
     use crate::skirmish_launch::{
         BATTLE_MODE_ID, LaunchStartPosition, LaunchTeam, PreFillHouseRoster, SkirmishAiSlot,
         SkirmishLaunchMode, SkirmishLaunchOptions, SkirmishLocalSlot,
@@ -91,7 +109,7 @@ pub fn battle_session_for_country(
             })
             .collect(),
         pre_fill_house_roster: PreFillHouseRoster::from_compact_skirmish(opponents.len()),
-        options: SkirmishLaunchOptions::default(),
+        options,
     }
 }
 
