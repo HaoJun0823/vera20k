@@ -97,12 +97,38 @@ impl Policy {
         }
     }
 
-    fn expected_mission(kind: JobKind) -> Option<MissionId> {
+    /// Whether the unit's own mission decides that this job is already live.
+    ///
+    /// A job without one is sent once and never re-sent, because re-sending the
+    /// same order every term is what makes a unit unable to act.
+    fn watched_by_mission(kind: JobKind) -> bool {
+        matches!(kind, JobKind::Harvest | JobKind::Assault | JobKind::Defend)
+    }
+
+    /// Whether the unit's current mission already means this job is being lived
+    /// out, so the policy has to leave the unit alone.
+    ///
+    /// The harvester is the case that matters. The engine hands a docking miner
+    /// to `Enter` for the refinery contact and `Unload` for the dump
+    /// (`MissionType::Enter` queued at `0x0073E093`, the dump under
+    /// `Mission_Unload`), so a policy that recognized only `Harvest` would send
+    /// a MegaMission into the middle of every dock. A MegaMission is
+    /// `Queue_Mission(mission, 1)` (`sim/mission/mega_mission.rs`): it replaces
+    /// the queued `Enter` that `per_cell_release_dock_contact` (`0x0073ACD7`)
+    /// needs to keep the contact, the radioed refinery is dropped at the next
+    /// track end, and the truck cycles back to the ore field still full —
+    /// measured at 527 dock entries against 14 empty-hold arrivals in one match
+    /// before this change, and one dock per unload after it.
+    fn living_out(kind: JobKind, mission: MissionId) -> bool {
         match kind {
-            JobKind::Harvest => Some(MissionId::from_known(MissionType::Harvest)),
-            JobKind::Assault => Some(MissionId::from_known(MissionType::Attack)),
-            JobKind::Defend => Some(MissionId::from_known(MissionType::AreaGuard)),
-            _ => None,
+            JobKind::Harvest => {
+                mission == MissionId::from_known(MissionType::Harvest)
+                    || mission == MissionId::from_known(MissionType::Enter)
+                    || mission == MissionId::from_known(MissionType::Unload)
+            }
+            JobKind::Assault => mission == MissionId::from_known(MissionType::Attack),
+            JobKind::Defend => mission == MissionId::from_known(MissionType::AreaGuard),
+            _ => false,
         }
     }
 
@@ -171,25 +197,20 @@ impl Policy {
                 continue;
             };
             let holding = self.issued.get(unit) == Some(&job.kind);
-            match Self::expected_mission(job.kind) {
-                Some(mission) => {
-                    let Some(current) = obs
-                        .own_entities()
-                        .find(|entity| entity.entity_id == *unit)
-                        .map(|entity| entity.mission)
-                    else {
-                        continue;
-                    };
-                    if current == mission {
-                        self.issued.insert(*unit, job.kind);
-                        continue;
-                    }
+            if Self::watched_by_mission(job.kind) {
+                let Some(current) = obs
+                    .own_entities()
+                    .find(|entity| entity.entity_id == *unit)
+                    .map(|entity| entity.mission)
+                else {
+                    continue;
+                };
+                if Self::living_out(job.kind, current) {
+                    self.issued.insert(*unit, job.kind);
+                    continue;
                 }
-                None => {
-                    if holding {
-                        continue;
-                    }
-                }
+            } else if holding {
+                continue;
             }
             orders.push((*unit, goal, job.kind));
         }
@@ -267,6 +288,7 @@ impl Brain for Policy {
         const STUCK_FRAMES: u64 = 90;
         self.stats.stuck = 0;
         let mut stood = BTreeMap::new();
+        let mut stuck = Vec::new();
         for unit in obs.own_entities() {
             // Holding a post is standing still on purpose; only a job that
             // names somewhere to be counts as stuck when the cell stops
@@ -288,6 +310,20 @@ impl Brain for Policy {
             };
             if held && tick.saturating_sub(since) >= STUCK_FRAMES {
                 self.stats.stuck += 1;
+                // "A unit did nothing" has to be actionable, so the reading
+                // names the unit, its job and where it stands still.
+                if let Some(job) = self.jobs.get(unit.entity_id) {
+                    stuck.push(format!(
+                        "{} id={} job={:?} target={:?} cell={:?} still={}",
+                        obs.object_type(rules, unit.type_id)
+                            .map_or("?", |ty| ty.id.as_str()),
+                        unit.entity_id,
+                        job.kind,
+                        job.target,
+                        unit.cell,
+                        tick.saturating_sub(since)
+                    ));
+                }
             }
             stood.insert(unit.entity_id, (unit.cell, since));
         }
@@ -308,6 +344,9 @@ impl Brain for Policy {
                 .filter_map(|unit| obs.object_type(rules, unit.type_id).map(|ty| ty.id.clone()))
                 .collect();
             log::info!("policy v2: unowned at {tick}: {:?}", idle);
+        }
+        if tick % 600 == 0 && !stuck.is_empty() {
+            log::info!("policy v2: stuck at {tick}: {:?}", stuck);
         }
         if tick % 600 == 0 {
             log::info!(
@@ -341,4 +380,66 @@ pub fn manager_domains() -> [Domain; 4] {
         Domain::Military,
         Domain::Abilities,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mission(known: MissionType) -> MissionId {
+        MissionId::from_known(known)
+    }
+
+    #[test]
+    fn a_docking_harvester_is_already_harvesting() {
+        // The engine's own dock hands the miner to Enter and Unload; a policy
+        // that ordered it again here would break the dock it is waiting on.
+        for known in [
+            MissionType::Harvest,
+            MissionType::Enter,
+            MissionType::Unload,
+        ] {
+            assert!(
+                Policy::living_out(JobKind::Harvest, mission(known)),
+                "a miner on the harvest cycle must be left alone"
+            );
+        }
+    }
+
+    #[test]
+    fn a_harvester_that_stopped_is_ordered_again() {
+        for idle in [
+            MissionId::NONE,
+            mission(MissionType::Guard),
+            mission(MissionType::AreaGuard),
+        ] {
+            assert!(
+                !Policy::living_out(JobKind::Harvest, idle),
+                "a truck that is not harvesting has to be told to harvest"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_job_with_a_mission_of_its_own_is_watched() {
+        for watched in [JobKind::Harvest, JobKind::Assault, JobKind::Defend] {
+            assert!(Policy::watched_by_mission(watched));
+        }
+        for once in [
+            JobKind::Deploy,
+            JobKind::Capture,
+            JobKind::Garrison,
+            JobKind::Repair,
+            JobKind::Transport,
+            JobKind::Breach,
+            JobKind::Scout,
+            JobKind::Retreat,
+            JobKind::ReturnOre,
+        ] {
+            assert!(
+                !Policy::watched_by_mission(once),
+                "sent once, never re-sent"
+            );
+        }
+    }
 }
