@@ -427,36 +427,44 @@ the goal.
 
 The test is committed and the matrix is unchanged by it (six of six identical).
 
-## What a move needs, and the fourth attempt at scouting
+## The fifth scout, the first that reached the enemy, and a zero that does not fit
 
-Three facts now, each from a test rather than from reading code (all in
-`autoplay/src/`):
+The previous round left a shape: a scout must be cheap and fast, the trip short,
+the destination inside the playfield. The profile says which unit that is — a dog
+has nine cells of sight and twice a rifleman's speed for the same 200 credits
+(`sight=9, speed=8, cost=200` against `E1`'s `5/4/200`). `best_scout` picks by
+sight per credit off the profile, so a faction whose cheapest eyes are a rifleman
+still scouts.
 
-- `move_tests.rs` — one `Goal::Move` through `Funnel::prepare` carries a tank
-  twenty cells.
-- `board_move_tests.rs` — the same through the real `ControlBoard`, budget and
-  `order_stands` included, also arrives with `rejected` at zero.
-- `guard_move_tests.rs` — a unit that held a guard post for sixty frames still
-  takes the move, so the rule that drops a march while a unit fires (the only arm
-  of the chain that reports success while dropping an order) is not the cause. And
-  a march of **160 cells** starts, keeps walking, and stops after about thirty
-  with 130 still to go: a long march is neither refused nor completed.
+That version was measured and reverted, six of six cells worse:
 
-`Observation::is_cell_in_playfield` was added because the fog grid is not the
-playfield. The grid covers the whole map buffer (256x256 on Death.mmx) while the
-walkable ground is smaller and offset inside it, which is why two earlier scout
-targets (`Cell((0, 0))`, then `Cell((16, 16))`) were cells no pathfinder reaches.
+| Map | Seed | Own | Lost | Stuck |
+|---|---|---|---|---|
+| Death.mmx | 0x5EED | 46 → 38 | 0:0 → **5:0** | 0 → 3 |
+| Death.mmx | 19 | 51 → 53 | — | 0 → 4 |
+| Death.mmx | 10 | 50 → 49 | — | 1 → 4 |
+| Barrel.mmx | 0x5EED | 46 → 44 | — | 1 → 3 |
+| Barrel.mmx | 19 | 46 → 46 | — | 1 → 3 |
+| Barrel.mmx | 24301 | 46 → 46 | — | 1 → 3 |
 
-The fourth scout attempt used the playfield query and a remembered destination.
-Its target was legitimate (`Cell((16, 128))`) and it was still reverted: **six of
-six cells worse**, `own` falling in three of them (46→25 on Barrel.mmx seed
-24301), `stuck` up everywhere. Taking soldiers off the base to look at the map
-costs more than the information is worth while the enemy attacks the base.
+The `lost` column is the new part and it is the informative one: this is the first
+scout attempt where anything was destroyed. Five of the house's objects died,
+which means the scouts reached the enemy and were killed by it.
 
-So the useful conclusion is not "scouting is wrong" but a shape for it: the army
-cannot spare front-line units, and a march stops after thirty cells, so a scout
-must be a cheap unit sent a short way repeatedly rather than a tank sent across
-the map. Nothing in the tree scouts today; all four attempts are reverted.
+And yet every reading of the match shows `seen=0`:
+
+    military: tick=10800 enabled=false soldiers=27 want=30 seen=0 near=0 going=false
+
+Units walked into enemy fire and the projection reports no enemy in line of sight,
+on every one of seventeen readings. `Observation::visible_enemy_entities` is tested
+and works in the fixture (`vision_tests`, one rifleman beside ours and one across
+the map: only the near one is a target), so either the fog is not being refreshed
+for the house in a real match, or the units are dying to something the visibility
+layer does not consider an object — a defence shot, or a shot from outside the
+unit's own sight.
+
+That is the next question, and it is a better one than "where should a scout go".
+Nothing scouts today; all five attempts are reverted.
 
 ## The hard maps, on this build
 

@@ -197,6 +197,20 @@ first, then measure behaviour.
   130 to go. So the next scout is not a tank sent across the map; it is a cheap
   unit sent a short way, repeatedly, and the army stays home. Two facts make that
   design testable now: the playfield query, and the measured march length.
+- **Five scouts now, and the fifth is the one that matters.** Picking the unit by
+  sight per credit off the profile — a dog has `sight=9, speed=8, cost=200` against
+  `E1`'s `5/4/200` — and sending it 24 cells at a time to a playfield-legal cell
+  reached the enemy: `lost` went `0:0 → 5:0`, the first destroyed objects any
+  scout attempt produced. It was still six of six cells worse and was reverted.
+- **The reading that does not fit, and the next question.** In that same match,
+  every one of seventeen readings shows `seen=0` — units walked into enemy fire and
+  the projection reports no enemy in line of sight. `visible_enemy_entities` is
+  tested and works in the arena fixture, so the two candidates are: the fog is not
+  refreshed for the house in a real match, or the units are killed by something the
+  visibility layer does not count (a defence shot, or fire from outside the unit's
+  own sight). Settling that is worth more than another scouting rewrite — every
+  decision that picks a target reads `seen`, so if it is always zero in a match,
+  none of the army work can be judged.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
    proven; the job is missing.
 5. Per-unit decision reasons in the log (unit 1234: job=defend
