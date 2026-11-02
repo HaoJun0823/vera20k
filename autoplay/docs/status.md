@@ -223,6 +223,42 @@ cost in the bank stops buying units, and units are what the object count is. The
 constant stays, and with it the open question of what the reserve is for now that
 income works.
 
+## The assault ladder, and what it did and did not fix
+
+Three rungs were missing below the order, and `design.md` section 4 already names
+them (no waiting on another pass; every rung terminates):
+
+- a job whose object is no longer visible ends;
+- a unit that has stood in one cell for 450 frames on an assault ends it and the
+  target is not proposed to that unit again for 1800 frames (`stalled`, `cooled`);
+- a unit that nothing proposed for gets the default job — guard the nearest
+  structure, read off the profile — so `Unowned == 0` holds by construction.
+
+With attacking on, the stuck count on the probe fell from 13-33 to 0-2 and
+`unowned` from 0→14 in one cell to 0 in all six. Own falls in no cell.
+
+What is left is the rung below those: an assault on a target the unit can see and
+reach but cannot finish. Those units read `job=Assault target=Object(2579)` with
+`still=1800` at the end of the run, and the abandonment that should fire at 450
+frames reads `stalled=0` — because those units are re-assigned and re-ordered in
+the same term they are counted, so the reading the ladder consults (`stood`) has
+just been reset. The next reading has to come from the target's health, not from
+the unit's cell: an assault that has not reduced its target in N frames is
+`Ineffective`, which is the design's fourth outcome and the one still missing.
+
+Two order-identity bugs turned up while measuring, and the matrix caught both as
+a fall in own rather than a test:
+
+- comparing the target for *every* watched job. A harvest job's target is the
+  cell the truck stood on and a defend post is where the first soldier is before
+  the yard exists, so both read as a new order every term: the dock regression
+  again, own 46 → 34. Only an assault is compared by target.
+- skipping the `issued` bookkeeping when the mission already showed the job, so a
+  unit with no remembered order was re-ordered every term.
+
+With attacking off the matrix reads identical in all six cells, so all of it is
+inert until the flag returns.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |

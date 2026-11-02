@@ -123,9 +123,14 @@ first, then measure behaviour.
    one, but five units standing 1400-1875 frames on an assault they cannot
    finish). The order path is sound — an attack names the enemy object and the
    target is read from `visible_enemy_entities`, so the policy no longer aims at
-   anything the player could not have clicked. Build the ladder below the order
-   next: a job gives up on a target the unit cannot reach and is not proposed to
-   that unit again, and the order is re-sent when the target it names changes.
+   anything the player could not have clicked. The ladder below the order now
+   exists (`stalled`/`cooled` in the stats line, plus a default guard job so no
+   unit is left unowned), and with the flag on the stuck count falls from 13-33
+   to 0-2 while own falls in no cell. What is still missing is the design's
+   fourth outcome: an assault that has not reduced its target in N frames is
+   `Ineffective`. Units stand 1800 frames on a visible target they cannot finish,
+   and the abandonment cannot see it because re-assignment resets the cell timer
+   it consults. Read the target's health, not the unit's cell.
 3. Composition by role, not by price. Front line, ranged, anti-air quotas; this
    fixes the one-type armies and the faction spread at once.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
