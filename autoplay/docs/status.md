@@ -259,6 +259,28 @@ a fall in own rather than a test:
 With attacking off the matrix reads identical in all six cells, so all of it is
 inert until the flag returns.
 
+## The fourth outcome, and the stuck clock none of it could be read with
+
+`Ineffective` — the design's fourth ending — is now implemented: an assault whose
+target's health has not moved for 450 frames ends, the pair is cooled down, and
+`ineffective` counts it. Two defects had to be fixed before the number would
+move, and both were found by reading it:
+
+- the first version recorded the target's health unconditionally, which moved the
+  timestamp every term, so the window could never elapse: `ineffective=0` in a
+  match where units stood 1800 frames. The clock now remembers the reading that
+  started the current run and resets only when the target loses a hit point;
+- the stuck clock was keyed on the cell alone, so a unit switching from holding a
+  post to attacking kept the cell it had held and read as "standing still on its
+  assault" in the same term it was given one — 38 units at once. It is cleared
+  when a unit's job changes, and a unit whose assault took health off its target
+  this term is excluded: the spec's H2 counts a unit stuck when it holds a
+  *movement* job and does not move, not a unit standing in range and firing.
+
+With attacking on, the cell that read 38 reads 0, two cells read +1 stuck, own
+falls in no cell and gains 3 in one. With the flag off the matrix is identical in
+all six cells.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |

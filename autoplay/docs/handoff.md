@@ -124,13 +124,14 @@ first, then measure behaviour.
    finish). The order path is sound — an attack names the enemy object and the
    target is read from `visible_enemy_entities`, so the policy no longer aims at
    anything the player could not have clicked. The ladder below the order now
-   exists (`stalled`/`cooled` in the stats line, plus a default guard job so no
-   unit is left unowned), and with the flag on the stuck count falls from 13-33
-   to 0-2 while own falls in no cell. What is still missing is the design's
-   fourth outcome: an assault that has not reduced its target in N frames is
-   `Ineffective`. Units stand 1800 frames on a visible target they cannot finish,
-   and the abandonment cannot see it because re-assignment resets the cell timer
-   it consults. Read the target's health, not the unit's cell.
+   exists (`stalled`/`cooled`/`ineffective` in the stats line, plus a default
+   guard job so no unit is left unowned), and with the flag on the stuck count
+   falls from 13-33 to 0 in the cell that showed it and +1 in two others, while
+   own falls in no cell and gains in one. The `Ineffective` outcome reads the
+   target's health (`Observation::health`, added for it), not the unit's cell,
+   because re-assignment resets a cell timer. What is left before the flag can
+   stay on is judgement: which target is worth the army, and when to break off.
+   The machinery to end a job is now there; nothing yet chooses well.
 3. Composition by role, not by price. Front line, ranged, anti-air quotas; this
    fixes the one-type armies and the faction spread at once.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
