@@ -184,21 +184,15 @@ impl Military {
     /// the house can see of the fight still steers what it buys.
     fn shortfall(ctx: &Ctx<'_>, candidates: &[(&ObjectType, &UnitProfile)]) -> [i64; ROLES.len()] {
         // The target mix, from the weights of everything the house can build.
-        let mut target = [0.0_f64; ROLES.len()];
+        let mut offered = [0.0_f64; ROLES.len()];
         for (_, profile) in candidates {
             let weights = ctx.roles.weights(&profile.id);
             for role in ROLES {
-                target[role.index()] += weights.get(role);
-            }
-        }
-        let offered: f64 = target.iter().sum();
-        if offered > 0.0 {
-            for share in target.iter_mut() {
-                *share /= offered;
+                offered[role.index()] += weights.get(role);
             }
         }
 
-        // What the house already brings, in the same units, and the total.
+        // What the house already brings, in the same units.
         let mut brings = [0.0_f64; ROLES.len()];
         for unit in ctx.obs.own_entities() {
             let Some(ty) = ctx.obs.object_type(ctx.rules, unit.type_id) else {
@@ -212,9 +206,6 @@ impl Military {
                 brings[role.index()] += weights.get(role);
             }
         }
-        // One army's worth when the house has none yet, so the first unit is
-        // chosen by the same mix as the thirtieth.
-        let held: f64 = brings.iter().sum::<f64>().max(1.0);
 
         // What the enemy asks for, by the job that answers the armour it wears.
         let mut threat = [0_i64; ROLES.len()];
@@ -230,13 +221,7 @@ impl Military {
             }
         }
 
-        let mut need = [0_i64; ROLES.len()];
-        for role in ROLES {
-            let at = role.index();
-            let want = held * target[at] + threat[at] as f64;
-            need[at] = ((want - brings[at]).max(0.0) * 1_000.0).round() as i64;
-        }
-        need
+        shortfall_of(offered, brings, threat)
     }
 
     /// How well a type answers what the house is short of.
@@ -510,4 +495,115 @@ const MARCH_SCAN_STEP: u16 = 4;
 /// Chebyshev distance in cells: how far a walk is on this grid.
 fn cell_distance(a: (u16, u16), b: (u16, u16)) -> i32 {
     i32::from(a.0.abs_diff(b.0)).max(i32::from(a.1.abs_diff(b.1)))
+}
+
+/// The arithmetic of the shortfall, separated from the projection it reads so a
+/// test can ask it with a roster and nothing else.
+///
+/// `offered` is the sum of every buildable type's weights in each job: the mix
+/// the rule set itself offers, normalised here. `brings` is the same sum over
+/// what the house already fields, and `threat` is a count of visible enemies by
+/// the job that answers the armour they wear.
+fn shortfall_of(
+    offered: [f64; ROLES.len()],
+    brings: [f64; ROLES.len()],
+    threat: [i64; ROLES.len()],
+) -> [i64; ROLES.len()] {
+    let total: f64 = offered.iter().sum();
+    let mut target = [0.0_f64; ROLES.len()];
+    if total > 0.0 {
+        for (at, share) in offered.iter().enumerate() {
+            target[at] = share / total;
+        }
+    }
+    // One army's worth when the house has none yet, so the first unit is chosen
+    // by the same mix as the thirtieth.
+    let held: f64 = brings.iter().sum::<f64>().max(1.0);
+    let mut need = [0_i64; ROLES.len()];
+    for at in 0..ROLES.len() {
+        let want = held * target[at] + threat[at] as f64;
+        need[at] = ((want - brings[at]).max(0.0) * 1_000.0).round() as i64;
+    }
+    need
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vera20k_core::rules::unit_role::RoleTable;
+
+    fn retail() -> Option<vera20k_core::rules::ruleset::RuleSet> {
+        Some(vera20k_core::rules::retail_ini_fixture::retail_battle_rules()?.rules)
+    }
+
+    /// The house opens with the mix the roster offers, not with the cheapest
+    /// type that happens to answer one job.
+    ///
+    /// This is the regression the six-cell matrix found: with no enemy in sight
+    /// the old picker scored every candidate zero and broke the tie on
+    /// `(cost, id)`, which put the attack dog before the rifleman because
+    /// `"ADOG" < "E1"`. The dog's warhead is worth nothing against anything
+    /// above infantry, so an army of them could not hurt a base.
+    #[test]
+    fn an_empty_house_opens_with_a_line_unit_not_a_cheap_specialist() {
+        let Some(rules) = retail() else {
+            return;
+        };
+        let roles = RoleTable::build(&rules);
+        let mut offered = [0.0_f64; ROLES.len()];
+        for ty in rules.all_objects() {
+            if !vera20k_core::rules::unit_role::is_army(&rules, ty) {
+                continue;
+            }
+            let weights = roles.weights(&ty.id);
+            for role in ROLES {
+                offered[role.index()] += weights.get(role);
+            }
+        }
+        let need = shortfall_of(offered, [0.0; ROLES.len()], [0; ROLES.len()]);
+        let score = |id: &str| {
+            let weights = roles.weights(id);
+            ROLES
+                .iter()
+                .map(|role| weights.get(*role) * need[role.index()].min(GAP_CAP * 1_000) as f64)
+                .fold(0.0_f64, f64::max)
+        };
+        assert!(
+            score("MTNK") > score("ADOG"),
+            "a tank opens the line and a dog does not: MTNK={} ADOG={}",
+            score("MTNK"),
+            score("ADOG")
+        );
+        assert!(score("ADOG") >= 0.0);
+    }
+
+    /// What the house already fields closes the gap it fills: a role whose share
+    /// is covered asks for nothing more, so the picker moves on to the next job
+    /// instead of buying the same answer forever.
+    #[test]
+    fn a_job_the_army_already_answers_is_not_short() {
+        let Some(rules) = retail() else {
+            return;
+        };
+        let roles = RoleTable::build(&rules);
+        let mut offered = [0.0_f64; ROLES.len()];
+        for ty in rules.all_objects() {
+            if !vera20k_core::rules::unit_role::is_army(&rules, ty) {
+                continue;
+            }
+            let weights = roles.weights(&ty.id);
+            for role in ROLES {
+                offered[role.index()] += weights.get(role);
+            }
+        }
+        let anti_vehicle = Role::AntiVehicle.index();
+        // Ten Grizzlies, in the units the shortfall counts.
+        let mut brings = [0.0_f64; ROLES.len()];
+        let grizzly = roles.weights("MTNK");
+        for role in ROLES {
+            brings[role.index()] += grizzly.get(role) * 10.0;
+        }
+        let need = shortfall_of(offered, brings, [0; ROLES.len()]);
+        assert_eq!(need[anti_vehicle], 0, "the tanks answer anti-vehicle");
+    }
 }

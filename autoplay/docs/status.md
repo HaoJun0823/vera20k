@@ -919,3 +919,19 @@ in every cell instead of one type, and seed 19 on Death.mmx kills seven enemy
 objects for none of its own. The one regressed cell is the campaign, not the
 composition: the column leaves and is destroyed (`lost` 5:1), which is the
 retreat rung status.md already records as missing.
+
+The 1v7 lane on the same build, Death.mmx, seven brutal houses, 12000 ticks:
+
+| Seed | own | army | lost |
+|---|---|---|---|
+| 0x5EED | 48 -> 37 | 4503 -> 4790 | 0:0 |
+| 19 | 50 -> 41 | 5620 -> 6101 | 0:0 |
+| 10 | 51 -> 37 | 6034 -> 4644 | 0:0 -> 2:0 |
+
+All three still survive, and the army's hit points are up on two of the three —
+but the object count falls on all three, because the same income now buys
+dearer units. The wallet ends at 120-935 credits in every seed, so the house is
+spending everything it has either way; the mix is simply more expensive per
+object. That is a real cost of this change and is recorded rather than argued
+away: the 1v1 matrix is the lane it was measured on, and the 1v7 lane now has a
+number to beat.
