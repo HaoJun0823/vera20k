@@ -427,6 +427,30 @@ the goal.
 
 The test is committed and the matrix is unchanged by it (six of six identical).
 
+## A Move works everywhere except where nobody asks for one
+
+Two tests now prove the chain from a brain to the engine:
+
+- `move_tests.rs`: one `Goal::Move` through `Funnel::prepare` carries a tank from
+  (6,6) to (26,26), within a cell of the target.
+- `board_move_tests.rs`: the same through the real `ControlBoard` — the object the
+  match drives, with the per-frame budget, the domain gate and `order_stands` —
+  also arrives, and `rejected` stays zero. `order_stands` is the one arm of the
+  chain that reports `Queued` while dropping an order, so it had to be ruled out
+  separately.
+
+A third experiment asked the policy itself, driving `Policy::think` against a
+house with a yard and twelve riflemen for three hundred frames and reading its
+outbox: **240 orders, every one of them `GuardAt`, not one `Move`.** The scouting
+that would ask for a move is not in the tree — it was measured and reverted three
+times in the previous two rounds, and what remained was the rest of the policy
+holding the army at its posts.
+
+So the reading this round is not a defect report: the door is sound end to end,
+and the policy has no code that asks a unit to go anywhere. Anyone reading the
+earlier rounds of this file should know that the three scout attempts were reverted
+and the current tree has none of them.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |

@@ -178,6 +178,19 @@ first, then measure behaviour.
   The next experiment should be one unit, one move, driven by a `Brain` that does
   nothing else, and watch where it stops; scissors on the `Outbox` drain are the
   most likely suspect.
+- **Resolved, and the answer is the opposite of the guess.** `order_stands` and
+  the `ControlBoard` are both innocent: `board_move_tests.rs` drives the real
+  board, budget and gate included, and a tank arrives twenty cells away with
+  `rejected` at zero. Asked directly, `Policy::think` emits 240 orders over three
+  hundred frames and **every one is `GuardAt`** — the tree has no code that asks a
+  unit to travel, because all three scouting attempts were reverted. The policy is
+  not failing to move units; it is not asking.
+  So the next step is to write the move request again, and this time the two
+  tests above say a working one will be carried. The three reverts were about
+  *where to send* a scout, not about whether orders travel; the last one
+  (`Cell((16,16))`, remembered target) failed because the target was picked from
+  fog-grid coordinates outside the playfield, which is a target-choice bug and not
+  an order-delivery one.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
    proven; the job is missing.
 5. Per-unit decision reasons in the log (unit 1234: job=defend
