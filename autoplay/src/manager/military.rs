@@ -433,8 +433,25 @@ impl Military {
         // the bases are 116 cells apart, nothing walks between them, so `seen` is
         // zero on every reading and the assault gate never opens. That is the
         // deadlock status.md records.
+        // Where the column is, as the mean of its cells rather than whichever
+        // unit the entity store yielded first. `first()` is not stable between
+        // terms and, worse, it is often a unit left behind at the base, so the
+        // frontier was searched from home every time and the column never got
+        // more than one march out: at 24000 ticks the readings still sit inside
+        // `x=132..188`, `y=64..116` with an enemy base at `(70, 157)`.
+        let column_at = if soldiers.is_empty() {
+            home
+        } else {
+            let (mut sx, mut sy) = (0_u32, 0_u32);
+            for unit in &soldiers {
+                sx += u32::from(unit.cell.0);
+                sy += u32::from(unit.cell.1);
+            }
+            let n = soldiers.len() as u32;
+            ((sx / n) as u16, (sy / n) as u16)
+        };
         let advance = if march {
-            march_cell(ctx, home, soldiers.first().map_or(home, |unit| unit.cell))
+            march_cell(ctx, home, column_at)
         } else {
             None
         };

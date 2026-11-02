@@ -1193,14 +1193,34 @@ the column oscillates between opposite edges of the explored region instead of
 walking in one direction. That is the shape of the scouting problem queue.md
 still has open (D4), not a tie-break to tune.
 
-**Anchoring the march on the column's centroid.** `soldiers.first()` is
-whichever unit the entity store yields first, so the frontier was computed from
-a different point every term — a plausible cause for a target that jumps from
-`(164,76)` to `(148,112)` to `(188,80)` between readings. Using the mean of the
-column's cells instead is three cells better and two worse at 12000 ticks, and
-the targets still move: they are moving because the frontier genuinely moves as
-ground is revealed, not because the anchor was unstable. Reverted, and the
-oscillation is left for the scouting work rather than another tie-break.
+**Anchoring the march on the column's centroid — rejected, then kept.**
+`soldiers.first()` is whichever unit the entity store yields first, and it is
+often a unit left behind at the base, so the frontier was searched from home on
+every term and the column never got more than one march out. Measuring the
+centroid at **12000 ticks** said three cells better and two worse, and it was
+reverted on that reading.
+
+That reading was too short. The question is how far a column travels over a
+whole match, and at 12000 the two anchors have not diverged yet. At 24000:
+
+| Map | Seed | own | army | lost |
+|---|---|---|---|---|
+| Death.mmx | 10 | 47 -> 69 | 5885 -> 9388 | 21:15 -> 2:8 |
+| Death.mmx | 19 | 58 -> 64 | 7608 -> 8681 | 11:4 -> 14:2 |
+| Death.mmx | 24301 | 77 -> 67 | 10739 -> 8768 | 2:6 -> 0:2 |
+| Barrel.mmx | 10 | 51 -> 49 | 6191 -> 5730 | 1:3 -> 19:6 |
+| Barrel.mmx | 19 | **39 -> 80** | **4045 -> 9804** | 19:7 -> 2:0 |
+| Barrel.mmx | 24301 | 50 -> 39 | 6256 -> 3828 | 9:0 -> 20:9 |
+
+Own 322 -> 368, army 40724 -> 46200, losses 63 -> 57, and `Barrel.mmx` seed 19 —
+the cell that was recorded as the weakest — doubles its object count and its hit
+points. Three cells get worse, two of them badly, which is the shape of an army
+that now goes somewhere: whether a given seed meets the enemy on good ground or
+bad is not something the anchor controls.
+
+1v7 at 12000 is two cells better and one worse. Kept, and the lesson recorded:
+a window shorter than the behaviour it measures cannot reject a change about
+distance.
 
 ### The weak cell is an attrition the house cannot pay for
 
