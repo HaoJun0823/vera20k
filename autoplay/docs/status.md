@@ -142,6 +142,50 @@ what harvesting in place and waiting at a one-dock refinery look like from a
 projection that carries only the cell. Recorded as a residual: whether a pause is
 a fill or a dock queue is not visible to the policy yet.
 
+## The forty-minute reading, and the attack that is still off
+
+The same build over 24000 ticks, three seeds, both maps, against the numbers the
+handoff recorded on the un-fixed build:
+
+| Map | Seed | Own | Enemy | Handoff's own (before) |
+|---|---|---|---|---|
+| Death.mmx | 0x5EED | 91 | 65 | 25 (survived) |
+| Death.mmx | 19 | 51 | 57 | 33 (survived) |
+| Death.mmx | 10 | 61 | 57 | lost at 17680 |
+| Barrel.mmx | 0x5EED | 34 | 61 | 27 (survived) |
+| Barrel.mmx | 19 | 102 | 65 | 25 (survived) |
+| Barrel.mmx | 10 | 70 | 49 | lost at 20435 |
+
+Six of six survive the forty-minute mark; four of six did before, and both seeds
+that used to be lost now survive. Nothing here wins — every cell is a timeout,
+which is the most a house that never attacks can do.
+
+`ATTACK_ENABLED = true` for one run, everything else identical:
+
+| Map | Seed | Own | Enemy | Stuck |
+|---|---|---|---|---|
+| Death.mmx | 0x5EED | 46 → 45 | 46 → 36 | 0 → 33 |
+| Death.mmx | 19 | 51 → 50 | 45 → 44 | 0 → 33 |
+| Death.mmx | 10 | 50 → 34 | 45 → 46 | 1 → 2 |
+| Barrel.mmx | 0x5EED | 46 → 44 | 49 → 41 | 1 → 13 |
+| Barrel.mmx | 19 | 46 → 46 | 39 → 40 | 1 → 29 |
+| Barrel.mmx | 10 | 50 → 45 | 41 → 29 | 0 → 29 |
+
+All six cells are worse, own falls in four of them, and the stuck count goes from
+0-1 to 13-33. The per-unit reading added with the dock fix says why: 25-33 units
+of the army stand around one stale target cell — `job=Assault
+target=Cell((96,143))`, `still=500-1400` frames — while holding the job. The
+enemy count does fall (49 → 41, 46 → 36, 45 → 44), so the army trades when it
+arrives and then stops. Attacking stays off until an assault job can end on
+arrival, pick a new target, judge local superiority and retreat.
+
+One thing the probe needed first: an assault order is an attack-move with a
+destination, and the engine lands that on `MissionType::Move` with the attack-move
+latch set (`mega_mission.rs::foot_assign_target_command`, the `0x004DF141`
+destination arm), not on `Attack`. The predicate now accepts both, and with the
+flag off again the matrix reads identical in all six cells — verified, so the fix
+is inert until attacking comes back.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |
@@ -157,9 +201,11 @@ IFV in a test), so this is policy work, not an engine gap.
 
 ## Known gaps
 
-- The army does not attack. Attacking is behind a flag that is off, because an
-  army that attacks at two-to-one loses three matches of six. Local
-  superiority, retreat and reinforcement are the next slice.
+- The army does not attack, and attacking is measurably worse even at parity:
+  six of six cells fall with the flag on, and the army stops at a stale target
+  cell (see the section above). Re-targeting on arrival, local superiority,
+  retreat and reinforcement are the next slice; the order path itself is sound
+  now (attack-move lands on `Move`, and the predicate accepts it).
 - The income stall is fixed at its source (the harvest cycle above); the reserves
   are not. One cell still ends with a refinery in production at 5 credits
   (Death.mmx, seed 10), and five of the six end with `nothing to build` while

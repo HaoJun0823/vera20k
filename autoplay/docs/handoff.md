@@ -115,8 +115,15 @@ first, then measure behaviour.
 2. The army as units. Military holds no state: it recomputes who is a soldier
    every term. It needs squads (membership on a term), local superiority per
    squad, retreat, reinforcement and focus fire. Attacking is off until that
-   exists (ATTACK_ENABLED in autoplay/src/manager/military.rs), because at
-   two-to-one the army loses three matches of six while holding loses one.
+   exists (ATTACK_ENABLED in autoplay/src/manager/military.rs), and the reason is
+   now measured on the fixed economy too: with the flag on, all six cells are
+   worse, own falls in four, and the stuck count goes from 0-1 to 13-33 because
+   25-33 units walk to one stale target cell, arrive, and stand there for
+   500-1400 frames holding the job. Start with the smallest rung that turns that
+   reading around: a job that ends when the unit arrives, so the next term can
+   pick a live target. The order path itself is sound now — an attack-move lands
+   on `MissionType::Move` with the attack-move latch set, and `living_out`
+   accepts it, so a re-order is not what breaks the attack.
 3. Composition by role, not by price. Front line, ranged, anti-air quotas; this
    fixes the one-type armies and the faction spread at once.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
@@ -189,3 +196,14 @@ three cells instead of 0 and status.md records why: every stuck unit is a
 harvester pausing for a few seconds, and the counter resets between readings.
 Follow-up worth its own commit: `stuck` should not count a harvester that is
 filling its hold, which the projection cannot tell from a unit that is frozen.
+
+The forty-minute matrix on that build: six of six cells survive, where four of
+six did before, and both seeds that used to be lost (Death.mmx 10 at 17680,
+Barrel.mmx 10 at 20435) now finish at 24000 with own 61 and 70. Every cell is
+still a timeout, so the ladder's wins need the army slice rather than the
+economy.
+
+The attack flag was then probed once more, at parity rather than at two-to-one:
+all six cells worse, own down in four, and the stuck count 13-33. The reading is
+the army standing around one target cell with `job=Assault`, which is the
+concrete starting point for item 2 above.
