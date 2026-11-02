@@ -157,7 +157,23 @@ impl UnitProfile {
         if ty.deployer || ty.deploys_into.is_some() || ty.undeploys_into.is_some() {
             roles = roles.with(Roles::DEPLOYER);
         }
-        if ty.refinery {
+        // Two keys, because retail uses both and they are not interchangeable.
+        // `Refinery=` is the allied and soviet refinery; Yuri's ore refinery
+        // carries no `Refinery=` at all and is declared by
+        // `ResourceDestination=yes` instead (`[YAREFN]` in rulesmd.ini). A
+        // predicate that read only `Refinery=` left the Yuri house with no
+        // refinery it could ever see, so it never built one, never bought a
+        // truck, and farmed bio reactors until the map ended.
+        //
+        // `ResourceDestination` alone is not enough, because the slave miner
+        // carries it too: `[SMIN]` is the deployed refinery's vehicle form
+        // (`DeploysInto=YAREFN`, and `[YAREFN]`'s `UndeploysInto=SMIN`), so the
+        // flag names "this object receives ore" and only a structure can be the
+        // place a house builds. The vehicle form is a harvester and is checked
+        // as one.
+        let receives_ore =
+            ty.refinery || (ty.resource_destination && ty.category == ObjectCategory::Building);
+        if receives_ore {
             roles = roles.with(Roles::REFINERY);
         }
         if ty.category == ObjectCategory::Building {
@@ -404,6 +420,40 @@ mod tests {
         if let Some(ifv) = profiles.get("FV") {
             assert!(ifv.roles.contains(Roles::TRANSPORT), "an IFV carries one");
             assert!(ifv.passengers > 0);
+        }
+    }
+
+    #[test]
+    fn a_refinery_is_recognized_by_either_key_retail_uses() {
+        let Some(rules) = retail() else {
+            return;
+        };
+        let profiles = Profiles::build(&rules);
+        // Allied and soviet refineries carry `Refinery=yes`.
+        for id in ["GAREFN", "NAREFN"] {
+            if let Some(refinery) = profiles.get(id) {
+                assert!(
+                    refinery.roles.contains(Roles::REFINERY),
+                    "{id} is a refinery"
+                );
+            }
+        }
+        // Yuri's carries `ResourceDestination=yes` and no `Refinery=` at all.
+        if let Some(yuri) = profiles.get("YAREFN") {
+            assert!(
+                yuri.roles.contains(Roles::REFINERY),
+                "a Yuri ore refinery is a refinery even without Refinery="
+            );
+        }
+        // And the predicate is not so broad that it swallows the miners: a
+        // gatherer drops ore off, it does not receive it.
+        for miner in ["HARV", "SMIN", "CMIN"] {
+            if let Some(truck) = profiles.get(miner) {
+                assert!(
+                    !truck.roles.contains(Roles::REFINERY),
+                    "{miner} is a harvester, not a refinery"
+                );
+            }
         }
     }
 
