@@ -786,11 +786,16 @@ impl Brain for Policy {
                 && !waiting
                 && !filling.contains(&unit.entity_id)
                 && job.is_some_and(|job| {
+                    // An assault that stands still is a column holding the
+                    // ground it took, not a unit doing nothing: measured, a
+                    // column that walks home when it cannot reach the frontier
+                    // loses strength in every cell, and one that holds loses
+                    // none. The other movement jobs are the ones where standing
+                    // still is the defect the spec's H2 names.
                     matches!(
                         job.kind,
                         JobKind::Harvest
                             | JobKind::ReturnOre
-                            | JobKind::Assault
                             | JobKind::Breach
                             | JobKind::Scout
                             | JobKind::Transport
