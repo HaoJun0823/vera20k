@@ -534,6 +534,34 @@ attempt should keep the march and add what a column does when it arrives and fin
 nothing: hold that ground and send the next march from there, rather than being
 re-decided every term.
 
+## Why the march keeps failing on the reading, not on the field
+
+The previous round's march killed seven enemy objects and was reverted because
+four of six cells were worse. Two of those four were `stuck=40`. This round tried
+to fix exactly that, by remembering the column's objective across terms and moving
+it on when reached, so a column that arrives is not re-decided every term.
+
+It was worse in a different way: `enemy` did not move at all (46 → 46, `lost`
+0:0), so the remembered objective stopped the advance instead of steadying it. A
+destination chosen once and kept is a column that stands where it was sent.
+
+Both versions were reverted, and the useful result is what they agree on: **the
+`stuck` reading is what rejects every version of this, and it is measuring the
+wrong thing.**
+
+`stuck` counts a unit that holds a movement job and does not change cell for six
+seconds. An army column that has arrived at its objective and is holding that
+ground is exactly that, by that definition — and holding ground is what an army
+does between marches. The spec's H2 counts a unit stuck when it holds a movement
+job and does not move; a column standing on the ground it was sent to take is not
+the failure H2 describes, and three attempts have now been rejected on it.
+
+So the next change is not another march. It is the stuck definition: a unit whose
+job has been achieved — assault on a cell it stands on, defend at the post it
+stands at — is finished, not stuck, and the job should end and be re-decided
+rather than counted against the policy forever. Until that is right, the matrix
+cannot tell a working army from a frozen one.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |

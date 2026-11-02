@@ -237,6 +237,20 @@ first, then measure behaviour.
   every term, so it neither holds the ground it took nor marches on from it. Add
   that — arrive, keep the cell, send the next march from there — and the same
   design should read clean.
+- **That was tried and it is the wrong next step.** Remembering the objective
+  across terms stopped the advance (enemy 46 → 46, `lost` 0:0): a destination
+  chosen once and kept is a column that stands where it was sent. Both versions
+  reverted.
+- **What three attempts agree on: `stuck` is measuring the wrong thing.** It counts
+  a unit that holds a movement job and does not change cell for six seconds, and an
+  army column holding ground it took is exactly that. The spec's H2 means a unit
+  that *should* be moving and is not; a column standing on its objective is not
+  that failure. Three march attempts have now been rejected on this reading alone,
+  two of them at `stuck=40` while the same run destroyed seven enemy objects.
+  **Fix the stuck definition first**, so a job whose end condition is met — assault
+  on the cell it stands on, defend at the post it stands at — ends and is
+  re-decided instead of counting against the policy forever. Until then the matrix
+  cannot tell a working army from a frozen one, and no army change can be judged.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
    proven; the job is missing.
 5. Per-unit decision reasons in the log (unit 1234: job=defend
