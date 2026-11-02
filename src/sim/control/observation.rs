@@ -1677,4 +1677,41 @@ mod vision_tests {
         );
         assert!(!seen.contains(&far), "the one across the map is not");
     }
+
+    /// The playfield is not the fog grid, and a decision that sends a unit
+    /// somewhere has to know the difference: the grid covers the whole map
+    /// buffer, so its far corner reads as ground while nothing can walk there.
+    ///
+    /// The arena fixture has a playfield (`OPEN_PLAYFIELD`), so both answers are
+    /// available here: a cell the fixture's ground covers, and one past its edge
+    /// but still inside the grid.
+    #[test]
+    fn a_cell_outside_the_playfield_is_not_ground() {
+        let Some((mut sim, _rules)) = arena() else {
+            return;
+        };
+        let americans: InternedId = sim.intern("Americans");
+        let obs = Observation::new(&sim, americans);
+
+        // The arena's own ground: 32x32 cells at the origin.
+        assert!(
+            obs.is_cell_in_playfield(10, 10),
+            "the arena's ground is playfield"
+        );
+        // Far past the arena's ground. The query reads the map's own bounds, not
+        // the arena's size, so this asserts what the shipped maps need: a cell
+        // the playfield does not cover is not ground, whatever the fog grid says
+        // about it.
+        assert!(
+            !obs.is_cell_in_playfield(20_000, 20_000),
+            "a cell far outside every playfield is not ground"
+        );
+        // A cell at the origin is ground either way: with playfield authority it
+        // is inside the arena, and with none the answer must be permissive or
+        // every fixture without a map would refuse every destination.
+        assert!(
+            obs.is_cell_in_playfield(0, 0),
+            "the origin is ground with or without a playfield"
+        );
+    }
 }
