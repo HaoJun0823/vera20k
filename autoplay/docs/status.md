@@ -1146,3 +1146,24 @@ Measured, 12000 ticks:
 Five of six 1v1 cells better than the column of thirty, one worse; 1v7 holds on
 two seeds and loses about a fifth of its hit points on the third. Recorded with
 both sides rather than called a win.
+
+### The forty-minute reading, after the session
+
+Both maps, three seeds, 24000 ticks, one opponent — the lane that decides
+whether a house survives rather than whether it grows:
+
+| Map | Seed | own | army | lost |
+|---|---|---|---|---|
+| Death.mmx | 24301 | 77 | 10739 | 2:6 |
+| Death.mmx | 19 | 58 | 7608 | 11:4 |
+| Death.mmx | 10 | 47 | 5885 | 21:15 |
+| Barrel.mmx | 24301 | 50 | 6256 | 9:0 |
+| Barrel.mmx | 19 | 39 | 4045 | 19:7 |
+| Barrel.mmx | 10 | 51 | 6191 | 1:3 |
+
+Six of six time out rather than falling. Against the column-of-thirty build on
+the same six cells: own averages 54 against 51, army 6787 against 6330, and the
+trade is 63 lost for 35 killed against 89 for 31 — better on all four numbers,
+which is the first time this session that a change has moved every aggregate at
+once. `Barrel.mmx` seed 19 remains the weak cell (`own 39, army 4045, 19:7`) and
+is the one to read next.
