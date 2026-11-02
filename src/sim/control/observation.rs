@@ -354,6 +354,22 @@ impl<'a> Observation<'a> {
         self.sim.object_type(type_id, rules).map(|ty| ty.strength)
     }
 
+    /// Current strength of any object by stable id, the house's or an enemy's.
+    ///
+    /// The projection already carries health for the house's own objects
+    /// (`OwnEntity::health`). An assault job needs the same fact about the thing
+    /// it is attacking: whether the attack is doing anything is a question about
+    /// the target's health, and the design's `Ineffective` outcome is exactly
+    /// that question (`design.md`, section 4). A dead or missing object answers
+    /// `None`, which is also how a caller tells "finished" from "not yet".
+    pub fn health(&self, entity_id: u64) -> Option<i32> {
+        self.sim
+            .entities()
+            .get(entity_id)
+            .filter(|entity| entity.health.current() > 0)
+            .map(|entity| entity.health.current())
+    }
+
     /// Finished buildings waiting to be placed on the map.
     pub fn ready_buildings(&self) -> impl Iterator<Item = ReadyBuilding> + '_ {
         let house = self.house;
