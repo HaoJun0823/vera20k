@@ -91,7 +91,7 @@ the whole army. B1 is not a smaller garrison; it is a column that comes back.
 | Item | Work | Accepts when |
 |---|---|---|
 | C1 | A phase ladder: opening, expansion, pressure, decision | the phase comes from the state, not a constant |
-| C2 | Composition by role: front line, ranged, anti-air | two or more roles in every army; the faction spread narrows |
+| C2 | Composition by role: front line, ranged, anti-air | done: the army is composed against the mix the rule set offers (`unit_role`), and every cell fields four to five types instead of one |
 | C3 | Priority between objectives (survival, economy, technology, expansion, harassment) | one table, no constants in two places |
 
 ### D. The house that grows
@@ -101,7 +101,7 @@ the whole army. B1 is not a smaller garrison; it is a column that comes back.
 | D1 | A second refinery that lands | the wallet stops freezing at 12 credits |
 | D2 | Walls and defence placement | xeb1 opens a wall; the base has a ring |
 | D3 | Breaches and transports | xtsunami lands units on another island |
-| D4 | Scouting | something sees the enemy before the army commits |
+| D4 | Scouting | something sees the enemy before the army commits: still nothing does |
 
 ### E. The abilities
 
@@ -117,3 +117,17 @@ One change per measurement. Six cells, or three at 1v7. Keep the change when
 own does not fall, no surviving seed is lost, unowned stays zero and stuck
 does not rise. A reading that only says "own is higher" is not a win: with
 lost at 0:0 everywhere, own counts the economy, not the fighting.
+
+Two readings were added since this rule was written, and both matter more than
+`own` on the lanes that now have a fight in them:
+
+- **army**, the house's fighting strength in hit points. A house of thirty
+  rifles and a house of thirty tanks are thirty objects; they are not the same
+  army, and a picker judged on `own` alone will buy the cheaper one.
+- **lost**, `own:enemy` summed off the census curve. A change that raises `own`
+  while killing nothing is a change that made the house hide.
+
+`stuck` now gives the work jobs (harvest, return) thirty seconds instead of six,
+because a truck standing on an ore cell while the engine fills its hold is not
+the failure the spec's H2 names. Every stuck reading that rejected a change in
+this session was such a truck.
