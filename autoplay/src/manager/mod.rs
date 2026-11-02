@@ -35,6 +35,11 @@ pub struct Ctx<'a> {
 pub struct Demands {
     pub jobs: Vec<Proposal>,
     pub intents: Vec<Intent>,
+    /// Where the house's base is, as the manager that knows it says.
+    ///
+    /// Only one layer may own "where is home": the military manager reads
+    /// the house's first structure, and the policy learns it from there.
+    pub home: Option<(u16, u16)>,
 }
 
 /// What a manager may do in one term.

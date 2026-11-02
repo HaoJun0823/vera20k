@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use vera20k_core::rules::ruleset::RuleSet;
 use vera20k_core::sim::behavior::goal::Goal;
+use vera20k_core::sim::behavior::view::cell_distance;
 use vera20k_core::sim::control::brain::{Brain, Outbox};
 use vera20k_core::sim::control::observation::Observation;
 use vera20k_core::sim::mission::{MissionId, MissionType};
@@ -22,6 +23,13 @@ use crate::manager::military::Military;
 use crate::manager::{Ctx, Demands, Manager};
 use crate::profile::{Profiles, Roles};
 use crate::registry::{JobKind, Manager as Domain};
+
+/// How far from the base a unit has to be before a finished fight sends it
+/// home. A unit that never left the base has nothing to walk back from.
+const RETURN_HOME_TRIGGER: i32 = 20;
+
+/// How close to the base counts as home.
+const RETURN_HOME_ARRIVED: i32 = 3;
 
 /// How often the policy re-decides jobs, in frames: one second of the
 /// simulation. Reactive decisions do not wait for it; this is the slow loop.
@@ -117,6 +125,15 @@ pub struct Policy {
     /// whose count moved is filling, and a harvester that is filling is
     /// working: the cell cannot say that, the engine's own cargo can.
     cargo_seen: BTreeMap<u64, u32>,
+    /// Where the house's base is, as the manager that owns it says.
+    home: Option<(u16, u16)>,
+    /// The units on their way home after a fight.
+    ///
+    /// The column that leaves and never comes back is the one failure the
+    /// attack lane has: measured, Barrel.mmx seed 19 read own 46 -> 37 with
+    /// the column out and nothing killed for it. A unit in this set walks home
+    /// and is given no other job until it is there.
+    returning: std::collections::BTreeSet<u64>,
     stats: Stats,
 }
 
@@ -138,6 +155,8 @@ impl Policy {
             progress: BTreeMap::new(),
             hitting: std::collections::BTreeSet::new(),
             cargo_seen: BTreeMap::new(),
+            home: None,
+            returning: std::collections::BTreeSet::new(),
             stats: Stats::default(),
         }
     }
@@ -156,7 +175,7 @@ impl Policy {
 
     /// Whether a type may hold this job. The predicate reads the profile, never
     /// a name, so a mod's harvester is as good as the stock one.
-    fn eligible(&self, kind: JobKind, roles: Roles) -> bool {
+    fn eligible(kind: JobKind, roles: Roles) -> bool {
         match kind {
             JobKind::Harvest | JobKind::ReturnOre => roles.contains(Roles::HARVESTER),
             JobKind::Deploy => roles.contains(Roles::DEPLOYER),
@@ -166,6 +185,7 @@ impl Policy {
             JobKind::Transport => roles.contains(Roles::TRANSPORT),
             JobKind::Breach | JobKind::Assault | JobKind::Defend => roles.contains(Roles::ARMED),
             JobKind::Scout | JobKind::Retreat => true,
+            JobKind::ReturnHome => roles.contains(Roles::ARMED),
         }
     }
 
@@ -174,7 +194,10 @@ impl Policy {
     /// A job without one is sent once and never re-sent, because re-sending the
     /// same order every term is what makes a unit unable to act.
     fn watched_by_mission(kind: JobKind) -> bool {
-        matches!(kind, JobKind::Harvest | JobKind::Assault | JobKind::Defend)
+        matches!(
+            kind,
+            JobKind::Harvest | JobKind::Assault | JobKind::Defend | JobKind::ReturnHome
+        )
     }
 
     /// Whether the unit's current mission already means this job is being lived
@@ -209,6 +232,9 @@ impl Policy {
                     || mission == MissionId::from_known(MissionType::Move)
             }
             JobKind::Defend => mission == MissionId::from_known(MissionType::AreaGuard),
+            // A unit walking home is on the Move mission; re-sending the walk
+            // would restart it every term.
+            JobKind::ReturnHome => mission == MissionId::from_known(MissionType::Move),
             _ => false,
         }
     }
@@ -223,6 +249,7 @@ impl Policy {
             (JobKind::Assault, Target::Object(target)) => Some(Goal::Attack { target }),
             (JobKind::Assault, Target::Cell(cell)) => Some(Goal::AttackMove { cell }),
             (JobKind::Defend, Target::Cell(cell)) => Some(Goal::GuardAt { cell }),
+            (JobKind::ReturnHome, Target::Cell(cell)) => Some(Goal::Move { cell }),
             (JobKind::Deploy, _) => Some(Goal::Deploy),
             _ => None,
         }
@@ -307,6 +334,15 @@ impl Policy {
             self.jobs.take(unit);
             self.issued.remove(&unit);
             self.progress.remove(&unit);
+            // A unit that has finished its fight, and is far from home, walks
+            // back before it is given another job. The base is what the army
+            // is for, and a column that never returns is how the base is lost.
+            if let Some(home) = self.home
+                && let Some(cell) = cells.get(&unit)
+                && cell_distance(*cell, home) >= RETURN_HOME_TRIGGER
+            {
+                self.returning.insert(unit);
+            }
             match ending {
                 Ending::Done => self.stats.finished += 1,
                 Ending::Unreachable => {
@@ -594,6 +630,43 @@ impl Brain for Policy {
             }
         }
 
+        // Where the house's base is, as the manager that owns it says.
+        if let Some(home) = demands.home {
+            self.home = Some(home);
+        }
+
+        // A unit on its way home is not given another job until it is home.
+        if let Some(home) = self.home {
+            let cells: BTreeMap<u64, (u16, u16)> = obs
+                .own_entities()
+                .map(|unit| (unit.entity_id, unit.cell))
+                .collect();
+            for unit in self.returning.clone() {
+                let arrived = cells
+                    .get(&unit)
+                    .is_some_and(|cell| cell_distance(*cell, home) <= RETURN_HOME_ARRIVED);
+                if arrived || !cells.contains_key(&unit) {
+                    self.returning.remove(&unit);
+                }
+            }
+        }
+        demands.jobs.retain(|proposal| {
+            let Some(unit) = proposal.actor else {
+                return true;
+            };
+            !self.returning.contains(&unit)
+        });
+        if let Some(home) = self.home {
+            for unit in self.returning.iter().copied().collect::<Vec<_>>() {
+                demands.jobs.push(Proposal {
+                    kind: JobKind::ReturnHome,
+                    target: Target::Cell(home),
+                    priority: 80,
+                    actor: Some(unit),
+                });
+            }
+        }
+
         // Only units that exist and can take an order are eligible.
         let mut eligible = Vec::new();
         for unit in obs.own_entities() {
@@ -618,7 +691,7 @@ impl Brain for Policy {
             };
             eligible
                 .iter()
-                .any(|(id, roles)| *id == unit && self.eligible(proposal.kind, *roles))
+                .any(|(id, roles)| *id == unit && Self::eligible(proposal.kind, *roles))
         });
         self.stats.proposals = demands.jobs.len();
         self.stats.intents = demands.intents.len();
@@ -1022,6 +1095,35 @@ mod tests {
         let seen = policy.progress.insert(11, (400, 900));
         assert_eq!(seen, Some((500, INEFFECTIVE_FRAMES)));
         assert_ne!(seen.expect("a reading").0, 400, "the target is being hurt");
+    }
+
+    #[test]
+    fn a_unit_walking_home_is_left_alone_and_comes_home_by_moving() {
+        // The campaign loop: a unit that has fought and is far from the base
+        // walks back, and the walk is a plain move, not an attack-move.
+        let job = Job {
+            kind: JobKind::ReturnHome,
+            target: Target::Cell((80, 90)),
+            priority: 80,
+            given: 0,
+        };
+        assert_eq!(
+            Policy::goal(&job),
+            Some(Goal::Move { cell: (80, 90) }),
+            "walking home is a move"
+        );
+        assert!(
+            Policy::living_out(JobKind::ReturnHome, mission(MissionType::Move)),
+            "a unit on the move mission is already walking home"
+        );
+        assert!(
+            !Policy::living_out(JobKind::ReturnHome, mission(MissionType::AreaGuard)),
+            "a unit that has arrived is not walking any more"
+        );
+        assert!(
+            Policy::eligible(JobKind::ReturnHome, Roles::ARMED),
+            "a soldier can walk home"
+        );
     }
 
     #[test]

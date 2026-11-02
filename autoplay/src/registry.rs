@@ -56,6 +56,12 @@ pub enum JobKind {
     Retreat,
     /// Deploy or pack up one unit: an MCV into a yard, a deployment-form change.
     Deploy,
+    /// Walk back to the base after a fight.
+    ///
+    /// The column that leaves and never comes back is the one failure the
+    /// attack lane has: measured, Barrel.mmx seed 19 read own 46 -> 37 with
+    /// the column out and nothing killed for it.
+    ReturnHome,
 }
 
 impl JobKind {
@@ -66,9 +72,8 @@ impl JobKind {
             Self::Harvest | Self::ReturnOre | Self::Deploy => Manager::Economy,
             Self::Repair => Manager::Build,
             Self::Capture | Self::Garrison | Self::Transport => Manager::Abilities,
-            Self::Breach | Self::Assault | Self::Defend | Self::Scout | Self::Retreat => {
-                Manager::Military
-            }
+            Self::Breach | Self::Assault | Self::Defend | Self::Scout | Self::Retreat
+            | Self::ReturnHome => Manager::Military,
         }
     }
 }
@@ -96,6 +101,7 @@ pub const JOBS: &[JobKind] = &[
     JobKind::Transport,
     JobKind::Retreat,
     JobKind::Deploy,
+    JobKind::ReturnHome,
 ];
 
 #[cfg(test)]

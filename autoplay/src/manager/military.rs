@@ -33,7 +33,7 @@ const ARMY_TO_ATTACK: usize = 30;
 /// ladder below the order: a job that gives up on a target it cannot reach, and
 /// an order that is re-sent when the target it names changes. Both are the next
 /// slice; see docs/status.md.
-const ATTACK_ENABLED: bool = false;
+const ATTACK_ENABLED: bool = true;
 /// Below this the house keeps its credits for buildings.
 const UNIT_SPEND_FLOOR: i32 = 900;
 
@@ -147,6 +147,10 @@ impl Military {
         let Some(home) = home else {
             return;
         };
+        // Where the house's base is. Only this manager knows: it is the one
+        // that reads the house's structures, and the policy learns it from here
+        // rather than keeping a second answer.
+        out.home = Some(home);
         // Enough to go is not enough to win: the group commits only when it
         // outnumbers what stands within reach of the target, at three to two.
         // An army that walks into twice its number is an army the house loses
