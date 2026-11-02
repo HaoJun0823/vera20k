@@ -275,6 +275,30 @@ impl<'a> Observation<'a> {
         (self.sim.fog().width(), self.sim.fog().height())
     }
 
+    /// Whether `rx, ry` is ground a unit can stand on, rather than the fog grid's
+    /// frame or the map buffer's padding.
+    ///
+    /// The two extents are not the same thing. The fog grid covers the whole map
+    /// buffer — 256x256 on Death.mmx — while the playfield a unit may walk on is
+    /// smaller and offset inside it. A destination taken from the fog grid alone
+    /// is a cell the pathfinder can never reach: three tanks ordered to
+    /// `Cell((0, 0))` stood there for the rest of the match, and the same at
+    /// `Cell((16, 16))`. A decision that sends a unit somewhere asks this first.
+    ///
+    /// `true` when the simulation has no map authority at all, so a fixture
+    /// without a playfield keeps its old behaviour instead of refusing every
+    /// destination.
+    pub fn is_cell_in_playfield(&self, rx: u16, ry: u16) -> bool {
+        let Some(bounds) = self.sim.playfield_bounds() else {
+            return true;
+        };
+        crate::sim::cell_rect::cell_is_in_playfield_height_aware(
+            (i32::from(rx), i32::from(ry)),
+            Some(bounds),
+            self.sim.resolved_terrain.as_ref(),
+        )
+    }
+
     /// Power the house's buildings consume.
     pub fn power_drain(&self) -> i32 {
         self.power().map_or(0, |(_, drain)| drain)
