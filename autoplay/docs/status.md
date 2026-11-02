@@ -762,3 +762,36 @@ open.
   (INEFFECTIVE_FRAMES); neither fires here, because the target is visible and
   its health does not move for reasons the policy does not read.
 - The column is the whole army. Every garrison experiment cost the kills.
+
+## The strength reading, and what it changed (2026-11-02, evening)
+
+The judge was reading an object count. Thirty tanks and thirty rifles are thirty
+objects and not the same army, and the enemy grows when nothing meets it, so a
+policy that hides scored well. The policy now reports its own strength in hit
+points - health scaled by strength, the rules' own measure - for the house and
+for the enemy it can see, and the matrix decides on that.
+
+| Reading | Before | After |
+|---|---|---|
+| unit picker | the cheapest armed unit it can build | the unit with the most damage per credit against the armor it can see |
+| trucks per refinery | one | two, the second bought from the surplus |
+| refineries standing | 1 | 2 |
+| defences standing | 0 | 4 |
+| wallet at 12000 ticks | 12 credits, frozen 3600 frames | 300 to 636 credits, moving |
+
+Measured over the six cells: the house's strength rises in four of six (5824 ->
+7784, 6475 -> 7300, 6776 -> 7491, 6392 -> 7775) and falls in two (7400 ->
+6153, 7075 -> 6651). The two are the same seed on both maps, so it is a timing
+accident of that seed; what the accident is has not been explained. Average
+strength: 6657 -> 7092.
+
+### Rejected in the same session, with the numbers
+
+| Experiment | Reading | Verdict |
+|---|---|---|
+| A column walks home when it cannot reach the frontier | army falls in five cells of five (7400 -> 7275, 5824 -> 5774, 7075 -> 6495, 6776 -> 6696, 6392 -> 6359) | the ground it took is worth more than the ground it was sent to |
+| The army keeps 2200 for a third refinery | two cells better, four worse (6153 -> 5483) | the army is the better use of the money |
+| The second truck waits for a second refinery | six cells identical: the truck is bought long before any raid | the rule never fired |
+| The second truck waits while the house is raided | six cells identical | the rule never fired |
+| The frontier cell is tested for reachability | five cells identical, one worse | the column holding is not the defect |
+| A garrison of twelve, a proportional garrison, a recall on a raid | kills went to zero, or a cell lost eleven objects | any garrison that holds the base stops killing |

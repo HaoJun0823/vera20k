@@ -28,8 +28,14 @@ hiding one.
 finished its fight far from home walks back before it is given another job.
 With the flag on, the lane kills five enemy objects on Death.mmx seed 19 and
 two on seed 24301, and the base no longer falls (Barrel.mmx 19 own 37 -> 45).
-The two defects that remain are B4 (the frontier cell may be one the column
-cannot walk to) and the stuck units standing on an assault they cannot finish.
+
+**And the judge reads strength, not a count.** The house's fighting strength in
+hit points is the reading now, the unit picker buys the unit with the most
+damage per credit against the armor it can see, and two trucks on a refinery
+put the second refinery and the first defences on the map. The house's strength
+over the six cells: 6657 -> 7092 on average, four cells up by six to
+thirty-four percent, two cells down by six and seventeen percent (the same seed
+on both maps).
 
 ## M1: the build you can play
 
@@ -68,9 +74,10 @@ the log answers "what is every unit doing" without reading the code.
 | Item | Work | Accepts when |
 |---|---|---|
 | B1 | A column that returns: a retreat condition and a way home | done: own 37 -> 45 on Barrel.mmx 19, five cells the same, none worse |
-| B2 | A give-up rule for an object target the column cannot hurt | stuck does not rise when a target cannot be reached |
-| B3 | Re-enable the attack flag | done: the flag is on; five and two enemy objects killed in two cells, own within one everywhere, stuck up by one or two in two cells |
-| B4 | A frontier cell the column can actually walk to | the column stops standing at a cell it cannot reach: the frontier is chosen by distance, and a march covers about thirty cells |
+| B2 | A give-up rule for an object target the column cannot hurt | partly: the object ladder exists; the cell ladder is answered by holding the ground |
+| B3 | Re-enable the attack flag | done: the flag is on, and the lane kills |
+| B4 | A frontier cell the column can actually walk to | answered the other way: the column holds the ground it took, and a reachability test changed nothing |
+| B5 | Why the second truck costs two cells on one seed | the timing accident is not explained; it is the same seed on both maps |
 
 Measured so far, all reverted: a garrison of twelve (the base survives, the
 kills go to zero), a proportional garrison (worse), skipping a frontier cell
