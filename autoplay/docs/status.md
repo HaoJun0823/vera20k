@@ -281,6 +281,41 @@ With attacking on, the cell that read 38 reads 0, two cells read +1 stuck, own
 falls in no cell and gains 3 in one. With the flag off the matrix is identical in
 all six cells.
 
+## The faction spread, measured and not yet explained
+
+Death.mmx, seed 0x5EED, 12000 ticks, attacking off, one run per faction:
+
+| Faction | Own | Enemy | Stuck |
+|---|---|---|---|
+| america | 46 | 46 | 0 |
+| russia | 70 | 49 | 3 |
+| yuri | 29 | 46 | 0 |
+
+A 41-object spread between the two extremes. The handoff attributed it to the
+"cheapest armed unit" picker making every army one type, and that is part of it,
+but the probe this round found something more basic on the Yuri side and it is
+*not* what it first looked like.
+
+What the probe did establish, each from a log line rather than from reading code:
+
+- the Yuri maker does deploy. `economy: maker PCV ... deploys_into=Some("YACNST")`
+  appears once, on the term the yard is put down, and never again, because a
+  deployed yard is a structure and no longer a unit in the projection. An earlier
+  reading of the same log concluded the maker never deployed and started a fix for
+  it; that fix was wrong and was reverted.
+- the Yuri house does build. Sixteen `Placing building YAPOWR` lines, so the
+  build order runs, and `ready_buildings` hands each one to the native site
+  search.
+- nothing the Yuri house builds ever finishes. The log has no `Completed ... for
+  Player` line for it, and the power reading climbs to 2400 with no refinery in
+  sight, while `economy: building in production at ...` keeps reporting a
+  `YAPOWR` that is never ready.
+
+So the failure is in the Yuri production path — a building placed and never
+completed — not in the maker and not in the target picker. That is where the next
+reading goes; a fix without it would be a guess, and this round already spent one
+guess on the maker.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |
