@@ -755,7 +755,18 @@ impl Brain for Policy {
 
         // A unit that has not moved for six seconds while holding a job is
         // stuck: the one reading the old policy had no way to report.
+        // The spec's H2 is a unit that holds a *movement* job and should be
+        // moving but is not. Six seconds is the walk clock. A harvest cycle is
+        // not a walk: the truck stands on the ore cell while the engine fills
+        // the hold and waits its turn at a one-dock refinery, and the measured
+        // pauses run to 210 frames and every one of them resumes (status.md,
+        // the residual under "the stuck reading, corrected"). Counting those as
+        // stuck is what has rejected three march attempts and two composition
+        // changes on a reading the army never touches, so the work jobs get
+        // their own clock: thirty seconds, longer than any pause seen, still
+        // short enough that a truck frozen for half a minute is reported.
         const STUCK_FRAMES: u64 = 90;
+        const WORK_STUCK_FRAMES: u64 = 450;
         self.stats.stuck = 0;
         let mut stood = BTreeMap::new();
         let mut stuck = Vec::new();
@@ -810,7 +821,14 @@ impl Brain for Policy {
                 Some((cell, since)) if *cell == unit.cell => *since,
                 _ => tick,
             };
-            if held && tick.saturating_sub(since) >= STUCK_FRAMES {
+            let limit = if job
+                .is_some_and(|job| matches!(job.kind, JobKind::Harvest | JobKind::ReturnOre))
+            {
+                WORK_STUCK_FRAMES
+            } else {
+                STUCK_FRAMES
+            };
+            if held && tick.saturating_sub(since) >= limit {
                 self.stats.stuck += 1;
                 // "A unit did nothing" has to be actionable, so the reading
                 // names the unit, its job and where it stands still.
