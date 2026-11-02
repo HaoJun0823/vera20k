@@ -1092,3 +1092,21 @@ object count, where the larger column holds ground the smaller one gives up. The
 constant is therefore recorded with both sides rather than declared correct — the
 next attempt at it should make the size a property of the map (how far the enemy
 is) instead of a number that has to serve both.
+
+### The 1v7 lane at 24000 ticks does not survive
+
+All three seeds survive the twenty-minute mark the lane was recorded at (12000
+ticks), and none survives twice that long:
+
+| Seed | own at the end | lost | fell at |
+|---|---|---|---|
+| 0x5EED | 3 | 39:0 | after 12000 |
+| 19 | 5 | 33:0 | 12418 |
+| 10 | 4 | 38:0 | 15879 |
+
+Seven brutal houses hold 324-369 objects between them against the house's
+forty-odd, so this is not a defect a constant fixes. It is the honest state of
+the lane: 12000 ticks survived, 24000 not, and the army still kills nothing on
+that map — thirty-nine of the house's objects are lost for zero of theirs in one
+seed. The next slice has to come from the enemy side of the ledger (the house
+fights nothing it is not standing on) rather than from another composition rule.
