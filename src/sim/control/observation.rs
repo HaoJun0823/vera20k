@@ -262,6 +262,13 @@ impl<'a> Observation<'a> {
         self.sim.fog().is_cell_revealed(self.house, rx, ry)
     }
 
+    /// Whether the house sees `rx, ry` right now, in line of sight
+    /// (`FogState::is_cell_visible`, the L2 layer): revealed is what the house
+    /// has seen at some point, this is what it sees this frame.
+    pub fn is_cell_visible(&self, rx: u16, ry: u16) -> bool {
+        self.sim.fog().is_cell_visible(self.house, rx, ry)
+    }
+
     /// The map's extent in cells, as the fog grid measures it: what a scan of
     /// the map is bounded by.
     pub fn map_extent(&self) -> (u16, u16) {
@@ -475,6 +482,21 @@ impl<'a> Observation<'a> {
                 cell: (entity.position.rx(), entity.position.ry()),
             })
         })
+    }
+
+    /// The enemy objects [`Self::enemy_entities`] returns narrowed to what the
+    /// house sees this frame (`FogState::is_cell_visible`, the L2 layer).
+    ///
+    /// The list above is the omniscient read the native computer AI uses, and the
+    /// spec forbids a policy from aiming at what the player could not have
+    /// clicked (spec 2.5, "no real-time enemy information outside vision"). A
+    /// policy that wants a legal target asks for this one; memory of what has
+    /// been seen (L1) is a further step, not this accessor's business.
+    pub fn visible_enemy_entities(&self) -> impl Iterator<Item = EnemyEntity> + '_ {
+        let house = self.house;
+        let fog = self.sim.fog();
+        self.enemy_entities()
+            .filter(move |enemy| fog.is_cell_visible(house, enemy.cell.0, enemy.cell.1))
     }
 
     /// Buildings owned by a `MultiplayPassive` house — the neutral and civilian
@@ -1556,4 +1578,63 @@ fn isqrt(value: i32) -> i32 {
         }
     }
     i32::try_from(low).unwrap_or(i32::MAX)
+}
+
+#[cfg(test)]
+mod vision_tests {
+    use super::*;
+    use crate::sim::intern::InternedId;
+
+    fn arena() -> Option<(Simulation, RuleSet)> {
+        let retail = crate::rules::retail_ini_fixture::retail_battle_rules()?;
+        let rules = retail.rules;
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xA17);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        Some((sim, rules))
+    }
+
+    /// A policy may aim at what the house sees, and not at what it does not.
+    ///
+    /// The projection can answer both: `enemy_entities` is the world's list, and
+    /// it is the read the native computer AI uses. If this accessor ever stopped
+    /// filtering, the first assertion below would still pass and the second
+    /// would not.
+    #[test]
+    fn an_enemy_behind_the_shroud_is_not_a_target() {
+        let Some((mut sim, rules)) = arena() else {
+            return;
+        };
+        let americans: InternedId = sim.intern("Americans");
+        let near = sim
+            .spawn_object("E1", "Russians", 28, 28, 0, &rules)
+            .expect("a rifleman next to the house's own");
+        let far = sim
+            .spawn_object("E1", "Russians", 4, 4, 0, &rules)
+            .expect("a rifleman across the map");
+        let scout = sim
+            .spawn_object("E1", "Americans", 27, 28, 0, &rules)
+            .expect("the house's own rifleman");
+        assert!(scout > 0);
+        for _ in 0..4 {
+            let _ = sim.take_due_commands();
+            sim.advance_tick(&[], Some(&rules), None, None, 33);
+        }
+
+        let obs = Observation::new(&sim, americans);
+        let seen: Vec<u64> = obs
+            .visible_enemy_entities()
+            .map(|enemy| enemy.entity_id)
+            .collect();
+        let all: Vec<u64> = obs.enemy_entities().map(|enemy| enemy.entity_id).collect();
+        assert!(
+            all.contains(&near) && all.contains(&far),
+            "the world knows both"
+        );
+        assert!(
+            seen.contains(&near),
+            "the rifleman in line of sight is a target"
+        );
+        assert!(!seen.contains(&far), "the one across the map is not");
+    }
 }
