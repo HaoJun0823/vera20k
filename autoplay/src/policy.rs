@@ -740,6 +740,32 @@ impl Brain for Policy {
             log::info!("policy v2: stuck at {tick}: {:?}", stuck);
         }
         if tick % 600 == 0 {
+            // Every unit, the job it holds and how long it has stood where it
+            // stands. This is the report a play test needs: "unit 1234 is
+            // doing nothing" becomes "unit 1234 holds Defend at (80,90) and
+            // has stood there 900 frames".
+            for unit in obs.own_entities() {
+                let Some(ty) = obs.object_type(rules, unit.type_id) else {
+                    continue;
+                };
+                let (kind, target) = match self.jobs.get(unit.entity_id) {
+                    Some(job) => (format!("{:?}", job.kind), format!("{:?}", job.target)),
+                    None => ("none".to_string(), "-".to_string()),
+                };
+                let standing = self
+                    .stood
+                    .get(&unit.entity_id)
+                    .filter(|(cell, _)| *cell == unit.cell)
+                    .map_or(0, |(_, since)| tick.saturating_sub(*since));
+                log::info!(
+                    "policy v2 unit: id={} {} job={} target={} standing={}",
+                    unit.entity_id,
+                    ty.id,
+                    kind,
+                    target,
+                    standing
+                );
+            }
             log::info!(
                 "policy v2: tick={tick} proposals={} intents={} assigned={} issued={} unowned={} refused={} finished={} stalled={} ineffective={} cooled={} fallback={} stuck={}",
                 self.stats.proposals,
