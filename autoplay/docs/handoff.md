@@ -82,9 +82,10 @@ opponents, ticks, result, tick, own, enemy, unowned, stuck, yards, walls, start
 credits / units / tech / roster, seconds. Two runs are compared by reading the
 file.
 
-Not built yet, and the first cheap win: --baseline <file> --compare, which
-prints the deltas and marks the cells that got worse. Without it, "did this
-change break something" is answered by remembering a table.
+Built, in the same session's later pass (see the end of this file): `--baseline
+<file>` runs the matrix and diffs every cell against a recorded file, and
+`--compare-only` re-reads two files without running anything. Without it, "did
+this change break something" was answered by remembering a table.
 
 ## Method that worked, and the trap in it
 
@@ -108,7 +109,8 @@ first, then measure behaviour.
    with zero income and no way back; the log line "economy: building in
    production at ..." is the reading. Replace the fixed reserves with the real
    cost of the cheapest harvester, and buy a replacement truck before any
-   building.
+   building. The recorded baseline says the income is dead before that queue is
+   even affordable — see the end of this file, where the miners are measured.
 2. The army as units. Military holds no state: it recomputes who is a soldier
    every term. It needs squads (membership on a term), local superiority per
    squad, retreat, reinforcement and focus fire. Attacking is off until that
@@ -116,10 +118,9 @@ first, then measure behaviour.
    two-to-one the army loses three matches of six while holding loses one.
 3. Composition by role, not by price. Front line, ranged, anti-air quotas; this
    fixes the one-type armies and the faction spread at once.
-4. Compare mode for the harness (see above).
-5. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
+4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
    proven; the job is missing.
-6. Per-unit decision reasons in the log (unit 1234: job=defend
+5. Per-unit decision reasons in the log (unit 1234: job=defend
    target=(80,90) reason=outnumbered), and a replay of one match, so a "the
    unit did nothing" report is actionable.
 
@@ -144,3 +145,35 @@ in the repository).
 - One owner per state. The policy owns its jobs; the engine owns the
   simulation. Do not add a second copy of a decision.
 - Determinism: integer maths in decisions, stable iteration, no f32.
+
+## Added after this was written (same day, later session)
+
+The compare mode above is built: `tools/autoplay_check.py --baseline <file>`
+diffs every cell of a run against a recorded file and prints `worse` when own
+falls, a seed that survived is lost, unowned rises or stuck rises; it also warns
+when the opening (credits/units/tech/roster) moved, because then the two readings
+are not the same experiment. `--compare-only` re-reads two files with no build and
+no matches. Tests are in `tools/tests/test_autoplay_check.py`.
+
+A baseline is recorded at `target/autoplay-results/baseline.jsonl` (Death.mmx and
+Barrel.mmx, seeds 0x5EED/19/10, 12000 ticks); a second run of the same command
+read identical in all six cells, so a diff is now evidence about the policy.
+
+Two things that change the shape of work item 1:
+
+- The object ceiling at 12000 ticks is money, not combat. With
+  `--start-credits 30000` the same two maps read own 85 (against 35 and 32 on a
+  10000 start). Five of the six baseline cells sit at 12 credits with the wallet
+  frozen for the last 3600 frames.
+- The income is dead because the harvesters do not unload. In the 30000-credit
+  Death run, seven miners log `ReturnToRefinery → Dock` 527 times and arrive at
+  ore with an empty hold 14 times; the retail brain on the same map and seed does
+  the reverse (96 empty arrivals against ~93 dock entries). The engine's own state
+  log, so the numbers are not the policy's opinion.
+
+Before changing the reserves, the harvest cycle is the reading to move: the
+policy re-sends `Goal::Harvest` (a MegaMission with a destination) every term the
+miner's mission is not Harvest, and during Enter/Unload it is not. Native rules
+worth reading first: `new_order_pending` (`src/sim/miner/refinery_dock.rs:420`,
+`0x0073E539`) and `per_cell_release_dock_contact` (`0x0073ACD7`). Whether that is
+the cause is not yet proven; the ratio above is what decides it.

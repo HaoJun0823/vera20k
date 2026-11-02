@@ -40,6 +40,70 @@ a type name.
 1v7 hard, Death.mmx, 12000 ticks, three seeds: two of three survive. The retail
 policy on 0x5EED lost at 11361.
 
+## The recorded baseline (2026-11-02, commit 3f9ba3a4a, this machine)
+
+The table above is a reading; this is a file on disk that a later run can be
+diffed against, both maps and all three seeds in one pass:
+
+    RA2_DIR=<retail> python -m tools.autoplay_check --brain v2 \
+        --seeds 0x5EED,19,10 --maps Death.mmx,Barrel.mmx --ticks 12000 \
+        --skip-tests --history target/autoplay-results/baseline.jsonl
+
+| Map | Seed | Own | Enemy | Unowned | Stuck |
+|---|---|---|---|---|---|
+| Death.mmx | 0x5EED | 35 | 47 | 0 | 0 |
+| Death.mmx | 19 | 35 | 40 | 0 | 0 |
+| Death.mmx | 10 | 35 | 45 | 0 | 0 |
+| Barrel.mmx | 0x5EED | 32 | 38 | 0 | 0 |
+| Barrel.mmx | 19 | 34 | 45 | 0 | 0 |
+| Barrel.mmx | 10 | 35 | 40 | 0 | 0 |
+
+A second run of the same command read exactly the same in every cell
+(`--compare-only`: 6 same, 0 better, 0 worse), so a diff is evidence about the
+policy and not about the machine.
+
+    RA2_DIR=<retail> python -m tools.autoplay_check --brain v2 \
+        --seeds 0x5EED,19,10 --maps Death.mmx,Barrel.mmx --ticks 12000 \
+        --skip-build --skip-tests --history target/autoplay-results/rerun.jsonl
+    python -m tools.autoplay_check --compare-only \
+        --baseline target/autoplay-results/baseline.jsonl \
+        --history target/autoplay-results/rerun.jsonl
+
+## The wallet is the ceiling, and the miners are why
+
+`--start-credits 30000` on the same two maps and seed 0x5EED, 12000 ticks:
+
+| Map | Own (10000 start) | Own (30000 start) | Enemy (30000 start) |
+|---|---|---|---|
+| Death.mmx | 35 | 85 | 49 |
+| Barrel.mmx | 32 | 85 | 51 |
+
+The army is not what stops the house at 35 objects; the wallet is. Five of the
+six cells above end at 12 credits with the wallet unchanged for the last 3600
+frames. Two readings under that:
+
+- With 30000 in the bank the house spends down to 300, the economy reports
+  `nothing to build ... refineries=3 defenses=4`, and the military manager stops
+  too (`UNIT_SPEND_FLOOR` 900). Nothing is queued for the last four minutes: the
+  build order has no target and the unit buyer has no budget.
+- The harvesters do not unload. Across the seven miners of the 30000-credit
+  Death run, the engine's state log reads `ReturnToRefinery → Dock` 527 times and
+  `SearchOre → Harvest` with `cargo=0` 14 times — an empty hold arriving at ore,
+  which is what a finished unload looks like. The retail brain on the same map
+  and seed arrives at ore empty 96 times against about 93 dock entries. Ours
+  enters Dock and comes back out full.
+
+The state log is the engine's (`src/sim/miner`), so the reading is engine-side
+even when the policy is what changed. The hypothesis that fits both native rules
+the code cites — `new_order_pending` (`refinery_dock.rs:420`, `0x0073E539`) ends
+an unload when a NavCom exists and the queued mission is neither none nor
+Harvest, and `per_cell_release_dock_contact` (`0x0073ACD7`) drops the contact
+unless the mission is Unload or Enter is queued — is that the policy re-sends
+`Goal::Harvest` (a MegaMission *with a destination*) every term the miner's
+mission is not Harvest, which is exactly during Enter and Unload. That is a
+hypothesis, not yet a proven cause; the reading that decides it is the ratio
+above, which the next change has to move.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |
@@ -58,11 +122,17 @@ IFV in a test), so this is policy work, not an engine gap.
 - The army does not attack. Attacking is behind a flag that is off, because an
   army that attacks at two-to-one loses three matches of six. Local
   superiority, retreat and reinforcement are the next slice.
-- The economy stalls on some seeds: a refinery queued near the wallet floor can
-  leave the house with zero income. Three attempted fixes made the matrix worse
-  and were reverted.
-- One harvester loops now and then (stuck=1): a truck alternating SearchOre and
-  ReturnToRefinery without docking.
+- The economy stalls, and the miners are the reason: five of six cells end at 12
+  credits, and the object ceiling lifts from 35 to 85 when the opening wallet is
+  30000. See the two sections above for the counts.
+- A refinery queued with only its cost plus the fixed 200 in the wallet takes the
+  rest of the income while it is unfinished, so the house earns at the rate one
+  unfinished building leaves it. Three attempted fixes made the matrix worse and
+  were reverted; the reserves are still a constant.
+- One cell (Barrel.mmx, 0x5EED) holds 1300 credits from tick 8400 with
+  `nothing to build ... refineries=1 defenses=0 in_production=None`: the house
+  survived, but nothing it could afford was a target. Unexplained; the log line
+  is the reading.
 - The shipyard counts as a war factory. Splitting the role improved Death.mmx
   and lost every Barrel.mmx seed, so the split was reverted.
 - Nothing for walls, transports, garrisons, superweapons, scouting, crates, or
@@ -75,3 +145,8 @@ lost that survived before, unowned zero, stuck not up. One change per
 measurement. Five of the experiments in this session improved one reading and
 lost seeds on another map, and were reverted; the assignment bug above is why
 one of them looked like a win.
+
+The measurement is a run of `tools/autoplay_check.py` against the baseline
+recorded above, which prints a cell as `worse` when own falls, a seed that
+survived is lost, unowned rises or stuck rises (`--baseline` marks the cell, and
+`--compare-only` re-reads two files without running anything).
