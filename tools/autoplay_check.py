@@ -93,10 +93,41 @@ class MatchReport:
     start_units: int = 0
     start_tech: int = 0
     roster: str = ""
+    # The exchange, read off the census curve rather than its last row: how many
+    # objects each side lost over the match. Two runs that end on the same count
+    # can still have traded very differently, and that is the reading a change to
+    # unit composition has to move.
+    own_lost: int = 0
+    enemy_lost: int = 0
 
     @property
     def won(self) -> bool:
         return self.result.startswith("won")
+
+    @property
+    def exchange(self) -> str:
+        """Objects traded, as `own_lost:enemy_lost`.
+
+        A ratio of one means each side destroyed as much as it lost; below one is
+        a favourable trade. Kept as text so a history row stays comparable
+        without dividing by zero.
+        """
+        return f"{self.own_lost}:{self.enemy_lost}"
+
+
+def losses(rows: list[tuple[str, ...]], column: int) -> int:
+    """How far a census column fell, summed over the whole curve.
+
+    A count that drops between two readings is that many objects destroyed. Rises
+    are ignored on purpose: a house that rebuilds is not undoing the loss, and a
+    net final-minus-start figure would hide a fight that cost both sides an army.
+    """
+    total = 0
+    for previous, current in zip(rows, rows[1:]):
+        drop = int(previous[column]) - int(current[column])
+        if drop > 0:
+            total += drop
+    return total
 
 
 def parse_report(seed: str, text: str, seconds: float) -> MatchReport:
@@ -121,6 +152,11 @@ def parse_report(seed: str, text: str, seconds: float) -> MatchReport:
     if rows:
         report.own = int(rows[-1][4])
         report.enemy = int(rows[-1][5])
+        # The whole curve, not the last row: a change to what the house builds is
+        # judged by what the two armies destroyed, and the final counts can be
+        # equal after very different fights.
+        report.own_lost = losses(rows, 4)
+        report.enemy_lost = losses(rows, 5)
     # The last reading, not the worst: the starting force is unowned until the
     # first post exists, and a maximum reports that first frame forever.
     report.unowned = int(UNOWNED.findall(text)[-1]) if UNOWNED.findall(text) else 0
@@ -161,6 +197,8 @@ def append_history(reports: list[MatchReport], args, path: Path) -> None:
                 "tick": report.tick,
                 "own": report.own,
                 "enemy": report.enemy,
+                "own_lost": report.own_lost,
+                "enemy_lost": report.enemy_lost,
                 "unowned": report.unowned,
                 "stuck": report.stuck,
                 "yards": report.yards,
@@ -278,6 +316,20 @@ def arrow(before: dict, after: dict, field: str) -> str:
     return f"{before.get(field, 0)}->{after.get(field, 0)}"
 
 
+def lost_arrow(before: dict, after: dict) -> str:
+    """The trade, before and after, as `own:enemy` losses on each side.
+
+    Printed but never judged: a composition change is expected to raise the
+    enemy's losses before it raises the object count, and the keep rule is still
+    the object count. What this column is for is telling a run that traded better
+    from one that traded the same.
+    """
+    def pair(row: dict) -> str:
+        return f"{row.get('own_lost', 0)}:{row.get('enemy_lost', 0)}"
+
+    return f"{pair(before)}->{pair(after)}"
+
+
 def compare_histories(baseline: Path, current: Path) -> None:
     """Print what moved between a reference run and this one, cell by cell."""
     before, before_unreadable = read_history(baseline)
@@ -290,7 +342,8 @@ def compare_histories(baseline: Path, current: Path) -> None:
 
     header = (
         f"{'map':<14}{'country':<10}{'seed':<7}{'ticks':<7}{'brain':<7}{'opp':<5}"
-        f"{'own':<12}{'enemy':<12}{'unowned':<10}{'stuck':<9}{'yards':<9}{'walls':<9}verdict"
+        f"{'own':<12}{'enemy':<12}{'lost':<16}{'unowned':<10}{'stuck':<9}{'yards':<9}"
+        f"{'walls':<9}verdict"
     )
     print("", flush=True)
     print(header, flush=True)
@@ -322,6 +375,7 @@ def compare_histories(baseline: Path, current: Path) -> None:
         print(
             f"{prefix}"
             f"{arrow(was, now, 'own'):<12}{arrow(was, now, 'enemy'):<12}"
+            f"{lost_arrow(was, now):<16}"
             f"{arrow(was, now, 'unowned'):<10}{arrow(was, now, 'stuck'):<9}"
             f"{arrow(was, now, 'yards'):<9}{arrow(was, now, 'walls'):<9}{verdict}",
             flush=True,
@@ -529,7 +583,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  start credits={report.start_credits} units={report.start_units} "
               f"tech={report.start_tech} roster=[{report.roster}]", flush=True)
         print(f"  own={report.own} enemy={report.enemy} yards={report.yards} "
-              f"walls={report.walls} unowned={report.unowned} stuck={report.stuck}", flush=True)
+              f"walls={report.walls} unowned={report.unowned} stuck={report.stuck} "
+              f"lost={report.exchange}", flush=True)
         if report.plots:
             print(f"  superweapon plots: {', '.join(report.plots)}", flush=True)
         if report.crates:

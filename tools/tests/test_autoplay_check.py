@@ -9,7 +9,24 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from tools.autoplay_check import compare_histories, judge, opening_drift, parse_report
+from tools.autoplay_check import (
+    compare_histories,
+    judge,
+    losses,
+    lost_arrow,
+    opening_drift,
+    parse_report,
+)
+
+# A census curve: tick, credits, enemy credits, power, own, enemy, ready,
+# rejected, not ready. Own climbs from 13 to 15 and dips twice; enemy only falls.
+CURVE = """
+     0     10000     10000       0     13     17      0         0         0
+  1800      6901      7014     150     15     14      0         0         0
+  3600      3758      3598     150     12     14      0         0         0
+  5400       626       510     150     16     11      0         0         0
+  7200       400         4     150     15      8      0         0         0
+"""
 
 LOG = """[INFO] auto play: building=35 infantry=60 vehicle=40 aircraft=6 ship=0 harv=6 \
 ref=3 yard=2 fighters=100 threat=[0,0,0,0,0,0,0] able=[90,98,15,90,38,100,9] \
@@ -20,6 +37,40 @@ roster=[E1:40,CAOILD:13,MTNK:12] crates=1[(61, 163)] income=4200/min seen=3/3
 [INFO] auto play: wall segment at (189, 105), 45 standing, closes 4 cells
 autoplay-match: won at tick 22915
 """
+
+
+class ExchangeTests(unittest.TestCase):
+    def test_losses_count_every_fall_and_ignore_a_rebuild(self):
+        """A count that drops is objects destroyed; a rise is not un-destroying."""
+        rows = [
+            ("0", "13", "17"),
+            ("1", "15", "14"),
+            ("2", "12", "14"),
+            ("3", "16", "11"),
+            ("4", "15", "8"),
+        ]
+        # Own: 13->15 rises, 15->12 falls 3, 12->16 rises, 16->15 falls 1.
+        self.assertEqual(losses(rows, 1), 4)
+        # Enemy: 17->14 falls 3, 14->14 flat, 14->11 falls 3, 11->8 falls 3.
+        self.assertEqual(losses(rows, 2), 9)
+
+    def test_the_report_carries_the_trade(self):
+        report = parse_report("24301", CURVE, 10.0)
+        self.assertEqual(report.own, 15)
+        self.assertEqual(report.enemy, 8)
+        self.assertEqual(report.own_lost, 4)
+        self.assertEqual(report.enemy_lost, 9)
+        self.assertEqual(report.exchange, "4:9")
+
+    def test_the_trade_is_printed_and_never_judged(self):
+        """A better trade must not turn a cell `worse` into `better` on its own."""
+        before = row(own_lost=30, enemy_lost=30)
+        after = row(own_lost=10, enemy_lost=80)
+        verdict, worse, better = judge(before, after)
+        self.assertEqual(verdict, "same", "the keep rule is still the object count")
+        self.assertEqual(worse, [])
+        self.assertEqual(better, [])
+        self.assertEqual(lost_arrow(before, after), "30:30->10:80")
 
 
 class ParseReportTests(unittest.TestCase):
