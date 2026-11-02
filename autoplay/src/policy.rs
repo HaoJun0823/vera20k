@@ -113,6 +113,10 @@ pub struct Policy {
     /// The spec's H2 counts a unit stuck when it holds a *movement* job and does
     /// not move for three seconds, not a unit that is firing.
     hitting: std::collections::BTreeSet<u64>,
+    /// The bales in each harvester's hold at the last reading. A harvester
+    /// whose count moved is filling, and a harvester that is filling is
+    /// working: the cell cannot say that, the engine's own cargo can.
+    cargo_seen: BTreeMap<u64, u32>,
     stats: Stats,
 }
 
@@ -133,6 +137,7 @@ impl Policy {
             given_up: BTreeMap::new(),
             progress: BTreeMap::new(),
             hitting: std::collections::BTreeSet::new(),
+            cargo_seen: BTreeMap::new(),
             stats: Stats::default(),
         }
     }
@@ -623,6 +628,22 @@ impl Brain for Policy {
             out.intent(intent);
         }
 
+        // A harvester that is filling its hold is working, not stuck. The
+        // engine's own bale count is the reading: a truck that is filling
+        // changes it every frame, a truck that stopped does not.
+        let mut cargo: BTreeMap<u64, u32> = BTreeMap::new();
+        for unit in obs.own_entities() {
+            if let Some(bales) = obs.miner_cargo_bales(unit.entity_id) {
+                cargo.insert(unit.entity_id, bales);
+            }
+        }
+        let filling: std::collections::BTreeSet<u64> = cargo
+            .iter()
+            .filter(|(unit, bales)| self.cargo_seen.get(unit) != Some(*bales))
+            .map(|(unit, _)| *unit)
+            .collect();
+        self.cargo_seen = cargo;
+
         // A unit that has not moved for six seconds while holding a job is
         // stuck: the one reading the old policy had no way to report.
         const STUCK_FRAMES: u64 = 90;
@@ -651,6 +672,7 @@ impl Brain for Policy {
             let firing = self.hitting.contains(&unit.entity_id);
             let held = !firing
                 && !achieved
+                && !filling.contains(&unit.entity_id)
                 && self.jobs.get(unit.entity_id).is_some_and(|job| {
                     matches!(
                         job.kind,

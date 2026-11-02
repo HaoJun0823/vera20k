@@ -373,6 +373,30 @@ impl<'a> Observation<'a> {
             .and_then(|entity| entity.passenger_role.inside_transport_id())
     }
 
+    /// The bales in a harvester's hold.
+    ///
+    /// A harvester that is filling its hold changes this every frame; one that
+    /// is standing still with a full hold does not. That difference is the
+    /// only way a policy can tell a truck at work from a truck that stopped,
+    /// and it is the engine's own number, not an opinion.
+    pub fn miner_cargo_bales(&self, entity_id: u64) -> Option<u32> {
+        self.sim
+            .entities()
+            .get(entity_id)
+            .and_then(|entity| entity.miner.as_ref())
+            .map(|miner| miner.cargo().len() as u32)
+    }
+
+    /// Whether a harvester's hold is full: it should be on its way to a
+    /// refinery, not standing where it filled.
+    pub fn miner_cargo_full(&self, entity_id: u64) -> Option<bool> {
+        self.sim
+            .entities()
+            .get(entity_id)
+            .and_then(|entity| entity.miner.as_ref())
+            .map(|miner| miner.is_full())
+    }
+
     /// Full strength of a type, from the frozen rules an object was built with.
     pub fn max_health(&self, rules: &RuleSet, type_id: InternedId) -> Option<i32> {
         self.sim.object_type(type_id, rules).map(|ty| ty.strength)
