@@ -186,6 +186,43 @@ destination arm), not on `Attack`. The predicate now accepts both, and with the
 flag off again the matrix reads identical in all six cells — verified, so the fix
 is inert until attacking comes back.
 
+## The army aims at what the house can see, and still does not attack
+
+The projection could already answer "where is every enemy in the world"
+(`enemy_entities`), and its own doc said so: the native computer AI is omniscient
+and a policy reusing its decisions inherits that. The spec forbids it (2.5, "no
+real-time enemy information outside vision"), which matters most at 1v7, where
+omniscience is every base on the map at once. `Observation::visible_enemy_entities`
+narrows that list to the cells the house's fog marks visible right now
+(`FogState::is_cell_visible`, the L2 layer); a test spawns one rifleman beside the
+house's own and one across the map and asserts that only the first is a target.
+The army targets from it.
+
+An assault is now an attack on the enemy *object* a player's click would name,
+not an attack-move to where it stood, and the job ends when its object is no
+longer visible. With attacking still off, the matrix reads identical in all six
+cells, so the change is inert until the flag returns.
+
+It also has to be re-aimed before that: the probe with the flag on reads 0 cells
+with own down and one up (own 46-51 against the same 39-49, so the army no longer
+loses objects), but five units of Barrel.mmx seed 0x5EED stand for 1400-1875
+frames on `job=Assault target=Object(2579)` — an assault on something the house
+can see and they cannot finish. The probe before this one, with a cell as the
+target, lost objects in four cells and froze 25-33 units. So the next rung is a
+job with a ladder below it: give up on a target this unit cannot reach, do not
+propose it to that unit again, and re-send the order when the target it names
+changes.
+
+## Reverted: the reserve, again
+
+The handoff's item 1 asks for the fixed reserves to become the real cost of the
+cheapest harvester. Tried: the economy's `+200` margin and the unit buyer's floor
+both read the cheapest buildable harvester off the profile table. It is worse in
+all six cells — own 46-51 becomes 37-41 — because a house that keeps a truck's
+cost in the bank stops buying units, and units are what the object count is. The
+constant stays, and with it the open question of what the reserve is for now that
+income works.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |

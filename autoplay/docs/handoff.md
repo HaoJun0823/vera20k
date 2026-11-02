@@ -107,23 +107,25 @@ first, then measure behaviour.
 
 1. Economy reserves. The stall this item described is fixed (see the end of this
    file): the policy was re-ordering each harvester in the middle of its own
-   dock. What is left is the reserve itself. Replace the fixed 200 margin and the
-   unit buyer's floor with the real cost of the cheapest harvester, and buy a
-   replacement truck before any building. The readings that say it is still
-   there: Death.mmx seed 10 ends with a refinery in production at 5 credits, and
-   five of six cells end with `nothing to build` while holding 300-661 credits.
+   dock. The reserve itself was then tried the way this item asks and reverted:
+   with the economy's margin and the unit buyer's floor both read off the
+   cheapest buildable harvester, own drops from 46-51 to 37-41 in all six cells,
+   because a house that keeps a truck's cost in the bank stops buying units. What
+   is still open is what the reserve is for now that income works; the constant
+   stays until a reading says otherwise.
 2. The army as units. Military holds no state: it recomputes who is a soldier
    every term. It needs squads (membership on a term), local superiority per
    squad, retreat, reinforcement and focus fire. Attacking is off until that
    exists (ATTACK_ENABLED in autoplay/src/manager/military.rs), and the reason is
-   now measured on the fixed economy too: with the flag on, all six cells are
-   worse, own falls in four, and the stuck count goes from 0-1 to 13-33 because
-   25-33 units walk to one stale target cell, arrive, and stand there for
-   500-1400 frames holding the job. Start with the smallest rung that turns that
-   reading around: a job that ends when the unit arrives, so the next term can
-   pick a live target. The order path itself is sound now — an attack-move lands
-   on `MissionType::Move` with the attack-move latch set, and `living_out`
-   accepts it, so a re-order is not what breaks the attack.
+   measured three times: at two-to-one on the un-fixed build, at parity with a
+   cell target (worse in all six cells, stuck 13-33), and at parity with the
+   object target and legal vision the policy has now (own down in no cell, up in
+   one, but five units standing 1400-1875 frames on an assault they cannot
+   finish). The order path is sound — an attack names the enemy object and the
+   target is read from `visible_enemy_entities`, so the policy no longer aims at
+   anything the player could not have clicked. Build the ladder below the order
+   next: a job gives up on a target the unit cannot reach and is not proposed to
+   that unit again, and the order is re-sent when the target it names changes.
 3. Composition by role, not by price. Front line, ranged, anti-air quotas; this
    fixes the one-type armies and the faction spread at once.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
@@ -207,3 +209,16 @@ The attack flag was then probed once more, at parity rather than at two-to-one:
 all six cells worse, own down in four, and the stuck count 13-33. The reading is
 the army standing around one target cell with `job=Assault`, which is the
 concrete starting point for item 2 above.
+
+Since then the army aims legally and at an object. `Observation` gained
+`is_cell_visible` and `visible_enemy_entities` (L2 only; the omniscient list stays
+where it is, unused by the policy), the military proposes `Target::Object`, the
+policy maps it to `Goal::Attack` — the click a player makes on an enemy — and a
+job ends when its object is no longer visible. With the flag off the matrix is
+identical in all six cells, so all of it is inert until attacking returns. With
+the flag on, own falls in no cell and gains in one (46→49 on Barrel.mmx seed 19),
+the enemy counts do not move, and the stuck clause fails on five units of
+Barrel.mmx seed 0x5EED that stand 1400-1875 frames on `job=Assault
+target=Object(2579)`: the army has nothing that gives up on a target it cannot
+reach, and the policy does not re-send an order once a unit's mission reads
+`Attack`, so a re-aimed job changes nothing for that unit.
