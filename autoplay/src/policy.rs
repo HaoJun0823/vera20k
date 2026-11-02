@@ -27,6 +27,19 @@ use crate::registry::{JobKind, Manager as Domain};
 /// simulation. Reactive decisions do not wait for it; this is the slow loop.
 pub const TERM_FRAMES: u64 = 15;
 
+/// How long a unit may stand in one cell on an assault before the job is
+/// abandoned: the order named something this unit cannot get to.
+///
+/// The ladder is the design's (`autoplay/docs/design.md`, section 4): every task
+/// reports `Done`, `Unreachable`, `Ineffective` or `Stalled`, and every rung
+/// terminates — the last rung is giving up and cooling down. Thirty seconds is
+/// the point at which standing still is no longer a fight in progress.
+const UNREACHABLE_FRAMES: u64 = 450;
+
+/// How long a unit stays off a target it could not reach, in frames: two
+/// minutes, the same order of magnitude as one battle.
+const UNREACHABLE_COOLDOWN: u64 = 1_800;
+
 /// What the policy did, for the trace line.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -38,6 +51,12 @@ pub struct Stats {
     pub refused: usize,
     /// Jobs that ended this term because their target was gone.
     pub finished: usize,
+    /// Jobs that ended this term because the unit could not reach the target.
+    pub stalled: usize,
+    /// Proposals dropped this term for a target the unit had given up on.
+    pub cooled: usize,
+    /// Units given the default job this term because nothing else claimed them.
+    pub fallback: usize,
     /// Units that have not changed cell for six seconds while holding a job.
     pub stuck: usize,
 }
@@ -47,10 +66,15 @@ pub struct Policy {
     managers: Vec<Box<dyn Manager>>,
     jobs: Assignments,
     last_term: Option<u64>,
-    issued: BTreeMap<u64, JobKind>,
+    /// The order each unit has been sent: the job kind, and the target it named.
+    /// A job whose target changed is a new order even when its kind did not.
+    issued: BTreeMap<u64, (JobKind, Target)>,
     /// Where each unit stood when it last moved, and when: the stuck counter
     /// reads this, so "a unit that does nothing" is a number, not an opinion.
     stood: BTreeMap<u64, ((u16, u16), u64)>,
+    /// Targets a unit has given up on, and the tick it may be proposed again:
+    /// the last rung of the assault ladder.
+    given_up: BTreeMap<(u64, u64), u64>,
     stats: Stats,
 }
 
@@ -68,6 +92,7 @@ impl Policy {
             last_term: None,
             issued: BTreeMap::new(),
             stood: BTreeMap::new(),
+            given_up: BTreeMap::new(),
             stats: Stats::default(),
         }
     }
@@ -158,31 +183,142 @@ impl Policy {
         }
     }
 
-    /// End the jobs whose target is gone.
+    /// End the jobs that are done, and the ones the unit cannot do.
     ///
-    /// An assault on an object the house can no longer see is work that cannot
-    /// be done, and the object may be dead. The job ends before this term's
-    /// proposals are collected, so the same unit can be given a live target in
-    /// the same term.
-    fn finish_done_jobs(&mut self, obs: &Observation<'_>) {
+    /// Two reasons, and both terminate: an assault on an object the house can no
+    /// longer see is work that cannot be done, and an assault that has left its
+    /// unit standing in one cell for [`UNREACHABLE_FRAMES`] is a target it
+    /// cannot get to. The second is the design's last rung — give up and cool
+    /// down (`design.md`, section 4) — and without it five units stood on one
+    /// refinery for 1400-1875 frames in the probe status.md records.
+    ///
+    /// Jobs end before this term's proposals are collected, so the same unit can
+    /// be given a live target in the same term.
+    fn finish_done_jobs(&mut self, obs: &Observation<'_>, tick: u64) {
+        self.given_up.retain(|_, until| *until > tick);
         let visible: Vec<u64> = obs
             .visible_enemy_entities()
             .map(|enemy| enemy.entity_id)
             .collect();
-        let done: Vec<u64> = self
+        let cells: BTreeMap<u64, (u16, u16)> = obs
+            .own_entities()
+            .map(|unit| (unit.entity_id, unit.cell))
+            .collect();
+        let done: Vec<(u64, u64, bool)> = self
             .jobs
             .iter()
-            .filter(|(_, job)| match (job.kind, job.target) {
-                (JobKind::Assault, Target::Object(target)) => !visible.contains(&target),
-                _ => false,
+            .filter_map(|(unit, job)| match (job.kind, job.target) {
+                (JobKind::Assault, Target::Object(target)) => {
+                    if !visible.contains(&target) {
+                        return Some((*unit, target, false));
+                    }
+                    let cell = cells.get(unit).copied().unwrap_or((0, 0));
+                    let standing = Self::standing_frames(self.stood.get(unit), cell, tick);
+                    (standing >= UNREACHABLE_FRAMES).then_some((*unit, target, true))
+                }
+                _ => None,
             })
-            .map(|(unit, _)| *unit)
             .collect();
-        for unit in done {
+        for (unit, target, unreachable) in done {
             self.jobs.take(unit);
             self.issued.remove(&unit);
-            self.stats.finished += 1;
+            if unreachable {
+                self.given_up
+                    .insert((unit, target), tick + UNREACHABLE_COOLDOWN);
+                self.stats.stalled += 1;
+            } else {
+                self.stats.finished += 1;
+            }
         }
+    }
+
+    /// Whether the order a unit already holds is the order this job asks for.
+    ///
+    /// Only an assault is compared by target, and it has to be: its enemy walks,
+    /// the mission keeps reading `Attack` while it does, and a job re-aimed at a
+    /// different enemy would otherwise look like a job already lived out.
+    ///
+    /// The other two watched jobs are compared by kind alone, each for its own
+    /// reason. A harvest job's target is the cell the truck stood on when the
+    /// job was given, and the ore is the mission's business, so comparing it
+    /// would re-order every truck every term and break the dock again. A defend
+    /// job's post is the first structure the house has, and before the yard
+    /// stands that is "wherever the first soldier is" — a cell that moves with
+    /// the army, so comparing it scattered the army before the base existed.
+    fn same_order(issued: Option<&(JobKind, Target)>, job: &Job) -> bool {
+        issued.is_some_and(|(kind, target)| {
+            *kind == job.kind && (job.kind != JobKind::Assault || *target == job.target)
+        })
+    }
+
+    /// How long the unit has stood in the cell it stands in now.
+    fn standing_frames(stood: Option<&((u16, u16), u64)>, cell: (u16, u16), tick: u64) -> u64 {
+        match stood {
+            Some((stood_at, since)) if *stood_at == cell => tick.saturating_sub(*since),
+            _ => 0,
+        }
+    }
+
+    /// The job a unit holds when nothing else claimed it: guard the nearest
+    /// structure the house owns.
+    ///
+    /// Off the profile, never a type name: any unit that is armed and not a
+    /// harvester can guard, and any structure is worth standing at. A house with
+    /// no structure yet guards the cell its units stand on, so the starting
+    /// force has a post before the yard exists.
+    fn default_job(&self, obs: &Observation<'_>, rules: &RuleSet, tick: u64) -> Vec<(u64, Job)> {
+        let mut posts: Vec<(u16, u16)> = Vec::new();
+        let mut idle: Vec<u64> = Vec::new();
+        for unit in obs.own_entities() {
+            let Some(ty) = obs.object_type(rules, unit.type_id) else {
+                continue;
+            };
+            let Some(profile) = self.profiles.get(&ty.id) else {
+                continue;
+            };
+            if profile.roles.contains(Roles::STRUCTURE) {
+                posts.push(unit.cell);
+                continue;
+            }
+            if unit.orderable
+                && !profile.roles.contains(Roles::HARVESTER)
+                && profile.roles.contains(Roles::ARMED)
+                && obs.inside_transport(unit.entity_id).is_none()
+                && self.jobs.get(unit.entity_id).is_none()
+            {
+                idle.push(unit.entity_id);
+            }
+        }
+        if posts.is_empty() {
+            return Vec::new();
+        }
+        posts.sort_unstable();
+        idle.into_iter()
+            .map(|unit| {
+                let cell = obs
+                    .own_entities()
+                    .find(|entity| entity.entity_id == unit)
+                    .map(|entity| entity.cell)
+                    .unwrap_or(posts[0]);
+                let post = *posts
+                    .iter()
+                    .min_by_key(|at| {
+                        i32::from(at.0.abs_diff(cell.0)).max(i32::from(at.1.abs_diff(cell.1)))
+                    })
+                    .expect("a structure to guard");
+                (
+                    unit,
+                    Job {
+                        kind: JobKind::Defend,
+                        target: Target::Cell(post),
+                        // Below every proposal a manager makes: this is the job
+                        // a unit gets when nothing wanted it.
+                        priority: 0,
+                        given: tick,
+                    },
+                )
+            })
+            .collect()
     }
 
     /// Give each unit at most one job, strongest proposal first. Deterministic:
@@ -210,6 +346,15 @@ impl Policy {
                 priority: proposal.priority,
                 given: tick,
             };
+            // A target this unit has already given up on is not proposed to it
+            // again until the cooldown runs out. Without this the ladder ends in
+            // a loop: give up, be told the same thing next term, stand still.
+            if let Target::Object(target) = job.target
+                && self.given_up.contains_key(&(unit, target))
+            {
+                self.stats.cooled += 1;
+                continue;
+            }
             // The strongest proposal wins: a later, weaker one must not
             // overwrite the job the unit was just given.
             if let Some(current) = self.jobs.get(unit)
@@ -218,7 +363,14 @@ impl Policy {
                 continue;
             }
             let changed = match self.jobs.give(unit, job) {
-                Some(previous) => previous.kind != proposal.kind,
+                // A harvest job's target is the cell the truck stood on when it
+                // was given, so a moving truck would read as "changed" every
+                // term and be re-ordered mid-dock. `same_order` is the one
+                // comparison that knows which targets are part of the order.
+                Some(previous) => !Self::same_order(
+                    Some(&(previous.kind, previous.target)),
+                    self.jobs.get(unit).expect("the job just given"),
+                ),
                 None => true,
             };
             if changed {
@@ -231,15 +383,23 @@ impl Policy {
     /// Issue the order for a job the unit is not already living out.
     ///
     /// A unit whose mission already names the job is left alone; re-sending the
-    /// same order every term is what makes a unit unable to fire. A one-shot
-    /// job, one with no mission of its own, is sent once.
+    /// same order every term is what makes a unit unable to fire, and it is what
+    /// broke the harvester's dock (`living_out`) and the army's cohesion.
+    ///
+    /// The one case the mission cannot see is an assault whose enemy has walked:
+    /// the unit keeps attacking, the mission keeps reading `Attack`, and the
+    /// target it is attacking is no longer the one the job names. So a watched
+    /// job is re-sent when its target changed, and only then — a re-send is a
+    /// new order, which for a unit already in the middle of the mission costs it
+    /// its current shot.
     fn issue(&mut self, obs: &Observation<'_>, out: &mut Outbox) {
         let mut orders = Vec::new();
         for (unit, job) in self.jobs.iter() {
             let Some(goal) = Self::goal(job) else {
                 continue;
             };
-            let holding = self.issued.get(unit) == Some(&job.kind);
+            let retargeted =
+                job.kind == JobKind::Assault && !Self::same_order(self.issued.get(unit), job);
             if Self::watched_by_mission(job.kind) {
                 let Some(current) = obs
                     .own_entities()
@@ -249,17 +409,24 @@ impl Policy {
                     continue;
                 };
                 if Self::living_out(job.kind, current) {
-                    self.issued.insert(*unit, job.kind);
-                    continue;
+                    // The job is live, so the unit is left alone and the order
+                    // is remembered — including the case where nothing was
+                    // remembered yet, which is what a first-term unit looks
+                    // like. The only exception is an assault whose target
+                    // moved: the mission cannot show that.
+                    self.issued.insert(*unit, (job.kind, job.target));
+                    if !retargeted {
+                        continue;
+                    }
                 }
-            } else if holding {
+            } else if Self::same_order(self.issued.get(unit), job) {
                 continue;
             }
-            orders.push((*unit, goal, job.kind));
+            orders.push((*unit, goal, (job.kind, job.target)));
         }
-        for (unit, goal, kind) in orders {
+        for (unit, goal, order) in orders {
             out.order(unit, goal);
-            self.issued.insert(unit, kind);
+            self.issued.insert(unit, order);
             self.stats.issued += 1;
         }
     }
@@ -279,9 +446,10 @@ impl Brain for Policy {
         self.last_term = Some(tick);
         self.stats = Stats::default();
 
-        // A job whose target is gone is finished before the term's proposals are
-        // collected, so the unit can be given a live one in the same term.
-        self.finish_done_jobs(obs);
+        // A job whose target is gone — or which the unit cannot reach — is
+        // finished before the term's proposals are collected, so the unit can be
+        // given a live one in the same term.
+        self.finish_done_jobs(obs, tick);
         let mut demands = Demands::default();
         {
             let ctx = Ctx {
@@ -375,6 +543,17 @@ impl Brain for Policy {
         }
         self.stood = stood;
 
+        // A unit with no job gets one: hold the nearest structure the house
+        // owns. `design.md` section 4 calls this the default task, and it is why
+        // `Unowned == 0` holds by construction rather than by luck — a unit whose
+        // only proposal was a target it has given up on is exactly the case that
+        // used to leave it standing with nothing to do.
+        let fallback = self.default_job(obs, rules, tick);
+        self.stats.fallback = fallback.len();
+        for (unit, job) in fallback {
+            self.jobs.give(unit, job);
+        }
+
         // A unit with no job is the failure this policy exists to prevent.
         self.stats.unowned = eligible
             .iter()
@@ -396,7 +575,7 @@ impl Brain for Policy {
         }
         if tick % 600 == 0 {
             log::info!(
-                "policy v2: tick={tick} proposals={} intents={} assigned={} issued={} unowned={} refused={} finished={} stuck={}",
+                "policy v2: tick={tick} proposals={} intents={} assigned={} issued={} unowned={} refused={} finished={} stalled={} cooled={} fallback={} stuck={}",
                 self.stats.proposals,
                 self.stats.intents,
                 self.stats.assigned,
@@ -404,6 +583,9 @@ impl Brain for Policy {
                 self.stats.unowned,
                 self.stats.refused,
                 self.stats.finished,
+                self.stats.stalled,
+                self.stats.cooled,
+                self.stats.fallback,
                 self.stats.stuck
             );
         }
@@ -500,6 +682,88 @@ mod tests {
             Policy::goal(&job(Target::Cell((5, 6)))),
             Some(Goal::AttackMove { cell: (5, 6) }),
             "the cell form is still an order, just not the one the army sends"
+        );
+    }
+
+    #[test]
+    fn an_order_that_names_a_new_target_is_a_new_order() {
+        let assault = |target| Job {
+            kind: JobKind::Assault,
+            target,
+            priority: 60,
+            given: 0,
+        };
+        // Same kind, moved enemy: the mission still reads Attack, so only the
+        // target can tell the policy it has something new to say.
+        let sent = Some(&(JobKind::Assault, Target::Object(77)));
+        assert!(Policy::same_order(sent, &assault(Target::Object(77))));
+        assert!(
+            !Policy::same_order(sent, &assault(Target::Object(78))),
+            "a moved target is a new order, not a job already lived out"
+        );
+    }
+
+    #[test]
+    fn a_harvesters_cell_is_not_part_of_its_order() {
+        // The harvest job's target is the cell the truck stood on when it was
+        // given, and the mine is the mission's business: comparing it would
+        // re-order every truck every term and break the dock again.
+        let harvest = Job {
+            kind: JobKind::Harvest,
+            target: Target::Cell((9, 9)),
+            priority: 10,
+            given: 0,
+        };
+        let sent = Some(&(JobKind::Harvest, Target::Cell((1, 1))));
+        assert!(Policy::same_order(sent, &harvest));
+    }
+
+    #[test]
+    fn a_defend_post_that_moves_is_not_a_new_order() {
+        // Before the yard stands, the post is wherever the first soldier is, so
+        // comparing it re-sent the guard every term and scattered the army.
+        let guard = Job {
+            kind: JobKind::Defend,
+            target: Target::Cell((50, 60)),
+            priority: 20,
+            given: 0,
+        };
+        let sent = Some(&(JobKind::Defend, Target::Cell((40, 40))));
+        assert!(Policy::same_order(sent, &guard));
+    }
+
+    #[test]
+    fn a_unit_gives_up_on_a_target_it_cannot_reach_and_is_not_sent_back() {
+        let mut policy = Policy::new(vera20k_core::rules::ruleset::RuleSet::empty_for_test());
+        let standing = Some(&((40, 40), 0_u64));
+        assert_eq!(
+            Policy::standing_frames(standing, (40, 40), 100),
+            100,
+            "the unit has stood here since frame 0"
+        );
+        assert!(
+            Policy::standing_frames(standing, (40, 40), UNREACHABLE_FRAMES) >= UNREACHABLE_FRAMES,
+            "past the ladder's last rung the job is Unreachable"
+        );
+        assert_eq!(
+            Policy::standing_frames(standing, (41, 40), 10_000),
+            0,
+            "a cell it just reached is not a stall"
+        );
+        // The cooldown is what keeps the ladder from looping, and it is the
+        // policy's own state, so it survives the term that recorded it. The
+        // deadline is the first frame the target may be proposed again.
+        let until = 900_u64;
+        policy.given_up.insert((7, 42), until);
+        policy.given_up.retain(|_, deadline| *deadline > until - 1);
+        assert!(
+            policy.given_up.contains_key(&(7, 42)),
+            "still cooling down on the frame before the deadline"
+        );
+        policy.given_up.retain(|_, deadline| *deadline > until);
+        assert!(
+            !policy.given_up.contains_key(&(7, 42)),
+            "the target may be proposed again once the cooldown has passed"
         );
     }
 
