@@ -1120,3 +1120,29 @@ base burns. Taking the odds out of the home case is worse on all three seeds —
 the defect; it is the only thing keeping those units alive. What kills them is
 whatever does not have to walk into the army to do it, and that is the next
 question rather than this one.
+
+## The column size is a fact about contact, not a number
+
+Twenty and thirty were both measured and each won a lane: twenty was six cells
+better on 1v1 and collapsed `Death.mmx` 1v7 seed 19 (`own 45 -> 23`, `army 6303
+-> 2769`), thirty was the reverse. The constant was standing in for something
+the policy can actually observe — **whether the house is in contact**.
+
+A house that has seen no enemy and lost nothing for four minutes (`MARCH_
+IMPATIENCE`) marches with twenty; one that has been in contact waits for thirty.
+Contact is the enemy in sight *or* an object of the house's own gone since the
+last reading: the 1v7 lane reads `seen=0` on every reading while its objects
+die, so vision alone would call a house under attack idle.
+
+Measured, 12000 ticks:
+
+| Lane | Reading | Before (30) | After |
+|---|---|---|---|
+| 1v1, six cells | own | +26 total | **+37** |
+| 1v1, six cells | army | +4191 total | **+5867** |
+| 1v7 seed 19 | own / army | 45 / 6303 | 46 / 6200 |
+| 1v7 seed 24301 | own / army | 44 / 6688 | 42 / 5193 |
+
+Five of six 1v1 cells better than the column of thirty, one worse; 1v7 holds on
+two seeds and loses about a fifth of its hit points on the third. Recorded with
+both sides rather than called a win.

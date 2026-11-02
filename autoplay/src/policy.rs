@@ -152,7 +152,7 @@ impl Policy {
             managers: vec![
                 Box::new(Economy),
                 Box::new(Build),
-                Box::new(Military),
+                Box::new(Military::default()),
                 Box::new(Abilities),
             ],
             jobs: Assignments::default(),

@@ -33,7 +33,11 @@ use crate::registry::JobKind;
 /// why this is recorded as a trade rather than a win. A column of thirty forms
 /// around tick 10000 on the current income, so it spends most of a match at its
 /// post.
-const ARMY_TO_MARCH: usize = 20;
+const ARMY_TO_MARCH: usize = 30;
+
+/// How long the house waits with nothing in sight before marching with what
+/// it has, in frames: two minutes.
+const MARCH_IMPATIENCE: u64 = 3_600;
 
 /// The fewest units that count as a squad when engaging.
 ///
@@ -75,7 +79,21 @@ const UNIT_SPEND_FLOOR: i32 = 900;
 const GAP_CAP: i64 = 3;
 
 #[derive(Debug, Default)]
-pub struct Military;
+pub struct Military {
+    /// The tick the house last saw an enemy of its own.
+    ///
+    /// What decides whether a march waits for a full column or goes with what
+    /// the house has: a house that has watched nothing happen for two minutes
+    /// is not waiting for anything, while one that was just in contact is.
+    last_contact: Option<u64>,
+    /// How many objects the house held at the last reading.
+    ///
+    /// Losing one is contact, whatever the fog says: a house that is being shot
+    /// at without seeing the shooter still knows it is in a fight, and the
+    /// readings bear that out — the 1v7 lane reads `seen=0` while its objects
+    /// die.
+    held_last: Option<usize>,
+}
 
 impl Manager for Military {
     fn propose(&mut self, ctx: &Ctx<'_>, out: &mut Demands) {
@@ -86,7 +104,7 @@ impl Manager for Military {
 
 impl Military {
     /// One unit at a time, cheapest first, while the wallet allows it.
-    fn produce(&self, ctx: &Ctx<'_>, out: &mut Demands) {
+    fn produce(&mut self, ctx: &Ctx<'_>, out: &mut Demands) {
         // The army does not spend the money the economy is saving: while the
         // house still wants a refinery, its cost stays in the wallet, and only
         // what is left over buys units. Without this the two managers bid
@@ -305,7 +323,7 @@ impl Military {
     }
 
     /// The army attacks once it is big enough, and holds the base before that.
-    fn commit(&self, ctx: &Ctx<'_>, out: &mut Demands) {
+    fn commit(&mut self, ctx: &Ctx<'_>, out: &mut Demands) {
         let mut soldiers = Vec::new();
         let mut home: Option<(u16, u16)> = None;
         for unit in ctx.obs.own_entities() {
@@ -389,7 +407,27 @@ impl Military {
             && soldiers.len() >= near * 2
             && soldiers.len() >= ENGAGE_FLOOR
             && (at_home || soldiers.len() >= ARMY_TO_MARCH);
-        let march = ATTACK_ENABLED && target.is_none() && soldiers.len() >= ARMY_TO_MARCH;
+        // A house that has seen nothing for two minutes is not waiting for
+        // anything, and it marches with what it has. One that was just in
+        // contact waits for the full column, because whatever it meets next is
+        // inside its own ground. This is the difference the two lanes measured:
+        // on Death.mmx 1v1 the bases sit 116 cells apart and the army never sees
+        // an enemy until it goes looking, while at 1v7 the ground is contested
+        // from the first minute.
+        let held = ctx.obs.own_entities().count();
+        if !seen.is_empty() || self.held_last.is_some_and(|was| held < was) {
+            self.last_contact = Some(ctx.tick);
+        }
+        self.held_last = Some(held);
+        let quiet = self
+            .last_contact
+            .is_none_or(|at| ctx.tick.saturating_sub(at) >= MARCH_IMPATIENCE);
+        let column = if quiet {
+            ENGAGE_FLOOR * 5
+        } else {
+            ARMY_TO_MARCH
+        };
+        let march = ATTACK_ENABLED && target.is_none() && soldiers.len() >= column;
         // With nothing in sight, a big-enough column marches at the edge of known
         // ground instead of guarding the base. Without it the army never leaves:
         // the bases are 116 cells apart, nothing walks between them, so `seen` is
@@ -413,11 +451,12 @@ impl Military {
         };
         if ctx.tick % 1800 == 0 {
             log::info!(
-                "military: tick={} enabled={} soldiers={} march_at={} seen={} near={} engage={} march={} order={:?}",
+                "military: tick={} enabled={} soldiers={} march_at={} quiet={} seen={} near={} engage={} march={} order={:?}",
                 ctx.tick,
                 ATTACK_ENABLED,
                 soldiers.len(),
-                ARMY_TO_MARCH,
+                column,
+                quiet,
                 seen.len(),
                 near_target,
                 engage,
