@@ -44,6 +44,20 @@ impl Roles {
     /// `Naval=yes`): a shipyard is not a war factory, and treating it as one
     /// leaves a base with no way to build a truck.
     pub const BUILDS_NAVAL: Self = Self(1 << 12);
+    /// An armed unit whose best weapon reaches further than a rifle's: it can
+    /// shoot from behind the front line.
+    ///
+    /// Derived from the weapon profile (`range_cells` against
+    /// [`Roles::FRONT_RANGE_CELLS`]), never from a type name, so a mod's artillery
+    /// is artillery. A unit is either ranged or a front-liner; the longer of its
+    /// weapons decides.
+    pub const RANGED: Self = Self(1 << 13);
+
+    /// A weapon reaching at least this many cells counts as ranged.
+    ///
+    /// A Grizzly's gun reaches four; a Prism Tank's reaches ten. Anything past
+    /// six is shooting over the line in front of it rather than standing in it.
+    pub const FRONT_RANGE_CELLS: i32 = 6;
 
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 != 0
@@ -69,6 +83,7 @@ impl Roles {
             ("trains-infantry", Roles::TRAINS_INFANTRY),
             ("builds-vehicles", Roles::BUILDS_VEHICLES),
             ("builds-naval", Roles::BUILDS_NAVAL),
+            ("ranged", Roles::RANGED),
         ];
         ALL.iter()
             .filter(|(_, role)| self.contains(*role))
@@ -232,6 +247,18 @@ impl UnitProfile {
         }
         if weapons.iter().any(|weapon| weapon.best_dps() > 0) {
             roles = roles.with(Roles::ARMED);
+        }
+        // What a unit is for in a fight, off its best reach rather than its name:
+        // a gun that reaches past the front line is a ranged unit, and one that
+        // does not stands in it. A structure keeps out of this — a base defence's
+        // reach says nothing about how an army should be composed.
+        if roles.contains(Roles::ARMED)
+            && ty.category != ObjectCategory::Building
+            && weapons
+                .iter()
+                .any(|weapon| weapon.range_cells >= Roles::FRONT_RANGE_CELLS)
+        {
+            roles = roles.with(Roles::RANGED);
         }
 
         Self {
@@ -420,6 +447,45 @@ mod tests {
         if let Some(ifv) = profiles.get("FV") {
             assert!(ifv.roles.contains(Roles::TRANSPORT), "an IFV carries one");
             assert!(ifv.passengers > 0);
+        }
+    }
+
+    #[test]
+    fn a_ranged_role_comes_from_the_reach_of_the_weapon() {
+        let Some(rules) = retail() else {
+            return;
+        };
+        let profiles = Profiles::build(&rules);
+        // The verses table cannot tell a rifle from a howitzer; reach can. These
+        // assertions are about the predicate, not about the units: whatever the
+        // rules call them, a gun past the threshold is ranged and one under it is
+        // not.
+        for profile in profiles.iter() {
+            if !profile.roles.contains(Roles::ARMED) || profile.roles.contains(Roles::STRUCTURE) {
+                continue;
+            }
+            let longest = profile
+                .weapons
+                .iter()
+                .map(|weapon| weapon.range_cells)
+                .max()
+                .unwrap_or(0);
+            assert_eq!(
+                profile.roles.contains(Roles::RANGED),
+                longest >= Roles::FRONT_RANGE_CELLS,
+                "{} reaches {longest} cells",
+                profile.id
+            );
+        }
+        // And the role is not free: an unarmed type never gets it.
+        for profile in profiles.iter() {
+            if !profile.roles.contains(Roles::ARMED) {
+                assert!(
+                    !profile.roles.contains(Roles::RANGED),
+                    "{} is not armed and cannot be ranged",
+                    profile.id
+                );
+            }
         }
     }
 
