@@ -827,3 +827,16 @@ So the army's money buys units, and the house's third refinery is not worth
 the units it would cost. The income ceiling is real, but it is not the first
 thing to fix: a house that cannot replace its losses has no economy to speak
 of.
+
+## The army is not strong enough to fight yet
+
+Two attempts to make it fight, both measured on the 1v7 lane, both rejected:
+
+| Attempt | Reading | Verdict |
+|---|---|---|
+| Engage a raider inside the base's ground instead of holding the post | one cell better, two worse; the worst 6034 -> 1834 with 13 of our units lost | the group commits to the raider and dies |
+| Keep the cost of a third refinery in the bank | three cells worse; one that survived now loses | the army is the better use of the money |
+
+Every rule that makes the army fight sooner costs more than it wins, because
+the army it sends loses. The strength has to come first: more units per credit,
+a front line that can absorb a hit, and a base that cannot be walked into.
