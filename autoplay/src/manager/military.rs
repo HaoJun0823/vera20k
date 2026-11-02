@@ -33,6 +33,13 @@ const ARMY_TO_MARCH: usize = 30;
 /// practice: the odds gate below it already asks for twice the enemy's number.
 const ENGAGE_FLOOR: usize = 4;
 
+/// How close counts as "around", in cells.
+///
+/// One radius for two questions, so a target and a base are measured the same
+/// way: the enemies standing within it of an object are the ones the odds gate
+/// counts, and a fight within it of home is a defence rather than a march.
+const NEAR_CELLS: i32 = 15;
+
 /// Whether the army attacks at all.
 ///
 /// Off, measured three times now. On the un-fixed economy the army sat at
@@ -344,7 +351,7 @@ impl Military {
         // in one fight.
         let near_target = target.map_or(0, |(_, cell)| {
             seen.iter()
-                .filter(|enemy| cell_distance(enemy.cell, cell) <= 15)
+                .filter(|enemy| cell_distance(enemy.cell, cell) <= NEAR_CELLS)
                 .count()
         });
         // Two to one, not three to two: an even fight is a lost army, and the
@@ -360,10 +367,19 @@ impl Military {
         // column: a squad that walks off the map alone is a squad the house
         // loses.
         let near = near_target.max(1);
+        // A fight at the door is not the same question as one away from it.
+        // Fog hides most of a raid: on Death.mmx 1v7 seed 19 the house saw six
+        // enemies at tick 10800, called the odds twelve-to-six good with fifteen
+        // units, and lost fourteen of them to what the fog was not showing. So
+        // the odds gate alone cannot decide a charge. Defending is what a house
+        // does with the army it has, wherever the enemy stands; going out to a
+        // target away from home is a march, and a march wants a column.
+        let at_home = target.is_some_and(|(_, cell)| cell_distance(cell, home) <= NEAR_CELLS);
         let engage = ATTACK_ENABLED
             && target.is_some()
             && soldiers.len() >= near * 2
-            && soldiers.len() >= ENGAGE_FLOOR;
+            && soldiers.len() >= ENGAGE_FLOOR
+            && (at_home || soldiers.len() >= ARMY_TO_MARCH);
         let march = ATTACK_ENABLED && target.is_none() && soldiers.len() >= ARMY_TO_MARCH;
         // With nothing in sight, a big-enough column marches at the edge of known
         // ground instead of guarding the base. Without it the army never leaves:

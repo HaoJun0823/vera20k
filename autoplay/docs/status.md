@@ -981,3 +981,28 @@ the counter resets between readings) — the residual this file already records
 above, not the army. The reading that would settle it is the spec's H2, "holds a
 *movement* job and does not move": a truck in a harvest cycle is not the failure
 H2 describes, and the harness does not make that distinction yet.
+
+### Defending is not marching
+
+The odds gate alone cannot decide a charge, because fog hides most of a raid.
+On Death.mmx 1v7 seed 19 the house saw six enemies at tick 10800, called twelve
+to six good odds with fifteen units, and lost fourteen of them to what the fog
+was not showing: `own 41 -> 27`, `army 6101 -> 1849`, `lost 14:0`.
+
+So the two questions are separated by distance as well as by size. A target
+within [`NEAR_CELLS`] of home is a defence, and a house defends with the army it
+has; a target beyond that is a march, and a march keeps the column of thirty.
+The same radius is what the odds gate already counts enemies within, so a target
+and a base are measured the same way rather than by two numbers.
+
+Measured: 1v1 four cells better, two worse; 1v7 three cells better on own, army
+and losses at once.
+
+| Lane | Seed | own | army | lost |
+|---|---|---|---|---|
+| 1v1 Death.mmx | 24301 | 41 -> 39 | 6775 -> 5991 | 0:0 -> 0:2 |
+| 1v1 Death.mmx | 19 | 44 -> 48 | 5658 -> 7357 | 0:0 -> 0:4 |
+| 1v1 Barrel.mmx | 24301 | 31 -> 41 | 3478 -> 6521 | 5:1 -> 0:0 |
+| 1v7 Death.mmx | 24301 | 37 -> 44 | 4790 -> 6688 | 0:0 |
+| 1v7 Death.mmx | 19 | 41 -> 45 | 6101 -> 6303 | 0:0 |
+| 1v7 Death.mmx | 10 | 37 -> 46 | 4644 -> 5718 | 2:0 -> 0:0 |
