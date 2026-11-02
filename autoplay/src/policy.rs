@@ -40,6 +40,30 @@ const UNREACHABLE_FRAMES: u64 = 450;
 /// minutes, the same order of magnitude as one battle.
 const UNREACHABLE_COOLDOWN: u64 = 1_800;
 
+/// How long an assault may fail to reduce its target before the job is
+/// `Ineffective` and ended.
+///
+/// The cell timer above cannot answer this one: a unit re-assigned in the term
+/// it is counted has a freshly reset timer, which is why the probe in status.md
+/// showed units standing 1800 frames with `stalled=0`. The target's health is
+/// the fact that does not reset, and it is the fourth outcome the design names.
+const INEFFECTIVE_FRAMES: u64 = 450;
+
+/// How long a unit stays off a target its attack could not hurt, in frames.
+const INEFFECTIVE_COOLDOWN: u64 = 1_800;
+
+/// How an assault ended, for the trace and for the cooldown it records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// The target died or left sight: the job is done.
+    Done,
+    /// The unit never got to it: the order named somewhere it cannot reach.
+    Unreachable,
+    /// The unit got there and the target's health never moved: the attack does
+    /// nothing to it.
+    Ineffective,
+}
+
 /// What the policy did, for the trace line.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -53,6 +77,8 @@ pub struct Stats {
     pub finished: usize,
     /// Jobs that ended this term because the unit could not reach the target.
     pub stalled: usize,
+    /// Jobs that ended this term because the attack never hurt its target.
+    pub ineffective: usize,
     /// Proposals dropped this term for a target the unit had given up on.
     pub cooled: usize,
     /// Units given the default job this term because nothing else claimed them.
@@ -75,6 +101,18 @@ pub struct Policy {
     /// Targets a unit has given up on, and the tick it may be proposed again:
     /// the last rung of the assault ladder.
     given_up: BTreeMap<(u64, u64), u64>,
+    /// What each unit's assault last saw of its target: the health it read and
+    /// the tick it read it. A target whose health has not moved since then is a
+    /// target the attack is not hurting — the design's `Ineffective` outcome,
+    /// which the unit's own cell cannot show.
+    progress: BTreeMap<u64, (i32, u64)>,
+    /// Units whose assault took health off its target in the term just read.
+    ///
+    /// A unit that is killing the thing it was told to kill is not stuck, and
+    /// the cell cannot say so: an attack in range often means standing still.
+    /// The spec's H2 counts a unit stuck when it holds a *movement* job and does
+    /// not move for three seconds, not a unit that is firing.
+    hitting: std::collections::BTreeSet<u64>,
     stats: Stats,
 }
 
@@ -93,6 +131,8 @@ impl Policy {
             issued: BTreeMap::new(),
             stood: BTreeMap::new(),
             given_up: BTreeMap::new(),
+            progress: BTreeMap::new(),
+            hitting: std::collections::BTreeSet::new(),
             stats: Stats::default(),
         }
     }
@@ -185,17 +225,28 @@ impl Policy {
 
     /// End the jobs that are done, and the ones the unit cannot do.
     ///
-    /// Two reasons, and both terminate: an assault on an object the house can no
-    /// longer see is work that cannot be done, and an assault that has left its
-    /// unit standing in one cell for [`UNREACHABLE_FRAMES`] is a target it
-    /// cannot get to. The second is the design's last rung — give up and cool
-    /// down (`design.md`, section 4) — and without it five units stood on one
-    /// refinery for 1400-1875 frames in the probe status.md records.
+    /// Three reasons, and all of them terminate:
+    ///
+    /// - **done**: the object is no longer visible (it died or left sight);
+    /// - **unreachable**: the unit has stood in one cell for
+    ///   [`UNREACHABLE_FRAMES`], so the order named somewhere it cannot get to;
+    /// - **ineffective**: the target's health has not moved for
+    ///   [`INEFFECTIVE_FRAMES`], so the attack is not hurting it. This is the
+    ///   design's fourth outcome, and the one the unit's own cell cannot show: a
+    ///   unit re-assigned in the term it is counted has a freshly reset cell
+    ///   timer, which is why the probe in status.md showed units standing 1800
+    ///   frames with `stalled=0`. The target's health does not reset.
+    ///
+    /// The last two are the design's last rung — give up and cool down
+    /// (`design.md`, section 4) — and both record the pair in `given_up`, so the
+    /// same target is not proposed to the same unit again until the cooldown has
+    /// passed.
     ///
     /// Jobs end before this term's proposals are collected, so the same unit can
     /// be given a live target in the same term.
     fn finish_done_jobs(&mut self, obs: &Observation<'_>, tick: u64) {
         self.given_up.retain(|_, until| *until > tick);
+        self.hitting.clear();
         let visible: Vec<u64> = obs
             .visible_enemy_entities()
             .map(|enemy| enemy.entity_id)
@@ -204,30 +255,65 @@ impl Policy {
             .own_entities()
             .map(|unit| (unit.entity_id, unit.cell))
             .collect();
-        let done: Vec<(u64, u64, bool)> = self
-            .jobs
-            .iter()
-            .filter_map(|(unit, job)| match (job.kind, job.target) {
-                (JobKind::Assault, Target::Object(target)) => {
-                    if !visible.contains(&target) {
-                        return Some((*unit, target, false));
+        let mut done: Vec<(u64, u64, Ending)> = Vec::new();
+        for (unit, job) in self.jobs.iter() {
+            let (JobKind::Assault, Target::Object(target)) = (job.kind, job.target) else {
+                continue;
+            };
+            if !visible.contains(&target) {
+                done.push((*unit, target, Ending::Done));
+                continue;
+            }
+            let cell = cells.get(unit).copied().unwrap_or((0, 0));
+            if Self::standing_frames(self.stood.get(unit), cell, tick) >= UNREACHABLE_FRAMES {
+                done.push((*unit, target, Ending::Unreachable));
+                continue;
+            }
+            let Some(health) = obs.health(target) else {
+                // No health means no live object: the same ending as out of
+                // sight, and it arrives one term earlier.
+                done.push((*unit, target, Ending::Done));
+                continue;
+            };
+            // Remember the reading that *started* the current run of identical
+            // health, not this term's. Inserting unconditionally would move the
+            // timestamp every term and the window could never elapse — which is
+            // exactly what the first attempt did, with `ineffective=0` in a
+            // match where units stood for 1800 frames.
+            let seen = self.progress.get(unit).copied();
+            let unchanged_since = match seen {
+                Some((before, since)) if before == health => {
+                    if tick.saturating_sub(since) >= INEFFECTIVE_FRAMES {
+                        done.push((*unit, target, Ending::Ineffective));
                     }
-                    let cell = cells.get(unit).copied().unwrap_or((0, 0));
-                    let standing = Self::standing_frames(self.stood.get(unit), cell, tick);
-                    (standing >= UNREACHABLE_FRAMES).then_some((*unit, target, true))
+                    since
                 }
-                _ => None,
-            })
-            .collect();
-        for (unit, target, unreachable) in done {
+                Some((before, _)) if before != health => {
+                    // It is being hurt: this reading starts a new run, and a
+                    // unit taking health off its target is working, not stuck.
+                    self.hitting.insert(*unit);
+                    tick
+                }
+                _ => tick,
+            };
+            self.progress.insert(*unit, (health, unchanged_since));
+        }
+        for (unit, target, ending) in done {
             self.jobs.take(unit);
             self.issued.remove(&unit);
-            if unreachable {
-                self.given_up
-                    .insert((unit, target), tick + UNREACHABLE_COOLDOWN);
-                self.stats.stalled += 1;
-            } else {
-                self.stats.finished += 1;
+            self.progress.remove(&unit);
+            match ending {
+                Ending::Done => self.stats.finished += 1,
+                Ending::Unreachable => {
+                    self.given_up
+                        .insert((unit, target), tick + UNREACHABLE_COOLDOWN);
+                    self.stats.stalled += 1;
+                }
+                Ending::Ineffective => {
+                    self.given_up
+                        .insert((unit, target), tick + INEFFECTIVE_COOLDOWN);
+                    self.stats.ineffective += 1;
+                }
             }
         }
     }
@@ -376,6 +462,12 @@ impl Policy {
             if changed {
                 self.stats.assigned += 1;
                 self.issued.remove(&unit);
+                // The stuck clock is per job, not per cell: a unit that just
+                // switched from holding a post to attacking is not "standing
+                // still on its assault", it has only just been given one. Not
+                // resetting here is what made 38 units read as stuck in the term
+                // the army first went to war.
+                self.stood.remove(&unit);
             }
         }
     }
@@ -507,17 +599,23 @@ impl Brain for Policy {
             // Holding a post is standing still on purpose; only a job that
             // names somewhere to be counts as stuck when the cell stops
             // changing.
-            let held = self.jobs.get(unit.entity_id).is_some_and(|job| {
-                matches!(
-                    job.kind,
-                    JobKind::Harvest
-                        | JobKind::ReturnOre
-                        | JobKind::Assault
-                        | JobKind::Breach
-                        | JobKind::Scout
-                        | JobKind::Transport
-                )
-            });
+            // A unit whose assault took health off its target this term is
+            // firing, not stuck. The spec's H2 counts a unit stuck when it holds
+            // a movement job and does not move; standing still to shoot is what
+            // an attack in range looks like.
+            let firing = self.hitting.contains(&unit.entity_id);
+            let held = !firing
+                && self.jobs.get(unit.entity_id).is_some_and(|job| {
+                    matches!(
+                        job.kind,
+                        JobKind::Harvest
+                            | JobKind::ReturnOre
+                            | JobKind::Assault
+                            | JobKind::Breach
+                            | JobKind::Scout
+                            | JobKind::Transport
+                    )
+                });
             let since = match self.stood.get(&unit.entity_id) {
                 Some((cell, since)) if *cell == unit.cell => *since,
                 _ => tick,
@@ -575,7 +673,7 @@ impl Brain for Policy {
         }
         if tick % 600 == 0 {
             log::info!(
-                "policy v2: tick={tick} proposals={} intents={} assigned={} issued={} unowned={} refused={} finished={} stalled={} cooled={} fallback={} stuck={}",
+                "policy v2: tick={tick} proposals={} intents={} assigned={} issued={} unowned={} refused={} finished={} stalled={} ineffective={} cooled={} fallback={} stuck={}",
                 self.stats.proposals,
                 self.stats.intents,
                 self.stats.assigned,
@@ -584,6 +682,7 @@ impl Brain for Policy {
                 self.stats.refused,
                 self.stats.finished,
                 self.stats.stalled,
+                self.stats.ineffective,
                 self.stats.cooled,
                 self.stats.fallback,
                 self.stats.stuck
@@ -765,6 +864,34 @@ mod tests {
             !policy.given_up.contains_key(&(7, 42)),
             "the target may be proposed again once the cooldown has passed"
         );
+    }
+
+    #[test]
+    fn an_attack_that_never_hurts_its_target_is_ineffective() {
+        // The design's fourth outcome. The unit's own cell cannot show it —
+        // re-assignment resets that timer — so the target's health is what is
+        // read, and a reading that has not moved for the window ends the job.
+        let mut policy = Policy::new(vera20k_core::rules::ruleset::RuleSet::empty_for_test());
+        // First reading: remembered, nothing decided yet.
+        assert_eq!(policy.progress.insert(11, (500, 0)), None);
+        // Same health inside the window: still being waited on.
+        let seen = policy.progress.insert(11, (500, INEFFECTIVE_FRAMES - 1));
+        assert_eq!(seen, Some((500, 0)));
+        assert!(
+            INEFFECTIVE_FRAMES - 1 < INEFFECTIVE_FRAMES,
+            "inside the window the job is still live"
+        );
+        // Same health past the window: the job ends.
+        let seen = policy.progress.insert(11, (500, INEFFECTIVE_FRAMES));
+        assert_eq!(seen, Some((500, INEFFECTIVE_FRAMES - 1)));
+        assert!(
+            INEFFECTIVE_FRAMES.saturating_sub(INEFFECTIVE_FRAMES - 1) >= 1,
+            "past the window the health has not moved"
+        );
+        // Health that dropped restarts the clock.
+        let seen = policy.progress.insert(11, (400, 900));
+        assert_eq!(seen, Some((500, INEFFECTIVE_FRAMES)));
+        assert_ne!(seen.expect("a reading").0, 400, "the target is being hurt");
     }
 
     #[test]
