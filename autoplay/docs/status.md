@@ -562,6 +562,26 @@ stands at — is finished, not stuck, and the job should end and be re-decided
 rather than counted against the policy forever. Until that is right, the matrix
 cannot tell a working army from a frozen one.
 
+## The stuck reading, corrected
+
+`stuck` is the one reading that rejected every march attempt, and it was measuring
+the wrong thing. It counts a unit that holds a movement job and does not change
+cell for six seconds; an army column holding the ground it just took is exactly
+that, and holding ground is what an army does between marches. The spec's H2 means
+a unit that *should* be moving and is not.
+
+`Policy::job_achieved` now separates the two: a job whose target is a cell the unit
+stands on (within one) is finished, not stuck. An object target still has to die
+before it counts as done, which `finish_done_jobs` decides, and a job with no
+target has nowhere to be.
+
+It is inert with attacking off — Assault on a cell is only issued while marching —
+so the six-cell matrix reads identical to the recorded baseline. The point is that
+the *next* march attempt can now be judged on whether it fights and whether the
+house survives, rather than on whether its column is standing still after it won.
+
+That measurement has not been run yet. It is the first item in handoff.md.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |

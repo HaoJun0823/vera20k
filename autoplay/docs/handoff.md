@@ -3,11 +3,48 @@
 Written 2026-11-02 for an agent taking this over. Everything below is measured
 on this branch; nothing here is a plan that has not been run.
 
+**Read this file, then `autoplay/docs/status.md`.** status.md holds the
+measurements in the order they were taken, including the ones that failed; this
+file holds the state and the queue. The single most important thing on either page
+is under "Start here" below, because the last four rounds were spent discovering
+it and the next agent should not spend four more.
+
+## Start here
+
+The army has never fought. That is not a bug in targeting, in the order door, or
+in the fog — all three have tests and all three work. It is a **deadlock**, and it
+was measured:
+
+- `commit` only proposes an assault when `visible_enemy_entities` has something in
+  it;
+- `seen` is zero on every reading of every match, because the two bases sit
+  (169, 91) and (70, 157) apart — 116 cells with nothing walking between them;
+- so the army never moves, the enemy count never falls (it only rises), and the
+  army holds.
+
+The escape was found and measured, and is **not in the tree** because it lost on
+the matrix: with no enemy in sight, a big-enough column marches at the unrevealed
+cell *farthest from home*. Over 12000 ticks on Death.mmx seed 0x5EED it walked
+about sixty cells and **destroyed seven enemy objects** (`lost 0:0 → 0:7`, enemy
+46 → 36) for two of its own. That is the only engagement this work has ever
+produced.
+
+It was reverted because `stuck` punished it: `stuck=40` in two cells, which is the
+reading counting a column standing on the ground it just took. `Policy::job_achieved`
+(committed) now answers that case correctly — a unit on the cell it was sent to is
+finished, not stuck — but **that fix has not been re-measured with the march in
+the tree**. That is the first job below.
+
+Six attempts at this have been reverted. Read status.md before trying a seventh:
+the failure modes are all recorded, with the number that rejected each.
+
 ## Where the work is
 
 - Branch: feature/autoplay-v2 (fork HaoJun0823/vera20k, upstream
   YuriPlanet/vera20k). upstream/main was merged in (204 commits) and one
   merged call site fixed.
+- HEAD at handoff: `f3cae8a38`, working tree clean, everything local (nothing
+  pushed; publication was never authorized).
 - The new policy lives in the workspace member autoplay/, outside the engine
   crate. vera20k-core still owns the engine; the policy reads a projection and
   answers through the same command funnel a player's click uses.
@@ -41,9 +78,13 @@ one job, and the outbox answers:
   barracks and a war factory, places each through the native site search;
 - keeps one harvester per refinery and buys the cheapest armed unit its
   factories can build;
-- holds the army at its post (attacking is behind a flag that is off, below);
+- holds the army at its post (`ATTACK_ENABLED` is false at HEAD; the march
+  described under "Start here" is not in the tree);
 - every fact about a type comes from autoplay/src/profile/mod.rs, derived from
   RULESMD.INI through the production reader. No type name in the policy.
+
+Nothing scouting-shaped is in the tree. Six scout attempts and three march
+attempts were measured and reverted; status.md has each with its numbers.
 
 ## Verified engine facts (do not re-derive)
 
@@ -58,20 +99,53 @@ one job, and the outbox answers:
 
 ## Measured baseline (2026-11-02, retail YR, hard computer)
 
-Death.mmx 1v1, 12000 ticks, three seeds: own 35 / 35 / 35, enemy 47 / 40 / 45,
-unowned 0, stuck 0. 24000 ticks over Death.mmx and Barrel.mmx: four of six
-survive. 1v7 at 12000 ticks: two of three survive (the retail policy lost at
-11361 on the same seed).
+The recorded baseline is `target/autoplay-results/inert.jsonl` (commit `b08fa928`,
+12000 ticks, america, `--baseline` compares against it):
 
-Faction sweep, Death.mmx 0x5EED, 12000 ticks, v2: america 35 own / 47 enemy,
-russia 51 / 48, yuri 29 / 46. The 40-unit spread between factions is unexplained
-and is the first thing worth chasing: the unit picker is "cheapest armed unit",
-which quietly means "each faction's best-value unit", so every army ends up one
-type.
+| Map | Seed | own | enemy | unowned | stuck |
+|---|---|---|---|---|---|
+| Death.mmx | 10 | 50 | 45 | 0 | 1 |
+| Death.mmx | 19 | 51 | 45 | 0 | 0 |
+| Death.mmx | 24301 | 46 | 46 | 0 | 0 |
+| Barrel.mmx | 10 | 50 | 41 | 0 | 0 |
+| Barrel.mmx | 19 | 46 | 39 | 0 | 1 |
+| Barrel.mmx | 24301 | 46 | 49 | 0 | 1 |
+
+Every cell reads `result=timeout at tick 12000`: both houses are still standing,
+which is the survival the keep rule judges. **Neither side loses an object in
+12000 ticks** — the `lost` column is `0:0` on every cell, which is the fact the
+whole army queue rests on.
+
+24000 ticks over the same maps: six of six survive (before the harvester
+re-ordering fix it was four of six). 1v7 at 12000 ticks: two of three survive (the
+retail policy lost at 11361 on the same seed).
+
+Faction sweep, Death.mmx 0x5EED, 12000 ticks, v2: **america 46, russia 70, yuri
+45**. The 24-object spread is the "cheapest armed unit" picker, which quietly means
+"each faction's best-value unit", so every army ends up one type — that is queue
+item 3.
 
 Hard maps: xeb1.map holds its side and opens no wall; xtsunami.map never leaves
 the starting island. Both are expected failures until the breach and transport
 jobs exist.
+
+## What has been proven about movement (the last four rounds, condensed)
+
+Every one of these has a test in `autoplay/src/`, and none of them needs re-deriving:
+
+| Question | Answer | Test |
+|---|---|---|
+| Does one `Goal::Move` reach the engine? | Yes, 20 cells, through `Funnel::prepare` | `move_tests.rs` |
+| Through the real board with budget and `order_stands`? | Yes, 20 cells, `rejected=0` | `board_move_tests.rs` |
+| Does a unit on a guard post still take a move? | Yes | `guard_move_tests.rs` |
+| How far does one march actually get? | About 30 of 160 cells, then stops | `guard_move_tests.rs` |
+| Does the fog report an enemy in line of sight? | Yes, within a few frames | `fog_tests.rs` |
+| Is the fog grid the playfield? | No — the grid is the whole map buffer | `sim::control::observation::vision_tests` |
+| When is a unit stuck, and when is it finished? | Finished on the cell it was sent to | `policy::tests::a_unit_standing_on_the_cell_it_was_sent_to_is_not_stuck` |
+
+The two that matter for the queue: **a march covers about thirty cells**, so plan
+trip lengths accordingly; and **`seen=0` in a match is honest** — nothing has come
+within sight, because nothing walks.
 
 ## The measurement harness
 
@@ -104,6 +178,34 @@ big survival improvement because the army had never attacked. Fix the semantics
 first, then measure behaviour.
 
 ## Open work, in the order it should be done
+
+**0. Re-measure the march now that `stuck` is fixed.** This is the immediate next
+step and it is short. The march that destroyed seven enemy objects was rejected by
+a reading that was wrong (`Policy::job_achieved` now separates "arrived" from
+"stuck", committed as `f3cae8a38`). Put the march back — three pieces, all recorded
+in status.md:
+
+   - in `commit`, when `army && target.is_none()`, propose `JobKind::Assault` with
+     `Target::Cell(march_cell(..))` at priority 55, instead of `Defend`;
+   - `march_cell` returns the unrevealed cell **farthest from home** that is
+     `is_cell_in_playfield` and within `MARCH_REACH_CELLS` (24) of the column.
+     Nearest-from-home walks the wrong way: it went east to `Cell((184,100))` while
+     the enemy held the west;
+   - flip `ATTACK_ENABLED` to true.
+
+   Then run the six-cell matrix. What to look for: `enemy` falling and `lost`
+   non-zero (the fight happens), `stuck` no longer exploding (the reading is fixed),
+   and `own` at or above the baseline. If `own` falls, the remaining question is
+   whether the army should leave at all, not whether it can — that has now been
+   answered.
+
+   Do **not** add a remembered objective across terms; that was tried and stopped
+   the advance dead (`enemy 46 → 46`, `lost 0:0`). Recompute the march cell each
+   term.
+
+The items below are the older queue, kept for the reasoning. Much of the long
+bullet chain under item 3 is a chronicle of rounds that status.md already records;
+read it there rather than here.
 
 1. Economy reserves. The stall this item described is fixed (see the end of this
    file): the policy was re-ordering each harvester in the middle of its own
@@ -278,6 +380,32 @@ in the repository).
 - One owner per state. The policy owns its jobs; the engine owns the
   simulation. Do not add a second copy of a decision.
 - Determinism: integer maths in decisions, stable iteration, no f32.
+
+## Picking it up in ten minutes
+
+    cd E:\Projects\vera20k-autoplay
+    set RA2_DIR=I:\SteamLibrary\steamapps\common\Command & Conquer Red Alert II
+
+    # 1. the policy's own tests (28 at handoff, all passing)
+    python -m tools.cargo_run -- test -p vera20k-autoplay --lib
+
+    # 2. the six-cell matrix, diffed against the recorded baseline
+    python -m tools.autoplay_check --brain v2 --seeds 0x5EED,19,10 ^
+        --maps Death.mmx,Barrel.mmx --ticks 12000 ^
+        --history target/autoplay-results/<name>.jsonl ^
+        --baseline target/autoplay-results/inert.jsonl
+
+    # 3. read the matrix back later without re-running it
+    python -m tools.autoplay_check --compare-only ^
+        target/autoplay-results/<name>.jsonl target/autoplay-results/inert.jsonl
+
+The matrix takes a few minutes. Read `own`, `lost` and `stuck` per cell; the keep
+rule is in "Method that worked". `own` alone is not the judge — a change that
+raises own while nothing fights is a change that made the house better at hiding.
+
+One caution learned the hard way: `--skip-build` reuses the last binary, so a run
+with it measures the *previous* code. Only use it when the tree has not changed
+since the last build.
 
 ## The Yuri house had no refinery it could want
 
