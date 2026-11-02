@@ -1201,3 +1201,24 @@ column's cells instead is three cells better and two worse at 12000 ticks, and
 the targets still move: they are moving because the frontier genuinely moves as
 ground is revealed, not because the anchor was unstable. Reverted, and the
 oscillation is left for the scouting work rather than another tie-break.
+
+### The weak cell is an attrition the house cannot pay for
+
+`Barrel.mmx` seed 19 at 24000 ticks reads `own 39, army 4045, lost 19:7`, and the
+readings say what the number is:
+
+    tick=14400 soldiers=45 engage=true  defences=4 credits=75
+    tick=18000 soldiers=40 engage=true  defences=4 credits=175
+    tick=21600 soldiers=32 engage=true  defences=3 credits=451
+    tick=23400 soldiers=29 engage=false defences=1 credits=644
+
+It is not a house that will not fight — `engage=true` on four of the last six
+readings, and it is the enemy that comes to it. It is a house that loses the
+trade: thirty soldiers become twenty-nine over four minutes while the pillbox
+line is dismantled from four to one, and `economy: nothing to build` on every
+reading because two refineries and three trucks leave 75-875 credits in the
+wallet. Both the army and the defences are being replaced slower than they die.
+
+That closes the session's picture: composition and the engage gate are fixed,
+and what remains is the economy under a fight — which is the same ceiling the
+three rejected saving rules ran into, now with a lane that shows the cost.
