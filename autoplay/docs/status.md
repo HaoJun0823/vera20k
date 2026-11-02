@@ -1192,3 +1192,12 @@ fresh every term from whatever the column's first unit happens to stand on, so
 the column oscillates between opposite edges of the explored region instead of
 walking in one direction. That is the shape of the scouting problem queue.md
 still has open (D4), not a tie-break to tune.
+
+**Anchoring the march on the column's centroid.** `soldiers.first()` is
+whichever unit the entity store yields first, so the frontier was computed from
+a different point every term — a plausible cause for a target that jumps from
+`(164,76)` to `(148,112)` to `(188,80)` between readings. Using the mean of the
+column's cells instead is three cells better and two worse at 12000 ticks, and
+the targets still move: they are moving because the frontier genuinely moves as
+ground is revealed, not because the anchor was unstable. Reverted, and the
+oscillation is left for the scouting work rather than another tie-break.
