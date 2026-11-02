@@ -1167,3 +1167,28 @@ trade is 63 lost for 35 killed against 89 for 31 — better on all four numbers,
 which is the first time this session that a change has moved every aggregate at
 once. `Barrel.mmx` seed 19 remains the weak cell (`own 39, army 4045, 19:7`) and
 is the one to read next.
+
+### Two reverted experiments at the end of the session
+
+**Counting an armed enemy building as an artillery need.** The 1v1 enemy builds
+almost nothing but defences (`NAWALL` 32, `NALASR` 17, `NABNKR` 18 in one 1v7
+log), and the house has no answer that outranges them. `HOWI` — the howitzer,
+`Prerequisite=GAWEAP`, `HowitzerGun` reach 12 cells — is buildable from the
+first war factory and the picker never buys it, because the only source of
+artillery demand is the roster mix, and most types are not artillery. Adding
+a demand for every armed enemy building the house can see changed nothing at
+12000 or 24000 ticks in any of the six cells, because the army never gets close
+enough to see one: `seen=0` on every reading of every match, and the column is
+still wandering its own side of the map at tick 23400.
+
+**Ranking the frontier by distance before proximity.** Preferring the frontier
+cell farthest from home instead of the one closest to known ground is three
+cells better and three worse over 24000 ticks (`Death.mmx` seeds 10 and 19 gain
+10 and 16 objects; seed 24301 loses 17, `Barrel.mmx` 19 loses a third of its hit
+points). Not a win, and reverted.
+
+The second result is the more useful one: it says the march target is chosen
+fresh every term from whatever the column's first unit happens to stand on, so
+the column oscillates between opposite edges of the explored region instead of
+walking in one direction. That is the shape of the scouting problem queue.md
+still has open (D4), not a tie-break to tune.
