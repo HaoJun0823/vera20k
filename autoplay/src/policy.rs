@@ -36,6 +36,8 @@ pub struct Stats {
     pub issued: usize,
     pub unowned: usize,
     pub refused: usize,
+    /// Jobs that ended this term because their target was gone.
+    pub finished: usize,
     /// Units that have not changed cell for six seconds while holding a job.
     pub stuck: usize,
 }
@@ -144,10 +146,42 @@ impl Policy {
     fn goal(job: &Job) -> Option<Goal> {
         match (job.kind, job.target) {
             (JobKind::Harvest, Target::Cell(cell)) => Some(Goal::Harvest { cell }),
+            // The army attacks the object it was told to: the click a player
+            // makes on an enemy, not an attack-move to where it stood. An
+            // attack-move's destination is reached once and then stood on, and
+            // that is the stale-target failure status.md records.
+            (JobKind::Assault, Target::Object(target)) => Some(Goal::Attack { target }),
             (JobKind::Assault, Target::Cell(cell)) => Some(Goal::AttackMove { cell }),
             (JobKind::Defend, Target::Cell(cell)) => Some(Goal::GuardAt { cell }),
             (JobKind::Deploy, _) => Some(Goal::Deploy),
             _ => None,
+        }
+    }
+
+    /// End the jobs whose target is gone.
+    ///
+    /// An assault on an object the house can no longer see is work that cannot
+    /// be done, and the object may be dead. The job ends before this term's
+    /// proposals are collected, so the same unit can be given a live target in
+    /// the same term.
+    fn finish_done_jobs(&mut self, obs: &Observation<'_>) {
+        let visible: Vec<u64> = obs
+            .visible_enemy_entities()
+            .map(|enemy| enemy.entity_id)
+            .collect();
+        let done: Vec<u64> = self
+            .jobs
+            .iter()
+            .filter(|(_, job)| match (job.kind, job.target) {
+                (JobKind::Assault, Target::Object(target)) => !visible.contains(&target),
+                _ => false,
+            })
+            .map(|(unit, _)| *unit)
+            .collect();
+        for unit in done {
+            self.jobs.take(unit);
+            self.issued.remove(&unit);
+            self.stats.finished += 1;
         }
     }
 
@@ -245,6 +279,9 @@ impl Brain for Policy {
         self.last_term = Some(tick);
         self.stats = Stats::default();
 
+        // A job whose target is gone is finished before the term's proposals are
+        // collected, so the unit can be given a live one in the same term.
+        self.finish_done_jobs(obs);
         let mut demands = Demands::default();
         {
             let ctx = Ctx {
@@ -359,13 +396,14 @@ impl Brain for Policy {
         }
         if tick % 600 == 0 {
             log::info!(
-                "policy v2: tick={tick} proposals={} intents={} assigned={} issued={} unowned={} refused={} stuck={}",
+                "policy v2: tick={tick} proposals={} intents={} assigned={} issued={} unowned={} refused={} finished={} stuck={}",
                 self.stats.proposals,
                 self.stats.intents,
                 self.stats.assigned,
                 self.stats.issued,
                 self.stats.unowned,
                 self.stats.refused,
+                self.stats.finished,
                 self.stats.stuck
             );
         }
@@ -443,6 +481,26 @@ mod tests {
         for idle in [MissionId::NONE, mission(MissionType::Guard)] {
             assert!(!Policy::living_out(JobKind::Assault, idle));
         }
+    }
+
+    #[test]
+    fn the_army_attacks_the_object_it_was_told_to() {
+        let job = |target| Job {
+            kind: JobKind::Assault,
+            target,
+            priority: 60,
+            given: 0,
+        };
+        assert_eq!(
+            Policy::goal(&job(Target::Object(77))),
+            Some(Goal::Attack { target: 77 }),
+            "an assault names the enemy the click would name"
+        );
+        assert_eq!(
+            Policy::goal(&job(Target::Cell((5, 6)))),
+            Some(Goal::AttackMove { cell: (5, 6) }),
+            "the cell form is still an order, just not the one the army sends"
+        );
     }
 
     #[test]

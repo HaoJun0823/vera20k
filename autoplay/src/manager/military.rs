@@ -8,6 +8,7 @@
 
 use vera20k_core::rules::object_type::ObjectCategory;
 use vera20k_core::sim::control::intent::Intent;
+use vera20k_core::sim::control::observation::EnemyEntity;
 use vera20k_core::sim::production::CanBuild;
 
 use crate::job::{Proposal, Target};
@@ -20,15 +21,18 @@ const ARMY_TO_ATTACK: usize = 30;
 
 /// Whether the army attacks at all.
 ///
-/// Off, and now measured twice on this side of the economy fix. With the army at
-/// two-to-one against the enemy on the un-fixed build, attacking lost three
-/// matches of six where holding lost one. With the economy fixed the army
-/// reaches parity or better (own 46-51 against 39-49 at 12000 ticks), and
-/// attacking is still worse in all six cells: own falls in four of them and the
-/// stuck count rises from 0-1 to 13-33. The reading is why: units walk to the
-/// one stale target cell, arrive, and stand there for 500-1400 frames holding the
-/// job, so there is no local superiority, no re-target and no retreat — the
-/// mechanics the next slice has to add. See docs/status.md.
+/// Off, measured three times now. On the un-fixed economy the army sat at
+/// two-to-one and attacking lost three matches of six where holding lost one.
+/// On the fixed build, with the army at parity and the order a cell attack-move,
+/// attacking was worse in all six cells with the stuck count at 13-33: units
+/// walked to one stale destination and stood on it. With the order now an attack
+/// on the object a player would click, and the target read off what the house
+/// actually sees, attacking no longer costs objects — own falls in no cell and
+/// gains in one — but five units of one match stand for 1400-1875 frames on an
+/// assault they cannot finish, so the stuck clause fails. What is missing is the
+/// ladder below the order: a job that gives up on a target it cannot reach, and
+/// an order that is re-sent when the target it names changes. Both are the next
+/// slice; see docs/status.md.
 const ATTACK_ENABLED: bool = false;
 /// Below this the house keeps its credits for buildings.
 const UNIT_SPEND_FLOOR: i32 = 900;
@@ -120,9 +124,14 @@ impl Military {
             }
             soldiers.push(unit);
         }
-        let target = ctx
-            .obs
-            .enemy_entities()
+        // What the house can see, not what the world holds. The projection's own
+        // enemy list is omniscient (the native computer AI is, and a policy that
+        // reused it would inherit that); the spec forbids aiming at anything the
+        // player could not have clicked, so a target is something in line of
+        // sight right now. A house that sees nothing holds its post.
+        let seen: Vec<EnemyEntity> = ctx.obs.visible_enemy_entities().collect();
+        let target = seen
+            .iter()
             .min_by_key(|enemy| {
                 soldiers
                     .iter()
@@ -130,7 +139,7 @@ impl Military {
                     .min()
                     .unwrap_or(i32::MAX)
             })
-            .map(|enemy| enemy.cell);
+            .map(|enemy| (enemy.entity_id, enemy.cell));
         // A house with no structure yet holds the ground its own units stand
         // on: the starting force is the whole army until the yard is up, and a
         // unit with no post is a unit nobody owns.
@@ -142,9 +151,8 @@ impl Military {
         // outnumbers what stands within reach of the target, at three to two.
         // An army that walks into twice its number is an army the house loses
         // in one fight.
-        let near_target = target.map_or(0, |cell| {
-            ctx.obs
-                .enemy_entities()
+        let near_target = target.map_or(0, |(_, cell)| {
+            seen.iter()
                 .filter(|enemy| cell_distance(enemy.cell, cell) <= 15)
                 .count()
         });
@@ -154,9 +162,12 @@ impl Military {
             ATTACK_ENABLED && soldiers.len() >= ARMY_TO_ATTACK && soldiers.len() >= near_target * 2;
         for unit in soldiers {
             match (army, target) {
-                (true, Some(cell)) => out.jobs.push(Proposal {
+                (true, Some((entity_id, _))) => out.jobs.push(Proposal {
                     kind: JobKind::Assault,
-                    target: Target::Cell(cell),
+                    // An object, not a cell: an attack-move to a cell is a
+                    // destination the unit reaches and then stands on, which is
+                    // the stale-target failure status.md records.
+                    target: Target::Object(entity_id),
                     priority: 60,
                     actor: Some(unit.entity_id),
                 }),
