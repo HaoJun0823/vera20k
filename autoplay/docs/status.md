@@ -1110,3 +1110,13 @@ the lane: 12000 ticks survived, 24000 not, and the army still kills nothing on
 that map — thirty-nine of the house's objects are lost for zero of theirs in one
 seed. The next slice has to come from the enemy side of the ledger (the house
 fights nothing it is not standing on) rather than from another composition rule.
+
+### Reverted: fighting at home whatever the odds
+
+The 1v7 lane loses thirty-nine objects for zero of the enemy's in one seed, and
+the obvious suspect was the odds gate: an army that declines to fight while its
+base burns. Taking the odds out of the home case is worse on all three seeds —
+`own 45 -> 23` and `army 6303 -> 2769` on seed 19, `15:0` lost. The gate is not
+the defect; it is the only thing keeping those units alive. What kills them is
+whatever does not have to walk into the army to do it, and that is the next
+question rather than this one.
