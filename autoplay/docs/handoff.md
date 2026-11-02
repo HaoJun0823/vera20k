@@ -168,6 +168,16 @@ first, then measure behaviour.
   exists and the retail policy moves units around the same map, so this is a
   policy-side question — most likely the job being re-decided every term before
   the unit has gone anywhere, which is what the stuck counts suggest.
+- **The order path is now proven sound and the policy is not.**
+  `autoplay/src/move_tests.rs` moves a tank twenty cells with one `Goal::Move`
+  through the same funnel a player's click uses. In a match the same goal does not
+  move a tank at all: three scout attempts, the last with a reachable destination
+  (`Cell((16,16))`) and a remembered target, left tanks at `(178,100)` from tick
+  600 to the end, stuck. The `Move` went out once. So what differs is the `Outbox`
+  path or the state the unit is in — not the goal, and not the pathfinder.
+  The next experiment should be one unit, one move, driven by a `Brain` that does
+  nothing else, and watch where it stops; scissors on the `Outbox` drain are the
+  most likely suspect.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
    proven; the job is missing.
 5. Per-unit decision reasons in the log (unit 1234: job=defend

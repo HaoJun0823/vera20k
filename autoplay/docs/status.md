@@ -401,6 +401,32 @@ rather than a targeting defect. The order funnel admits the move — the log sho
 no refusals — so the next reading is downstream of admission: why a `Goal::Move`
 from the policy does not carry a unit out of the base area.
 
+## A Move works in a test and not in a match
+
+The previous round left a choice: either the move order never travels, or the
+policy re-sends it and the unit restarts. A test now settles the first half.
+
+One tank at (6,6), one `Goal::Move` to (26,26), through `Funnel::prepare` — the
+same door a player's click and the policy both use — and the engine drives it.
+The tank arrives within a cell of the destination. The order path is sound over
+twenty cells, with nothing re-sending.
+
+So the fault is on the policy side, and scouting was tried three times:
+
+| Attempt | Target rule | Reading |
+|---|---|---|
+| 1 | nearest unrevealed cell, re-chosen each term | `seen=0`; every unit cell between x=169 and x=186 |
+| 2 | farthest unrevealed, remembered per scout | target `Cell((0, 0))`, three tanks `still=11400` at the end |
+| 3 | same with a 16-cell margin off the fog grid's edge | target `Cell((16, 16))`, tanks still at `(178, 100)`, stuck from tick 600 |
+
+All three reverted. The third is the informative one: the destination was
+reachable, the order went out once, and the unit did not travel — while the same
+goal through the funnel in a test moves a tank twenty cells. So the difference is
+the `Outbox` path, or the state the unit is in when the policy orders it, and not
+the goal.
+
+The test is committed and the matrix is unchanged by it (six of six identical).
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |
