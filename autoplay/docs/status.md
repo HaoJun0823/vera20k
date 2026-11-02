@@ -371,6 +371,36 @@ next step is not another composition rule; it is getting the two armies to meet 
 either by turning attacking back on now that a job can end for all four of the
 design's reasons, or by finding where the opponent's units actually are.
 
+## The army goes, and there is nothing in sight to go at
+
+Turning attacking on changed nothing measurable: the same three factions, the
+same counts, `lost` still 0:0. Three separate conditions gate the attack and a
+count that does not move cannot say which one refused, so the gate now reports
+itself:
+
+    military: tick=9000 enabled=true soldiers=30 want=30 seen=0 near=0 going=true
+
+`going=true`: the army reaches its size and the house is willing to commit.
+`seen=0`: the projection reports no enemy in line of sight, on every reading of a
+12000-tick match. The army is ready and has nothing to attack. That is the whole
+of why item 3 could not be judged.
+
+Scouting was written to fix it — a tenth of the army sent to ground the house has
+never revealed, which is the spec's A2 — and **both versions were measured and
+reverted**:
+
+- nearest unrevealed cell: `seen` still 0, and every unit cell in the log sat
+  between x=169 and x=186. The scout walked a step past the base's own sight,
+  that step cleared, and the next term named the next step.
+- farthest unrevealed cell on a coarse scan: six of six cells worse, `stuck` up in
+  every one (0→2, 1→4, 1→2, 1→2, 0→1, 0→2). Given a `Move`, the scouts could not
+  make it and stood still instead.
+
+What that settles: the units do not travel far, and `seen=0` is a symptom of that
+rather than a targeting defect. The order funnel admits the move — the log shows
+no refusals — so the next reading is downstream of admission: why a `Goal::Move`
+from the policy does not carry a unit out of the base area.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |

@@ -147,14 +147,27 @@ first, then measure behaviour.
    judges. Before retrying, find a reading that can see the range paying for
    itself: the matrix counts objects, and both houses are still holding at 12000
    ticks, so it cannot.
-   **That reading now exists and it reads zero.** The harness records
-   `own_lost:enemy_lost` off the census curve, and over 12000 ticks on Death.mmx
-   neither side loses a single object — both curves rise monotonically. There is
-   no fight for a range advantage to win, which is the real reason the quota
-   failed. `enemy` in every table in this file is the enemy's economy, not its
-   army. Before item 3 can be judged, the two armies have to meet: attacking can
-   now end for all four of the design's reasons, so turning it back on is the
-   cheapest way to find out whether they do.
+- **That reading now exists and it reads zero.** The harness records
+  `own_lost:enemy_lost` off the census curve, and over 12000 ticks on Death.mmx
+  neither side loses a single object — both curves rise monotonically. There is
+  no fight for a range advantage to win, which is the real reason the quota
+  failed. `enemy` in every table in this file is the enemy's economy, not its
+  army.
+- **Why there is no fight.** The attack gate now reports itself:
+  `military: tick=9000 enabled=true soldiers=30 want=30 seen=0 near=0 going=true`.
+  The army is big enough and willing; the house sees no enemy at all, on every
+  reading of the match. `Observation::visible_enemy_entities` is a correct L2 read
+  and the house simply never leaves its own sight radius.
+- **Scouting was tried twice and reverted twice.** Nearest unrevealed cell: the
+  scout walked one step past the base and stopped. Farthest unrevealed cell: six
+  of six cells worse, `stuck` up everywhere, because the scouts were given a
+  `Move` and could not make it. The order funnel shows no refusals, so the
+  question is downstream of admission.
+- Next reading, smallest first: take one unit and one `Goal::Move` to a cell
+  thirty cells away, in a match, and find where the order stops. `sim::pathfinding`
+  exists and the retail policy moves units around the same map, so this is a
+  policy-side question — most likely the job being re-decided every term before
+  the unit has gone anywhere, which is what the stuck counts suggest.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
    proven; the job is missing.
 5. Per-unit decision reasons in the log (unit 1234: job=defend
