@@ -680,3 +680,45 @@ The measurement is a run of `tools/autoplay_check.py` against the baseline
 recorded above, which prints a cell as `worse` when own falls, a seed that
 survived is lost, unowned rises or stuck rises (`--baseline` marks the cell, and
 `--compare-only` re-reads two files without running anything).
+
+## The attack lane, measured at HEAD (2026-11-02, after the handoff)
+
+The flag was put on for one matrix run and the six cells were compared with
+the flag-off baseline (review-cargo-off.jsonl). Recorded because the question
+the handoff leaves open is now measured, not guessed:
+
+| Map | Seed | own | enemy | lost | stuck |
+|---|---|---|---|---|---|
+| Death.mmx | 24301 | 46 -> 46 | 46 -> 35 | 0:0 -> 0:8 | 0 -> 0 |
+| Death.mmx | 19 | 51 -> 51 | 45 -> 40 | 0:0 -> 0:5 | 0 -> 0 |
+| Death.mmx | 10 | 50 -> 51 | 45 -> 44 | 0:0 -> 0:0 | 1 -> 2 |
+| Barrel.mmx | 24301 | 46 -> 46 | 49 -> 48 | 0:0 -> 0:0 | 1 -> 0 |
+| Barrel.mmx | 19 | 46 -> 37 | 39 -> 40 | 0:0 -> 0:7 | 0 -> 0 |
+| Barrel.mmx | 10 | 50 -> 50 | 41 -> 41 | 0:0 -> 0:0 | 0 -> 1 |
+
+Read it as: the column kills thirteen enemy objects across two cells and
+loses none of its own, and in exactly one cell the base is destroyed while
+the column is away (Barrel.mmx 19, own 46 -> 37). The flag stays off at HEAD.
+
+### Three experiments after that, all reverted
+
+1. **A garrison of twelve at home.** The base survives (Barrel.mmx 19 reads
+   own 37 -> 50) but the kills go to zero in every cell, and stuck rises by
+   one to four. It fails the keep rule: lost must stay non-zero somewhere, or
+   nothing is being decided.
+2. **A proportional garrison (two thirds march).** own -6 on Barrel.mmx 10,
+   kills zero, five of six cells worse. A small column cannot take the ground
+   a large one took, so the share must not be fixed.
+3. **Skipping the frontier cell a column already failed to reach.** Five cells
+   same, one worse (stuck +1), kills unchanged. So the stuck units are not
+   march-cell failures: they are standing on an object target they cannot
+   finish, which is the ladder the handoff names.
+
+### What that leaves
+
+The trade is measured rather than guessed: the army that kills is the whole
+army, and any garrison that keeps the base kills nothing. The next change is
+therefore not a smaller garrison but a column that comes back — a retreat
+condition on the column, and a give-up rule that fires for an object target
+the column cannot hurt. The readings to watch are own (must not fall), lost
+(must stay non-zero) and stuck (must not rise).
