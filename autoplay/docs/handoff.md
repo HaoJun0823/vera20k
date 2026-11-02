@@ -6,17 +6,20 @@ and what to do next.
 
 ## The state
 
-Branch `feature/autoplay-v2`, thirteen commits from `autoplay: the army is
-composed from the role model` to `autoplay: two reverted experiments, and what
-they point at`. Every one is measured; every reverted one is recorded with its
-numbers.
+Branch `feature/autoplay-v2`, working tree clean at `82b5f2847`. Thirteen measured
+commits from `autoplay: the army is composed from the role model` through
+`autoplay: the column marches from where the column is`, then two from this review
+session (the repaired test and the reverted retreat). Every one is measured; every
+reverted one is recorded with its numbers.
 
+- **The tests pass: 33 of 33.** They did not before this session — see "The session
+  that was interrupted" below.
 - **1v1, six cells, 12000 ticks** — six of six better than the state the session
   started from (`eval-v2-fixed.jsonl`): own +37 total, army +5867 total, no cell
   worse, `stuck` down where it moved at all.
 - **1v1, six cells, 24000 ticks** — six of six survive. own averages 54, army
-  6787, 63 lost for 35 killed. `Barrel.mmx` seed 19 is the weak cell
-  (`own 39, army 4045, lost 19:7`).
+  6787, 63 lost for 35 killed. `Barrel.mmx` seed 19 was the weak cell, and the
+  centroid anchor fixed it (`own 39 → 80`, `lost 19:7 → 2:0`).
 - **1v7, three seeds, 12000 ticks** — three of three survive, own 43/46/42,
   army 6439/6200/5193, no loss on two seeds and 11:0 on one. 24000 ticks is
   still lost (12418-15952): seven brutal houses hold 324-369 objects.
@@ -38,6 +41,32 @@ numbers.
    threat vector that is empty on every reading.
 5. **The army fights the raid it can see and marches only with a column**, where
    the column size is a fact about contact rather than a constant.
+
+## The session that was interrupted, and what was found in it (2026-11-03)
+
+A second session left two things behind, and both were settled before this handoff
+was written:
+
+- **A test that had never passed.** `an_empty_house_opens_with_a_line_unit_not_a_cheap_specialist`
+  was added in `562c8d3a4` and failed from that day: it asserted the tank scores
+  above the dog (171.4 against 193.0), and the suite read 32 passed / 1 failed on
+  every commit after it. The intent was right and the mechanism was wrong — an
+  empty house does open with a tank, but because `produce` walks
+  `[vehicle, infantry]` and returns on the first it can start, not because of the
+  score. Repaired in `2329092b8`; the test now asserts what actually decides it.
+  **Run the whole suite, not a filtered subset.**
+- **A retreat rung that never fired.** Left in the working tree, measured on both
+  lanes: six of six 1v1 and three of three 1v7 cells identical to the baseline. It
+  keyed the retreat on `threat_around > 0 && away && soldiers.len() <= threat_around`,
+  and the first conjunct counts enemies in `seen` — which is empty on almost every
+  reading, and is empty in exactly the 1v7 case the change cited as its motivation.
+  Reverted in `82b5f2847`, with the readings in status.md.
+
+The lesson from both: the fog defeats any rule keyed on `seen`. A retreat, a
+garrison, a threat estimate — each needs something the house can read without
+vision. `fc3130501` already introduced one such notion (contact as "an enemy in
+sight **or** an object of mine gone since the last reading"); the retreat was not
+built on it, which is why it could not fire.
 
 ## What to do next, in order
 
