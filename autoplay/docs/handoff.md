@@ -11,39 +11,54 @@ it and the next agent should not spend four more.
 
 ## Start here
 
-The army has never fought. That is not a bug in targeting, in the order door, or
-in the fog — all three have tests and all three work. It is a **deadlock**, and it
-was measured:
+The deadlock is closed and a sharper question replaced it. Read this section, then
+`autoplay/docs/status.md`, then the numbers in `target/autoplay-results/front2.jsonl`.
 
-- `commit` only proposes an assault when `visible_enemy_entities` has something in
-  it;
-- `seen` is zero on every reading of every match, because the two bases sit
-  (169, 91) and (70, 157) apart — 116 cells with nothing walking between them;
-- so the army never moves, the enemy count never falls (it only rises), and the
-  army holds.
+**What was wrong.** `commit` only proposes an assault when `visible_enemy_entities`
+has something in it; `seen` is zero on every reading of every match because the two
+bases sit (169, 91) and (70, 157) apart — 116 cells with nothing walking between
+them. So the army never moved, the enemy count never fell, and the army held. That
+is measured, and four rounds went into finding it.
 
-The escape was found and measured, and is **not in the tree** because it lost on
-the matrix: with no enemy in sight, a big-enough column marches at the unrevealed
-cell *farthest from home*. Over 12000 ticks on Death.mmx seed 0x5EED it walked
-about sixty cells and **destroyed seven enemy objects** (`lost 0:0 → 0:7`, enemy
-46 → 36) for two of its own. That is the only engagement this work has ever
-produced.
+**What fixed it.** With no enemy in sight, a big-enough column marches at a cell on
+the **edge of known ground** (the frontier), inside the playfield, within one march.
+Three readings had to be right first: `Policy::job_achieved` (arrived is not stuck),
+the frontier rather than the farthest unexplored cell (deep cells sit behind walls
+and cannot be walked to), and `ACHIEVED_CELLS = 3` (a column arrives spread out).
+All three are committed.
 
-It was reverted because `stuck` punished it: `stuck=40` in two cells, which is the
-reading counting a column standing on the ground it just took. `Policy::job_achieved`
-(committed) now answers that case correctly — a unit on the cell it was sent to is
-finished, not stuck — but **that fix has not been re-measured with the march in
-the tree**. That is the first job below.
+**What the matrix said.** Six cells, 12000 ticks, with the flag on:
 
-Six attempts at this have been reverted. Read status.md before trying a seventh:
-the failure modes are all recorded, with the number that rejected each.
+| Map | Seed | own | lost | stuck |
+|---|---|---|---|---|
+| Death.mmx | 24301 | 46 → 46 | **0:8** | 0 |
+| Death.mmx | 10 | 50 → 51 | 0:0 | 1 → 2 |
+| Death.mmx | 19 | 51 → 51 | 0:0 | 0 → 1 |
+| Barrel.mmx | 10 | 50 → 50 | 0:0 | 0 → 1 |
+| Barrel.mmx | 24301 | 46 → 46 | 0:0 | 0 |
+| Barrel.mmx | 19 | 46 → 37 | **7:0** | 0 → 1 |
+
+Four worse, one better, one same — so `ATTACK_ENABLED` is **false** at HEAD and the
+baseline is untouched (verified: six of six identical to `inert.jsonl`). Flipping
+the flag to true reproduces `front2.jsonl`.
+
+**The question that is open now.** In Barrel.mmx seed 19 the column left and the
+base was destroyed: `soldiers` fell 32 → 22 between tick 9000 and 10800, `lost`
+`7:0`. Everywhere else own holds or rises, and in Death.mmx 24301 the column
+destroyed eight enemy objects. So an army that leaves wins fights and loses its
+base. **What stays home is the next decision**, and `lost` is now a reading that can
+see it. The three `stuck`-only cells do not count against the march: both counted
+units in them are harvesters shuttling ore, not soldiers.
+
+Do not re-derive any of this. Six attempts at the army were reverted before this
+one; status.md has each with the number that rejected it.
 
 ## Where the work is
 
 - Branch: feature/autoplay-v2 (fork HaoJun0823/vera20k, upstream
   YuriPlanet/vera20k). upstream/main was merged in (204 commits) and one
   merged call site fixed.
-- HEAD at handoff: `f3cae8a38`, working tree clean, everything local (nothing
+- HEAD at handoff: `f93386790`, working tree clean, everything local (nothing
   pushed; publication was never authorized).
 - The new policy lives in the workspace member autoplay/, outside the engine
   crate. vera20k-core still owns the engine; the policy reads a projection and
@@ -78,13 +93,15 @@ one job, and the outbox answers:
   barracks and a war factory, places each through the native site search;
 - keeps one harvester per refinery and buys the cheapest armed unit its
   factories can build;
-- holds the army at its post (`ATTACK_ENABLED` is false at HEAD; the march
-  described under "Start here" is not in the tree);
+- holds the army at its post. `ATTACK_ENABLED` is false at HEAD; the march, the
+  frontier search and the arrival reading are all committed behind it and measured
+  in `front2.jsonl`;
 - every fact about a type comes from autoplay/src/profile/mod.rs, derived from
   RULESMD.INI through the production reader. No type name in the policy.
 
-Nothing scouting-shaped is in the tree. Six scout attempts and three march
-attempts were measured and reverted; status.md has each with its numbers.
+Nothing scouting-shaped is in the tree. Six scout attempts were measured and
+reverted before the army march replaced the idea; status.md has each with its
+numbers.
 
 ## Verified engine facts (do not re-derive)
 
@@ -140,8 +157,9 @@ Every one of these has a test in `autoplay/src/`, and none of them needs re-deri
 | Does a unit on a guard post still take a move? | Yes | `guard_move_tests.rs` |
 | How far does one march actually get? | About 30 of 160 cells, then stops | `guard_move_tests.rs` |
 | Does the fog report an enemy in line of sight? | Yes, within a few frames | `fog_tests.rs` |
-| Is the fog grid the playfield? | No — the grid is the whole map buffer | `sim::control::observation::vision_tests` |
-| When is a unit stuck, and when is it finished? | Finished on the cell it was sent to | `policy::tests::a_unit_standing_on_the_cell_it_was_sent_to_is_not_stuck` |
+| Is the fog grid the playfield? | No — the grid is the whole map buffer | `vision_tests` |
+| When is a unit stuck, and when is it finished? | Finished within 3 cells of its named cell | `policy::tests::a_unit_standing_on_the_cell_it_was_sent_to_is_not_stuck` |
+| Can a blind march reach a deep unexplored cell? | No — walls and water; aim at the frontier | `front2.jsonl`, status.md |
 
 The two that matter for the queue: **a march covers about thirty cells**, so plan
 trip lengths accordingly; and **`seen=0` in a match is honest** — nothing has come
@@ -179,29 +197,36 @@ first, then measure behaviour.
 
 ## Open work, in the order it should be done
 
-**0. Re-measure the march now that `stuck` is fixed.** This is the immediate next
-step and it is short. The march that destroyed seven enemy objects was rejected by
-a reading that was wrong (`Policy::job_achieved` now separates "arrived" from
-"stuck", committed as `f3cae8a38`). Put the march back — three pieces, all recorded
-in status.md:
+**0. Decide what stays home.** This is the immediate next step. The march exists,
+is measured and is correct; it is behind `ATTACK_ENABLED = false` because the army
+leaving loses the base in one of six cells. `target/autoplay-results/front2.jsonl`
+is the run with the flag on, and the six cells are tabulated at the top of this
+file.
 
-   - in `commit`, when `army && target.is_none()`, propose `JobKind::Assault` with
-     `Target::Cell(march_cell(..))` at priority 55, instead of `Defend`;
-   - `march_cell` returns the unrevealed cell **farthest from home** that is
-     `is_cell_in_playfield` and within `MARCH_REACH_CELLS` (24) of the column.
-     Nearest-from-home walks the wrong way: it went east to `Cell((184,100))` while
-     the enemy held the west;
-   - flip `ATTACK_ENABLED` to true.
+The measured trade: in Barrel.mmx seed 19 `soldiers` fell 32 → 22 between tick 9000
+and 10800 with `lost 7:0` while the column was away; in Death.mmx 24301 the same
+mechanism destroyed eight enemy objects and read `same`, not worse.
 
-   Then run the six-cell matrix. What to look for: `enemy` falling and `lost`
-   non-zero (the fight happens), `stuck` no longer exploding (the reading is fixed),
-   and `own` at or above the baseline. If `own` falls, the remaining question is
-   whether the army should leave at all, not whether it can — that has now been
-   answered.
+Candidate rules, cheapest first — try one, measure, keep or revert:
 
-   Do **not** add a remembered objective across terms; that was tried and stopped
-   the advance dead (`enemy 46 → 46`, `lost 0:0`). Recompute the march cell each
-   term.
+   - **leave a garrison**: when the gate opens, hold back a fraction (a third?) of
+     the soldiers on `Defend` at `home` and march only the rest. `commit` already
+     builds the soldier list per term, so this is a split of that list, not new
+     state;
+   - **a commit radius**: march only when the column would stay within N cells of
+     the base, so a fight is always near enough to fall back from. The deadlock's
+     map has the enemy 116 cells away, so this may simply disable the march — check
+     it against `front2` before believing it;
+   - **reinforce while away**: keep `ARMY_TO_ATTACK` at the gate but let the army
+     keep buying while it marches. It already does; confirm on a reading.
+
+The judging readings are `own` (must not fall below the baseline), `lost` (must
+stay non-zero somewhere, or nothing is being decided), and `stuck` (the two
+harvester units in the `stuck`-only cells are not the army — do not chase them).
+
+**Do not** re-tune the march itself first: the frontier, `ACHIEVED_CELLS = 3` and
+`job_achieved` were each adjusted against measured cases and are now reading
+correctly. The remaining defect is strategic, not geometric.
 
 The items below are the older queue, kept for the reasoning. Much of the long
 bullet chain under item 3 is a chronicle of rounds that status.md already records;

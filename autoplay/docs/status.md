@@ -582,6 +582,55 @@ house survives, rather than on whether its column is standing still after it won
 
 That measurement has not been run yet. It is the first item in handoff.md.
 
+## The march reaches the matrix, and the matrix has a fight in it for the first time
+
+Three readings had to be right before a march could be judged, and all three are
+now in the tree, behind `ATTACK_ENABLED = false` so the baseline is untouched:
+
+1. `Policy::job_achieved` — a unit on the cell it was sent to has *finished*, not
+   stuck. Without it a winning column reads `stuck=40`, which is the reading that
+   rejected the three previous attempts.
+2. The objective is a cell **on the edge of known ground**, not the farthest
+   unrevealed one. Marching deep into unexplored terrain picks cells behind walls:
+   the previous attempt ordered a column to `Cell((132, 204))`, it stopped 23 cells
+   short at `(153, 181)` where it could not stand, and stood there for the rest of
+   the match. A cell touching revealed ground is one a unit on revealed ground could
+   have walked to — the frontier is the only place a blind march can safely aim.
+3. `ACHIEVED_CELLS = 3`, not 1. A column does not arrive in formation: the measured
+   case held `(143,98)..(146,99)` around `Cell((144,96))` and read stuck at ninety
+   frames on members five frames short of moving.
+
+Measured with the flag on (front2.jsonl), six cells, 12000 ticks:
+
+| Map | Seed | own | lost | stuck | |
+|---|---|---|---|---|---|
+| Death.mmx | 24301 | 46 → 46 | **0:8** | 0 | same — it fought and won |
+| Death.mmx | 10 | 50 → 51 | 0:0 | 1 → 2 | worse (stuck only) |
+| Death.mmx | 19 | 51 → 51 | 0:0 | 0 → 1 | worse (stuck only) |
+| Barrel.mmx | 10 | 50 → 50 | 0:0 | 0 → 1 | worse (stuck only) |
+| Barrel.mmx | 24301 | 46 → 46 | 0:0 | 0 | same |
+| Barrel.mmx | 19 | 46 → 37 | **7:0** | 0 → 1 | worse — the column was destroyed |
+
+No seed was lost: every cell still reads `timeout at tick 12000`, and own holds or
+rises in five of six. Against `inert.jsonl` it is four cells worse, one better, one
+same, so the flag stays off — the keep rule is not negotiable, and the measurement
+is recorded rather than argued with.
+
+Two readings explain why the code is kept instead of deleted:
+
+- in the three `stuck`-only cells, both counted units are harvesters (`CMIN` on
+  `Harvest`) shuttling between an ore field and a refinery. The march adds no stuck
+  of its own; those cells differ from the baseline by a reading the army never
+  touches.
+- Barrel.mmx seed 19 lost seven objects **because the column left**: `soldiers` fell
+  from 32 to 22 between tick 9000 and 10800. That is the trade the change actually
+  makes, and it is a garrison question — whether the army leaves at all — rather
+  than a march question.
+
+So the deadlock is closed and a new, sharper question is open: an army that leaves
+wins fights and loses its base. What stays home is the next thing to decide, and
+`lost` is now a reading that can see the answer.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |
