@@ -1256,3 +1256,31 @@ the house has no siege. The frontier-edge creep the centroid anchor uses keeps t
 army at its own edge, meeting the enemy in the field where the trade is
 favourable. Reverted; the `enemy_base_cells` accessor stays out with it.
 
+
+### Reverted: the retreat rung, which never fired
+
+An interrupted session left a retreat rung in the working tree: a column that has
+marched away from its base and finds itself outnumbered where it stands falls
+back, `threat_around > 0 && away && soldiers.len() <= threat_around`. The evidence
+it cited was 1v7 seed 19 losing fourteen of fifteen.
+
+It was measured on both lanes and **fired zero times**:
+
+    tick=7200  seen=3 near=3 threat_around=0 away=false retreat=false
+    tick=9000  seen=1 near=1 threat_around=1 away=false retreat=false
+
+Six of six 1v1 cells identical to the baseline, and three of three 1v7 cells
+identical. Not a regression — dead code.
+
+The reason is the same fog the whole army work ran into: `threat_around` counts
+enemies in `seen`, which is empty on almost every reading, so the first conjunct is
+false whenever the retreat would matter. In the one 1v7 reading where `seen` is not
+empty, `away` is false instead: the column had not yet walked past `NEAR_CELLS`
+from home. All three conjuncts never met.
+
+The citation was also wrong in a second way: the 1v7 lane it points at reads
+`seen=0` while its objects die, which is the *reason* `threat_around` cannot see
+the threat. A retreat keyed on visibility cannot fire in the situation that
+motivated it. The next attempt needs a threat the house can read without vision —
+losses per term, or the `contact` notion `fc3130501` introduced for the column
+size — not `seen` again.
