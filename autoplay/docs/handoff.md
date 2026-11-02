@@ -133,7 +133,11 @@ first, then measure behaviour.
    stay on is judgement: which target is worth the army, and when to break off.
    The machinery to end a job is now there; nothing yet chooses well.
 3. Composition by role, not by price. Front line, ranged, anti-air quotas; this
-   fixes the one-type armies and the faction spread at once.
+   fixes the one-type armies and the faction spread at once. The spread is now
+   measured properly: america 46, russia 70, yuri 45 at 12000 ticks on the same
+   map and seed, after the Yuri refinery profile bug was fixed (see the end of
+   this file). Russia's 24-object lead over the other two is the "cheapest armed
+   unit" picker, untouched, and it is what this item is for.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
    proven; the job is missing.
 5. Per-unit decision reasons in the log (unit 1234: job=defend
@@ -161,6 +165,24 @@ in the repository).
 - One owner per state. The policy owns its jobs; the engine owns the
   simulation. Do not add a second copy of a decision.
 - Determinism: integer maths in decisions, stable iteration, no f32.
+
+## The Yuri house had no refinery it could want
+
+`Roles::REFINERY` came from `Refinery=` alone. `[YAREFN]` does not carry that key;
+it is declared by `ResourceDestination=yes`. The Yuri refinery therefore read as
+`harvester,deployer,armed,structure`, the build order's `!has(REFINERY)` test was
+permanently true, and its `or(power)` fallback fired every term: sixteen bio
+reactor placements, power 2400, no ore income, own 29 at 12000 ticks against
+America's 46.
+
+Gating the same key on "is a building" is what makes it correct rather than too
+broad: `[SMIN]`, the slave miner, is the deployed refinery's vehicle form and
+carries the key too, and it is a harvester. After the fix: yuri 45, america 46,
+russia 70.
+
+Read this before trusting any faction number recorded before it: everything in
+this file above about factions was measured on a build where Yuri could not build
+a refinery.
 
 ## Added after this was written (same day, later session)
 

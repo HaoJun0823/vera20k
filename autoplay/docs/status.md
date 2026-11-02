@@ -281,40 +281,35 @@ With attacking on, the cell that read 38 reads 0, two cells read +1 stuck, own
 falls in no cell and gains 3 in one. With the flag off the matrix is identical in
 all six cells.
 
-## The faction spread, measured and not yet explained
+## The faction spread, and the Yuri refinery that was not one
 
 Death.mmx, seed 0x5EED, 12000 ticks, attacking off, one run per faction:
 
-| Faction | Own | Enemy | Stuck |
-|---|---|---|---|
-| america | 46 | 46 | 0 |
-| russia | 70 | 49 | 3 |
-| yuri | 29 | 46 | 0 |
+| Faction | Own before | Own after | Enemy | Stuck |
+|---|---|---|---|---|
+| america | 46 | 46 | 46 | 0 |
+| russia | 70 | 70 | 49 | 3 |
+| yuri | **29** | **45** | 46 | 0 |
 
-A 41-object spread between the two extremes. The handoff attributed it to the
-"cheapest armed unit" picker making every army one type, and that is part of it,
-but the probe this round found something more basic on the Yuri side and it is
-*not* what it first looked like.
+The cause was a profile predicate, not a policy choice. `Roles::REFINERY` was
+derived from `Refinery=` alone. Retail's allied and soviet refineries carry that
+key; `[YAREFN]` does not — it is declared by `ResourceDestination=yes`. So the
+Yuri refinery's roles read `harvester,deployer,armed,structure`, the build order's
+`!has(Roles::REFINERY)` test was permanently true, and the `or(power)` fallback
+fired every term: sixteen bio reactor placements in one match, power at 2400, no
+ore income ever.
 
-What the probe did establish, each from a log line rather than from reading code:
+`ResourceDestination` alone is too broad to fix it — `[SMIN]`, the slave miner, is
+the deployed refinery's vehicle form and carries the same key — so the role is
+granted when the object is a building. The three miners are still harvesters.
 
-- the Yuri maker does deploy. `economy: maker PCV ... deploys_into=Some("YACNST")`
-  appears once, on the term the yard is put down, and never again, because a
-  deployed yard is a structure and no longer a unit in the projection. An earlier
-  reading of the same log concluded the maker never deployed and started a fix for
-  it; that fix was wrong and was reverted.
-- the Yuri house does build. Sixteen `Placing building YAPOWR` lines, so the
-  build order runs, and `ready_buildings` hands each one to the native site
-  search.
-- nothing the Yuri house builds ever finishes. The log has no `Completed ... for
-  Player` line for it, and the power reading climbs to 2400 with no refinery in
-  sight, while `economy: building in production at ...` keeps reporting a
-  `YAPOWR` that is never ready.
+Measured after: own 45 against America's 46 on the same map and seed, and the
+six-cell matrix on Death.mmx and Barrel.mmx is identical to its baseline.
 
-So the failure is in the Yuri production path — a building placed and never
-completed — not in the maker and not in the target picker. That is where the next
-reading goes; a fix without it would be a guess, and this round already spent one
-guess on the maker.
+The remaining spread is russia 70 against america 46, and it is the "cheapest
+armed unit" picker the handoff blamed: an army of one type whose value depends
+entirely on which type the faction's cheapest happens to be. That is item 3 of
+the handoff, untouched.
 
 ## The hard maps, on this build
 
