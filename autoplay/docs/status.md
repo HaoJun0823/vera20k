@@ -1006,3 +1006,32 @@ and losses at once.
 | 1v7 Death.mmx | 24301 | 37 -> 44 | 4790 -> 6688 | 0:0 |
 | 1v7 Death.mmx | 19 | 41 -> 45 | 6101 -> 6303 | 0:0 |
 | 1v7 Death.mmx | 10 | 37 -> 46 | 4644 -> 5718 | 2:0 -> 0:0 |
+
+### The march arm was unreachable, and the scan stopped at eighteen cells
+
+Splitting the gate left a defect in the table that reads the two halves:
+
+    let order = match (engage, target, advance) {
+        (true, Some((entity_id, _)), _) => Some(Target::Object(entity_id)),
+        (true, None, Some(cell)) => Some(Target::Cell(cell)),   // never
+        _ => None,
+    };
+
+The second arm needs `engage` and no target, and `engage` requires a target. The
+column therefore stood at its post with `march=true order=None` for the rest of
+every match, which is why the first measurement of the split showed nothing:
+`advance` was computed and then thrown away. The match now reads `(target,
+advance)` on its own arms.
+
+Under it was a second stop: `march_cost` scanned one march's reach (eighteen
+cells) for ground the house had not seen, and by tick 10800 on Death.mmx seed 19
+every cell that close was already revealed — `march=true order=None` with
+thirty-four units. A fallback scan at twice the radius (`MARCH_FAR_CELLS`) runs
+only when the first finds nothing, so a safe frontier still wins when there is
+one. The reading after both: `military: tick=10800 ... soldiers=34 march=true
+order=Some(Cell((108, 168)))`.
+
+Measured against `stuck-v8.jsonl`: five cells the same, one better, none worse.
+That is honest rather than disappointing — the column only forms around tick
+10000 on the current income, so there are twelve hundred frames left to march
+in. Growth, not the march, is what bounds this lane now.

@@ -393,9 +393,13 @@ impl Military {
         };
         // What the army is to do this term, if anything: the object a player's
         // click would name, the frontier cell a blind march takes, or nothing.
-        let order = match (engage, target, advance) {
-            (true, Some((entity_id, _)), _) => Some(Target::Object(entity_id)),
-            (true, None, Some(cell)) => Some(Target::Cell(cell)),
+        // Read `advance` on its own arm. Keying the march on `engage` made the
+        // arm unreachable — `engage` requires a target and a march has none —
+        // so the column stood at its post with `march=true order=None` for the
+        // rest of every match after the gate was split.
+        let order = match (target, advance) {
+            (Some((entity_id, _)), _) if engage => Some(Target::Object(entity_id)),
+            (None, Some(cell)) => Some(Target::Cell(cell)),
             _ => None,
         };
         if ctx.tick % 1800 == 0 {
@@ -451,6 +455,21 @@ impl Military {
 /// the previous version's other bug: nearest-from-home marched east while the
 /// enemy held the west.
 fn march_cell(ctx: &Ctx<'_>, home: (u16, u16), from: (u16, u16)) -> Option<(u16, u16)> {
+    // One march's reach first, and a longer one only when that finds nothing:
+    // by 12000 ticks on Death.mmx seed 19 every cell within eighteen of the
+    // column was already revealed, the house read `march=true order=None` with
+    // thirty-five units, and the army stood at its post for the rest of the
+    // match. A frontier just past one march is still the next place to go.
+    march_cell_within(ctx, home, from, MARCH_REACH_CELLS)
+        .or_else(|| march_cell_within(ctx, home, from, MARCH_FAR_CELLS))
+}
+
+fn march_cell_within(
+    ctx: &Ctx<'_>,
+    home: (u16, u16),
+    from: (u16, u16),
+    reach: u16,
+) -> Option<(u16, u16)> {
     let (width, height) = ctx.obs.map_extent();
     if width == 0 || height == 0 {
         return None;
@@ -462,7 +481,7 @@ fn march_cell(ctx: &Ctx<'_>, home: (u16, u16), from: (u16, u16)) -> Option<(u16,
         while x < width {
             if !ctx.obs.is_cell_in_playfield(x, y)
                 || ctx.obs.is_cell_revealed(x, y)
-                || cell_distance(from, (x, y)) > i32::from(MARCH_REACH_CELLS)
+                || cell_distance(from, (x, y)) > i32::from(reach)
             {
                 x = x.saturating_add(MARCH_SCAN_STEP);
                 continue;
@@ -526,6 +545,12 @@ const FRONTIER_SEARCH: i32 = 4;
 
 /// How far one march goes, in cells: inside what a march is measured to cover.
 const MARCH_REACH_CELLS: u16 = 18;
+
+/// How far the fallback march scan looks, in cells.
+///
+/// Used only when nothing unrevealed lies inside one march: twice the radius,
+/// which is about the length of a march a column actually walks.
+const MARCH_FAR_CELLS: u16 = 40;
 
 /// How coarsely the march scan samples the map, in cells.
 const MARCH_SCAN_STEP: u16 = 4;
