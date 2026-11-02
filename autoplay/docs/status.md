@@ -1242,3 +1242,17 @@ wallet. Both the army and the defences are being replaced slower than they die.
 That closes the session's picture: composition and the engage gate are fixed,
 and what remains is the economy under a fight — which is the same ceiling the
 three rejected saving rules ran into, now with a lane that shows the cost.
+
+### Reverted: marching at the enemy base
+
+The army should march toward where the enemy is, not just the frontier, and the
+simulation tracks every house's `base_center`, so the policy can know the enemy's
+starting ground the way a player does from the map. A `march_cell` that prefers
+the frontier cell nearest the enemy base (still one march out, still only what it
+sees) is **much worse**: at 24000 ticks three Death.mmx cells go from army 9388
+to 5675, 8681 to 6223, 8768 to 8435, and lost 2:8 to 9:6. The army walks to the
+fortress and is dismantled there - the enemy base is tesla coils and walls, and
+the house has no siege. The frontier-edge creep the centroid anchor uses keeps the
+army at its own edge, meeting the enemy in the field where the trade is
+favourable. Reverted; the `enemy_base_cells` accessor stays out with it.
+
