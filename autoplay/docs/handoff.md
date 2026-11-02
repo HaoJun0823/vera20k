@@ -183,14 +183,20 @@ first, then measure behaviour.
   board, budget and gate included, and a tank arrives twenty cells away with
   `rejected` at zero. Asked directly, `Policy::think` emits 240 orders over three
   hundred frames and **every one is `GuardAt`** — the tree has no code that asks a
-  unit to travel, because all three scouting attempts were reverted. The policy is
+  unit to travel, because all the scouting attempts were reverted. The policy is
   not failing to move units; it is not asking.
-  So the next step is to write the move request again, and this time the two
-  tests above say a working one will be carried. The three reverts were about
-  *where to send* a scout, not about whether orders travel; the last one
-  (`Cell((16,16))`, remembered target) failed because the target was picked from
-  fog-grid coordinates outside the playfield, which is a target-choice bug and not
-  an order-delivery one.
+- **Then the asking was tried a fourth time and the shape of the problem changed.**
+  `Observation::is_cell_in_playfield` now exists, because the fog grid covers the
+  whole map buffer while walkable ground is smaller: two earlier targets
+  (`Cell((0,0))`, `Cell((16,16))`) were cells no pathfinder reaches. With a legal
+  target (`Cell((16,128))`) the fourth scout was still worse in six of six cells,
+  own falling 46→25 in one, `stuck` up everywhere — taking front-line soldiers off
+  the base costs more than the map information is worth.
+- **And a march is not unlimited.** `guard_move_tests.rs`: a 160-cell march on a
+  200-cell arena starts, keeps walking, and stops after about thirty cells with
+  130 to go. So the next scout is not a tank sent across the map; it is a cheap
+  unit sent a short way, repeatedly, and the army stays home. Two facts make that
+  design testable now: the playfield query, and the measured march length.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
    proven; the job is missing.
 5. Per-unit decision reasons in the log (unit 1234: job=defend

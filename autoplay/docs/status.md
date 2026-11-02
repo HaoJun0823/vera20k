@@ -427,29 +427,36 @@ the goal.
 
 The test is committed and the matrix is unchanged by it (six of six identical).
 
-## A Move works everywhere except where nobody asks for one
+## What a move needs, and the fourth attempt at scouting
 
-Two tests now prove the chain from a brain to the engine:
+Three facts now, each from a test rather than from reading code (all in
+`autoplay/src/`):
 
-- `move_tests.rs`: one `Goal::Move` through `Funnel::prepare` carries a tank from
-  (6,6) to (26,26), within a cell of the target.
-- `board_move_tests.rs`: the same through the real `ControlBoard` — the object the
-  match drives, with the per-frame budget, the domain gate and `order_stands` —
-  also arrives, and `rejected` stays zero. `order_stands` is the one arm of the
-  chain that reports `Queued` while dropping an order, so it had to be ruled out
-  separately.
+- `move_tests.rs` — one `Goal::Move` through `Funnel::prepare` carries a tank
+  twenty cells.
+- `board_move_tests.rs` — the same through the real `ControlBoard`, budget and
+  `order_stands` included, also arrives with `rejected` at zero.
+- `guard_move_tests.rs` — a unit that held a guard post for sixty frames still
+  takes the move, so the rule that drops a march while a unit fires (the only arm
+  of the chain that reports success while dropping an order) is not the cause. And
+  a march of **160 cells** starts, keeps walking, and stops after about thirty
+  with 130 still to go: a long march is neither refused nor completed.
 
-A third experiment asked the policy itself, driving `Policy::think` against a
-house with a yard and twelve riflemen for three hundred frames and reading its
-outbox: **240 orders, every one of them `GuardAt`, not one `Move`.** The scouting
-that would ask for a move is not in the tree — it was measured and reverted three
-times in the previous two rounds, and what remained was the rest of the policy
-holding the army at its posts.
+`Observation::is_cell_in_playfield` was added because the fog grid is not the
+playfield. The grid covers the whole map buffer (256x256 on Death.mmx) while the
+walkable ground is smaller and offset inside it, which is why two earlier scout
+targets (`Cell((0, 0))`, then `Cell((16, 16))`) were cells no pathfinder reaches.
 
-So the reading this round is not a defect report: the door is sound end to end,
-and the policy has no code that asks a unit to go anywhere. Anyone reading the
-earlier rounds of this file should know that the three scout attempts were reverted
-and the current tree has none of them.
+The fourth scout attempt used the playfield query and a remembered destination.
+Its target was legitimate (`Cell((16, 128))`) and it was still reverted: **six of
+six cells worse**, `own` falling in three of them (46→25 on Barrel.mmx seed
+24301), `stuck` up everywhere. Taking soldiers off the base to look at the map
+costs more than the information is worth while the enemy attacks the base.
+
+So the useful conclusion is not "scouting is wrong" but a shape for it: the army
+cannot spare front-line units, and a march stops after thirty cells, so a scout
+must be a cheap unit sent a short way repeatedly rather than a tank sent across
+the map. Nothing in the tree scouts today; all four attempts are reverted.
 
 ## The hard maps, on this build
 
