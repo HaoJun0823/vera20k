@@ -20,6 +20,18 @@ use crate::registry::JobKind;
 /// as power_balance.
 const POWER_MARGIN: i32 = 20;
 
+/// How many harvesters a refinery is given.
+///
+/// One truck on a refinery is the ceiling on the house's income, and the
+/// ceiling is what the wallet hits: measured, five of the six baseline cells
+/// sat at twelve credits with the wallet frozen for the last 3600 frames,
+/// which is also why no second refinery ever landed.
+const HARVESTERS_PER_REFINERY: usize = 2;
+
+/// What the wallet keeps in hand before a second truck on a refinery is
+/// bought.
+const EXTRA_HARVESTER_MARGIN: i32 = 1_500;
+
 #[derive(Debug, Default)]
 pub struct Economy;
 
@@ -249,7 +261,8 @@ impl Economy {
                 refineries += usize::from(profile.roles.contains(Roles::REFINERY));
             }
         }
-        if refineries == 0 || harvesters >= refineries {
+        let wanted = refineries * HARVESTERS_PER_REFINERY;
+        if refineries == 0 || harvesters >= wanted {
             return;
         }
         let mut want: Option<&UnitProfile> = None;
@@ -271,7 +284,20 @@ impl Economy {
         let Some(type_id) = ctx.obs.type_id(&want.id) else {
             return;
         };
-        if ctx.obs.in_production(ctx.rules, type_id) || !Self::affordable(ctx, want) {
+        if ctx.obs.in_production(ctx.rules, type_id) {
+            return;
+        }
+        // The first truck on a refinery is income and is bought as soon as the
+        // wallet allows. The second is bought from the surplus: measured, the
+        // two-truck rule raised the house's strength in four cells of six and
+        // lowered it in two, and the two were the cells where the extra truck
+        // took the money the army was about to spend.
+        let margin = if harvesters >= refineries {
+            EXTRA_HARVESTER_MARGIN
+        } else {
+            200
+        };
+        if ctx.obs.credits() < want.cost + margin {
             return;
         }
         out.intents.push(Intent::QueueProduction { type_id });
