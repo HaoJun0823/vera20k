@@ -345,6 +345,31 @@ impl Policy {
         }
     }
 
+    /// Whether the unit has already done what its job asked: it stands on the
+    /// cell the job names, within a step.
+    ///
+    /// This is what separates "still working" from "finished and waiting". The
+    /// spec's H2 (`stuck`) counts a unit that holds a movement job and should be
+    /// moving but is not; a column standing on the ground it was sent to take has
+    /// done what it was told. Counting those made a march that destroyed seven
+    /// enemy objects read `stuck=40` and lose to a build that never left its base
+    /// (status.md, "three marches rejected on a reading that measures the wrong
+    /// thing").
+    ///
+    /// Only cell targets are answered: an object target is a thing to keep
+    /// shooting, and `finish_done_jobs` decides when that is over.
+    fn job_achieved(job: &Job, cell: (u16, u16)) -> bool {
+        match job.target {
+            Target::Cell(target) => {
+                i32::from(cell.0.abs_diff(target.0)).max(i32::from(cell.1.abs_diff(target.1))) <= 1
+            }
+            // An object target is a thing to keep shooting, and a job with no
+            // target is a job with nowhere to be: neither is finished by standing
+            // still.
+            Target::Object(_) | Target::None => false,
+        }
+    }
+
     /// The job a unit holds when nothing else claimed it: guard the nearest
     /// structure the house owns.
     ///
@@ -603,8 +628,20 @@ impl Brain for Policy {
             // firing, not stuck. The spec's H2 counts a unit stuck when it holds
             // a movement job and does not move; standing still to shoot is what
             // an attack in range looks like.
+            // A unit whose job is *achieved* is not stuck, and that is the case
+            // three march attempts were rejected on. `stuck` is the spec's H2: a
+            // unit that holds a movement job and should be moving but is not. A
+            // column standing on the cell it was sent to take has done what it
+            // was told; a unit guarding the post it stands at likewise. Counting
+            // those is what made a run that destroyed seven enemy objects read
+            // `stuck=40` and lose to a build that never left its base.
+            let achieved = self
+                .jobs
+                .get(unit.entity_id)
+                .is_some_and(|job| Self::job_achieved(job, unit.cell));
             let firing = self.hitting.contains(&unit.entity_id);
             let held = !firing
+                && !achieved
                 && self.jobs.get(unit.entity_id).is_some_and(|job| {
                     matches!(
                         job.kind,
@@ -829,6 +866,42 @@ mod tests {
         };
         let sent = Some(&(JobKind::Defend, Target::Cell((40, 40))));
         assert!(Policy::same_order(sent, &guard));
+    }
+
+    /// A unit that has arrived is finished, not stuck. Three march attempts were
+    /// rejected because `stuck` counted a column standing on the cell it had been
+    /// sent to take; this pins the distinction so the next change cannot bring it
+    /// back.
+    #[test]
+    fn a_unit_standing_on_the_cell_it_was_sent_to_is_not_stuck() {
+        let march = Job {
+            kind: JobKind::Assault,
+            target: Target::Cell((140, 172)),
+            priority: 55,
+            given: 0,
+        };
+        assert!(
+            Policy::job_achieved(&march, (140, 172)),
+            "standing on the destination is the job done"
+        );
+        assert!(
+            Policy::job_achieved(&march, (141, 171)),
+            "a step off the cell is still the cell"
+        );
+        assert!(
+            !Policy::job_achieved(&march, (152, 151)),
+            "eleven cells short is a unit that has not got there and is stuck"
+        );
+        // An object target is never achieved by standing somewhere: the target
+        // has to die, which `finish_done_jobs` decides.
+        let kill = Job {
+            kind: JobKind::Assault,
+            target: Target::Object(1),
+            priority: 60,
+            given: 0,
+        };
+        assert!(!Policy::job_achieved(&kill, (140, 172)));
+        assert!(!Policy::job_achieved(&kill, (0, 0)));
     }
 
     #[test]
