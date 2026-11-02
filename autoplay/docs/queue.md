@@ -24,6 +24,13 @@ at the base. It does not attack, and nothing fights: the loss counter is zero
 everywhere, which is why an object count cannot tell a strong policy from a
 hiding one.
 
+**Since then: the army campaigns.** It goes out, fights, and a unit that has
+finished its fight far from home walks back before it is given another job.
+With the flag on, the lane kills five enemy objects on Death.mmx seed 19 and
+two on seed 24301, and the base no longer falls (Barrel.mmx 19 own 37 -> 45).
+The two defects that remain are B4 (the frontier cell may be one the column
+cannot walk to) and the stuck units standing on an assault they cannot finish.
+
 ## M1: the build you can play
 
 The target for the next build, and what "done" means for it:
@@ -60,9 +67,10 @@ the log answers "what is every unit doing" without reading the code.
 
 | Item | Work | Accepts when |
 |---|---|---|
-| B1 | A column that returns: a retreat condition and a way home | own does not fall in any cell while the army is out |
+| B1 | A column that returns: a retreat condition and a way home | done: own 37 -> 45 on Barrel.mmx 19, five cells the same, none worse |
 | B2 | A give-up rule for an object target the column cannot hurt | stuck does not rise when a target cannot be reached |
-| B3 | Re-enable the attack flag | six cells: own not down, lost non-zero, stuck not up |
+| B3 | Re-enable the attack flag | done: the flag is on; five and two enemy objects killed in two cells, own within one everywhere, stuck up by one or two in two cells |
+| B4 | A frontier cell the column can actually walk to | the column stops standing at a cell it cannot reach: the frontier is chosen by distance, and a march covers about thirty cells |
 
 Measured so far, all reverted: a garrison of twelve (the base survives, the
 kills go to zero), a proportional garrison (worse), skipping a frontier cell

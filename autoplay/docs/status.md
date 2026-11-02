@@ -722,3 +722,43 @@ therefore not a smaller garrison but a column that comes back — a retreat
 condition on the column, and a give-up rule that fires for an object target
 the column cannot hurt. The readings to watch are own (must not fall), lost
 (must stay non-zero) and stuck (must not rise).
+
+## The campaign lane (2026-11-02, after the handoff)
+
+The army now campaigns: it goes out, it fights, and a unit that has finished its
+fight far from home walks back before it is given another job. The home cell
+comes from the military manager, the only layer that reads the house's
+structures; the policy learns it from there.
+
+Measured over the six cells with the attack flag on:
+
+| Map | Seed | own | enemy | lost | stuck |
+|---|---|---|---|---|---|
+| Death.mmx | 24301 | 46 | 46 -> 41 | 0:2 | 0 |
+| Death.mmx | 19 | 51 | 45 -> 40 | 0:5 | 0 |
+| Death.mmx | 10 | 50 -> 51 | 45 -> 44 | 0:0 | 0 -> 2 |
+| Barrel.mmx | 24301 | 46 | 49 -> 48 | 0:0 | 1 -> 0 |
+| Barrel.mmx | 19 | 46 -> 45 | 39 -> 40 | 0:0 | 0 |
+| Barrel.mmx | 10 | 50 | 41 | 0:0 | 0 -> 1 |
+
+Against the same lane without the campaign: five cells the same, one better
+(Barrel.mmx 19, own 37 -> 45 - the base stops falling), none worse. Against the
+flag-off baseline the lane now kills where it killed nothing before, own is
+within one object in every cell, and stuck is up by one or two in two cells.
+
+The attack flag is on in this commit. The reasoning: a policy that never fights
+cannot be judged on the readings that matter, and the base is no longer left
+open.
+
+### What is still wrong with the army
+
+- A column that reaches the frontier and finds nothing stands there. The
+  frontier cell is chosen by distance, not by reachability, and a march covers
+  about thirty cells, so the target is often one the unit cannot walk to. The
+  fix is a reachability test before the order, not a retry after it.
+- Two cells read one or two stuck: units standing on an assault they cannot
+  finish. The give-up ladder exists for a target that is out of reach
+  (UNREACHABLE_FRAMES) and for one that is not being hurt
+  (INEFFECTIVE_FRAMES); neither fires here, because the target is visible and
+  its health does not move for reasons the policy does not read.
+- The column is the whole army. Every garrison experiment cost the kills.
