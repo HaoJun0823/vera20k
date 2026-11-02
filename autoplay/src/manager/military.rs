@@ -20,11 +20,15 @@ const ARMY_TO_ATTACK: usize = 30;
 
 /// Whether the army attacks at all.
 ///
-/// Off while the attack layer has no judgement to give it: measured over three
-/// seeds on two maps at 24000 ticks, an army that attacks even at two-to-one
-/// loses three matches of six, while the same army holding its post loses one.
-/// The flag is the honest state of the work, not a tuned value: the next slice
-/// is local superiority, retreat and reinforcement, and then it comes back on.
+/// Off, and now measured twice on this side of the economy fix. With the army at
+/// two-to-one against the enemy on the un-fixed build, attacking lost three
+/// matches of six where holding lost one. With the economy fixed the army
+/// reaches parity or better (own 46-51 against 39-49 at 12000 ticks), and
+/// attacking is still worse in all six cells: own falls in four of them and the
+/// stuck count rises from 0-1 to 13-33. The reading is why: units walk to the
+/// one stale target cell, arrive, and stand there for 500-1400 frames holding the
+/// job, so there is no local superiority, no re-target and no retreat — the
+/// mechanics the next slice has to add. See docs/status.md.
 const ATTACK_ENABLED: bool = false;
 /// Below this the house keeps its credits for buildings.
 const UNIT_SPEND_FLOOR: i32 = 900;

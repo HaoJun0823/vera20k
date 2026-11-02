@@ -126,7 +126,16 @@ impl Policy {
                     || mission == MissionId::from_known(MissionType::Enter)
                     || mission == MissionId::from_known(MissionType::Unload)
             }
-            JobKind::Assault => mission == MissionId::from_known(MissionType::Attack),
+            JobKind::Assault => {
+                // An attack-move that carries a destination lands on `Move`
+                // with the attack-move latch set, not on `Attack` (native
+                // `mega_mission.rs::foot_assign_target_command`, the
+                // `0x004DF141` destination arm), so `Attack` alone would
+                // re-send the order every term — the same failure the
+                // harvester's dock cycle has.
+                mission == MissionId::from_known(MissionType::Attack)
+                    || mission == MissionId::from_known(MissionType::Move)
+            }
             JobKind::Defend => mission == MissionId::from_known(MissionType::AreaGuard),
             _ => false,
         }
@@ -417,6 +426,22 @@ mod tests {
                 !Policy::living_out(JobKind::Harvest, idle),
                 "a truck that is not harvesting has to be told to harvest"
             );
+        }
+    }
+
+    #[test]
+    fn an_attacking_unit_is_not_re_ordered_every_term() {
+        // The policy's assault order is an attack-move with a destination, and
+        // the engine lands that on Move with the latch set; a predicate that
+        // knew only Attack would spam the order.
+        for on_the_way in [MissionType::Attack, MissionType::Move] {
+            assert!(
+                Policy::living_out(JobKind::Assault, mission(on_the_way)),
+                "an attack-move is not a unit waiting for orders"
+            );
+        }
+        for idle in [MissionId::NONE, mission(MissionType::Guard)] {
+            assert!(!Policy::living_out(JobKind::Assault, idle));
         }
     }
 
