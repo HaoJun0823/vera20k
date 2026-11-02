@@ -12,6 +12,8 @@ pub mod profile;
 pub mod registry;
 
 #[cfg(test)]
+mod board_move_tests;
+#[cfg(test)]
 mod move_tests;
 #[cfg(test)]
 mod transport_tests;
