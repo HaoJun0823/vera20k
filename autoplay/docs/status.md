@@ -795,3 +795,21 @@ strength: 6657 -> 7092.
 | The second truck waits while the house is raided | six cells identical | the rule never fired |
 | The frontier cell is tested for reachability | five cells identical, one worse | the column holding is not the defect |
 | A garrison of twelve, a proportional garrison, a recall on a raid | kills went to zero, or a cell lost eleven objects | any garrison that holds the base stops killing |
+
+## The 1v7 lane on the same build
+
+Death.mmx, seven brutal computer houses against the driven house, 12000 ticks,
+three seeds:
+
+| Seed | own | army | enemy objects | enemy in sight | lost | result |
+|---|---|---|---|---|---|---|
+| 0x5EED | 48 | 4503 | 316 | 659 | 0:0 | survived |
+| 19 | 50 | 5620 | 295 | 2666 | 0:0 | survived |
+| 10 | 51 | 6034 | 300 | 0 | 0:0 | survived |
+
+Three of three survive the twenty-minute mark with nothing lost, against seven
+houses that hold three hundred objects between them. It is not a win: the
+house's strength is a third of what the enemy has, and the enemy never has to
+come to it. What the lane says is that the house now survives what it could
+not survive before (the same lane read 3:0 on one seed before the campaign
+loop, and 40 own on this seed before the two trucks).
