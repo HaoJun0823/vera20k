@@ -211,6 +211,19 @@ first, then measure behaviour.
   own sight). Settling that is worth more than another scouting rewrite — every
   decision that picks a target reads `seen`, so if it is always zero in a match,
   none of the army work can be judged.
+- **Settled, and it is a deadlock.** `fog_tests.rs` puts two riflemen two cells
+  apart in the arena and the house's fog reports both the cell and the enemy on it
+  within a few frames: the fog and the accessor are sound. What the matches show is
+  distance — the bases are at (169, 91) and (70, 157), a hundred and sixteen cells
+  apart, and nothing walks between them. So the loop is: the army holds until
+  something is in sight, nothing is ever in sight because nothing walks, so the
+  army holds. `ATTACK_ENABLED = true` confirms it rather than fixing it: `going`
+  turns true at tick 9000 and `seen` stays zero, with own and enemy identical to
+  the attacking-off run.
+  The next change is therefore to the waiting army, not to targeting: with no enemy
+  in sight, the assault should be a march towards ground the house has not seen
+  rather than a guard order on the base. The judging reading is `seen` becoming
+  non-zero at all, on any term of any match.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
    proven; the job is missing.
 5. Per-unit decision reasons in the log (unit 1234: job=defend

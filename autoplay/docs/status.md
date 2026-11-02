@@ -466,6 +466,35 @@ unit's own sight.
 That is the next question, and it is a better one than "where should a scout go".
 Nothing scouts today; all five attempts are reverted.
 
+## The deadlock the readings add up to
+
+Every fact in the last three rounds composes into one shape, and it is a loop:
+
+1. the army holds its post until `seen` is non-empty — `commit` only proposes an
+   assault when `visible_enemy_entities` has something in it;
+2. `seen` is zero on every reading of every match, because the two bases sit
+   (169, 91) and (70, 157) apart: **a hundred and sixteen cells** with nothing
+   between them;
+3. so the army never takes a step towards the enemy, and the enemy's count never
+   falls (the census in the previous section shows it only rising);
+4. and the army holds.
+
+A test now rules out the projection as the cause: two riflemen two cells apart in
+the rival arena, and the house's fog reports both the cell (`is_cell_visible`) and
+the enemy standing on it (`visible_enemy_entities`) within a few frames. The fog
+and the accessor are sound. `seen=0` is the honest answer to "is there an enemy in
+line of sight" when nothing has come within sight of anything else.
+
+With `ATTACK_ENABLED = true` the gate reports itself and confirms the loop:
+`going=true` from tick 9000 onwards, `seen=0` on every reading, and `own`/`enemy`
+identical to the attacking-off run.
+
+So the next change is not a target rule and not another scout. It is that a
+waiting army has to go somewhere: with no enemy in sight, the assault should be a
+march towards ground the house has not seen, not a guard order. That is the same
+`sight` the scouts were reaching for, applied to the army instead of to one unit,
+and the reading that judges it is `seen` becoming non-zero at all.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |
