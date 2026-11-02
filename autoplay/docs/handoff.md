@@ -147,6 +147,14 @@ first, then measure behaviour.
    judges. Before retrying, find a reading that can see the range paying for
    itself: the matrix counts objects, and both houses are still holding at 12000
    ticks, so it cannot.
+   **That reading now exists and it reads zero.** The harness records
+   `own_lost:enemy_lost` off the census curve, and over 12000 ticks on Death.mmx
+   neither side loses a single object — both curves rise monotonically. There is
+   no fight for a range advantage to win, which is the real reason the quota
+   failed. `enemy` in every table in this file is the enemy's economy, not its
+   army. Before item 3 can be judged, the two armies have to meet: attacking can
+   now end for all four of the design's reasons, so turning it back on is the
+   cheapest way to find out whether they do.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
    proven; the job is missing.
 5. Per-unit decision reasons in the log (unit 1234: job=defend

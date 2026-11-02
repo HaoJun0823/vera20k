@@ -342,6 +342,35 @@ has to show the range is worth something — a fight the army wins that it lost
 before — and the matrix as it stands cannot see that, because it counts objects
 and both houses are still holding.
 
+## The matrix has no fighting in it to measure
+
+The harness now records the trade: `own_lost` and `enemy_lost`, summed off the
+whole census curve, printed as `lost=own:enemy` and written to the history file.
+A composition change is expected to raise the enemy's losses before it raises the
+object count, so this was the reading item 3 needed. It is printed and never
+judged — the keep rule is still the object count, and a test asserts that a better
+trade alone cannot turn a cell from `same` into `better`.
+
+The first measurement with it:
+
+| Faction | Own | Enemy | Lost |
+|---|---|---|---|
+| america | 46 | 46 | 0:0 |
+| russia | 70 | 49 | 0:0 |
+| yuri | 45 | 46 | 0:0 |
+
+Zero in every cell, and the full curves confirm it: every census row on both sides
+is at least as high as the one before it. Over 12000 ticks on Death.mmx neither
+side destroys a single object. Both houses build, both keep building, and the two
+armies never meet in a way that costs anyone anything.
+
+That is the real reason item 3 failed: there was no fight for a range advantage
+to win. It also means the object count is currently measuring the economy and
+nothing else, and that `enemy` is the enemy's economy rather than its army. The
+next step is not another composition rule; it is getting the two armies to meet —
+either by turning attacking back on now that a job can end for all four of the
+design's reasons, or by finding where the opponent's units actually are.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |
