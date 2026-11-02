@@ -311,6 +311,37 @@ armed unit" picker the handoff blamed: an army of one type whose value depends
 entirely on which type the faction's cheapest happens to be. That is item 3 of
 the handoff, untouched.
 
+## Composition by role: the predicate is in, the policy that reads it is not
+
+`Roles::RANGED` now exists: an armed unit whose longest weapon reaches past six
+cells shoots over the front line rather than standing in it. Derived from the
+weapon table, never a type name, and a structure keeps out of it. Its test walks
+every armed type in retail rules and asserts the equivalence, so the predicate
+cannot drift from the data.
+
+The change that would have used it — keep a third of the army ranged, and have
+the next unit fill whichever half is thin — was measured and **reverted**:
+
+| Map | Seed | Own | Verdict |
+|---|---|---|---|
+| Death.mmx | 0x5EED | 46 → 45 | worse |
+| Death.mmx | 19 | 51 → 51 | same (stuck +1) |
+| Death.mmx | 10 | 50 → 50 | same |
+| Barrel.mmx | 0x5EED | 46 → 48 | better |
+| Barrel.mmx | 19 | 46 → 46 | same |
+| Barrel.mmx | 24301 | 46 → 44 | worse |
+
+Three cells worse, one better: under the keep rule that is a revert, and it was
+reverted. The role itself is inert (six of six identical against the baseline),
+so it is committed and the reader is not.
+
+What that result says about the item: quotas alone do not raise the object count.
+A house that spends a third of its budget on longer-ranged, more expensive units
+buys fewer units, and the count it is judged by falls. The next attempt at item 3
+has to show the range is worth something — a fight the army wins that it lost
+before — and the matrix as it stands cannot see that, because it counts objects
+and both houses are still holding.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |

@@ -138,6 +138,15 @@ first, then measure behaviour.
    map and seed, after the Yuri refinery profile bug was fixed (see the end of
    this file). Russia's 24-object lead over the other two is the "cheapest armed
    unit" picker, untouched, and it is what this item is for.
+   **Half of it is done and the half that matters was reverted.** `Roles::RANGED`
+   exists (reach past six cells, from the weapon table), and it is inert: six of
+   six cells identical. The quota that reads it — a third of the army ranged,
+   the next unit filling the thin half — measured three cells worse and one
+   better, so it was reverted under the keep rule. Quotas alone lower the object
+   count, because longer-ranged units cost more and the count is what the matrix
+   judges. Before retrying, find a reading that can see the range paying for
+   itself: the matrix counts objects, and both houses are still holding at 12000
+   ticks, so it cannot.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
    proven; the job is missing.
 5. Per-unit decision reasons in the log (unit 1234: job=defend
