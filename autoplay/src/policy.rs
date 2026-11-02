@@ -345,6 +345,14 @@ impl Policy {
         }
     }
 
+    /// How close to the named cell a unit has to be for its job to count as done.
+    ///
+    /// A column does not arrive in formation: members stop two or three cells apart
+    /// around the cell they were sent to, and each is then five to ten frames short of
+    /// moving. One cell is too tight — the measured case was a squad holding
+    /// (143,98)..(146,99) around Cell((144,96)), reading stuck at ninety frames.
+    const ACHIEVED_CELLS: i32 = 3;
+
     /// Whether the unit has already done what its job asked: it stands on the
     /// cell the job names, within a step.
     ///
@@ -361,7 +369,8 @@ impl Policy {
     fn job_achieved(job: &Job, cell: (u16, u16)) -> bool {
         match job.target {
             Target::Cell(target) => {
-                i32::from(cell.0.abs_diff(target.0)).max(i32::from(cell.1.abs_diff(target.1))) <= 1
+                i32::from(cell.0.abs_diff(target.0)).max(i32::from(cell.1.abs_diff(target.1)))
+                    <= Self::ACHIEVED_CELLS
             }
             // An object target is a thing to keep shooting, and a job with no
             // target is a job with nowhere to be: neither is finished by standing

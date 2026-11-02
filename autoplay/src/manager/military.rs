@@ -165,9 +165,19 @@ impl Military {
         // "the matrix showed no change" cannot tell which one said no. It settled
         // one question already — the army reaches its size and goes, and `seen=0`
         // means there is nothing in sight to go at.
+        // With nothing in sight, a big-enough column marches at the edge of known
+        // ground instead of guarding the base. Without it the army never leaves:
+        // the bases are 116 cells apart, nothing walks between them, so `seen` is
+        // zero on every reading and the assault gate never opens. That is the
+        // deadlock status.md records.
+        let advance = if army && target.is_none() {
+            march_cell(ctx, home, soldiers.first().map_or(home, |unit| unit.cell))
+        } else {
+            None
+        };
         if ctx.tick % 1800 == 0 {
             log::info!(
-                "military: tick={} enabled={} soldiers={} want={} seen={} near={} going={}",
+                "military: tick={} enabled={} soldiers={} want={} seen={} near={} going={} advance={:?}",
                 ctx.tick,
                 ATTACK_ENABLED,
                 soldiers.len(),
@@ -175,17 +185,26 @@ impl Military {
                 seen.len(),
                 near_target,
                 army,
+                advance,
             );
         }
         for unit in soldiers {
-            match (army, target) {
-                (true, Some((entity_id, _))) => out.jobs.push(Proposal {
+            match (army, target, advance) {
+                (true, Some((entity_id, _)), _) => out.jobs.push(Proposal {
                     kind: JobKind::Assault,
                     // An object, not a cell: an attack-move to a cell is a
                     // destination the unit reaches and then stands on, which is
                     // the stale-target failure status.md records.
                     target: Target::Object(entity_id),
                     priority: 60,
+                    actor: Some(unit.entity_id),
+                }),
+                (true, None, Some(cell)) => out.jobs.push(Proposal {
+                    // A march ordered as an assault: an attack-move fights
+                    // whatever it meets on the way instead of walking past it.
+                    kind: JobKind::Assault,
+                    target: Target::Cell(cell),
+                    priority: 55,
                     actor: Some(unit.entity_id),
                 }),
                 _ => out.jobs.push(Proposal {
@@ -208,6 +227,102 @@ impl Military {
         }
     }
 }
+
+/// Where a column with no target should march: an unrevealed cell **on the edge of
+/// ground the house already knows**, inside the playfield, within one march.
+///
+/// Edge of known ground, not "the farthest unrevealed cell", and that is the fix
+/// for the case that killed the previous version. Marching deep into unexplored
+/// terrain picks cells behind walls and water: the last attempt ordered a column
+/// to `Cell((132, 204))`, the column stopped at `(153, 181)` — 23 cells away, a
+/// cell it could not stand on — and stood there for the rest of the match, reading
+/// `stuck=40`. A cell that touches known ground is one a unit standing on the
+/// known ground could have walked to, so the frontier is the only place a blind
+/// march can safely aim.
+///
+/// Ties break by distance from home, preferring the further cell, so the column
+/// keeps opening new ground instead of clearing its own neighbourhood. That was
+/// the previous version's other bug: nearest-from-home marched east while the
+/// enemy held the west.
+fn march_cell(ctx: &Ctx<'_>, home: (u16, u16), from: (u16, u16)) -> Option<(u16, u16)> {
+    let (width, height) = ctx.obs.map_extent();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut best: Option<((u16, u16), i32, i32)> = None;
+    let mut y = 0;
+    while y < height {
+        let mut x = 0;
+        while x < width {
+            if !ctx.obs.is_cell_in_playfield(x, y)
+                || ctx.obs.is_cell_revealed(x, y)
+                || cell_distance(from, (x, y)) > i32::from(MARCH_REACH_CELLS)
+            {
+                x = x.saturating_add(MARCH_SCAN_STEP);
+                continue;
+            }
+            if let Some(edge) = frontier_distance(ctx, x, y) {
+                // A cell right on the known edge is a cell a unit could have
+                // walked to. Rank by how close it is to that edge, then by how far
+                // it takes the column from home.
+                let reach = cell_distance(home, (x, y));
+                let better = match best {
+                    None => true,
+                    Some((_, best_edge, best_reach)) => {
+                        edge < best_edge || (edge == best_edge && reach > best_reach)
+                    }
+                };
+                if better {
+                    best = Some(((x, y), edge, reach));
+                }
+            }
+            x = x.saturating_add(MARCH_SCAN_STEP);
+        }
+        y = y.saturating_add(MARCH_SCAN_STEP);
+    }
+    best.map(|(cell, _, _)| cell)
+}
+
+/// How many steps an unrevealed cell is from the nearest revealed one, up to
+/// [`FRONTIER_SEARCH`]; `None` when no known ground is that close.
+fn frontier_distance(ctx: &Ctx<'_>, x: u16, y: u16) -> Option<i32> {
+    let mut edge = 1;
+    while edge <= FRONTIER_SEARCH {
+        let steps = edge as u16;
+        for dy in 0..=steps {
+            for dx in 0..=steps {
+                if dx.max(dy) != steps {
+                    continue;
+                }
+                for (sx, sy) in [
+                    (i32::from(x) + i32::from(dx), i32::from(y) + i32::from(dy)),
+                    (i32::from(x) + i32::from(dx), i32::from(y) - i32::from(dy)),
+                    (i32::from(x) - i32::from(dx), i32::from(y) + i32::from(dy)),
+                    (i32::from(x) - i32::from(dx), i32::from(y) - i32::from(dy)),
+                ] {
+                    if sx < 0 || sy < 0 {
+                        continue;
+                    }
+                    let (sx, sy) = (sx as u16, sy as u16);
+                    if ctx.obs.is_cell_revealed(sx, sy) {
+                        return Some(edge);
+                    }
+                }
+            }
+        }
+        edge += 1;
+    }
+    None
+}
+
+/// How far the frontier search looks for known ground, in cells.
+const FRONTIER_SEARCH: i32 = 4;
+
+/// How far one march goes, in cells: inside what a march is measured to cover.
+const MARCH_REACH_CELLS: u16 = 18;
+
+/// How coarsely the march scan samples the map, in cells.
+const MARCH_SCAN_STEP: u16 = 4;
 
 /// Chebyshev distance in cells: how far a walk is on this grid.
 fn cell_distance(a: (u16, u16), b: (u16, u16)) -> i32 {
