@@ -160,6 +160,23 @@ impl Military {
         // army is the only thing keeping the base.
         let army =
             ATTACK_ENABLED && soldiers.len() >= ARMY_TO_ATTACK && soldiers.len() >= near_target * 2;
+        // Why the army is or is not going is a reading, not something to infer
+        // from a count that did not move: three separate conditions gate it, and
+        // "the matrix showed no change" cannot tell which one said no. It settled
+        // one question already — the army reaches its size and goes, and `seen=0`
+        // means there is nothing in sight to go at.
+        if ctx.tick % 1800 == 0 {
+            log::info!(
+                "military: tick={} enabled={} soldiers={} want={} seen={} near={} going={}",
+                ctx.tick,
+                ATTACK_ENABLED,
+                soldiers.len(),
+                ARMY_TO_ATTACK,
+                seen.len(),
+                near_target,
+                army,
+            );
+        }
         for unit in soldiers {
             match (army, target) {
                 (true, Some((entity_id, _))) => out.jobs.push(Proposal {
