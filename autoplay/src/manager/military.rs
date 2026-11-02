@@ -6,6 +6,8 @@
 //! size they hold the base. A harvester is armed and is not a soldier, so it is
 //! never given either job.
 
+use std::collections::BTreeMap;
+
 use vera20k_core::rules::object_type::ObjectCategory;
 use vera20k_core::sim::control::intent::Intent;
 use vera20k_core::sim::control::observation::EnemyEntity;
@@ -15,6 +17,14 @@ use crate::job::{Proposal, Target};
 use crate::manager::{Ctx, Demands, Manager};
 use crate::profile::{Roles, UnitProfile};
 use crate::registry::JobKind;
+
+/// Whether the unit the house buys is the one that hurts what it can see,
+/// or the cheapest armed unit it can build.
+///
+/// The flag exists so both answers can be measured on the same build. The
+/// cheapest picker is what the policy used from the start, and it is why every
+/// army was one type.
+const THREAT_AWARE_PRODUCTION: bool = true;
 
 /// How many armed units the house wants before it attacks.
 const ARMY_TO_ATTACK: usize = 30;
@@ -68,8 +78,29 @@ impl Military {
         if ctx.obs.credits() < UNIT_SPEND_FLOOR + reserve {
             return;
         }
-        let mut infantry: Option<&UnitProfile> = None;
-        let mut vehicle: Option<&UnitProfile> = None;
+        // What the house is fighting, in armor classes.
+        //
+        // The picker used to be "the cheapest armed unit", which quietly means
+        // "each faction's best-value unit": every army ended up one type, and
+        // the factions differed by twenty-five objects because their cheap
+        // units were worth different amounts. The unit a house buys is the one
+        // that hurts what is in front of it, per credit.
+        //
+        // The flag is here so the two pickers can be measured against each
+        // other on the same build rather than argued about.
+        let mut threat: BTreeMap<usize, usize> = BTreeMap::new();
+        for enemy in ctx.obs.visible_enemy_entities() {
+            if let Some(profile) = ctx
+                .obs
+                .object_type(ctx.rules, enemy.type_id)
+                .and_then(|ty| ctx.profiles.get(&ty.id))
+            {
+                *threat.entry(profile.armor).or_default() += 1;
+            }
+        }
+        let mut infantry: Option<(&UnitProfile, i64)> = None;
+        let mut vehicle: Option<(&UnitProfile, i64)> = None;
+        let threat_picker = THREAT_AWARE_PRODUCTION;
         for ty in ctx.rules.all_objects() {
             if ty.category == ObjectCategory::Building {
                 continue;
@@ -83,13 +114,18 @@ impl Military {
             if ctx.obs.can_build(ctx.rules, ty, false) != CanBuild::Yes {
                 continue;
             }
+            let score = if threat_picker {
+                Self::threat_score(profile, &threat)
+            } else {
+                0
+            };
             match ty.category {
-                ObjectCategory::Infantry => infantry = Self::cheaper(infantry, profile),
-                ObjectCategory::Vehicle => vehicle = Self::cheaper(vehicle, profile),
+                ObjectCategory::Infantry => infantry = Self::better(infantry, profile, score),
+                ObjectCategory::Vehicle => vehicle = Self::better(vehicle, profile, score),
                 _ => {}
             }
         }
-        for want in [vehicle, infantry].into_iter().flatten() {
+        for want in [vehicle, infantry].into_iter().flatten().map(|(profile, _)| profile) {
             let Some(type_id) = ctx.obs.type_id(&want.id) else {
                 continue;
             };
@@ -98,6 +134,47 @@ impl Military {
             }
             out.intents.push(Intent::QueueProduction { type_id });
             return;
+        }
+    }
+
+    /// The damage this type does per credit against the armor the house can
+    /// see, in permille. Zero when nothing is in sight, which leaves the
+    /// cheapest type as the answer.
+    fn threat_score(profile: &UnitProfile, threat: &BTreeMap<usize, usize>) -> i64 {
+        let total: usize = threat.values().sum();
+        if total == 0 {
+            return 0;
+        }
+        let mut weighted = 0_i64;
+        for (armor, count) in threat {
+            let dps = profile
+                .best_weapon_against(*armor)
+                .map_or(0, |weapon| weapon.dps_permille[*armor]);
+            weighted += dps * (*count as i64);
+        }
+        let average = weighted / total as i64;
+        // Per credit, with a thousand so the division keeps its precision.
+        average * 1_000 / i64::from(profile.cost).max(1)
+    }
+
+    /// The better of two candidates: more damage per credit first, and the
+    /// cheaper one when they are equal.
+    fn better<'a>(
+        current: Option<(&'a UnitProfile, i64)>,
+        candidate: &'a UnitProfile,
+        score: i64,
+    ) -> Option<(&'a UnitProfile, i64)> {
+        match current {
+            None => Some((candidate, score)),
+            Some((best, best_score)) => {
+                if score > best_score
+                    || (score == best_score && (candidate.cost, &candidate.id) < (best.cost, &best.id))
+                {
+                    Some((candidate, score))
+                } else {
+                    Some((best, best_score))
+                }
+            }
         }
     }
 
@@ -221,15 +298,6 @@ impl Military {
         }
     }
 
-    fn cheaper<'a>(
-        current: Option<&'a UnitProfile>,
-        candidate: &'a UnitProfile,
-    ) -> Option<&'a UnitProfile> {
-        match current {
-            Some(best) if (best.cost, &best.id) <= (candidate.cost, &candidate.id) => Some(best),
-            _ => Some(candidate),
-        }
-    }
 }
 
 /// Where a column with no target should march: an unrevealed cell **on the edge of

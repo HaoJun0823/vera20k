@@ -93,6 +93,10 @@ pub struct Stats {
     pub fallback: usize,
     /// Units that have not changed cell for six seconds while holding a job.
     pub stuck: usize,
+    /// What the house has to fight with, in hit points.
+    pub army: i32,
+    /// What it can see of the enemy, in the same measure.
+    pub enemy: i32,
 }
 
 pub struct Policy {
@@ -597,6 +601,33 @@ impl Policy {
             self.stats.issued += 1;
         }
     }
+
+    /// What one object is worth in a fight, in hit points.
+    ///
+    /// The rules' own measure, so both sides are scored the same way: a
+    /// Grizzly's strength against a conscript's is close to how many of the
+    /// latter the former is worth. A type with no weapon is worth nothing here
+    /// whatever it survives - a refinery is ground the army stands on, not a
+    /// threat it has to outfight, and that is what keeps the enemy's economy
+    /// out of the comparison.
+    fn fight_value(
+        &self,
+        obs: &Observation<'_>,
+        rules: &RuleSet,
+        entity_id: u64,
+        type_id: vera20k_core::sim::intern::InternedId,
+    ) -> i32 {
+        let Some(profile) = obs
+            .object_type(rules, type_id)
+            .and_then(|ty| self.profiles.get(&ty.id))
+        else {
+            return 0;
+        };
+        if !profile.roles.contains(Roles::ARMED) {
+            return 0;
+        }
+        obs.health(entity_id).unwrap_or(0).max(0)
+    }
 }
 
 impl Brain for Policy {
@@ -738,15 +769,23 @@ impl Brain for Policy {
             // was told; a unit guarding the post it stands at likewise. Counting
             // those is what made a run that destroyed seven enemy objects read
             // `stuck=40` and lose to a build that never left its base.
-            let achieved = self
-                .jobs
-                .get(unit.entity_id)
-                .is_some_and(|job| Self::job_achieved(job, unit.cell));
+            let job = self.jobs.get(unit.entity_id);
+            let achieved = job.is_some_and(|job| Self::job_achieved(job, unit.cell));
             let firing = self.hitting.contains(&unit.entity_id);
+            // A truck waiting its turn at the refinery is at work: the engine
+            // hands it Enter and Unload for the dock, and the dock serves one
+            // truck at a time. Two trucks on one refinery means one of them
+            // waits, and the waiting one is not stuck.
+            let waiting = job.is_some_and(|job| {
+                matches!(job.kind, JobKind::Harvest | JobKind::ReturnOre)
+                    && (unit.mission == MissionId::from_known(MissionType::Enter)
+                        || unit.mission == MissionId::from_known(MissionType::Unload))
+            });
             let held = !firing
                 && !achieved
+                && !waiting
                 && !filling.contains(&unit.entity_id)
-                && self.jobs.get(unit.entity_id).is_some_and(|job| {
+                && job.is_some_and(|job| {
                     matches!(
                         job.kind,
                         JobKind::Harvest
@@ -765,7 +804,7 @@ impl Brain for Policy {
                 self.stats.stuck += 1;
                 // "A unit did nothing" has to be actionable, so the reading
                 // names the unit, its job and where it stands still.
-                if let Some(job) = self.jobs.get(unit.entity_id) {
+                if let Some(job) = job {
                     stuck.push(format!(
                         "{} id={} job={:?} target={:?} cell={:?} still={}",
                         obs.object_type(rules, unit.type_id)
@@ -812,6 +851,21 @@ impl Brain for Policy {
         if tick % 600 == 0 && !stuck.is_empty() {
             log::info!("policy v2: stuck at {tick}: {:?}", stuck);
         }
+        // What the house has to fight with, and what it can see of the enemy,
+        // in the same measure. The judge needs a strength reading: an object
+        // count cannot tell a house with thirty tanks from a house with thirty
+        // rifles, and the enemy grows when nothing meets it.
+        let army = obs
+            .own_entities()
+            .map(|unit| self.fight_value(obs, rules, unit.entity_id, unit.type_id))
+            .sum::<i32>();
+        let enemy = obs
+            .visible_enemy_entities()
+            .map(|enemy| self.fight_value(obs, rules, enemy.entity_id, enemy.type_id))
+            .sum::<i32>();
+        self.stats.army = army;
+        self.stats.enemy = enemy;
+
         if tick % 600 == 0 {
             // Every unit, the job it holds and how long it has stood where it
             // stands. This is the report a play test needs: "unit 1234 is
@@ -840,7 +894,7 @@ impl Brain for Policy {
                 );
             }
             log::info!(
-                "policy v2: tick={tick} proposals={} intents={} assigned={} issued={} unowned={} refused={} finished={} stalled={} ineffective={} cooled={} fallback={} stuck={}",
+                "policy v2: tick={tick} proposals={} intents={} assigned={} issued={} unowned={} refused={} finished={} stalled={} ineffective={} cooled={} fallback={} stuck={} army={} epoints={}",
                 self.stats.proposals,
                 self.stats.intents,
                 self.stats.assigned,
@@ -852,7 +906,9 @@ impl Brain for Policy {
                 self.stats.ineffective,
                 self.stats.cooled,
                 self.stats.fallback,
-                self.stats.stuck
+                self.stats.stuck,
+                self.stats.army,
+                self.stats.enemy
             );
         }
     }

@@ -63,6 +63,11 @@ STANDING = re.compile(r"(\d+) standing")
 CENSUS = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$", re.M)
 UNOWNED = re.compile(r"unowned=(\d+)")
 STUCK = re.compile(r"stuck=(\d+)")
+# The policy's own strength reading: what the house has to fight with, and what
+# it can see of the enemy, in hit points. An object count cannot tell thirty
+# tanks from thirty rifles, and the enemy grows when nothing meets it.
+ARMY = re.compile(r"army=(\d+)")
+EPOINTS = re.compile(r"epoints=(\d+)")
 # The opening a run starts from: without it two results are not comparable.
 START = re.compile(
     r"start: map=(\S+) country=(\S+) credits=(-?\d+) unit_count=(-?\d+) "
@@ -87,6 +92,8 @@ class MatchReport:
     enemy: int = 0
     unowned: int = 0
     stuck: int = 0
+    army: int = 0
+    epoints: int = 0
     country: str = ""
     start_credits: int = 0
     start_own: int = 0
@@ -162,6 +169,10 @@ def parse_report(seed: str, text: str, seconds: float) -> MatchReport:
     report.unowned = int(UNOWNED.findall(text)[-1]) if UNOWNED.findall(text) else 0
     readings = STUCK.findall(text)
     report.stuck = int(readings[-1]) if readings else 0
+    army = ARMY.findall(text)
+    report.army = int(army[-1]) if army else 0
+    epoints = EPOINTS.findall(text)
+    report.epoints = int(epoints[-1]) if epoints else 0
     report.yards = max((int(value) for value in re.findall(r"yard=(\d+)", text)), default=0)
     report.walls = max((int(value) for value in STANDING.findall(text)), default=0)
     return report
@@ -201,6 +212,8 @@ def append_history(reports: list[MatchReport], args, path: Path) -> None:
                 "enemy_lost": report.enemy_lost,
                 "unowned": report.unowned,
                 "stuck": report.stuck,
+                "army": report.army,
+                "epoints": report.epoints,
                 "yards": report.yards,
                 "walls": report.walls,
                 "start_credits": report.start_credits,
@@ -271,11 +284,16 @@ def judge(before: dict, after: dict) -> tuple[str, list[str], list[str]]:
     worse: list[str] = []
     better: list[str] = []
 
-    own_before, own_after = int(before.get("own", 0)), int(after.get("own", 0))
-    if own_after < own_before:
-        worse.append(f"own {own_before}->{own_after}")
-    elif own_after > own_before:
-        better.append(f"own {own_before}->{own_after}")
+    # The house's fighting strength decides, not its object count: thirty
+    # tanks and thirty rifles are thirty objects and not the same army. The
+    # count is printed as context. A row without the reading (an older file)
+    # is not judged on it.
+    if "army" in before and "army" in after:
+        army_before, army_after = int(before.get("army", 0)), int(after.get("army", 0))
+        if army_after < army_before:
+            worse.append(f"army {army_before}->{army_after}")
+        elif army_after > army_before:
+            better.append(f"army {army_before}->{army_after}")
 
     for field in ("unowned", "stuck"):
         was, now = int(before.get(field, 0)), int(after.get(field, 0))
@@ -342,7 +360,7 @@ def compare_histories(baseline: Path, current: Path) -> None:
 
     header = (
         f"{'map':<14}{'country':<10}{'seed':<7}{'ticks':<7}{'brain':<7}{'opp':<5}"
-        f"{'own':<12}{'enemy':<12}{'lost':<16}{'unowned':<10}{'stuck':<9}{'yards':<9}"
+        f"{'own':<12}{'army':<12}{'enemy':<12}{'lost':<16}{'unowned':<10}{'stuck':<9}{'yards':<9}"
         f"{'walls':<9}verdict"
     )
     print("", flush=True)
@@ -374,7 +392,8 @@ def compare_histories(baseline: Path, current: Path) -> None:
         counts[verdict] += 1
         print(
             f"{prefix}"
-            f"{arrow(was, now, 'own'):<12}{arrow(was, now, 'enemy'):<12}"
+            f"{arrow(was, now, 'own'):<12}{arrow(was, now, 'army'):<12}"
+            f"{arrow(was, now, 'enemy'):<12}"
             f"{lost_arrow(was, now):<16}"
             f"{arrow(was, now, 'unowned'):<10}{arrow(was, now, 'stuck'):<9}"
             f"{arrow(was, now, 'yards'):<9}{arrow(was, now, 'walls'):<9}{verdict}",
