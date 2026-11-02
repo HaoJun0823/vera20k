@@ -813,3 +813,17 @@ house's strength is a third of what the enemy has, and the enemy never has to
 come to it. What the lane says is that the house now survives what it could
 not survive before (the same lane read 3:0 on one seed before the campaign
 loop, and 40 own on this seed before the two trucks).
+
+## The money belongs to the army, not to the third refinery
+
+Keeping a refinery's cost in the bank (2200 while the house has fewer than
+three) was measured on both lanes and rejected on both:
+
+- 1v1, six cells: two better, four worse, the worst 6153 -> 5483.
+- 1v7, three cells: three worse, and one seed that survived now loses
+  (4503 -> 2973, lost at 11053).
+
+So the army's money buys units, and the house's third refinery is not worth
+the units it would cost. The income ceiling is real, but it is not the first
+thing to fix: a house that cannot replace its losses has no economy to speak
+of.
