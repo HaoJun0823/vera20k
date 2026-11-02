@@ -24,7 +24,16 @@ use crate::registry::JobKind;
 /// gated on the odds in front of it (`soldiers >= 2 * near`), because a house of
 /// twenty-three that waits for thirty while five raiders burn its base never
 /// fights at all — the reading the matrix took on Death.mmx seed 24301.
-const ARMY_TO_MARCH: usize = 30;
+///
+/// Twenty, measured at 24000 ticks against thirty on the same six cells: the
+/// house's own count averages 57 against 51, its army 7118 hit points against
+/// 6330, and the trade 67 lost for 44 killed against 89 lost for 31. Death.mmx is
+/// where it shows — seed 10 goes from `own 31, lost 35:2` to `own 50, lost
+/// 18:16` — and Barrel.mmx prefers the larger column on object count, which is
+/// why this is recorded as a trade rather than a win. A column of thirty forms
+/// around tick 10000 on the current income, so it spends most of a match at its
+/// post.
+const ARMY_TO_MARCH: usize = 20;
 
 /// The fewest units that count as a squad when engaging.
 ///

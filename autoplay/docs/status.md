@@ -1064,3 +1064,31 @@ belongs to the army", above), so the channel was reverted with it rather than
 left in place for a fourth try. If income is raised again it has to come from
 something that pays for itself without idling the wallet — a cheaper truck, a
 closer ore field, or ore that is worth more per trip.
+
+## The column is twenty, and the trade is the reading
+
+The march gate wanted thirty armed units. On the current income that size forms
+around tick 10000, so a column spent most of a twenty-minute match standing at
+its post; Death.mmx seed 10 read `own 31, lost 35:2` at tick 24000 — it lost
+thirty-five objects to a fight it never joined.
+
+Twenty, over 24000 ticks, same six cells:
+
+| Map | Seed | own | army | lost |
+|---|---|---|---|---|
+| Death.mmx | 24301 | 65 -> 80 | 7509 -> 10969 | 3:4 -> 0:4 |
+| Death.mmx | 19 | 41 -> 69 | 5716 -> 9401 | 22:6 -> 12:3 |
+| Death.mmx | 10 | 31 -> 50 | 3396 -> 6436 | 35:2 -> 18:16 |
+| Barrel.mmx | 24301 | 51 -> 49 | 6376 -> 5715 | 11:12 -> 8:1 |
+| Barrel.mmx | 19 | 54 -> 39 | 6406 -> 4045 | 16:1 -> 19:7 |
+| Barrel.mmx | 10 | 63 -> 56 | 8577 -> 6140 | 2:6 -> 10:13 |
+
+Averages: own 51 -> 57, army 6330 -> 7118, 89 lost for 31 killed -> 67 lost for
+44 killed. Every one of the six still times out at 24000 rather than falling,
+which is the survival reading that matters most.
+
+It is a trade, not a win: `Death.mmx` gains enormously and `Barrel.mmx` loses on
+object count, where the larger column holds ground the smaller one gives up. The
+constant is therefore recorded with both sides rather than declared correct — the
+next attempt at it should make the size a property of the map (how far the enemy
+is) instead of a number that has to serve both.
