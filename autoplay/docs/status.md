@@ -935,3 +935,49 @@ spending everything it has either way; the mix is simply more expensive per
 object. That is a real cost of this change and is recorded rather than argued
 away: the 1v1 matrix is the lane it was measured on, and the 1v7 lane now has a
 number to beat.
+
+## The army would not fight unless it had thirty units
+
+The gate that commits the army was one number: `soldiers.len() >= ARMY_TO_ATTACK`
+(30) **and** `soldiers >= 2 * near`, whatever the enemy in front of it was doing.
+On Death.mmx seed 24301 that read, on every one of the twenty readings:
+
+    military: tick=10800 enabled=true soldiers=23 want=30 seen=5 near=5 going=false
+
+Twenty-three units, five enemies in sight, and the house holding because it had
+not reached thirty. `epoints` (the enemy's strength inside the house's own
+sight) climbed from 0 to 1750 over the last three thousand frames: the raiders
+were eating the base while its army watched.
+
+The two questions are separate, and now they have two constants:
+
+- **Engaging** what the house can see is gated on the odds in front of it —
+  `soldiers >= 2 * near` and a floor of four, which is the smallest group that
+  can trade with a raid. An absolute size has no business here: a house of
+  twenty-three that waits for thirty never fights.
+- **Marching** into ground with nothing in sight still wants a column, and keeps
+  the thirty (`ARMY_TO_MARCH`). A squad that walks off the map alone is a squad
+  the house loses.
+
+Measured against `eval-v2-fixed.jsonl`, six cells:
+
+| Map | Seed | own | enemy | lost | army |
+|---|---|---|---|---|---|
+| Barrel.mmx | 10 | 43 -> 47 | 52 -> 38 | 0:0 -> 0:1 | 6975 -> 6908 |
+| Barrel.mmx | 19 | 42 -> 47 | 56 -> 52 | 0:0 | 7075 -> 7175 |
+| Barrel.mmx | 24301 | 31 -> 41 | 43 -> 44 | 5:1 -> 0:0 | 3478 -> 6521 |
+| Death.mmx | 10 | 43 -> 49 | 46 -> 43 | 0:0 | 7075 -> 7175 |
+| Death.mmx | 19 | 44 -> 48 | 42 -> 33 | 0:0 -> 0:4 | 5658 -> 7211 |
+| Death.mmx | 24301 | 41 -> 39 | 47 -> 40 | 0:0 -> 0:2 | 6775 -> 5991 |
+
+The house's object count rises in five of six, the enemy's falls in five of six,
+and the army kills where it killed nothing. The cell the change was aimed at —
+Death.mmx 24301 — goes from `own 29, lost 5:1` to `own 39, lost 0:2`.
+
+The harness still marks four of the six `worse`, because `stuck` rises by one in
+three cells and its keep rule counts that. Every one of those units is a `CMIN`
+harvester on `Harvest` pausing at a dock or an ore field (`still=90..195`, and
+the counter resets between readings) — the residual this file already records
+above, not the army. The reading that would settle it is the spec's H2, "holds a
+*movement* job and does not move": a truck in a harvest cycle is not the failure
+H2 describes, and the harness does not make that distinction yet.

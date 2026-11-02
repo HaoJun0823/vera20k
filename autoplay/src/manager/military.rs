@@ -7,7 +7,7 @@
 //! never given either job.
 
 use vera20k_core::rules::object_type::{ObjectCategory, ObjectType};
-use vera20k_core::rules::unit_role::{ROLES, Role};
+use vera20k_core::rules::unit_role::ROLES;
 use vera20k_core::sim::control::intent::Intent;
 use vera20k_core::sim::control::observation::EnemyEntity;
 use vera20k_core::sim::production::CanBuild;
@@ -17,8 +17,21 @@ use crate::manager::{Ctx, Demands, Manager};
 use crate::profile::{Roles, UnitProfile};
 use crate::registry::JobKind;
 
-/// How many armed units the house wants before it attacks.
-const ARMY_TO_ATTACK: usize = 30;
+/// How big a column has to be before it marches into ground with nothing in
+/// sight.
+///
+/// This is the only absolute size left. Engaging a target the house can see is
+/// gated on the odds in front of it (`soldiers >= 2 * near`), because a house of
+/// twenty-three that waits for thirty while five raiders burn its base never
+/// fights at all — the reading the matrix took on Death.mmx seed 24301.
+const ARMY_TO_MARCH: usize = 30;
+
+/// The fewest units that count as a squad when engaging.
+///
+/// One rifleman is not a fight, and four is the smallest group that can trade
+/// with a raid without being picked off one at a time. It never binds in
+/// practice: the odds gate below it already asks for twice the enemy's number.
+const ENGAGE_FLOOR: usize = 4;
 
 /// Whether the army attacks at all.
 ///
@@ -336,56 +349,65 @@ impl Military {
         });
         // Two to one, not three to two: an even fight is a lost army, and the
         // army is the only thing keeping the base.
-        let army =
-            ATTACK_ENABLED && soldiers.len() >= ARMY_TO_ATTACK && soldiers.len() >= near_target * 2;
-        // Why the army is or is not going is a reading, not something to infer
-        // from a count that did not move: three separate conditions gate it, and
-        // "the matrix showed no change" cannot tell which one said no. It settled
-        // one question already — the army reaches its size and goes, and `seen=0`
-        // means there is nothing in sight to go at.
+        //
+        // The two halves are separate questions. **Engaging** a target the house
+        // can see is gated on the odds in front of it, never on an absolute size:
+        // a house of twenty-three that waits for thirty while five raiders burn
+        // its base is a house that never fights at all, and that is exactly what
+        // the matrix measured (Death.mmx 24301: `soldiers=23 want=30 going=false`
+        // on every reading while `epoints` climbed). **Marching** into ground
+        // with nothing in sight is the other question, and that one does want a
+        // column: a squad that walks off the map alone is a squad the house
+        // loses.
+        let near = near_target.max(1);
+        let engage = ATTACK_ENABLED
+            && target.is_some()
+            && soldiers.len() >= near * 2
+            && soldiers.len() >= ENGAGE_FLOOR;
+        let march = ATTACK_ENABLED && target.is_none() && soldiers.len() >= ARMY_TO_MARCH;
         // With nothing in sight, a big-enough column marches at the edge of known
         // ground instead of guarding the base. Without it the army never leaves:
         // the bases are 116 cells apart, nothing walks between them, so `seen` is
         // zero on every reading and the assault gate never opens. That is the
         // deadlock status.md records.
-        let advance = if army && target.is_none() {
+        let advance = if march {
             march_cell(ctx, home, soldiers.first().map_or(home, |unit| unit.cell))
         } else {
             None
         };
+        // What the army is to do this term, if anything: the object a player's
+        // click would name, the frontier cell a blind march takes, or nothing.
+        let order = match (engage, target, advance) {
+            (true, Some((entity_id, _)), _) => Some(Target::Object(entity_id)),
+            (true, None, Some(cell)) => Some(Target::Cell(cell)),
+            _ => None,
+        };
         if ctx.tick % 1800 == 0 {
             log::info!(
-                "military: tick={} enabled={} soldiers={} want={} seen={} near={} going={} advance={:?}",
+                "military: tick={} enabled={} soldiers={} march_at={} seen={} near={} engage={} march={} order={:?}",
                 ctx.tick,
                 ATTACK_ENABLED,
                 soldiers.len(),
-                ARMY_TO_ATTACK,
+                ARMY_TO_MARCH,
                 seen.len(),
                 near_target,
-                army,
-                advance,
+                engage,
+                march,
+                order,
             );
         }
         for unit in soldiers {
-            match (army, target, advance) {
-                (true, Some((entity_id, _)), _) => out.jobs.push(Proposal {
+            match order {
+                // An object, not a cell: an attack-move to a cell is a
+                // destination the unit reaches and then stands on, which is the
+                // stale-target failure status.md records.
+                Some(target) => out.jobs.push(Proposal {
                     kind: JobKind::Assault,
-                    // An object, not a cell: an attack-move to a cell is a
-                    // destination the unit reaches and then stands on, which is
-                    // the stale-target failure status.md records.
-                    target: Target::Object(entity_id),
-                    priority: 60,
+                    target,
+                    priority: if engage { 60 } else { 55 },
                     actor: Some(unit.entity_id),
                 }),
-                (true, None, Some(cell)) => out.jobs.push(Proposal {
-                    // A march ordered as an assault: an attack-move fights
-                    // whatever it meets on the way instead of walking past it.
-                    kind: JobKind::Assault,
-                    target: Target::Cell(cell),
-                    priority: 55,
-                    actor: Some(unit.entity_id),
-                }),
-                _ => out.jobs.push(Proposal {
+                None => out.jobs.push(Proposal {
                     kind: JobKind::Defend,
                     target: Target::Cell(home),
                     priority: 20,
@@ -530,7 +552,7 @@ fn shortfall_of(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vera20k_core::rules::unit_role::RoleTable;
+    use vera20k_core::rules::unit_role::{Role, RoleTable};
 
     fn retail() -> Option<vera20k_core::rules::ruleset::RuleSet> {
         Some(vera20k_core::rules::retail_ini_fixture::retail_battle_rules()?.rules)
