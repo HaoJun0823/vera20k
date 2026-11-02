@@ -224,6 +224,19 @@ first, then measure behaviour.
   in sight, the assault should be a march towards ground the house has not seen
   rather than a guard order on the base. The judging reading is `seen` becoming
   non-zero at all, on any term of any match.
+- **Tried, and it works.** Marching a big-enough army at the unrevealed cell
+  *farthest from home* (the nearest-first version walked the wrong way: east to
+  `Cell((184,100))` while the enemy held the west) produced the first real
+  engagement in this whole effort: over 12000 ticks on Death.mmx seed 0x5EED the
+  column walked about sixty cells, from (169,91) to (152,151), and **destroyed
+  seven enemy objects** (`lost 0:0 → 0:7`, enemy 46 → 36) at a cost of two of its
+  own. It was reverted anyway — four of six cells worse — but two of those four are
+  `stuck=40`, which is the ladder complaining, not the army failing.
+  **The next attempt should keep the march and finish the ladder around it.** What
+  a column does when it arrives and finds nothing is unwritten: it is re-decided
+  every term, so it neither holds the ground it took nor marches on from it. Add
+  that — arrive, keep the cell, send the next march from there — and the same
+  design should read clean.
 4. Breach and transport jobs, which unlock the two hard maps. Boarding itself is
    proven; the job is missing.
 5. Per-unit decision reasons in the log (unit 1234: job=defend

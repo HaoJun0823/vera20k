@@ -495,6 +495,45 @@ march towards ground the house has not seen, not a guard order. That is the same
 `sight` the scouts were reaching for, applied to the army instead of to one unit,
 and the reading that judges it is `seen` becoming non-zero at all.
 
+## Closing the deadlock: the army marched, and killed seven
+
+The deadlock above has an obvious escape, and this round tried it: with no enemy
+in sight, a waiting army that is big enough marches towards unseen ground instead
+of guarding the base. The target is the unrevealed cell *farthest from home* that
+is inside the playfield and within one march of the army.
+
+The first version preferred the unrevealed cell *nearest* home, and that is the
+side away from the enemy on this map: the column marched to `Cell((184, 100))`,
+seventeen cells east of a base at (169, 91), while the enemy held (70, 157) to the
+west. `seen` stayed zero for the whole match. Farthest-from-home flipped the
+direction and the army met the enemy.
+
+Measured, Death.mmx seed 0x5EED, 12000 ticks, with the march and an arrival ending
+so a column does not stand on its destination holding an assault forever:
+
+| Reading | Value |
+|---|---|
+| own | 46 → 44 |
+| enemy | 46 → **36** |
+| lost | 0:0 → **0:7** |
+| stuck | 0 → 5 |
+
+**Seven enemy objects destroyed**, by an army that had never left its base. The
+column walked about sixty cells — from (169, 91) to (152, 151) — and kept fighting
+on arrival. This is the first time any change in this work produced a real
+engagement.
+
+It was still reverted: four of six cells worse. Two of them are `stuck` at 40,
+which is the reading saying something rather than the army being stuck — a column
+that arrives, fights, and is then re-tasked every term without a rule for "I am
+already where you sent me". The other two lose one to three objects while killing
+six to nine, which is a trade, not a regression.
+
+So the mechanism is proven and the ladder around it is not written yet. The next
+attempt should keep the march and add what a column does when it arrives and finds
+nothing: hold that ground and send the next march from there, rather than being
+re-decided every term.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |
