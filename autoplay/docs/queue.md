@@ -1,133 +1,243 @@
 # The work queue
 
-Reorganised on 2026-11-02 after the v2 policy reached a measurable state. One
-line per item, with the reading that accepts it. The detailed chronicle is in
-status.md; the design is in design.md; the acceptance criteria are in spec.md.
+Audited against `spec.md` and `G:/Documents/autoplay-v2.txt` on 2026-11-03. One
+line per item, with the reading that accepts it and its real state. The chronicle
+is status.md; the design is design.md; the acceptance criteria are spec.md.
+
+**Read the state column as a fact, not an intention.** `DONE` means a measured
+reading exists. `PARTLY` means code exists and the spec's judgement does not
+hold. `STUB` means the manager is an empty `propose` — the file exists so the
+registry has an owner, and it decides nothing. `NOT STARTED` means neither.
+
+The single number that governs this page: **of the four managers, two decide
+nothing.** `manager/build.rs` (10 lines) and `manager/abilities.rs` (9 lines) are
+stubs. Everything the spec asks about walls, placement, repairs, transports,
+capture, infiltration, garrisons and superweapons belongs to them.
 
 ## Where the work stands
 
-Measured, retail YR, hard computer, six-cell matrix (Death.mmx and Barrel.mmx,
-seeds 0x5EED / 19 / 10, 12000 ticks), the flag off:
+Measured on the current HEAD, retail YR, hard computer, six-cell matrix
+(Death.mmx and Barrel.mmx, seeds 0x5EED / 19 / 10, 12000 ticks):
 
 | Reading | Value |
 |---|---|
-| own (Death / Barrel) | 46 / 51 / 50 and 46 / 46 / 50 |
-| enemy | 45 / 45 / 46 and 41 / 39 / 49 |
+| own | 46-50 per cell; 24000 ticks reaches 67 |
+| army (hit points) | ~7100 per cell and rising to 24000 |
 | unowned | 0 in every cell |
-| stuck | 0 in every cell (since the cargo-aware counter) |
-| lost | 0:0 in every cell: neither side loses an object |
+| stuck | 0-3, harvesters only |
+| lost | 0:0 on most cells, 0:2-0:8 where the column fights |
 | 24000 ticks | six of six survive |
-| 1v7, 12000 ticks | two of three survive |
+| 1v7, 12000 ticks | three of three survive |
+| 1v7, 24000 ticks | lost |
 
-The policy builds an economy, keeps the harvesters working, and holds the army
-at the base. It does not attack, and nothing fights: the loss counter is zero
-everywhere, which is why an object count cannot tell a strong policy from a
-hiding one.
+The house builds an economy, keeps two refineries and four defences, runs
+twenty-plus harvesters, composes a four-to-five-type army from the role model, and
+marches a column that fights in the field. It does not reach the enemy base, does
+not build walls, does not capture, does not transport, does not use a superweapon.
 
-**Since then: the army campaigns.** It goes out, fights, and a unit that has
-finished its fight far from home walks back before it is given another job.
-With the flag on, the lane kills five enemy objects on Death.mmx seed 19 and
-two on seed 24301, and the base no longer falls (Barrel.mmx 19 own 37 -> 45).
+**Observed in one 24000-tick match (audit1.jsonl) — the capability count is zero
+for every one of these:**
 
-**And the judge reads strength, not a count.** The house's fighting strength in
-hit points is the reading now, the unit picker buys the unit with the most
-damage per credit against the armor it can see, and two trucks on a refinery
-put the second refinery and the first defences on the map. The house's strength
-over the six cells: 6657 -> 7092 on average, four cells up by six to
-thirty-four percent, two cells down by six and seventeen percent (the same seed
-on both maps).
+| Command class | Uses in 24000 ticks |
+|---|---|
+| `Capture` | 0 |
+| `Transport` | 0 |
+| `LaunchSuperWeapon` | 0 |
+| `Garrison` | 0 |
+| `Repair` | 0 |
+| wall placement | 0 |
 
-## M1: the build you can play
+That table is the honest measure of how much of the wish list is live.
 
-The target for the next build, and what "done" means for it:
+## The four managers, and what each owns
 
-1. **A playable build.** fast profile, client, VERA20K_BRAIN=v2 selects the
-   new policy, the retail policy stays the default.
-2. **A visible opening.** The house deploys its maker, raises a plant, a
-   refinery, a barracks and a war factory, places them, and the harvesters
-   work. The unit count should reach the high forties by 12000 ticks, not the
-   thirties.
-3. **Every unit explainable.** The log names each unit, its job and how long
-   it has stood still. A unit that stands still has a line that says why.
-4. **The three switches real.** Production off stops building, forces off stops
-   the army, abilities off stops the superweapons. The board gates the
-   commands; the HUD line names what is on.
-5. **The army does not throw the base away.** The attack flag stays off until
-   the column can come back (item B1).
+| Manager | File | Lines | Decides |
+|---|---|---|---|
+| Economy | manager/economy.rs | 305 | build order, harvesters, refineries, power, defences |
+| Military | manager/military.rs | 713 | unit composition, column, march, engage, defend |
+| Build | manager/build.rs | 10 | **nothing (stub)** |
+| Abilities | manager/abilities.rs | 9 | **nothing (stub)** |
 
-Acceptance for M1: the client runs, the opening is visible in one match, and
-the log answers "what is every unit doing" without reading the code.
+Of the fourteen `JobKind`s, the policy can only ever issue five: `Deploy`,
+`Harvest`, `Assault`, `Defend` from the two live managers, and `ReturnHome`, which
+`policy.rs` proposes itself for a unit whose fight is over far from home. The
+remaining nine — `Repair`, `Capture`, `Garrison`, `Breach`, `Scout`, `Transport`,
+`Retreat`, `ReturnOre` — are declared, registered, and never proposed by anyone.
 
-## The queue
+## Reconciliation against the wish list
 
-### A. Visibility (cheap, and every later item depends on it)
+Grouped by the headings in `G:/Documents/autoplay-v2.txt`, so it can be read side
+by side with it.
 
-| Item | Work | Accepts when |
+### 建造基地 (base building)
+
+| Want | State | Evidence |
 |---|---|---|
-| A1 | Per-unit decision log: id, type, job, target, standing frames | done (this branch) |
-| A2 | The compare tool prints both commits and marks a mixed comparison | the diff names the code it compared |
-| A3 | The matrix runs two lanes: the flag off (baseline) and the flag on (experiment) | the army branch has a live reading every run |
-| A4 | A page for the player: keys, switches, log fields, what to look for | playing-v2.md exists |
+| 跨国家生产能力 | NOT STARTED | needs `Capture`; zero captures in 24000 ticks |
+| 分基地 (MCV) | NOT STARTED | one yard, never a second |
+| 围墙 / 防御塔 | PARTLY | four defences per cell (economy), **zero walls built** |
+| 建筑不堵死 | NOT STARTED | no placement graph; buildings placed by the native site search only |
+| 重要建筑不靠前 | NOT STARTED | no distance rule |
+| 经济好时补电厂/工厂 | PARTLY | power is raised when short (`POWER_MARGIN`); no capacity check |
+| 科技优先（雷达/精炼器/工业工厂） | NOT STARTED | build order stops at refinery → barracks → factory → 2nd refinery → defences |
+| 出售保不住的建筑 | NOT STARTED | no sell decision |
+| 占据矿脉建分基地 | NOT STARTED | — |
+| 经济管理滚雪球 | PARTLY | two refineries and `HARVESTERS_PER_REFINERY = 2`; wallet still freezes at 300-900 |
+| 回收厂/维修厂/克隆缸 | NOT STARTED | `Build` is a stub |
+| 切换主生产工厂 | NOT STARTED | no `TogglePrimaryFactory` use |
 
-### B. The army that goes and comes back
+### 建造单位 (unit production)
 
-| Item | Work | Accepts when |
+| Want | State | Evidence |
 |---|---|---|
-| B1 | A column that returns: a retreat condition and a way home | done: own 37 -> 45 on Barrel.mmx 19, five cells the same, none worse |
-| B2 | A give-up rule for an object target the column cannot hurt | partly: the object ladder exists; the cell ladder is answered by holding the ground |
-| B3 | Re-enable the attack flag | done: the flag is on, and the lane kills |
-| B4 | A frontier cell the column can actually walk to | answered the other way: the column holds the ground it took, and a reachability test changed nothing |
-| B5 | Why the second truck costs two cells on one seed | the timing accident is not explained; it is the same seed on both maps |
+| 按战斗情况和单位特点生产 | PARTLY | picker reads the role model against visible armour (`unit_role`), 4-5 types per cell; no reaction to the enemy's changing mix (spec P1) |
+| 队列不闲置 | PARTLY | queue idle much of the match; `economy: nothing to build` on most readings |
 
-Measured so far, all reverted: a garrison of twelve (the base survives, the
-kills go to zero), a proportional garrison (worse), skipping a frontier cell
-the column already failed (one cell worse), a recall on a visible raid (the
-base still falls, the army oscillates), and engaging raiders inside the base
-(one cell down eleven objects). The trade is measured: the army that kills is
-the whole army. B1 is not a smaller garrison; it is a column that comes back.
+### 小队作战 (squads)
 
-### C. The strategy above the army
-
-| Item | Work | Accepts when |
+| Want | State | Evidence |
 |---|---|---|
-| C1 | A phase ladder: opening, expansion, pressure, decision | the phase comes from the state, not a constant |
-| C2 | Composition by role: front line, ranged, anti-air | done: the army is composed against the mix the rule set offers (`unit_role`), and every cell fields four to five types instead of one |
-| C3 | Priority between objectives (survival, economy, technology, expansion, harassment) | one table, no constants in two places |
+| 组合有效的战斗小队 | PARTLY | column marches and fights; composition by role is done. No squad as a unit of state — military recomputes per term. Spec S1 (≥2 roles, ≥4 units) holds by accident, not by rule |
+| 不在家门口集结 | PARTLY | frontier march starts near home and walks out; never asserted |
 
-### D. The house that grows
+### 单独作战 (per-unit behaviour) — the largest gap
 
-| Item | Work | Accepts when |
+| Spec ID | Want | State |
 |---|---|---|
-| D1 | A second refinery that lands | the wallet stops freezing at 12 credits |
-| D2 | Walls and defence placement | xeb1 opens a wall; the base has a ring |
-| D3 | Breaches and transports | xtsunami lands units on another island |
-| D4 | Scouting | something sees the enemy before the army commits: still nothing does |
+| U1 | 风筝 | NOT STARTED |
+| U2 | 躲避弹道 | NOT STARTED |
+| U3 | 绕开威胁 | NOT STARTED |
+| U4 | 打不过就跑 | **tried and reverted** — keyed on `seen`, fired zero times (status.md) |
+| U5 | 对策性 | PARTLY — the picker buys the right counter; individual units do not decline bad targets |
+| U6 | 子弹分配 | NOT STARTED |
+| U7 | 卡位攻击 | NOT STARTED |
+| U8 | 保护英雄/高价值 | NOT STARTED |
+| U9 | 英雄照常参战 | NOT STARTED |
+| U10 | 引诱/扛伤 | NOT STARTED |
+| U11 | 自爆单位 | NOT STARTED |
+| U12 | 感染寄生 | NOT STARTED |
+| U13 | 掩护关键单位 | NOT STARTED |
 
-### E. The abilities
+Thirteen of thirteen unstarted or reverted. This is the "最复杂" part of the
+wish list and almost none of it exists.
 
-| Item | Work | Accepts when |
+### 单位功能 (unit capabilities)
+
+| Spec ID | Want | State |
 |---|---|---|
-| E1 | Superweapon use: the target is worth it | the launch count is non-zero and the target is a base |
-| E2 | Infiltration: factory, refinery, laboratory, superweapon | each use is counted |
-| E3 | Harvester micro: high-value ore, no raiding | the harvester's ore value per minute rises |
+| A1 | 捡箱子 | NOT STARTED |
+| A2 | 探索迷雾 | NOT STARTED — six attempts reverted; `seen=0` on every reading |
+| A3 | 海上运输 | NOT STARTED — `Transport` job never proposed |
+| A4 | 空中运输 | NOT STARTED |
+| A5 | 渗透 | NOT STARTED — `Abilities` is a stub |
+| A6 | 占领建造场（重中之重） | NOT STARTED — the wish list's stated priority is not begun |
+| A7 | 特殊能力 | NOT STARTED |
+| A8 | 矿车微操 | NOT STARTED |
+| A9 | 建筑特殊能力 | NOT STARTED |
+
+### 中立建筑 (neutral structures)
+
+| Spec ID | Want | State |
+|---|---|---|
+| N1 | 驻扎判断 | NOT STARTED |
+| N2 | 开局全知 | PARTLY — L0 map data is available; nothing reads the neutral list |
+| N3 | 重点设施保护 | NOT STARTED |
+| N4 | 过远放弃 | NOT STARTED |
+
+### 能力使用 (support powers)
+
+| Spec ID | Want | State |
+|---|---|---|
+| C1 | 支援能力使用 | NOT STARTED — zero launches |
+| C2 | 超级武器目标 | NOT STARTED |
+
+### 组合技 / 压制
+
+| Spec ID | Want | State |
+|---|---|---|
+| K1 | 伊文装炸药 | NOT STARTED |
+| K2 | 工程兵进 IFV | NOT STARTED |
+
+### 技术层面 (the interface)
+
+| Want | State | Evidence |
+|---|---|---|
+| 类 bwapi 的查询/命令接口 | **DONE** | `Observation` + `Outbox` + `Funnel`; a brain reads a projection and answers through the same door a click uses |
+| 可接入神经网络等外部模块 | **DONE by design** | a brain is `Box<dyn Brain>`; `match.rs --brain` selects one by name |
+| 独立的 BOT，纯代码驱动 | **DONE** | `autoplay/` is a workspace member outside the engine crate |
+| 会计算识别单位能力 | **PARTLY** | `rules::unit_role` scores a type against armour and reads `Capabilities`; it is the strongest part of the work |
+
+### 限制 (constraints)
+
+| # | Constraint | State |
+|---|---|---|
+| 1 | 全局/生产/战斗/能力 四个开关 | **DONE** — `AutoPlayDomains` on the board |
+| 2 | 不控制不可控单位 | PARTLY — `orderable` is checked; not asserted for scripted transports |
+| 3 | 每局状态独立 | assumed, not tested |
+| 4 | battle control offline 时停止 | **DONE** — `sim.session().input_locked()` returns empty |
+| 5 | 编队单位不托管 | **DONE** — `take_back` / `excluded` |
+
+### 历史问题 (H1-H18 permanent counters)
+
+Spec §5 asks for eighteen counters, each printed in the matrix and asserted so it
+cannot regress. The harness judges three fields —
+`tools/autoplay_check.py: JUDGED = ("own", "unowned", "stuck")` — and the census
+prints nine columns (tick, credits, enemy credits, power, own, enemy, ready,
+rejected, not ready) plus `army` and `lost`.
+
+Mapped against the eighteen:
+
+| Spec counter | Reading that covers it | State |
+|---|---|---|
+| H2 墙口卡死 | `stuck` | exists, but count is harvesters on ore |
+| H15 执行成功后发呆 | `stuck` + `finished` | partly |
+| H16 兵种单一 | role count per match | exists, asserted |
+| H5 高频指令 | `issued` per term | partly (counted, not asserted ≤1) |
+| H1 / H7 挂机 | `unowned` | exists |
+| H3, H4, H6, H8-H14, H17, H18 | — | **not counted at all** |
+
+So twelve of eighteen have no counter. This is the cheapest large win available:
+most need one line in the census, and they turn "we fixed it once" into a number
+that cannot regress. It is P0 below.
+
+## What this means for the queue
+
+The old queue below was written when the army was the whole story. It is now
+badly out of date: it lists B1 as done on a reading that has since been superseded,
+B3 as done when the flag is on, and D4 as open when six attempts have been reverted
+and the question has moved.
+
+Priority, by what the spec judges and what the code cannot do:
+
+**P0 — the judges the spec asks for and nothing supplies.** The eighteen H
+counters and the `army`/`lost` readings exist but the rest do not. Without them,
+every item below is judged on a number that cannot see it.
+
+**P1 — the two empty managers.** `Build` and `Abilities` between them own walls,
+placement, repairs, capture, transports, infiltration, garrisons and superweapons —
+most of the wish list's concrete wants. Each is a separate slice; start with
+`Abilities::Capture` (A6, called 重中之重 in the wish list) or `Build`'s wall ring
+(B3, the only base item with a countable judgement).
+
+**P2 — the army that reaches the enemy base.** The column fights in the field and
+cannot break a fortress. status.md records marching at the base losing three
+Death.mmx cells (army 9388 → 5675). Needs artillery (HOWI exists and is never
+bought) and a siege judgement.
+
+**P3 — economy ceiling.** Two refineries, wallet 300-900, `economy: nothing to
+build` on most readings. Three saving rules tried and all lost to the army.
+
+**P4 — per-unit behaviour (U1-U13).** Thirteen items, none started. This is the
+largest single body of work in the wish list and should not be attempted before
+P0 gives it a reading.
 
 ## The rule that decides
 
-One change per measurement. Six cells, or three at 1v7. Keep the change when
-own does not fall, no surviving seed is lost, unowned stays zero and stuck
-does not rise. A reading that only says "own is higher" is not a win: with
-lost at 0:0 everywhere, own counts the economy, not the fighting.
+One change per measurement. Six cells, or three at 1v7. Keep the change when own
+does not fall, no surviving seed is lost, unowned stays zero and stuck does not
+rise — and read `army` and `lost` beside `own`, because a change that raises the
+object count while killing nothing is a change that made the house hide.
 
-Two readings were added since this rule was written, and both matter more than
-`own` on the lanes that now have a fight in them:
-
-- **army**, the house's fighting strength in hit points. A house of thirty
-  rifles and a house of thirty tanks are thirty objects; they are not the same
-  army, and a picker judged on `own` alone will buy the cheaper one.
-- **lost**, `own:enemy` summed off the census curve. A change that raises `own`
-  while killing nothing is a change that made the house hide.
-
-`stuck` now gives the work jobs (harvest, return) thirty seconds instead of six,
-because a truck standing on an ore cell while the engine fills its hold is not
-the failure the spec's H2 names. Every stuck reading that rejected a change in
-this session was such a truck.
+Every measurement names the file it was compared against. **Run the whole test
+suite, not a filtered subset**: one test in the tree had failed from the day it
+was written and went unnoticed for four commits (handoff.md).
