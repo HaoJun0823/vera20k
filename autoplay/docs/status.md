@@ -104,6 +104,44 @@ mission is not Harvest, which is exactly during Enter and Unload. That is a
 hypothesis, not yet a proven cause; the reading that decides it is the ratio
 above, which the next change has to move.
 
+## The harvest job is not re-sent into the engine's own dock cycle
+
+The policy used to order a harvester again every term its mission was not
+`Harvest` — which is exactly while the engine is docking it (`Enter` for the
+refinery contact, `Unload` for the dump). That order is a MegaMission, and a
+MegaMission is `Queue_Mission(mission, 1)`: it replaced the queued `Enter` that
+`per_cell_release_dock_contact` (`0x0073ACD7`) needs to keep the radioed
+refinery, so the truck dropped its dock and cycled back to the ore field full.
+`Policy::living_out` now counts `Harvest`, `Enter` and `Unload` as the same job
+being lived out, and a harvester is only ordered again when it is idle.
+
+Same command and same baseline as above, after the change:
+
+| Map | Seed | Own | Enemy | Unowned | Stuck |
+|---|---|---|---|---|---|
+| Death.mmx | 0x5EED | 46 (was 35) | 47 | 0 | 0 |
+| Death.mmx | 19 | 51 (was 35) | 40 | 0 | 0 |
+| Death.mmx | 10 | 50 (was 35) | 45 | 0 | 1 |
+| Barrel.mmx | 0x5EED | 46 (was 32) | 38 | 0 | 1 |
+| Barrel.mmx | 19 | 46 (was 34) | 39 | 0 | 1 |
+| Barrel.mmx | 10 | 50 (was 35) | 40 | 0 | 0 |
+
+Own is up in all six cells and down in none, no seed that survived is lost, and
+unowned stays zero. The engine readings move with it: a miner arrives at ore
+with an empty hold 26-35 times per match instead of 10-16, Dock entries fall from
+166-172 to 26-32 (one dock per unload, as in the retail runs), and the wallet no
+longer freezes — the last readings are 390-1164 credits instead of 12, and no
+cell spends the last 3600 frames standing still.
+
+The one clause that does not hold is `stuck`, which reads 1 in three cells where
+it read 0. The reading is now per unit (`policy v2: stuck at ...`), and every
+stuck unit is a CMIN holding `job=Harvest`, still for 90-210 frames. Between two
+readings the counter resets (id=2911 reads `still=90` at 10800 and `still=210` at
+11400), so those units do move; they pause for a few seconds at a time, which is
+what harvesting in place and waiting at a one-dock refinery look like from a
+projection that carries only the cell. Recorded as a residual: whether a pause is
+a fill or a dock queue is not visible to the policy yet.
+
 ## The hard maps, on this build
 
 | Map | Own | Enemy | Stuck | Reading |
@@ -122,17 +160,18 @@ IFV in a test), so this is policy work, not an engine gap.
 - The army does not attack. Attacking is behind a flag that is off, because an
   army that attacks at two-to-one loses three matches of six. Local
   superiority, retreat and reinforcement are the next slice.
-- The economy stalls, and the miners are the reason: five of six cells end at 12
-  credits, and the object ceiling lifts from 35 to 85 when the opening wallet is
-  30000. See the two sections above for the counts.
+- The income stall is fixed at its source (the harvest cycle above); the reserves
+  are not. One cell still ends with a refinery in production at 5 credits
+  (Death.mmx, seed 10), and five of the six end with `nothing to build` while
+  holding 300-661 credits: two refineries, three or four defences, and nothing
+  else the wallet can afford. The unit buyer's `UNIT_SPEND_FLOOR` (900) plus its
+  1500 reserve while the house wants refineries is the binding limit there.
 - A refinery queued with only its cost plus the fixed 200 in the wallet takes the
-  rest of the income while it is unfinished, so the house earns at the rate one
-  unfinished building leaves it. Three attempted fixes made the matrix worse and
-  were reverted; the reserves are still a constant.
-- One cell (Barrel.mmx, 0x5EED) holds 1300 credits from tick 8400 with
-  `nothing to build ... refineries=1 defenses=0 in_production=None`: the house
-  survived, but nothing it could afford was a target. Unexplained; the log line
-  is the reading.
+  rest of the income while it is unfinished. Three attempted fixes made the
+  matrix worse and were reverted; the reserves are still a constant.
+- `stuck` no longer distinguishes a harvester that pauses from one that is
+  frozen; see the residual in the section above. A pause is not visible in the
+  projection, so the next reading has to come from the engine's miner state.
 - The shipyard counts as a war factory. Splitting the role improved Death.mmx
   and lost every Barrel.mmx seed, so the split was reverted.
 - Nothing for walls, transports, garrisons, superweapons, scouting, crates, or

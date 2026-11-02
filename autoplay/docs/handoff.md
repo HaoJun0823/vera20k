@@ -105,12 +105,13 @@ first, then measure behaviour.
 
 ## Open work, in the order it should be done
 
-1. Economy reliability. A refinery queued near the wallet floor leaves the house
-   with zero income and no way back; the log line "economy: building in
-   production at ..." is the reading. Replace the fixed reserves with the real
-   cost of the cheapest harvester, and buy a replacement truck before any
-   building. The recorded baseline says the income is dead before that queue is
-   even affordable — see the end of this file, where the miners are measured.
+1. Economy reserves. The stall this item described is fixed (see the end of this
+   file): the policy was re-ordering each harvester in the middle of its own
+   dock. What is left is the reserve itself. Replace the fixed 200 margin and the
+   unit buyer's floor with the real cost of the cheapest harvester, and buy a
+   replacement truck before any building. The readings that say it is still
+   there: Death.mmx seed 10 ends with a refinery in production at 5 credits, and
+   five of six cells end with `nothing to build` while holding 300-661 credits.
 2. The army as units. Military holds no state: it recomputes who is a soldier
    every term. It needs squads (membership on a term), local superiority per
    squad, retreat, reinforcement and focus fire. Attacking is off until that
@@ -177,3 +178,14 @@ miner's mission is not Harvest, and during Enter/Unload it is not. Native rules
 worth reading first: `new_order_pending` (`src/sim/miner/refinery_dock.rs:420`,
 `0x0073E539`) and `per_cell_release_dock_contact` (`0x0073ACD7`). Whether that is
 the cause is not yet proven; the ratio above is what decides it.
+
+Then it was fixed: `Policy::living_out` counts `Harvest`, `Enter` and `Unload` as
+the same job being lived out, so a harvester is ordered again only when it is
+idle. The same baseline then reads own 46/51/50 on Death.mmx (was 35/35/35) and
+46/46/50 on Barrel.mmx (was 32/34/35), no seed lost, unowned still zero; empty
+arrivals at ore rise from 10-16 to 26-35 per match and Dock entries fall from
+166-172 to 26-32, so one dock now means one unload. The `stuck` clause reads 1 in
+three cells instead of 0 and status.md records why: every stuck unit is a
+harvester pausing for a few seconds, and the counter resets between readings.
+Follow-up worth its own commit: `stuck` should not count a harvester that is
+filling its hold, which the projection cannot tell from a unit that is frozen.
