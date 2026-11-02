@@ -41,21 +41,28 @@ numbers.
 
 ## What to do next, in order
 
-1. **`Barrel.mmx` seed 19 at 24000 ticks.** `own 39, army 4045, lost 19:7` — the
-   weakest cell on either lane. Read the log for what it is losing to first.
-2. **The army never finds the enemy.** `seen=0` on every reading for the whole
-   24000-tick match, and the column wanders its own side of the map (tick 23400:
-   `order=Some(Cell((136, 64)))` against an enemy base at `(70, 157)`). Ranking
-   the frontier by distance instead of proximity is three cells better and three
-   worse; the target is re-chosen every term from the column's first unit, so the
-   column oscillates between opposite edges of the explored region. That is
-   queue.md D4, and it is the largest single lever left.
+1. **`Barrel.mmx` seed 19 at 24000 ticks** — resolved. The centroid anchor (the
+   column marches from where the column is, not from `soldiers.first()`) took it
+   from `own 39, army 4045, lost 19:7` to `own 80, army 9804, lost 2:0`. It was an
+   attrition the house could not pay for, and marching further let it meet the
+   enemy in the field instead of at its own door.
+2. **The army now finds the enemy, but does not march to its base.** The centroid
+   anchor fixed the wandering: with `soldiers.first()` the frontier was searched
+   from home every term, but the mean of the column's cells lets it walk outward
+   and it now engages enemies in the field (Barrel.mmx seed 19 reads `seen=9` at
+   tick 21600). Marching *directly* at the enemy base was tried and rejected — it
+   sends the column into the fortress (tesla coils, walls, no siege of its own)
+   and three Death.mmx cells lost half their army. So the army meets the enemy in
+   the field, which is the favourable ground; pushing all the way to the base
+   needs a siege unit first (item 3).
 3. **Artillery against a fortress.** The 1v1 enemy builds almost nothing but
    defences. `HOWI` is buildable from the first war factory and the picker never
    buys it, because the only source of artillery demand is the roster mix. The
-   first attempt (a demand for every armed enemy building in sight) is inert
-   because the army never gets close enough to see one — it becomes live once
-   item 2 is answered.
+   attempt (a demand for every armed enemy building in sight) is inert twice over:
+   the army still never reaches the enemy base buildings (it meets units in the
+   field, not the fortress), so `seen` never contains a building. It becomes live
+   only once item 2's base march works — which needs a siege unit so the column
+   survives the trip.
 4. **Income.** Three trucks for two bays, wallet at 300-900 credits, and every
    reserve rule tried against it has lost to the army (status.md: three times).
    A cheaper truck, a closer ore field, or ore worth more per trip — not another
