@@ -13,6 +13,16 @@ Usage:
     python -m tools.autoplay_check --skip-tests          # matches only
     python -m tools.autoplay_check --ticks 12000         # a shorter look
 
+    # one change per measurement: record a reference run, change the policy,
+    # run again, and read what moved. Newest row per cell wins.
+    python -m tools.autoplay_check --history target/autoplay-results/before.jsonl
+    python -m tools.autoplay_check --history target/autoplay-results/after.jsonl \\
+        --baseline target/autoplay-results/before.jsonl
+    # with no matches to run, re-read two files already on disk:
+    python -m tools.autoplay_check --compare-only \\
+        --baseline target/autoplay-results/before.jsonl \\
+        --history target/autoplay-results/after.jsonl
+
 The retail install is read from RA2_DIR. Without it the build and the tests
 still run and the matches are reported as skipped.
 """
@@ -35,6 +45,14 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SEEDS = ("0x5EED",)
 DEFAULT_MAP = "Death.mmx"
 DEFAULT_TICKS = 36_000
+DEFAULT_HISTORY = ROOT / "target" / "autoplay-results" / "history.jsonl"
+
+# The fields one run is judged by. `own` is the reading at a fixed tick; the
+# result says whether the house was still standing when the ticks ran out.
+JUDGED = ("own", "unowned", "stuck")
+# The opening a run starts from. Two runs whose openings differ are not the
+# same experiment, so a drift here is a warning, not a delta.
+OPENING = ("start_credits", "start_units", "start_tech", "start_own", "roster")
 
 RESULT = re.compile(r"(won|timeout|lost) at tick (\d+)")
 CRATE = re.compile(r"crate picked up at (\(\d+, \d+\)) by house (\S+)")
@@ -156,6 +174,185 @@ def append_history(reports: list[MatchReport], args, path: Path) -> None:
             }) + "\n")
 
 
+def key_of(row: dict) -> tuple[str, str, str, str, int, int]:
+    """Which experiment a row belongs to.
+
+    Rows match on all of it: a run is only comparable to the same brain, map,
+    faction, seed, length and opponent count.
+    """
+    return (
+        str(row.get("brain", "")),
+        str(row.get("map", "")),
+        str(row.get("country", "")),
+        str(row.get("seed", "")),
+        int(row.get("ticks", 0)),
+        int(row.get("opponents", 1)),
+    )
+
+
+def read_history(path: Path) -> tuple[dict[tuple, dict], int]:
+    """The newest row per cell, and how many lines could not be read.
+
+    A history file is append-only, so a cell appears once per run in it and the
+    last reading is the current one. Unreadable lines are counted rather than
+    passed over in silence: a comparison that lost rows has to say so.
+    """
+    rows: dict[tuple, dict] = {}
+    unreadable = 0
+    if not path.is_file():
+        return rows, unreadable
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            unreadable += 1
+            continue
+        if isinstance(row, dict):
+            rows[key_of(row)] = row
+        else:
+            unreadable += 1
+    return rows, unreadable
+
+
+def survived(row: dict) -> bool:
+    """A house still standing when the ticks ran out, or one that won."""
+    return str(row.get("result", "")).startswith(("won", "timeout"))
+
+
+def judge(before: dict, after: dict) -> tuple[str, list[str], list[str]]:
+    """What one cell did, and why.
+
+    The keep rule is the one the handoff records: own must not fall at a fixed
+    tick, no seed may be lost that survived, unowned stays zero, stuck must not
+    rise. Enemy count and walls are read as context -- they move for reasons the
+    policy does not own -- so they are printed but never decided on.
+    """
+    worse: list[str] = []
+    better: list[str] = []
+
+    own_before, own_after = int(before.get("own", 0)), int(after.get("own", 0))
+    if own_after < own_before:
+        worse.append(f"own {own_before}->{own_after}")
+    elif own_after > own_before:
+        better.append(f"own {own_before}->{own_after}")
+
+    for field in ("unowned", "stuck"):
+        was, now = int(before.get(field, 0)), int(after.get(field, 0))
+        if now > was:
+            worse.append(f"{field} {was}->{now}")
+        elif now < was:
+            better.append(f"{field} {was}->{now}")
+
+    tick_before, tick_after = int(before.get("tick", 0)), int(after.get("tick", 0))
+    lived_before, lived_after = survived(before), survived(after)
+    if lived_before and not lived_after:
+        worse.append(f"lost at {tick_after} (was survived)")
+    elif not lived_before and lived_after:
+        better.append(f"survived (was lost at {tick_before})")
+    elif tick_after < tick_before:
+        worse.append(f"lost earlier {tick_before}->{tick_after}")
+    elif tick_after > tick_before:
+        better.append(f"held longer {tick_before}->{tick_after}")
+
+    if worse:
+        return "worse", worse, better
+    if better:
+        return "better", worse, better
+    return "same", worse, better
+
+
+def opening_drift(before: dict, after: dict) -> list[str]:
+    """The opening fields that differ between two readings of one cell."""
+    return [
+        f"{field} {before.get(field)!r}->{after.get(field)!r}"
+        for field in OPENING
+        if before.get(field) != after.get(field)
+    ]
+
+
+def arrow(before: dict, after: dict, field: str) -> str:
+    """One field, before and after."""
+    return f"{before.get(field, 0)}->{after.get(field, 0)}"
+
+
+def compare_histories(baseline: Path, current: Path) -> None:
+    """Print what moved between a reference run and this one, cell by cell."""
+    before, before_unreadable = read_history(baseline)
+    after, after_unreadable = read_history(current)
+    print("", flush=True)
+    print(f"baseline {baseline}: {len(before)} cells, {before_unreadable} unreadable line(s)",
+          flush=True)
+    print(f"current  {current}: {len(after)} cells, {after_unreadable} unreadable line(s)",
+          flush=True)
+
+    header = (
+        f"{'map':<14}{'country':<10}{'seed':<7}{'ticks':<7}{'brain':<7}{'opp':<5}"
+        f"{'own':<12}{'enemy':<12}{'unowned':<10}{'stuck':<9}{'yards':<9}{'walls':<9}verdict"
+    )
+    print("", flush=True)
+    print(header, flush=True)
+    print("-" * (len(header) + 24), flush=True)
+
+    # What makes two readings the same experiment. Enemy count, walls and the
+    # opening are in it: a run that moved one of those is not a replay.
+    delta_fields = ("own", "enemy", "unowned", "stuck", "yards", "walls", "tick", "result")
+    worse_cells: list[str] = []
+    counts = {"same": 0, "better": 0, "worse": 0, "missing": 0}
+    identical = True
+    for key in sorted(set(before) | set(after)):
+        brain, map_name, country, seed, ticks, opponents = key
+        label = f"{map_name} {country} seed {seed} [{brain}] {ticks} ticks, {opponents} opponent(s)"
+        prefix = (f"{map_name:<14}{country:<10}{seed:<7}{ticks:<7}{brain:<7}{opponents:<5}")
+        was, now = before.get(key), after.get(key)
+        if was is None:
+            counts["missing"] += 1
+            identical = False
+            print(f"{prefix}no baseline row: {label}", flush=True)
+            continue
+        if now is None:
+            counts["missing"] += 1
+            identical = False
+            print(f"{prefix}missing from this run: {label}", flush=True)
+            continue
+        verdict, worse, better = judge(was, now)
+        counts[verdict] += 1
+        print(
+            f"{prefix}"
+            f"{arrow(was, now, 'own'):<12}{arrow(was, now, 'enemy'):<12}"
+            f"{arrow(was, now, 'unowned'):<10}{arrow(was, now, 'stuck'):<9}"
+            f"{arrow(was, now, 'yards'):<9}{arrow(was, now, 'walls'):<9}{verdict}",
+            flush=True,
+        )
+        if worse:
+            worse_cells.append(f"{label}: {'; '.join(worse)}")
+        if worse or better:
+            print(f"    {'; '.join(worse + better)}", flush=True)
+        drift = opening_drift(was, now)
+        if drift:
+            identical = False
+            print(f"    opening differs, so this is not the same experiment: "
+                  f"{'; '.join(drift)}", flush=True)
+        if any(was.get(field) != now.get(field) for field in delta_fields):
+            identical = False
+
+    trailing = counts["worse"] + counts["better"] + counts["same"]
+    print("")
+    print(f"cells: {trailing + counts['missing']} compared, {counts['same']} same, "
+          f"{counts['better']} better, {counts['worse']} worse, "
+          f"{counts['missing']} missing", flush=True)
+    if worse_cells:
+        print("cells that got worse:")
+        for line in worse_cells:
+            print(f"  {line}", flush=True)
+    else:
+        print("no cell got worse", flush=True)
+    if identical:
+        print("every cell reads exactly as the baseline: same seed, same result", flush=True)
+
+
 def run_command(args: list[str]) -> int:
     """Run a command, streaming its output."""
     print("$", " ".join(args), flush=True)
@@ -253,6 +450,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="starting tech level")
     parser.add_argument("--history", default="",
                         help="append every result here (default target/autoplay-results/history.jsonl)")
+    parser.add_argument("--baseline", default="",
+                        help="reference history file: after the run, print what each cell "
+                             "moved compared with it (implies --compare)")
+    parser.add_argument("--compare", action="store_true",
+                        help="compare against --baseline; that flag already implies this")
+    parser.add_argument("--compare-only", action="store_true",
+                        help="compare --baseline with --history and run nothing")
     parser.add_argument("--opponents", type=int, default=1,
                         help="computer houses against the local one")
     parser.add_argument("--ticks", type=int, default=DEFAULT_TICKS, help="how many frames a match runs")
@@ -262,11 +466,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log-dir", default=None, help="where the match logs go")
     args = parser.parse_args(argv)
 
+    if args.compare and not args.baseline:
+        parser.error("--compare needs --baseline <file>")
+
     seeds = [seed.strip() for seed in args.seeds.split(",") if seed.strip()]
     # The match binary reads a decimal seed; a hex one is what a person writes.
     seeds = [str(int(seed, 0)) for seed in seeds]
     log_dir = Path(args.log_dir) if args.log_dir else ROOT / "target" / "autoplay-check"
     log_dir.mkdir(parents=True, exist_ok=True)
+    history = Path(args.history) if args.history else DEFAULT_HISTORY
+
+    # Reading two files on disk needs no build and no retail install, so a
+    # comparison can be re-read as often as wanted while a run is understood.
+    if args.compare_only:
+        if not args.baseline:
+            parser.error("--compare-only needs --baseline <file>")
+        compare_histories(Path(args.baseline), history)
+        return 0
 
     if not args.skip_build:
         build = [sys.executable, "-m", "tools.cargo_run", "--", "build", "--profile", "fast"]
@@ -319,9 +535,10 @@ def main(argv: list[str] | None = None) -> int:
         if report.crates:
             print(f"  crates picked up: {', '.join(report.crates)}", flush=True)
 
-    history = Path(args.history) if args.history else ROOT / "target" / "autoplay-results" / "history.jsonl"
     append_history(reports, args, history)
     print(f"\nhistory: {history}", flush=True)
+    if args.baseline:
+        compare_histories(Path(args.baseline), history)
     return 0
 
 
