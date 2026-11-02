@@ -1035,3 +1035,32 @@ Measured against `stuck-v8.jsonl`: five cells the same, one better, none worse.
 That is honest rather than disappointing — the column only forms around tick
 10000 on the current income, so there are twelve hundred frames left to march
 in. Growth, not the march, is what bounds this lane now.
+
+### Reverted: a truck the army paid for
+
+The income ceiling is what bounds every lane now, and the reading that made it
+concrete: three harvesters for two bays at the end of every match, and a wallet
+that never again exceeds 900 credits after the opening spend. The second truck
+is gated at `cost + 1500` (`EXTRA_HARVESTER_MARGIN`) and the army spends
+everything above 900, so the 1700 the truck wants never accumulates.
+
+The attempt: the economy states what it is saving in `Demands::reserve`, and the
+managers that follow it — the army, and the economy's own build order — leave
+that much alone. It works as designed and it is much worse:
+
+| Map | Seed | own | army |
+|---|---|---|---|
+| Barrel.mmx | 10 | 47 -> 44 | 6908 -> 5061 |
+| Barrel.mmx | 19 | 47 -> 44 | 7175 -> 5675 |
+| Barrel.mmx | 24301 | 41 -> 36 | 6521 -> 4075 |
+| Death.mmx | 10 | 49 -> 41 | 7175 -> 5675 |
+| Death.mmx | 19 | 47 -> 45 | 7457 -> 6226 |
+| Death.mmx | 24301 | 39 -> 34 | 5991 -> 3827 |
+
+Six of six worse, and the army's hit points fall by a quarter to a third: a
+reserve of 2900 is a house that builds nothing at all while it waits. This is
+the third time an economy-saving rule has lost to the army (see "the money
+belongs to the army", above), so the channel was reverted with it rather than
+left in place for a fourth try. If income is raised again it has to come from
+something that pays for itself without idling the wallet — a cheaper truck, a
+closer ore field, or ore that is worth more per trip.
