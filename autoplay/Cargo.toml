@@ -33,6 +33,13 @@ name = "autoplay-match"
 path = "src/bin/match.rs"
 required-features = ["retail-fixture"]
 
+# The role weights the army picker reads, so the composition can be reviewed
+# without running a match.
+[[bin]]
+name = "autoplay-roles"
+path = "src/bin/roles.rs"
+required-features = ["retail-fixture"]
+
 [lib]
 name = "autoplay"
 path = "src/lib.rs"

@@ -28,6 +28,7 @@
 use std::collections::BTreeMap;
 
 use crate::rules::armor::ArmorId;
+use crate::rules::capabilities::{Capabilities, Tag};
 use crate::rules::object_type::{ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
 
@@ -64,6 +65,55 @@ pub const ROLES: [Role; 7] = [
     Role::Scout,
     Role::Support,
 ];
+
+/// The weight at which a type counts as able to do a job rather than merely
+/// carrying some of it.
+///
+/// `RoleWeights` are scaled against the best answer the rule set offers, so a
+/// quarter of it is a type that really does the job; a tank's trace of anti-air
+/// (it has none) stays out of the count. The retail brain counts its `able`
+/// vector at this bar, and every caller that asks "is this job covered" has to
+/// ask it the same way.
+pub const ROLE_FLOOR: f64 = 0.25;
+
+/// Seats at which a type carries rather than fights.
+///
+/// The night hawk (`Passengers=5`) and the hind (`Passengers=10`) are air
+/// transports with a machine gun; the IFV's one seat is a fighting vehicle that
+/// happens to carry someone. Five is where the retail brain draws the line
+/// (`sim::strategy::retail::census`), and this is the owner of that reading so
+/// a second caller cannot draw it somewhere else.
+pub const TRANSPORT_SEATS: i32 = 5;
+
+/// Whether a type belongs on an army's line.
+///
+/// Infantry, vehicles and aircraft that carry a weapon that fires, and are not
+/// tools: a harvester, an engineer or spy (they capture, they do not shoot), a
+/// transport (five seats or more, [`TRANSPORT_SEATS`]), a spawn child (a round
+/// already in the air), or a yard maker (it deploys into the base's own
+/// foundation).
+///
+/// Every term is a key the type declares — nothing here is a name or a shape
+/// retail happens to have — so a mod's unit is admitted or refused by the same
+/// reading. The retail brain and the autoplay policy both ask this question,
+/// and this is the one place it is answered.
+pub fn is_army(rules: &RuleSet, ty: &ObjectType) -> bool {
+    matches!(
+        ty.category,
+        ObjectCategory::Infantry | ObjectCategory::Vehicle | ObjectCategory::Aircraft
+    ) && Capabilities::of(rules, ty).has(Tag::Armed)
+        && !ty.engineer
+        && !ty.infiltrate
+        && !ty.harvester
+        && !ty.resource_gatherer
+        && ty.passengers < TRANSPORT_SEATS
+        && !ty.spawned
+        && !ty
+            .deploys_into
+            .as_deref()
+            .and_then(|name| rules.object(name))
+            .is_some_and(|yard| yard.build_const_eligible)
+}
 
 /// The role that answers a type wearing `armour`: the job a squad has to cover
 /// to hurt it. `None` for the two `special` classes, which nothing in the
@@ -309,6 +359,18 @@ fn assess(rules: &RuleSet, ty: &ObjectType) -> RawProfile {
         let Some(weapon) = rules.weapon(&name) else {
             continue;
         };
+        // `NeverUse=yes` is never selected: `TechnoClass::What_Weapon_Should_I_Use
+        // @ 0x006F33BF` returns the primary as soon as the secondary carries the
+        // flag, so a type's worth is not in that weapon. Retail's one such
+        // weapon is the `VirtualScanner` every dog and engineer carries as
+        // `Secondary=`, a range-5 `InvisibleAll`/`SA` entry that exists to widen
+        // the guard scan. Scored as a weapon it handed the attack dog 0.24 of
+        // anti-vehicle and 0.30 of anti-air weight off a warhead it can never
+        // fire, which is enough for a squad's shortfall to call itself answered.
+        // `capabilities.rs` already skips the flag when it decides `Armed`.
+        if weapon.never_use {
+            continue;
+        }
         let shots = weapon.damage.max(0) as f64 * weapon.burst.max(1) as f64;
         let rate = if weapon.rof > 0 {
             60.0 / f64::from(weapon.rof)
@@ -439,6 +501,56 @@ mod tests {
             table.weights("MTNK").get(Role::AntiAir),
             0.0,
             "a Grizzly has no weapon that can engage aircraft at all"
+        );
+    }
+
+    /// `NeverUse=yes` is a scan range, not a weapon. The attack dog carries the
+    /// same `VirtualScanner` every engineer does, an `InvisibleAll`/`SA` entry
+    /// that reaches five cells and is never selected to fire, and scored as a
+    /// weapon it made the dog look like a counter to armour and to aircraft.
+    #[test]
+    fn a_never_use_weapon_earns_no_weight() {
+        let Some(table) = table() else {
+            return;
+        };
+        let dog = table.weights("ADOG");
+        assert_eq!(
+            dog.get(Role::AntiVehicle),
+            0.0,
+            "the dog's teeth do nothing to armour and its scanner never fires: {dog:?}"
+        );
+        assert_eq!(
+            dog.get(Role::AntiAir),
+            0.0,
+            "and it cannot engage aircraft: {dog:?}"
+        );
+        assert!(
+            dog.get(Role::AntiInfantry) > 0.0,
+            "what it is for is infantry: {dog:?}"
+        );
+    }
+
+    /// What a squad is made of, read off the keys rather than off names: a
+    /// soldier and a tank are army, a truck, an engineer, a big transport and
+    /// a yard maker are not.
+    #[test]
+    fn army_is_a_key_and_not_a_name() {
+        let Some(rules) = crate::rules::retail_ini_fixture::retail_unlayered_rules() else {
+            return;
+        };
+        let army = |id: &str| rules.object(id).is_some_and(|ty| is_army(&rules, ty));
+        assert!(army("E1"), "a rifleman fights");
+        assert!(army("MTNK"), "a tank fights");
+        assert!(!army("HARV"), "a harvester is the house's income");
+        assert!(!army("ENGINEER"), "an engineer captures, it does not shoot");
+        assert!(
+            !army("SHAD"),
+            "a five-seat night hawk carries the army, it is not the army"
+        );
+        // A seat or two is a fighting vehicle that happens to carry someone.
+        assert!(
+            army("FV"),
+            "the IFV's one seat does not make it a transport"
         );
     }
 

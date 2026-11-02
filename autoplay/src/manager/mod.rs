@@ -10,6 +10,7 @@ pub mod economy;
 pub mod military;
 
 use vera20k_core::rules::ruleset::RuleSet;
+use vera20k_core::rules::unit_role::RoleTable;
 use vera20k_core::sim::control::intent::Intent;
 use vera20k_core::sim::control::observation::Observation;
 
@@ -22,6 +23,9 @@ pub struct Ctx<'a> {
     pub rules: &'a RuleSet,
     pub obs: &'a Observation<'a>,
     pub profiles: &'a Profiles,
+    /// What every type is for, read off the rules' own weapon and warhead
+    /// data by the engine's role model.
+    pub roles: &'a RoleTable,
     pub tick: u64,
 }
 

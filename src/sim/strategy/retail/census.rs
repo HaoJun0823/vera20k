@@ -245,14 +245,12 @@ pub(super) struct Traits {
 /// Seats at which a type is a transport rather than a fighting unit, in the
 /// retail rules.
 ///
-/// The night hawk (`[SHAD]`, `Passengers=5`, `ini/rulesmd.ini:10526`) and the
-/// hind (`[HIND]`, `Passengers=10`, `10825`) are the air transports, and both
-/// carry a cannon — so "has a weapon" counts them as army. They are not army:
-/// they are how the army gets somewhere, and counting them inflated the house's
-/// fighting strength until the tech gates opened on a dozen seats and a machine
-/// gun. A seat or two is a fighting vehicle that happens to carry someone (the
-/// IFV's one seat, `1099`), which is why the bar is five.
-const TRANSPORT_SEATS: i32 = 5;
+/// The night hawk (`[SHAD]`, `Passengers=5`) and the hind (`[HIND]`,
+/// `Passengers=10`) are the air transports, and both carry a cannon — so "has a
+/// weapon" counts them as army. They are not army: they are how the army gets
+/// somewhere. The bar is [`crate::rules::unit_role::TRANSPORT_SEATS`], the
+/// owner's reading, not a second copy of it.
+const TRANSPORT_SEATS: i32 = crate::rules::unit_role::TRANSPORT_SEATS;
 
 impl Traits {
     /// What a type can do, read from the keys the type itself declares.
@@ -285,21 +283,10 @@ impl Traits {
             // and answers every other test as army, so without it the brain
             // hands the paradrop's own plane a combat order, the plane's
             // mission is rewritten mid-drop, and the drop never lands.
-            combat: matches!(
-                ty.category,
-                ObjectCategory::Infantry | ObjectCategory::Vehicle | ObjectCategory::Aircraft
-            ) && armed
-                && !captures
-                && !ty.engineer
-                && !ty.harvester
-                && !ty.resource_gatherer
-                && !carries
-                && !ty.spawned
-                && !ty
-                    .deploys_into
-                    .as_deref()
-                    .and_then(|name| rules.object(name))
-                    .is_some_and(|yard| yard.build_const_eligible),
+            // One owner for "is this army": the rules-level predicate the
+            // autoplay policy asks too, so the two brains cannot disagree
+            // about what a squad is made of.
+            combat: crate::rules::unit_role::is_army(rules, ty),
             harvester: ty.resource_gatherer,
             refinery: ty.resource_destination,
             yard: ty.build_const_eligible,
@@ -454,10 +441,9 @@ impl Census {
 }
 
 /// The weight at which a type counts as able to do a job rather than merely
-/// carrying some of it. `RoleWeights` are scaled against the best answer the
-/// rule set offers, so a quarter of it is a type that really does the job; a
-/// tank's trace of anti-air (it has none) stays out of the count.
-const ROLE_FLOOR: f64 = 0.25;
+/// carrying some of it. Owned by the role model, because the autoplay policy
+/// has to count the same way for its own shortfall.
+const ROLE_FLOOR: f64 = crate::rules::unit_role::ROLE_FLOOR;
 
 /// What one object is worth in a fight, in hit points.
 ///

@@ -52,7 +52,6 @@ impl Roles {
     /// is artillery. A unit is either ranged or a front-liner; the longer of its
     /// weapons decides.
     pub const RANGED: Self = Self(1 << 13);
-
     /// A weapon reaching at least this many cells counts as ranged.
     ///
     /// A Grizzly's gun reaches four; a Prism Tank's reaches ten. Anything past
@@ -130,6 +129,9 @@ pub struct UnitProfile {
     pub strength: i32,
     /// The type's own armor, as an index into the verses table.
     pub armor: usize,
+    /// The type's own armor by name, so a caller can ask what job answers
+    /// it without re-reading the rules.
+    pub armor_name: String,
     pub speed: i32,
     pub sight: i32,
     pub roles: Roles,
@@ -208,8 +210,29 @@ impl UnitProfile {
             _ => {}
         }
 
+        // Only the slots native actually fires, and never a `NeverUse=yes`
+        // entry.
+        //
+        // `TechnoClass::What_Weapon_Should_I_Use @ 0x006F3330` returns one
+        // weapon index, and `weapon_damage_value` (`0x006F3970`) reads the
+        // current gunner slot for a `TurretCount>0` non-gattling type and
+        // slots 0..1 otherwise. The slots past those are not a second gun:
+        // the IFV's seventeen `WeaponN=` entries are the crew weapons each
+        // passenger turns its turret into, and summing them gave one transport
+        // the firepower of a dozen types at once. Arm E at `0x006F33BF` never
+        // selects a `NeverUse=yes` secondary, which is the scan-range
+        // `VirtualScanner` every dog and engineer carries.
+        let slots: Vec<usize> = if ty.is_gattling {
+            // A gattling type steps through `stage*2` and `stage*2+1`, so what
+            // it can bring is spread over every slot it declares.
+            (0..ty.weapon_record_count()).collect()
+        } else if ty.turret_count > 0 {
+            vec![0]
+        } else {
+            vec![0, 1]
+        };
         let mut weapons = Vec::new();
-        for index in 0..ty.weapon_record_count() {
+        for index in slots {
             let Some(name) = ty.weapon_at(index) else {
                 continue;
             };
@@ -219,6 +242,9 @@ impl UnitProfile {
             let Some(weapon) = rules.weapon(name) else {
                 continue;
             };
+            if weapon.never_use {
+                continue;
+            }
             let mut dps_permille = [0_i64; ARMOR_SLOTS];
             let verses = rules
                 .warhead(weapon.warhead.as_deref().unwrap_or(""))
@@ -245,7 +271,13 @@ impl UnitProfile {
                 splash_cells,
             });
         }
-        if weapons.iter().any(|weapon| weapon.best_dps() > 0) {
+        // `Armed` is the engine's own answer (`capabilities.rs`), not a second
+        // reading of the weapon list: it skips `NeverUse=yes` entries and reads
+        // the same slots the simulation does, so a mod's unit is armed here
+        // exactly when it is armed in the fight.
+        if vera20k_core::rules::capabilities::Capabilities::of(rules, ty)
+            .has(vera20k_core::rules::capabilities::Tag::Armed)
+        {
             roles = roles.with(Roles::ARMED);
         }
         // What a unit is for in a fight, off its best reach rather than its name:
@@ -267,6 +299,7 @@ impl UnitProfile {
             cost: ty.cost,
             strength: ty.strength,
             armor: vera20k_core::rules::armor::armor_index(&ty.armor).index(),
+            armor_name: ty.armor.clone(),
             speed: ty.speed,
             sight: ty.sight,
             roles,
@@ -286,6 +319,23 @@ impl UnitProfile {
             .iter()
             .filter(|weapon| weapon.can_hurt(armor))
             .max_by_key(|weapon| weapon.dps_permille[armor])
+    }
+
+    /// The damage this type puts into a target of that armor class, per second.
+    ///
+    /// The best of the weapons that can hurt it, not the sum: native fires one
+    /// weapon at a time (`What_Weapon_Should_I_Use` answers one index), so a
+    /// type with a rifle and a rocket launcher does not shoot both in the same
+    /// second. Zero means no weapon can hurt that armor class at all, which is
+    /// the answer a caller needs — a type that cannot hurt armour is not army
+    /// against armour.
+    pub fn damage_against(&self, armor: usize) -> i64 {
+        self.weapons
+            .iter()
+            .filter(|weapon| weapon.can_hurt(armor))
+            .map(|weapon| weapon.dps_permille[armor])
+            .max()
+            .unwrap_or(0)
     }
 
     /// Whether this unit can hurt an object with that armor at all.
@@ -433,6 +483,44 @@ mod tests {
             "a tank's gun hurts heavy armor"
         );
         assert!(grizzly.cost > 0);
+    }
+
+    /// The attack dog's only real weapon is its teeth, and a `ParasiteDog`
+    /// warhead is 0% against every vehicle armour. It used to score anti-armour
+    /// damage off the `VirtualScanner` every dog carries as `Secondary=` — a
+    /// `NeverUse=yes` scan range that native never selects to fire.
+    #[test]
+    fn a_dog_cannot_hurt_armour() {
+        let Some(rules) = retail() else {
+            return;
+        };
+        let profiles = Profiles::build(&rules);
+        let Some(dog) = profiles.get("ADOG") else {
+            return;
+        };
+        for armor in ["light", "medium", "heavy"] {
+            let at = vera20k_core::rules::armor::armor_index(armor).index();
+            assert!(!dog.can_hurt(at), "a dog does nothing to {armor} armour");
+            assert_eq!(dog.damage_against(at), 0);
+        }
+        assert!(!dog.weapons.iter().any(|w| w.id == "VirtualScanner"));
+    }
+
+    /// A turreted type's profile is the gun it points, not the whole weapon
+    /// array: `TurretCount>0` takes `What_Weapon_Should_I_Use`'s gunner slot
+    /// (arm A), and the IFV's seventeen entries are the crew weapons each
+    /// passenger turns its turret into.
+    #[test]
+    fn a_turreted_type_is_profiled_by_its_own_gun() {
+        let Some(rules) = retail() else {
+            return;
+        };
+        let profiles = Profiles::build(&rules);
+        let Some(ifv) = profiles.get("FV") else {
+            return;
+        };
+        assert_eq!(ifv.weapons.len(), 1, "the IFV carries one gun of its own");
+        assert_eq!(ifv.weapons[0].id, "HoverMissile");
     }
 
     #[test]

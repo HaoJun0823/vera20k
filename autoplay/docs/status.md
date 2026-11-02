@@ -840,3 +840,82 @@ Two attempts to make it fight, both measured on the 1v7 lane, both rejected:
 Every rule that makes the army fight sooner costs more than it wins, because
 the army it sends loses. The strength has to come first: more units per credit,
 a front line that can absorb a hit, and a base that cannot be walked into.
+
+## The army is composed from the role model, and the model was wrong
+
+Three separate defects sat under "the army is not strong enough to fight",
+and only the third was in the policy.
+
+1. **`NeverUse=yes` was scored as a weapon.** `TechnoClass::What_Weapon_Should_I_Use
+   @ 0x006F33BF` returns the primary as soon as the secondary carries the flag,
+   so the entry is never fired. Retail's only such weapon is the
+   `VirtualScanner` every dog and engineer carries as `Secondary=` — a range-5
+   `InvisibleAll`/`SA` entry that exists to widen the guard scan. The role model
+   scored it, which gave the attack dog 0.24 of anti-vehicle and 0.30 of
+   anti-air weight off a warhead it can never shoot. The engine's own
+   `capabilities.rs` already skipped the flag when it decides `Armed`; the role
+   owner did not.
+2. **The autoplay profile's weapon table was a second implementation.** It read
+   every weapon slot of a type and summed them, so the IFV's seventeen
+   `WeaponN=` entries — the crew weapons each passenger turns its turret into —
+   became one transport with a dozen types' firepower, and the same
+   `VirtualScanner` made the dog look armoured. Native reads one weapon: arm A
+   of the ladder returns the gunner slot for a `TurretCount>0` non-gattling
+   type, and `weapon_damage_value` (`0x006F3970`) reads slots 0..1 otherwise.
+   The table now holds only those slots and never a `NeverUse=yes` entry, and
+   `damage_against` is the best of them rather than their sum. `Armed` comes
+   from `Capabilities` rather than a second reading of the list.
+3. **The picker ranked by a count it did not have.** With `seen=0` on every
+   reading, the old threat score was zero for every candidate and the tie broke
+   on `(cost, id)`: `ADOG` before `E1`, `FV` before `MTNK`. The house fielded
+   twenty-six attack dogs, whose `ParasiteDog` warhead is 0% against light,
+   medium, heavy, wood, steel and concrete — an army that could kill riflemen
+   and nothing else, in a match where the enemy builds mostly defences.
+
+### One owner for "is this army"
+
+`rules::unit_role::is_army` is now the answer, and the retail brain's census
+asks it too (`Traits::combat` used to spell the predicate out). Every term is a
+key the type declares: a weapon that fires, no capture or harvest job, fewer
+than five seats (`TRANSPORT_SEATS`, moved onto the role model), not a spawn
+child, not a yard maker. `ROLE_FLOOR` moved there for the same reason.
+
+The `Roles::AI_ONLY` bit added a round earlier is gone. It read `NotHuman=yes`
+as "the player cannot build this", which retail contradicts: every dog is
+`NotHuman=yes` with `Cost=200`, `Prerequisite=Barracks` and `TechLevel=2`, and
+is buildable. A mod's robot or animal unit marked the same way would have been
+silently dropped from the army. The dog is refused now because the role model
+says it answers one job, not because of a flag retail uses for something else.
+
+### What the picker composes against
+
+The threat vector the retail brain uses comes from the whole enemy army — which
+it may do, because the native computer is omniscient. This policy may only look
+at what its own units can see (spec 2.5), and on a map whose bases sit 116 cells
+apart that is nothing on every reading of every match.
+
+So the target is **the mix the rule set itself offers**: each job worth the sum
+of the weights every buildable type carries in it, normalised, times the army
+the house already fields. A role a mod adds or retunes reshapes the target with
+no constant to revisit. A visible enemy is added on top in units of one type's
+worth, so what the house can see still steers what it buys. The score is the
+biggest gap a type closes, not the sum of all of them (one multi-role vehicle
+outranking every specialist is the engine's own recorded finding), and ties go
+to the type the house holds fewest of, then the dearer one.
+
+Measured on the six-cell matrix against `eval-v2-fixed.jsonl`:
+
+| Map | Seed | own | army | lost |
+|---|---|---|---|---|
+| Barrel.mmx | 10 | 43 -> 48 | 6975 -> 7058 | 0:0 |
+| Barrel.mmx | 19 | 42 -> 47 | 7075 -> 7175 | 0:0 |
+| Barrel.mmx | 24301 | 31 -> 42 | 3478 -> 6675 | 5:1 -> 0:0 |
+| Death.mmx | 10 | 43 -> 49 | 7075 -> 7175 | 0:0 |
+| Death.mmx | 19 | 44 -> 49 | 5658 -> 7293 | 0:0 -> 0:7 |
+| Death.mmx | 24301 | 41 -> 29 | 6775 -> 4532 | 0:0 -> 5:1 |
+
+Five cells better, one worse. The house fields `E1`/`GGI`/`MTNK`/`FV`/`ADOG`
+in every cell instead of one type, and seed 19 on Death.mmx kills seven enemy
+objects for none of its own. The one regressed cell is the campaign, not the
+composition: the column leaves and is destroyed (`lost` 5:1), which is the
+retreat rung status.md already records as missing.

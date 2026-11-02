@@ -6,9 +6,8 @@
 //! size they hold the base. A harvester is armed and is not a soldier, so it is
 //! never given either job.
 
-use std::collections::BTreeMap;
-
-use vera20k_core::rules::object_type::ObjectCategory;
+use vera20k_core::rules::object_type::{ObjectCategory, ObjectType};
+use vera20k_core::rules::unit_role::{ROLES, Role};
 use vera20k_core::sim::control::intent::Intent;
 use vera20k_core::sim::control::observation::EnemyEntity;
 use vera20k_core::sim::production::CanBuild;
@@ -17,14 +16,6 @@ use crate::job::{Proposal, Target};
 use crate::manager::{Ctx, Demands, Manager};
 use crate::profile::{Roles, UnitProfile};
 use crate::registry::JobKind;
-
-/// Whether the unit the house buys is the one that hurts what it can see,
-/// or the cheapest armed unit it can build.
-///
-/// The flag exists so both answers can be measured on the same build. The
-/// cheapest picker is what the policy used from the start, and it is why every
-/// army was one type.
-const THREAT_AWARE_PRODUCTION: bool = true;
 
 /// How many armed units the house wants before it attacks.
 const ARMY_TO_ATTACK: usize = 30;
@@ -46,6 +37,13 @@ const ARMY_TO_ATTACK: usize = 30;
 const ATTACK_ENABLED: bool = true;
 /// Below this the house keeps its credits for buildings.
 const UNIT_SPEND_FLOOR: i32 = 900;
+
+/// How large a gap is worth answering once, in units.
+///
+/// Three, the engine's own cap (`retail::composition::GAP_CAP`): a house that
+/// sees twenty tanks does not need twenty anti-tank units before it buys
+/// anything else, and an uncapped gap drowns every other job.
+const GAP_CAP: i64 = 3;
 
 #[derive(Debug, Default)]
 pub struct Military;
@@ -78,29 +76,23 @@ impl Military {
         if ctx.obs.credits() < UNIT_SPEND_FLOOR + reserve {
             return;
         }
-        // What the house is fighting, in armor classes.
+        // What the house is short of, in roles.
         //
-        // The picker used to be "the cheapest armed unit", which quietly means
-        // "each faction's best-value unit": every army ended up one type, and
-        // the factions differed by twenty-five objects because their cheap
-        // units were worth different amounts. The unit a house buys is the one
-        // that hurts what is in front of it, per credit.
+        // The picker used to score a candidate by the average damage it does
+        // against the armor classes it can see, and the visible set is empty on
+        // every reading of every match, so the average was over nothing: every
+        // candidate scored zero and the tie was broken by price and then by
+        // name. That is how the house ended up fielding twenty-six Allied
+        // attack dogs - a `NotHuman=yes` type the player's build list does not
+        // offer, whose only weapon does nothing against armour - and eight
+        // IFVs, which are transports.
         //
-        // The flag is here so the two pickers can be measured against each
-        // other on the same build rather than argued about.
-        let mut threat: BTreeMap<usize, usize> = BTreeMap::new();
-        for enemy in ctx.obs.visible_enemy_entities() {
-            if let Some(profile) = ctx
-                .obs
-                .object_type(ctx.rules, enemy.type_id)
-                .and_then(|ty| ctx.profiles.get(&ty.id))
-            {
-                *threat.entry(profile.armor).or_default() += 1;
-            }
-        }
-        let mut infantry: Option<(&UnitProfile, i64)> = None;
-        let mut vehicle: Option<(&UnitProfile, i64)> = None;
-        let threat_picker = THREAT_AWARE_PRODUCTION;
+        // The role model answers the question the average could not: what the
+        // house is short of, and which type answers it. `rules::unit_role`
+        // derives the weights from the same `Verses=` data the damage kernel
+        // uses, so a mod's own warheads reshape the answer.
+        // The candidates: what the house can actually put on the line.
+        let mut candidates: Vec<(&ObjectType, &UnitProfile)> = Vec::new();
         for ty in ctx.rules.all_objects() {
             if ty.category == ObjectCategory::Building {
                 continue;
@@ -108,24 +100,46 @@ impl Military {
             let Some(profile) = ctx.profiles.get(&ty.id) else {
                 continue;
             };
-            if !profile.roles.contains(Roles::ARMED) || profile.roles.contains(Roles::HARVESTER) {
+            if !Self::is_army_candidate(ctx, ty) {
                 continue;
             }
             if ctx.obs.can_build(ctx.rules, ty, false) != CanBuild::Yes {
                 continue;
             }
-            let score = if threat_picker {
-                Self::threat_score(profile, &threat)
-            } else {
-                0
-            };
+            candidates.push((ty, profile));
+        }
+        if candidates.is_empty() {
+            return;
+        }
+        // What the army is short of, in permille of a job's share of it.
+        let need = Self::shortfall(ctx, &candidates);
+        // How many of each type the house already holds: the tie between two
+        // answers goes to the one it has fewest of, so a line rotates between
+        // the types that answer a job instead of buying the same answer forever.
+        let mut held: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+        for unit in ctx.obs.own_entities() {
+            if let Some(ty) = ctx.obs.object_type(ctx.rules, unit.type_id) {
+                *held.entry(ty.id.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut infantry: Option<(&UnitProfile, i64, i64)> = None;
+        let mut vehicle: Option<(&UnitProfile, i64, i64)> = None;
+        for (ty, profile) in candidates {
+            let score = Self::role_score(ctx, &ty.id, &need);
+            let holds = held.get(&ty.id).copied().unwrap_or(0);
             match ty.category {
-                ObjectCategory::Infantry => infantry = Self::better(infantry, profile, score),
-                ObjectCategory::Vehicle => vehicle = Self::better(vehicle, profile, score),
+                ObjectCategory::Infantry => {
+                    infantry = Self::better(infantry, profile, score, holds)
+                }
+                ObjectCategory::Vehicle => vehicle = Self::better(vehicle, profile, score, holds),
                 _ => {}
             }
         }
-        for want in [vehicle, infantry].into_iter().flatten().map(|(profile, _)| profile) {
+        for want in [vehicle, infantry]
+            .into_iter()
+            .flatten()
+            .map(|(profile, _, _)| profile)
+        {
             let Some(type_id) = ctx.obs.type_id(&want.id) else {
                 continue;
             };
@@ -137,42 +151,140 @@ impl Military {
         }
     }
 
-    /// The damage this type does per credit against the armor the house can
-    /// see, in permille. Zero when nothing is in sight, which leaves the
-    /// cheapest type as the answer.
-    fn threat_score(profile: &UnitProfile, threat: &BTreeMap<usize, usize>) -> i64 {
-        let total: usize = threat.values().sum();
-        if total == 0 {
-            return 0;
-        }
-        let mut weighted = 0_i64;
-        for (armor, count) in threat {
-            let dps = profile
-                .best_weapon_against(*armor)
-                .map_or(0, |weapon| weapon.dps_permille[*armor]);
-            weighted += dps * (*count as i64);
-        }
-        let average = weighted / total as i64;
-        // Per credit, with a thousand so the division keeps its precision.
-        average * 1_000 / i64::from(profile.cost).max(1)
+    /// Whether a type belongs on the army's line at all.
+    ///
+    /// `rules::unit_role::is_army` owns the answer — the retail brain asks it
+    /// too — so the two cannot disagree about what a squad is made of. Every
+    /// term is a key the type declares: a weapon that fires (not a
+    /// `NeverUse=yes` scan range), no capture or harvest job, fewer than five
+    /// seats, not a spawn child, not a yard maker. A mod's unit is admitted by
+    /// the same reading, and the attack dog is refused because it is a scout
+    /// the squad already has, not because of its name.
+    fn is_army_candidate(ctx: &Ctx<'_>, ty: &ObjectType) -> bool {
+        vera20k_core::rules::unit_role::is_army(ctx.rules, ty)
     }
 
-    /// The better of two candidates: more damage per credit first, and the
-    /// cheaper one when they are equal.
+    /// What the house is short of, in permille of each job's share of the army.
+    ///
+    /// The army is composed in the proportion the rule set itself offers: each
+    /// job worth the sum of the weights every buildable type carries in it, and
+    /// the house short of whatever share it has not filled yet. Nothing here is
+    /// a retail number — a mod that adds a type, or retunes a warhead, reshapes
+    /// the target mix without a constant to revisit.
+    ///
+    /// This is what a house that can see nothing composes against. The retail
+    /// brain reads its threat off the whole enemy army, which it is allowed to
+    /// do because the native computer is omniscient; this policy may only look
+    /// at what its own units can see (spec 2.5), and on a map whose two bases
+    /// sit a hundred cells apart that is nothing at all. Composing against the
+    /// roster is the honest answer to "what will an army meet": the enemy is
+    /// drawn from the same rules.
+    ///
+    /// A visible enemy is added on top, in units of one type's worth, so what
+    /// the house can see of the fight still steers what it buys.
+    fn shortfall(ctx: &Ctx<'_>, candidates: &[(&ObjectType, &UnitProfile)]) -> [i64; ROLES.len()] {
+        // The target mix, from the weights of everything the house can build.
+        let mut target = [0.0_f64; ROLES.len()];
+        for (_, profile) in candidates {
+            let weights = ctx.roles.weights(&profile.id);
+            for role in ROLES {
+                target[role.index()] += weights.get(role);
+            }
+        }
+        let offered: f64 = target.iter().sum();
+        if offered > 0.0 {
+            for share in target.iter_mut() {
+                *share /= offered;
+            }
+        }
+
+        // What the house already brings, in the same units, and the total.
+        let mut brings = [0.0_f64; ROLES.len()];
+        for unit in ctx.obs.own_entities() {
+            let Some(ty) = ctx.obs.object_type(ctx.rules, unit.type_id) else {
+                continue;
+            };
+            if !vera20k_core::rules::unit_role::is_army(ctx.rules, ty) {
+                continue;
+            }
+            let weights = ctx.roles.weights(&ty.id);
+            for role in ROLES {
+                brings[role.index()] += weights.get(role);
+            }
+        }
+        // One army's worth when the house has none yet, so the first unit is
+        // chosen by the same mix as the thirtieth.
+        let held: f64 = brings.iter().sum::<f64>().max(1.0);
+
+        // What the enemy asks for, by the job that answers the armour it wears.
+        let mut threat = [0_i64; ROLES.len()];
+        for enemy in ctx.obs.visible_enemy_entities() {
+            let Some(ty) = ctx.obs.object_type(ctx.rules, enemy.type_id) else {
+                continue;
+            };
+            if ty.category == ObjectCategory::Building || ty.spawned {
+                continue;
+            }
+            if let Some(role) = vera20k_core::rules::unit_role::role_against_armour(ty.armor_id()) {
+                threat[role.index()] += 1;
+            }
+        }
+
+        let mut need = [0_i64; ROLES.len()];
+        for role in ROLES {
+            let at = role.index();
+            let want = held * target[at] + threat[at] as f64;
+            need[at] = ((want - brings[at]).max(0.0) * 1_000.0).round() as i64;
+        }
+        need
+    }
+
+    /// How well a type answers what the house is short of.
+    ///
+    /// The gap it closes **best**, not the sum of all of them: a type that
+    /// answers four jobs a little is not four units, and summing let one
+    /// multi-role vehicle outrank every specialist — the engine's own
+    /// composition reads it the same way (`retail::composition::fighter`).
+    /// A type that answers nothing scores zero.
+    fn role_score(ctx: &Ctx<'_>, type_id: &str, need: &[i64; ROLES.len()]) -> i64 {
+        let weights = ctx.roles.weights(type_id);
+        let closest = ROLES
+            .iter()
+            .map(|role| weights.get(*role) * need[role.index()].min(GAP_CAP * 1_000) as f64)
+            .fold(0.0_f64, f64::max);
+        if closest <= 0.0 {
+            return 0;
+        }
+        closest as i64
+    }
+
+    /// The better of two candidates, ranked the way the engine's own
+    /// composition ranks its fighters: the bigger gap first, then the type the
+    /// house holds fewest of, then the dearer one, then the earlier rule.
+    ///
+    /// The held count rotates a line between the types that answer a job — one
+    /// gap, one answer, and the answer with the best score won every cycle for
+    /// as long as the gap lasted. The price breaks the last tie toward the
+    /// dearer type rather than the cheaper one, because a band is a price and
+    /// not a preference: two types that answer a job equally are not equally
+    /// worth buying, and the cheap one is the one that fills the line with
+    /// soldiers while the factory can make tanks.
     fn better<'a>(
-        current: Option<(&'a UnitProfile, i64)>,
+        current: Option<(&'a UnitProfile, i64, i64)>,
         candidate: &'a UnitProfile,
         score: i64,
-    ) -> Option<(&'a UnitProfile, i64)> {
+        held: i64,
+    ) -> Option<(&'a UnitProfile, i64, i64)> {
+        let rank = |score: i64, held: i64, cost: i32, id: &str| (score, -held, cost, id.to_owned());
         match current {
-            None => Some((candidate, score)),
-            Some((best, best_score)) => {
-                if score > best_score
-                    || (score == best_score && (candidate.cost, &candidate.id) < (best.cost, &best.id))
-                {
-                    Some((candidate, score))
+            None => Some((candidate, score, held)),
+            Some((best, best_score, best_held)) => {
+                let candidate_rank = rank(score, held, candidate.cost, &candidate.id);
+                let best_rank = rank(best_score, best_held, best.cost, &best.id);
+                if candidate_rank > best_rank {
+                    Some((candidate, score, held))
                 } else {
-                    Some((best, best_score))
+                    Some((best, best_score, best_held))
                 }
             }
         }
@@ -297,7 +409,6 @@ impl Military {
             }
         }
     }
-
 }
 
 /// Where a column with no target should march: an unrevealed cell **on the edge of

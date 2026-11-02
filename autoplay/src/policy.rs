@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 use vera20k_core::rules::ruleset::RuleSet;
+use vera20k_core::rules::unit_role::RoleTable;
 use vera20k_core::sim::behavior::goal::Goal;
 use vera20k_core::sim::behavior::view::cell_distance;
 use vera20k_core::sim::control::brain::{Brain, Outbox};
@@ -101,6 +102,8 @@ pub struct Stats {
 
 pub struct Policy {
     profiles: Profiles,
+    /// What every type is for, read off the rules by the engine's role model.
+    roles: RoleTable,
     managers: Vec<Box<dyn Manager>>,
     jobs: Assignments,
     last_term: Option<u64>,
@@ -145,6 +148,7 @@ impl Policy {
     pub fn new(rules: &RuleSet) -> Self {
         Self {
             profiles: Profiles::build(rules),
+            roles: RoleTable::build(rules),
             managers: vec![
                 Box::new(Economy),
                 Box::new(Build),
@@ -654,6 +658,7 @@ impl Brain for Policy {
                 rules,
                 obs,
                 profiles: &self.profiles,
+                roles: &self.roles,
                 tick,
             };
             for manager in &mut self.managers {
