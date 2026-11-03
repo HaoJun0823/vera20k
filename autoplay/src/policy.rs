@@ -999,7 +999,7 @@ impl Brain for Policy {
                     .filter(|(cell, _)| *cell == unit.cell)
                     .map_or(0, |(_, since)| tick.saturating_sub(*since));
                 log::info!(
-                    "policy v2 unit: id={} {} job={} target={} standing={} mission={:?}",
+                    "policy v2 unit: id={} {} job={} target={} standing={} mission={:?} at={:?}",
                     unit.entity_id,
                     ty.id,
                     kind,
@@ -1010,7 +1010,12 @@ impl Brain for Policy {
                     // "the order was never taken" from "it was taken and the walk
                     // did not start", and a capture that lives one term looks the
                     // same either way.
-                    unit.mission
+                    unit.mission,
+                    // Where it stands. Without this, a unit that disappears from the
+                    // log has no location and "died at the base" and "died a
+                    // hundred cells out" read the same — which is the question the
+                    // loss count raised and cannot answer on its own.
+                    unit.cell
                 );
             }
             log::info!(
