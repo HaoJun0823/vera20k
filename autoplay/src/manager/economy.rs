@@ -26,7 +26,7 @@ const POWER_MARGIN: i32 = 20;
 /// ceiling is what the wallet hits: measured, five of the six baseline cells
 /// sat at twelve credits with the wallet frozen for the last 3600 frames,
 /// which is also why no second refinery ever landed.
-const HARVESTERS_PER_REFINERY: usize = 2;
+const HARVESTERS_PER_REFINERY: usize = 3;
 
 /// What the wallet keeps in hand before a second truck on a refinery is
 /// bought.
