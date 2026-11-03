@@ -4,6 +4,46 @@ Audited against `spec.md` and `G:/Documents/autoplay-v2.txt` on 2026-11-03. One
 line per item, with the reading that accepts it and its real state. The chronicle
 is status.md; the design is design.md; the acceptance criteria are spec.md.
 
+## The current target: 1v7 easy, survive
+
+Set 2026-11-03, and reached. Death.mmx, seven computer houses, 24000 ticks, three
+seeds, **all three survive**:
+
+| Seed | own | enemy | lost | result |
+|---|---|---|---|---|
+| 0x5EED | 57 | 287 | 18:5 | timeout |
+| 19 | 41 | 298 | 13:10 | timeout |
+| 10 | 50 | 288 | 6:11 | timeout |
+
+The same build on the neighbouring lanes, which is what makes the target
+meaningful:
+
+| Lane | Result | own / enemy | lost |
+|---|---|---|---|
+| 1v1 easy | timeout | **65 / 42** | 5:4 |
+| 1v7 easy | timeout ×3 | 57 / 287, 41 / 298, 50 / 288 | 18:5, 13:10, 6:11 |
+| 1v7 normal | **lost at 17188** | 9 / 375 | 32:0 |
+
+**Read the result column before reading anything else.** All three 1v7 easy cells
+are `timeout`: the house stood until the clock ran out. No enemy house was
+defeated, and `enemy` climbs from 119 at tick 0 to 287 at 23400 while ours peaks
+at 72 and falls to 57. Surviving is the milestone; it is not a win and nothing
+here claims one.
+
+What is settled by it: the difficulty parameter is live (normal dies at 17188
+with the house reduced to nine objects), the army does engage (seed 0x5EED turns
+`engage=true` at tick 9000 and `seen` climbs 0 → 19), and the remaining gap is
+**structural** — seven houses open with 119 objects against our 13, and the
+tactical layer is deciding inside that ratio.
+
+Reproduce:
+
+    python -m tools.autoplay_check --brain v2 --seeds 0x5EED,19,10 \
+        --maps Death.mmx --ticks 24000 --opponents 7 --difficulty easy \
+        --history target/autoplay-results/easy1v7.jsonl
+
+Three minutes per match. The capability table prints after the matrix.
+
 **Read the state column as a fact, not an intention.** `DONE` means a measured
 reading exists. `PARTLY` means code exists and the spec's judgement does not
 hold. `STUB` means the manager is an empty `propose` — the file exists so the
@@ -209,27 +249,28 @@ and the question has moved.
 
 Priority, by what the spec judges and what the code cannot do:
 
-**P0 — the judges the spec asks for and nothing supplies.** The eighteen H
-counters and the `army`/`lost` readings exist but the rest do not. Without them,
-every item below is judged on a number that cannot see it.
+**P0 — the 1v7 easy economy.** Seven houses hold 287 objects at tick 23400 while
+the house holds 57, and the wallet reads 300-900 credits with `economy: nothing
+to build` on most readings. Three saving rules have been tried and all lost to
+the army, so the direction to try is the other one: a cheaper truck, a closer ore
+field, or ore worth more per trip. This is the only line that changes the ratio
+rather than the fight inside it.
 
-**P1 — the two empty managers.** `Build` and `Abilities` between them own walls,
-placement, repairs, capture, transports, infiltration, garrisons and superweapons —
-most of the wish list's concrete wants. Each is a separate slice; start with
-`Abilities::Capture` (A6, called 重中之重 in the wish list) or `Build`'s wall ring
-(B3, the only base item with a countable judgement).
+**P1 — something that can remove a building.** `lost` on the easy lane is 18:5,
+13:10 and 6:11 over 24000 ticks: the house cannot shrink a 287-object colony
+five objects at a time. Artillery exists as a type (`HOWI` is buildable from the
+first war factory) and the picker never buys it, because the only source of
+artillery demand is the roster mix rather than the sight of an enemy building.
 
-**P2 — the army that reaches the enemy base.** The column fights in the field and
-cannot break a fortress. status.md records marching at the base losing three
-Death.mmx cells (army 9388 → 5675). Needs artillery (HOWI exists and is never
-bought) and a siege judgement.
+**P2 — the judges the spec asks for and nothing supplies.** Twelve of the spec's
+eighteen H counters have no reading at all.
 
-**P3 — economy ceiling.** Two refineries, wallet 300-900, `economy: nothing to
-build` on most readings. Three saving rules tried and all lost to the army.
+**P3 — the two empty managers.** `Build` and `Abilities` between them own walls,
+placement, repairs, capture, transports, infiltration, garrisons and superweapons.
 
-**P4 — per-unit behaviour (U1-U13).** Thirteen items, none started. This is the
-largest single body of work in the wish list and should not be attempted before
-P0 gives it a reading.
+**P4 — per-unit behaviour (U1-U13).** Thirteen items, none started. The largest
+single body of work in the wish list and it should not be attempted before P2
+gives it a reading.
 
 ## The rule that decides
 
