@@ -154,6 +154,12 @@ impl Economy {
         let mut laboratory: Option<&UnitProfile> = None;
         let mut purifier: Option<&UnitProfile> = None;
         let mut superweapon: Option<&UnitProfile> = None;
+        // The radar sits between the war factory and the laboratory: `[GATECH]`
+        // lists `Prerequisite=GAWEAP,RADAR,GACNST`, and a house without one has
+        // every technology building refused on every term. Measured on 1v7 easy
+        // before this existed: `GATECH refused by can_build` at every readout and
+        // `lab=0` at the end of a 24000-tick match.
+        let mut radar: Option<&UnitProfile> = None;
         for ty in ctx.rules.all_objects() {
             let Some(profile) = ctx.profiles.get(&ty.id) else {
                 continue;
@@ -189,6 +195,8 @@ impl Economy {
             }
             if profile.roles.contains(Roles::LABORATORY) {
                 laboratory = Self::cheaper(laboratory, profile);
+            } else if profile.roles.contains(Roles::RADAR) {
+                radar = Self::cheaper(radar, profile);
             } else if profile.roles.contains(Roles::ORE_PURIFIER) {
                 purifier = Self::cheaper(purifier, profile);
             } else if profile.roles.contains(Roles::SUPERWEAPON) {
@@ -253,9 +261,12 @@ impl Economy {
         } else if defenses < 4 && defense.is_some_and(|want| Self::affordable(ctx, want)) {
             defense
         // The technology tier, after the base can defend itself and before the
-        // house starts buying launchers. The laboratory comes first because it
-        // is the gate: its own prerequisite chain is what makes the purifier and
-        // the superweapon buildable at all, and it also carries the force shield.
+        // house starts buying launchers. The radar comes first because it is what
+        // the laboratory's prerequisite names, and the laboratory after it because
+        // that is the gate: its own chain is what makes the purifier and the
+        // launcher buildable, and it also carries the force shield.
+        } else if !has(Roles::RADAR) && radar.is_some_and(|want| Self::affordable(ctx, want)) {
+            radar
         } else if !has(Roles::LABORATORY)
             && laboratory.is_some_and(|want| Self::affordable(ctx, want))
         {

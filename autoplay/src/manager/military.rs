@@ -103,6 +103,51 @@ impl Manager for Military {
 }
 
 impl Military {
+    /// The next technology building the house has not got, and what it costs.
+    ///
+    /// Zero once the tier is standing: an army that keeps saving after the
+    /// laboratory, the purifier and a launcher are all up is an army that never
+    /// gets bought. The order matches the economy's own ladder, so the two
+    /// managers agree on what is next instead of bidding against each other.
+    fn tech_reserve(ctx: &Ctx<'_>) -> i32 {
+        let has = |role: Roles| {
+            ctx.obs
+                .own_entities()
+                .filter(|unit| {
+                    ctx.obs
+                        .object_type(ctx.rules, unit.type_id)
+                        .and_then(|ty| ctx.profiles.get(&ty.id))
+                        .is_some_and(|profile| profile.roles.contains(role))
+                })
+                .count()
+                > 0
+        };
+        for role in [
+            Roles::RADAR,
+            Roles::LABORATORY,
+            Roles::ORE_PURIFIER,
+            Roles::SUPERWEAPON,
+        ] {
+            if has(role) {
+                continue;
+            }
+            // The cheapest buildable type that fills this role: the economy will
+            // buy the same one, because both take `cheaper`.
+            let cost = ctx
+                .rules
+                .all_objects()
+                .filter_map(|ty| ctx.profiles.get(&ty.id))
+                .filter(|profile| profile.category == ObjectCategory::Building)
+                .filter(|profile| profile.roles.contains(role))
+                .map(|profile| profile.cost)
+                .min();
+            if let Some(cost) = cost {
+                return cost + 200;
+            }
+        }
+        0
+    }
+
     /// One unit at a time, cheapest first, while the wallet allows it.
     fn produce(&mut self, ctx: &Ctx<'_>, out: &mut Demands) {
         // The army does not spend the money the economy is saving: while the
@@ -119,7 +164,21 @@ impl Military {
                     .is_some_and(|profile| profile.roles.contains(Roles::REFINERY))
             })
             .count();
-        let reserve = if refineries < 2 { 1_500 } else { 0 };
+        // The technology tier is also worth not bidding against. A laboratory
+        // costs 2000 and the army's floor is 900, so a house at war with a
+        // 300-900 wallet can never hold the 2200 it needs: measured on 1v7 easy,
+        // `lab_cand=true` from the moment the radar stood and `credits=300` at
+        // the same readings, so the laboratory was refused for money on every
+        // term until the match ended.
+        //
+        // The reserve is the price of the next technology building the economy
+        // has not got yet, capped by what the wallet can actually reach. A house
+        // that keeps the whole cost in the bank forever buys no army, which is
+        // the failure the refinery reserve already measured: own fell 46-51 to
+        // 37-41 when the army banked a truck's cost. So the cap is the point: the
+        // army keeps enough for one building and spends the rest.
+        let tech_reserve = Self::tech_reserve(ctx);
+        let reserve = if refineries < 2 { 1_500 } else { tech_reserve };
         if ctx.obs.credits() < UNIT_SPEND_FLOOR + reserve {
             return;
         }

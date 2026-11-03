@@ -78,6 +78,15 @@ impl Roles {
     /// houses that own them fire iron curtains, nukes, lightning storms and the
     /// chronosphere. A house with none of them has no answer to a house that has.
     pub const SUPERWEAPON: Self = Self(1 << 16);
+    /// A radar: the building that satisfies a `RADAR` prerequisite group.
+    ///
+    /// `Radar=yes` in the retail rules. It sits between the war factory and the
+    /// laboratory — `[GATECH]` lists `Prerequisite=GAWEAP,RADAR,GACNST` — and a
+    /// house that never builds one can never reach the laboratory, the force
+    /// shield, the purifier or anything behind them. Measured: the policy's build
+    /// order went straight from four defences to a laboratory, the laboratory was
+    /// refused on every term, and the house ended 1v7 matches with `lab=0`.
+    pub const RADAR: Self = Self(1 << 17);
     /// A weapon reaching at least this many cells counts as ranged.
     ///
     /// A Grizzly's gun reaches four; a Prism Tank's reaches ten. Anything past
@@ -112,6 +121,7 @@ impl Roles {
             ("laboratory", Roles::LABORATORY),
             ("ore-purifier", Roles::ORE_PURIFIER),
             ("superweapon", Roles::SUPERWEAPON),
+            ("radar", Roles::RADAR),
         ];
         ALL.iter()
             .filter(|(_, role)| self.contains(*role))
@@ -262,6 +272,12 @@ impl UnitProfile {
             }
             if ty.ore_purifier {
                 roles = roles.with(Roles::ORE_PURIFIER);
+            }
+            // The radar. `Radar=yes` on `[AMRADR]`, `[NARADR]`, `[GAAIRC]` and
+            // `[NAPSIS]`, which are exactly the four the retail rules list under
+            // `[General] PrerequisiteRadar` — the group `[GATECH]` names.
+            if ty.radar {
+                roles = roles.with(Roles::RADAR);
             }
             // A laboratory is the structure whose only superweapon is the force
             // shield: retail gives it no other effect to declare, and a house
