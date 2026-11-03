@@ -351,7 +351,30 @@ impl Military {
         // player could not have clicked, so a target is something in line of
         // sight right now. A house that sees nothing holds its post.
         let seen: Vec<EnemyEntity> = ctx.obs.visible_enemy_entities().collect();
-        let target = seen
+        // A target nobody can hurt is not a target. `FireError::Illegal` is the
+        // engine's "never", and it is the answer for the wish list's oldest
+        // complaint — 狗咬坦克, an attack dog chewing on armour it cannot dent, and
+        // 步兵打盖特, a rifleman shooting at a gate. Those orders cost a unit and
+        // achieve nothing, and the engine already knows the answer before the
+        // order is sent.
+        //
+        // `Range` and `Ammo` are deliberately not filtered: those are "not yet",
+        // and a unit that walks into range or waits for its reload is doing its
+        // job. Only `Illegal` means picking another target.
+        let reachable: Vec<EnemyEntity> = seen
+            .iter()
+            .filter(|enemy| {
+                soldiers.iter().any(|unit| {
+                    !matches!(
+                        ctx.obs
+                            .engage_error(ctx.rules, unit.entity_id, enemy.entity_id),
+                        Some(vera20k_core::sim::combat::fire_error::FireError::Illegal)
+                    )
+                })
+            })
+            .copied()
+            .collect();
+        let target = reachable
             .iter()
             .min_by_key(|enemy| {
                 soldiers
@@ -468,13 +491,18 @@ impl Military {
         };
         if ctx.tick % 1800 == 0 {
             log::info!(
-                "military: tick={} enabled={} soldiers={} march_at={} quiet={} seen={} near={} engage={} march={} order={:?}",
+                "military: tick={} enabled={} soldiers={} march_at={} quiet={} seen={} reach={} near={} engage={} march={} order={:?}",
                 ctx.tick,
                 ATTACK_ENABLED,
                 soldiers.len(),
                 column,
                 quiet,
                 seen.len(),
+                // How many of the visible enemies any soldier can actually hurt.
+                // `seen` alone cannot show whether the Illegal filter is doing
+                // anything: a lane where every visible type is reachable reads the
+                // same as one where the filter never ran.
+                reachable.len(),
                 near_target,
                 engage,
                 march,
