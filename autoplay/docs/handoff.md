@@ -1,106 +1,90 @@
 # Handoff
 
-Where the v2 policy stands at the end of the session that took it from a dog
-army to a composed one. The chronicle is status.md; this is what to read first
-and what to do next.
+Where the v2 policy stands, 2026-11-04 07:40. The chronicle is `status.md`; the
+roadmap is `plan.md`; what a tester should look at is `playtest-plan.md`. This is
+what to read first and what to do next.
 
 ## The state
 
-Branch `feature/autoplay-v2`, working tree clean at `82b5f2847`. Thirteen measured
-commits from `autoplay: the army is composed from the role model` through
-`autoplay: the column marches from where the column is`, then two from this review
-session (the repaired test and the reverted retreat). Every one is measured; every
-reverted one is recorded with its numbers.
+Branch `feature/autoplay-v2`, working tree clean at `71f7389f7`.
 
-- **The tests pass: 33 of 33.** They did not before this session — see "The session
-  that was interrupted" below.
-- **1v1, six cells, 12000 ticks** — six of six better than the state the session
-  started from (`eval-v2-fixed.jsonl`): own +37 total, army +5867 total, no cell
-  worse, `stuck` down where it moved at all.
-- **1v1, six cells, 24000 ticks** — six of six survive. own averages 54, army
-  6787, 63 lost for 35 killed. `Barrel.mmx` seed 19 was the weak cell, and the
-  centroid anchor fixed it (`own 39 → 80`, `lost 19:7 → 2:0`).
-- **1v7, three seeds, 12000 ticks** — three of three survive, own 43/46/42,
-  army 6439/6200/5193, no loss on two seeds and 11:0 on one. 24000 ticks is
-  still lost (12418-15952): seven brutal houses hold 324-369 objects.
+- **Tests: 34 of 34 pass.** (`cargo test -p vera20k-autoplay --lib`)
+- **Harness: 14 tests pass.** (`python -m unittest tools.tests.test_autoplay_check`)
+- **1v1 easy, six cells, 12000 ticks** — own 45-57, `stuck` 0, six of six survive.
+- **1v7 easy, Death.mmx seed 0x5EED, 24000 ticks** — own 84, enemy 274, `lost 1:9`,
+  survives. Three seeds: own 84 / 90 / 58.
+- **Nothing wins.** Every lane ends `timeout` with no enemy base destroyed.
 
-## What changed and why it matters
+## The two readings that did not exist before this session
 
-1. **`rules::unit_role` was scoring `NeverUse=yes` weapons.** The `VirtualScanner`
-   every dog carries as `Secondary=` gave the attack dog 0.24 anti-vehicle and
-   0.30 anti-air weight off a warhead it can never fire. Fixed at the owner, so
-   the retail brain gets the right answer too.
-2. **`rules::unit_role::is_army` is the one owner of "is this army"**, and the
-   retail census asks it too. `Roles::AI_ONLY` is gone: `NotHuman=yes` does not
-   mean unbuildable — every dog is `NotHuman` with `Prerequisite=Barracks` — so
-   a mod unit marked that way would have been dropped.
-3. **The autoplay profile no longer sums every weapon slot.** It reads the slots
-   native fires and never a `NeverUse` entry, and `Armed` comes from the engine's
-   `Capabilities`.
-4. **The picker composes against the mix the rule set offers**, not against a
-   threat vector that is empty on every reading.
-5. **The army fights the raid it can see and marches only with a column**, where
-   the column size is a fact about contact rather than a constant.
+Both are in `policy.rs` and both were added because every earlier judgement ran
+without them.
 
-## The session that was interrupted, and what was found in it (2026-11-03)
+1. **Per-type losses.** `policy v2 losses: tick=… so_far={ADOG: 14, FV: 11, …}`,
+   printed every 3600 ticks. First reading: 40 objects lost in a 1v7 match, of which
+   **25 were attack dogs and IFVs** against three tanks. See `losses.md`.
+2. **Unit position and base.** The unit line carries `at=(x,y)`; the military line
+   carries `home=` and `door=`. First reading: the army's whole footprint stayed
+   within about thirty cells of a base at (69-80, 155-165). See `no-sortie.md`.
 
-A second session left two things behind, and both were settled before this handoff
-was written:
+**Both readings have a known defect**: `at=(0,0)` appears for units that also appear
+elsewhere, so the origin is an invalid value and not a position. Any conclusion read
+from positions must exclude it first. Cause uninvestigated.
 
-- **A test that had never passed.** `an_empty_house_opens_with_a_line_unit_not_a_cheap_specialist`
-  was added in `562c8d3a4` and failed from that day: it asserted the tank scores
-  above the dog (171.4 against 193.0), and the suite read 32 passed / 1 failed on
-  every commit after it. The intent was right and the mechanism was wrong — an
-  empty house does open with a tank, but because `produce` walks
-  `[vehicle, infantry]` and returns on the first it can start, not because of the
-  score. Repaired in `2329092b8`; the test now asserts what actually decides it.
-  **Run the whole suite, not a filtered subset.**
-- **A retreat rung that never fired.** Left in the working tree, measured on both
-  lanes: six of six 1v1 and three of three 1v7 cells identical to the baseline. It
-  keyed the retreat on `threat_around > 0 && away && soldiers.len() <= threat_around`,
-  and the first conjunct counts enemies in `seen` — which is empty on almost every
-  reading, and is empty in exactly the 1v7 case the change cited as its motivation.
-  Reverted in `82b5f2847`, with the readings in status.md.
+## What was tried and reverted this session
 
-The lesson from both: the fog defeats any rule keyed on `seen`. A retreat, a
-garrison, a threat estimate — each needs something the house can read without
-vision. `fc3130501` already introduced one such notion (contact as "an enemy in
-sight **or** an object of mine gone since the last reading"); the retreat was not
-built on it, which is why it could not fire.
+Nine attempts, all measured, all reverted. The list with numbers is `excluded.md`;
+the short version:
+
+| attempt | 1v7 own |
+|---|---|
+| per-unit target selection | 13 |
+| narrow pairing fix (only the dog re-aimed) | 26 |
+| garrison, priority 30 | 17 |
+| garrison, gated | 17 |
+| second war factory | 39 |
+| return-home leash 20 → 40 cells | 58 |
+| home = densest cluster + quiet at home | 55 |
+| baseline | **84** |
+
+`excluded.md` draws the conclusion: the baseline sits on a narrow balance — column
+concentrated, soldiers at home, army not roaming, one factory — and moving any of
+those four takes the house apart.
+
+## What is live
+
+- **Capture works.** `capture: engineer 2778 took building 2608 for Player` appears in
+  the log; `Capture` fires 1-3 times per cell. Nearest-first ordering is what made it
+  land (`44f945c2e`).
+- **The engine reports captures.** One line at the ownership change makes "captured"
+  and "died walking" distinguishable (`cae13c2b0`).
+- **Garrison is implemented and disabled** at the call site, because seven garrison
+  jobs on the 1v7 lane cost the base (`0720ec741`).
 
 ## What to do next, in order
 
-1. **`Barrel.mmx` seed 19 at 24000 ticks** — resolved. The centroid anchor (the
-   column marches from where the column is, not from `soldiers.first()`) took it
-   from `own 39, army 4045, lost 19:7` to `own 80, army 9804, lost 2:0`. It was an
-   attrition the house could not pay for, and marching further let it meet the
-   enemy in the field instead of at its own door.
-2. **The army now finds the enemy, but does not march to its base.** The centroid
-   anchor fixed the wandering: with `soldiers.first()` the frontier was searched
-   from home every term, but the mean of the column's cells lets it walk outward
-   and it now engages enemies in the field (Barrel.mmx seed 19 reads `seen=9` at
-   tick 21600). Marching *directly* at the enemy base was tried and rejected — it
-   sends the column into the fortress (tesla coils, walls, no siege of its own)
-   and three Death.mmx cells lost half their army. So the army meets the enemy in
-   the field, which is the favourable ground; pushing all the way to the base
-   needs a siege unit first (item 3).
-3. **Artillery against a fortress.** The 1v1 enemy builds almost nothing but
-   defences. `HOWI` is buildable from the first war factory and the picker never
-   buys it, because the only source of artillery demand is the roster mix. The
-   attempt (a demand for every armed enemy building in sight) is inert twice over:
-   the army still never reaches the enemy base buildings (it meets units in the
-   field, not the fortress), so `seen` never contains a building. It becomes live
-   only once item 2's base march works — which needs a siege unit so the column
-   survives the trip.
-4. **Income.** Three trucks for two bays, wallet at 300-900 credits, and every
-   reserve rule tried against it has lost to the army (status.md: three times).
-   A cheaper truck, a closer ore field, or ore worth more per trip — not another
-   saving rule.
+1. **Fix the `at=(0,0)` defect.** It undermines every position reading, including the
+   one that produced this session's central finding.
+2. **Find why going out costs more than staying.** Correcting `home` (a captured
+   building had made it point at the enemy) and letting the column march when the base
+   was quiet both cost `own` — 84 → 55 — even though `march=true` finally appeared.
+   That is the opposite of what the wish list wants and it is uninvestigated.
+3. **Do not** add factories, add income, widen the leash, or re-aim units. All four
+   are measured and all four are worse. See `excluded.md`.
 
-## The rule that decides
+## Still open from the wish list
 
-Six cells, or three at 1v7. Keep a change when own does not fall, no surviving
-seed is lost, unowned stays zero and stuck does not rise — and read `army` and
-`lost` beside `own`, because a change that raises the object count while killing
-nothing is a change that made the house hide. Every measurement in status.md
-names the file it was compared against.
+Ship, breach, infiltration, superweapon use, building abilities, combinations, kiting,
+retreat, ammunition sharing. `plan.md` has them in four batches with the criteria each
+would be judged by.
+
+## A caution about this session's own record
+
+Two claims were overstated and corrected in place:
+
+- "the army never left the base" — units did reach thirty cells out; the accurate
+  statement is that its range was small.
+- the loss reading was treated as clean before the origin defect was found.
+
+Treat the numbers in these docs as measurements taken with the tools described, not as
+established fact. The tools have been wrong twice.
