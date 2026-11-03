@@ -165,6 +165,26 @@ impl Economy {
             // limits. A policy that queues a type the house would refuse has
             // built nothing and blocked its own factory.
             if ctx.obs.can_build(ctx.rules, ty, false) != CanBuild::Yes {
+                // Why a technology building is refused is not visible from the
+                // outside: `CanBuild` answers `No` without a reason, and a house
+                // that stops at four defences looks identical whether the
+                // laboratory is unaffordable or impossible. One line per term is
+                // the cheapest way to tell those apart.
+                if ctx.tick % 1200 == 0
+                    && (profile.roles.contains(Roles::LABORATORY)
+                        || profile.roles.contains(Roles::ORE_PURIFIER))
+                {
+                    log::info!(
+                        "economy: {} refused by can_build at {} cost={} power={} house_tech={}",
+                        ty.id.as_str(),
+                        ctx.tick,
+                        profile.cost,
+                        profile.power,
+                        ctx.obs
+                            .tech_level()
+                            .map_or("?".to_string(), |level| level.to_string()),
+                    );
+                }
                 continue;
             }
             if profile.roles.contains(Roles::LABORATORY) {
