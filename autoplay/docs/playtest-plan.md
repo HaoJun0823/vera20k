@@ -1,27 +1,52 @@
 # 实机测试计划
 
-写于 2026-11-03。这份是给实机（客户端）测试用的，判据全部可观测、可复现。
-自动化的部分是 `tools/autoplay_check.py`；这份聚焦**人坐在屏幕前能看到什么**。
+写于 2026-11-03，交付版本标记于文末。这份是给实机（客户端）测试用的，判据全部
+可观测、可复现。自动化的部分是 `tools/autoplay_check.py`；这份聚焦**人坐在屏幕
+前能看到什么**。
+
+## 交付的构建
+
+| 项 | 值 |
+|---|---|
+| commit | `d4126bda2` |
+| 二进制 | `target/owned-worktrees/ae136fdc2a7d7d58/fast/vera20k.exe` |
+| 大小 / 时间 | 45.3 MB / 2026-11-03 21:38 |
+| 测试 | `cargo test -p vera20k-autoplay --lib` 34 通过 |
+| 环境变量 | `VERA20K_BRAIN=v2` 选择新策略，缺省仍是 retail |
 
 ## 现在的基线（已实测，不是估计）
 
 | 对局 | 难度 | 24000 tick 结果 | own / enemy | 损失 |
 |---|---|---|---|---|
-| 1v1 | 简单 | 存活 | 65 / 42 | 5:4 |
-| 1v7 | 简单 | **存活 ×3 种子** | 57/41/50 : 287/298/288 | 18:5, 13:10, 6:11 |
+| 1v1 | 简单 | 存活 | 65-79 / 29-42 | 0:7 ~ 6:14 |
+| 1v7 | 简单 | **存活 ×3 种子** | 47/41/50 : 291/298/288 | 18:5, 13:10, 6:11 |
 | 1v7 | 普通 | **17188 tick 战败** | 9 / 375 | 32:0 |
+
+六格矩阵（12000 tick，三种子两图，Normal）：own 42-49，`stuck=0`，全部存活。
 
 **能赢吗：不能。** 三个 1v7 简单全是 `timeout`（时间到，房子还在），
 一个敌方基地都没打掉，敌方对象数从 119 涨到 287。
 
 所以实机测试的预期应该是：**简单档能站住、能交战、但打不完**。
 
+## 这一版新增了什么（相对上一版）
+
+- **科技建筑识别**：实验室、矿石精炼器、超武现在能被策略认出来，判定全部来自
+  retail 的 INI 键（`SuperWeapon=ForceShieldSpecial`、`OrePurifier=yes`、
+  `Radar=yes`），不是硬编码类型名。
+- **雷达这一档**：`[GATECH]` 需要 `Prerequisite=GAWEAP,RADAR,GACNST`，之前的建造
+  链从防御塔直接跳到实验室，所以实验室永远造不出来。现在会先造雷达。
+- **第三辆矿车**：每座精炼厂从 2 辆改成 3 辆。1v1 的 `own` 从 73 升到 79，1v7
+  完全不变。
+
+**但实验室在 1v1 里仍然造不出来**：它要 2000，钱包峰值约 1000，而建造是全额
+预扣（引擎行为，已验证）。这是已知的天花板，不是 bug。
+
 ## 准备：让自动玩跑起来
 
     1. set RA2_DIR=I:\SteamLibrary\steamapps\common\Command & Conquer Red Alert II
-    2. python -m tools.cargo_run -- build --profile fast
-    3. set VERA20K_BRAIN=v2
-    4. 启动 target/owned-worktrees/<id>/fast/vera20k.exe
+    2. set VERA20K_BRAIN=v2
+    3. 启动 target/owned-worktrees/ae136fdc2a7d7d58/fast/vera20k.exe
 
 **四个自动玩按键默认没有绑定。** 必须先在热键设置的 `vera20k` 分类里分配：
 
