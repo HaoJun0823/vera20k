@@ -46,6 +46,11 @@ DEFAULT_SEEDS = ("0x5EED",)
 DEFAULT_MAP = "Death.mmx"
 DEFAULT_TICKS = 36_000
 DEFAULT_HISTORY = ROOT / "target" / "autoplay-results" / "history.jsonl"
+# The engine offers three; the spec's word "冷酷" has no fourth. Defaulting to
+# Normal while the spec asked for something harder is how every measurement in
+# this folder came to describe an easier game than the one being judged, so the
+# difficulty is now a recorded field and a flag.
+DEFAULT_DIFFICULTY = "normal"
 
 # The fields one run is judged by. `own` is the reading at a fixed tick; the
 # result says whether the house was still standing when the ticks ran out.
@@ -63,6 +68,37 @@ STANDING = re.compile(r"(\d+) standing")
 CENSUS = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(-?\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*$", re.M)
 UNOWNED = re.compile(r"unowned=(\d+)")
 STUCK = re.compile(r"stuck=(\d+)")
+# One unit's decision line: the policy prints what each unit was told to do.
+# This is the only reading that can say whether a capability was ever used —
+# a job kind that never appears in it was never asked for, whatever the code
+# contains.
+#
+# The target is greedy up to `standing=` rather than `\S+`: a cell target prints
+# as `Cell((172, 89))`, which contains a space, and a non-space field silently
+# dropped every job that named one — harvest and defend both read zero while the
+# log had ninety-six harvest lines in it.
+UNIT_JOB = re.compile(
+    r"policy v\d+ unit: id=(\d+) (\S+) job=(\w+) target=(.+?) standing=(\d+)"
+)
+# The kinds the policy can actually ask for. Anything outside this list is a
+# declared job nobody proposes, and the capability audit says so rather than
+# reporting it as zero uses of a thing that exists.
+PROPOSABLE = ("Deploy", "Harvest", "Assault", "Defend", "ReturnHome")
+ALL_JOBS = (
+    "Deploy",
+    "Harvest",
+    "ReturnOre",
+    "Repair",
+    "Capture",
+    "Garrison",
+    "Breach",
+    "Assault",
+    "Defend",
+    "Scout",
+    "Transport",
+    "Retreat",
+    "ReturnHome",
+)
 # The policy's own strength reading: what the house has to fight with, and what
 # it can see of the enemy, in hit points. An object count cannot tell thirty
 # tanks from thirty rifles, and the enemy grows when nothing meets it.
@@ -106,6 +142,27 @@ class MatchReport:
     # unit composition has to move.
     own_lost: int = 0
     enemy_lost: int = 0
+    # How many distinct units were ever given each job kind, and how many
+    # decisions of that kind were logged. A capability the wish list asks for
+    # and the policy never asks for shows up here as zero, which is the point:
+    # "the code contains it" and "the house ever did it" are different claims,
+    # and only the second one is a feature.
+    jobs_used: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def capabilities(self) -> dict[str, int]:
+        """Every job the policy could propose, with its use count.
+
+        A kind absent from the log reads zero rather than missing: the table is
+        the answer to "what does this policy actually do", and a gap in it would
+        read as "not measured" when the truth is "never happened".
+        """
+        return {kind: self.jobs_used.get(kind, 0) for kind in ALL_JOBS}
+
+    @property
+    def unused_capabilities(self) -> list[str]:
+        """The kinds declared in the registry that no unit was ever given."""
+        return [kind for kind, count in self.capabilities.items() if count == 0]
 
     @property
     def won(self) -> bool:
@@ -175,6 +232,20 @@ def parse_report(seed: str, text: str, seconds: float) -> MatchReport:
     report.epoints = int(epoints[-1]) if epoints else 0
     report.yards = max((int(value) for value in re.findall(r"yard=(\d+)", text)), default=0)
     report.walls = max((int(value) for value in STANDING.findall(text)), default=0)
+
+    # What the house was ever actually asked to do. Counted per distinct unit
+    # rather than per log line: the unit line repeats every readout, so a raw
+    # count would measure log verbosity instead of how many soldiers took the
+    # job. `standing` is not involved — a unit that holds a job for a whole
+    # match is still one unit that took it.
+    seen_units: dict[str, set[str]] = {}
+    for unit, _type, kind, _target, _standing in UNIT_JOB.findall(text):
+        # `none` is the absence of a job, not one of them: counting it would put
+        # a row in the capability table for doing nothing.
+        if kind == "none":
+            continue
+        seen_units.setdefault(kind, set()).add(unit)
+    report.jobs_used = {kind: len(units) for kind, units in seen_units.items()}
     return report
 
 
@@ -203,6 +274,7 @@ def append_history(reports: list[MatchReport], args, path: Path) -> None:
                 "country": report.country,
                 "seed": report.seed,
                 "opponents": args.opponents,
+                "difficulty": args.difficulty,
                 "ticks": args.ticks,
                 "result": report.result,
                 "tick": report.tick,
@@ -221,15 +293,18 @@ def append_history(reports: list[MatchReport], args, path: Path) -> None:
                 "start_units": report.start_units,
                 "start_tech": report.start_tech,
                 "roster": report.roster,
+                "jobs": report.capabilities,
                 "seconds": round(report.seconds, 1),
             }) + "\n")
 
 
-def key_of(row: dict) -> tuple[str, str, str, str, int, int]:
+def key_of(row: dict) -> tuple[str, str, str, str, int, int, str]:
     """Which experiment a row belongs to.
 
     Rows match on all of it: a run is only comparable to the same brain, map,
-    faction, seed, length and opponent count.
+    faction, seed, length, opponent count and difficulty. Difficulty is in the
+    key because it was missing for every run before this field existed, and a
+    Normal match is not comparable to a Hard one.
     """
     return (
         str(row.get("brain", "")),
@@ -238,6 +313,7 @@ def key_of(row: dict) -> tuple[str, str, str, str, int, int]:
         str(row.get("seed", "")),
         int(row.get("ticks", 0)),
         int(row.get("opponents", 1)),
+        str(row.get("difficulty", "")),
     )
 
 
@@ -276,24 +352,33 @@ def survived(row: dict) -> bool:
 def judge(before: dict, after: dict) -> tuple[str, list[str], list[str]]:
     """What one cell did, and why.
 
-    The keep rule is the one the handoff records: own must not fall at a fixed
-    tick, no seed may be lost that survived, unowned stays zero, stuck must not
-    rise. Enemy count and walls are read as context -- they move for reasons the
-    policy does not own -- so they are printed but never decided on.
+    Four things decide, and the docstring used to name a fifth:
+
+    - **army**, the house's fighting strength in hit points. Thirty tanks and
+      thirty rifles are thirty objects and not the same army, so the object
+      count is not the judge. A row written before `army` existed falls back to
+      `own`, because comparing nothing is worse than comparing the old reading;
+    - **unowned** must not rise: a unit nobody owns is a bug;
+    - **stuck** must not rise: the spec's H2;
+    - **survival**: no seed may be lost that survived, and a house that holds
+      longer is better.
+
+    Enemy count, walls and the trade are read as context: they move for reasons
+    the policy does not own, so they are printed and never decided on.
     """
     worse: list[str] = []
     better: list[str] = []
 
-    # The house's fighting strength decides, not its object count: thirty
-    # tanks and thirty rifles are thirty objects and not the same army. The
-    # count is printed as context. A row without the reading (an older file)
-    # is not judged on it.
+    # Strength first, and `own` only when there is no strength reading to use.
     if "army" in before and "army" in after:
-        army_before, army_after = int(before.get("army", 0)), int(after.get("army", 0))
-        if army_after < army_before:
-            worse.append(f"army {army_before}->{army_after}")
-        elif army_after > army_before:
-            better.append(f"army {army_before}->{army_after}")
+        field = "army"
+    else:
+        field = "own"
+    was, now = int(before.get(field, 0)), int(after.get(field, 0))
+    if now < was:
+        worse.append(f"{field} {was}->{now}")
+    elif now > was:
+        better.append(f"{field} {was}->{now}")
 
     for field in ("unowned", "stuck"):
         was, now = int(before.get(field, 0)), int(after.get(field, 0))
@@ -312,6 +397,15 @@ def judge(before: dict, after: dict) -> tuple[str, list[str], list[str]]:
         worse.append(f"lost earlier {tick_before}->{tick_after}")
     elif tick_after > tick_before:
         better.append(f"held longer {tick_before}->{tick_after}")
+
+    # A win is the only reading that settles a cell outright.
+    won_before, won_after = str(before.get("result", "")).startswith("won"), str(
+        after.get("result", "")
+    ).startswith("won")
+    if won_after and not won_before:
+        better.append("won (was not a win)")
+    elif won_before and not won_after:
+        worse.append("no longer a win")
 
     if worse:
         return "worse", worse, better
@@ -348,6 +442,40 @@ def lost_arrow(before: dict, after: dict) -> str:
     return f"{pair(before)}->{pair(after)}"
 
 
+def capability_report(reports: list[MatchReport]) -> None:
+    """What the house was ever asked to do, summed over every cell of a run.
+
+    This is the acceptance reading the feature side needs and the object count
+    cannot supply. The wish list asks for capture, transport, infiltration,
+    superweapons, garrisons and walls; the keep rule judges hit points. A run can
+    score well on every existing field while never once exercising a capability,
+    and until this line existed there was no way to tell "we built it" from "the
+    house did it".
+
+    A kind declared in the registry that reads zero here is a feature that does
+    not exist in practice, whatever the code says.
+    """
+    ran = max((report.tick for report in reports), default=0)
+    print("", flush=True)
+    print(f"capabilities over {len(reports)} match(es), {ran} ticks:", flush=True)
+    total: dict[str, int] = {kind: 0 for kind in ALL_JOBS}
+    for report in reports:
+        for kind, count in report.capabilities.items():
+            total[kind] += count
+    width = max(len(kind) for kind in ALL_JOBS)
+    for kind in ALL_JOBS:
+        count = total[kind]
+        mark = "" if count else "   <- never asked for"
+        print(f"  {kind:<{width}}  {count:>4}{mark}", flush=True)
+    proposable_zero = [kind for kind in PROPOSABLE if total[kind] == 0]
+    if proposable_zero:
+        # A kind the policy issues every match when the game allows it, and did
+        # not issue here, is a defect in this run rather than a missing feature:
+        # something gated it off.
+        print(f"\n  a job the policy can issue was never issued: "
+              f"{', '.join(proposable_zero)}", flush=True)
+
+
 def compare_histories(baseline: Path, current: Path) -> None:
     """Print what moved between a reference run and this one, cell by cell."""
     before, before_unreadable = read_history(baseline)
@@ -359,7 +487,7 @@ def compare_histories(baseline: Path, current: Path) -> None:
           flush=True)
 
     header = (
-        f"{'map':<14}{'country':<10}{'seed':<7}{'ticks':<7}{'brain':<7}{'opp':<5}"
+        f"{'map':<14}{'country':<10}{'seed':<7}{'ticks':<7}{'brain':<7}{'opp':<5}{'diff':<8}"
         f"{'own':<12}{'army':<12}{'enemy':<12}{'lost':<16}{'unowned':<10}{'stuck':<9}{'yards':<9}"
         f"{'walls':<9}verdict"
     )
@@ -374,9 +502,11 @@ def compare_histories(baseline: Path, current: Path) -> None:
     counts = {"same": 0, "better": 0, "worse": 0, "missing": 0}
     identical = True
     for key in sorted(set(before) | set(after)):
-        brain, map_name, country, seed, ticks, opponents = key
-        label = f"{map_name} {country} seed {seed} [{brain}] {ticks} ticks, {opponents} opponent(s)"
-        prefix = (f"{map_name:<14}{country:<10}{seed:<7}{ticks:<7}{brain:<7}{opponents:<5}")
+        brain, map_name, country, seed, ticks, opponents, difficulty = key
+        label = (f"{map_name} {country} seed {seed} [{brain}] {ticks} ticks, "
+                 f"{opponents} opponent(s), {difficulty or 'normal'}")
+        prefix = (f"{map_name:<14}{country:<10}{seed:<7}{ticks:<7}{brain:<7}{opponents:<5}"
+                  f"{difficulty or 'normal':<8}")
         was, now = before.get(key), after.get(key)
         if was is None:
             counts["missing"] += 1
@@ -456,6 +586,7 @@ def run_match(
     start_credits: int | None = None,
     start_units: int | None = None,
     start_tech: int | None = None,
+    difficulty: str = DEFAULT_DIFFICULTY,
 ) -> MatchReport:
     """Run one match and read its log.
 
@@ -463,7 +594,7 @@ def run_match(
     map and seed, all of them side by side.
     """
     stem = map_name.replace("/", "_").replace("\\", "_")
-    log = log_dir / f"match-{stem}-{seed}-{brain}-{country}.log"
+    log = log_dir / f"match-{stem}-{seed}-{brain}-{country}-{difficulty}.log"
     started = time.monotonic()
     command = [
         str(binary),
@@ -473,6 +604,7 @@ def run_match(
         "--brain", brain,
         "--opponents", str(opponents),
         "--country", country,
+        "--difficulty", difficulty,
     ]
     for flag, value in (
         ("--credits", start_credits),
@@ -532,6 +664,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="compare --baseline with --history and run nothing")
     parser.add_argument("--opponents", type=int, default=1,
                         help="computer houses against the local one")
+    parser.add_argument("--difficulty", default=DEFAULT_DIFFICULTY,
+                        choices=["easy", "normal", "hard"],
+                        help="the computer's difficulty; recorded in the history row because "
+                             "a Normal match is not comparable to a Hard one")
     parser.add_argument("--ticks", type=int, default=DEFAULT_TICKS, help="how many frames a match runs")
     parser.add_argument("--jobs", type=int, default=0, help="how many matches at once (0: one per seed)")
     parser.add_argument("--skip-build", action="store_true", help="use the binary as it is")
@@ -591,6 +727,7 @@ def main(argv: list[str] | None = None) -> int:
                 binary, combo[2], combo[0], args.ticks, log_dir,
                 args.brain, args.opponents, combo[1],
                 args.start_credits, args.start_units, args.start_tech,
+                args.difficulty,
             ),
             combos,
         ))
@@ -608,9 +745,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  superweapon plots: {', '.join(report.plots)}", flush=True)
         if report.crates:
             print(f"  crates picked up: {', '.join(report.crates)}", flush=True)
+        # The capability line: what the house was ever asked to do. A kind at
+        # zero is a feature that was never exercised, however much code it has.
+        used = {kind: count for kind, count in report.capabilities.items() if count}
+        idle = report.unused_capabilities
+        print(f"  jobs used: {used if used else 'none'}", flush=True)
+        if idle:
+            print(f"  never asked for: {', '.join(idle)}", flush=True)
 
     append_history(reports, args, history)
     print(f"\nhistory: {history}", flush=True)
+    capability_report(reports)
     if args.baseline:
         compare_histories(Path(args.baseline), history)
     return 0
