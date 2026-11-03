@@ -113,6 +113,11 @@ pub struct Policy {
     /// Where each unit stood when it last moved, and when: the stuck counter
     /// reads this, so "a unit that does nothing" is a number, not an opinion.
     stood: BTreeMap<u64, ((u16, u16), u64)>,
+    /// The house's own objects last term, by stable id and type, so this term can
+    /// say what went missing instead of only how many are left.
+    alive_last: BTreeMap<u64, String>,
+    /// Every object the house has lost, by type id, for the end-of-match reading.
+    lost: BTreeMap<String, u64>,
     /// Targets a unit has given up on, and the tick it may be proposed again:
     /// the last rung of the assault ladder.
     given_up: BTreeMap<(u64, u64), u64>,
@@ -165,6 +170,8 @@ impl Policy {
             cargo_seen: BTreeMap::new(),
             home: None,
             returning: std::collections::BTreeSet::new(),
+            alive_last: BTreeMap::new(),
+            lost: BTreeMap::new(),
             stats: Stats::default(),
         }
     }
@@ -666,6 +673,50 @@ impl Policy {
         }
         obs.health(entity_id).unwrap_or(0).max(0)
     }
+    /// Count what the house lost since the last term, by type.
+    ///
+    /// The projection has no death feed, and a house that loses half its output
+    /// cannot learn why from a snapshot: `own` at a tick is the survivors, never
+    /// the ones that did not come back. Every attempt this session to judge a
+    /// change ran into that — `own` moved and nothing said what died.
+    ///
+    /// Identity is a unit's stable id, so this is exact: a unit present last term
+    /// and absent now was destroyed or left the projection. Structures are
+    /// excluded, because a building finishing is not a soldier dying.
+    fn count_losses(&mut self, rules: &RuleSet, obs: &Observation<'_>, tick: u64) {
+        if tick == 0 {
+            // Nothing was alive last term; the opening force is not a loss.
+            self.alive_last = self.snapshot(rules, obs);
+            return;
+        }
+        let alive = self.snapshot(rules, obs);
+        for (id, ty) in &self.alive_last {
+            if alive.contains_key(id) {
+                continue;
+            }
+            *self.lost.entry(ty.clone()).or_insert(0) += 1;
+        }
+        self.alive_last = alive;
+    }
+
+    /// The house's own non-structure objects, keyed by stable id.
+    fn snapshot(&self, rules: &RuleSet, obs: &Observation<'_>) -> BTreeMap<u64, String> {
+        let mut alive = BTreeMap::new();
+        for unit in obs.own_entities() {
+            let Some(ty) = obs.object_type(rules, unit.type_id) else {
+                continue;
+            };
+            if self
+                .profiles
+                .get(&ty.id)
+                .is_some_and(|profile| profile.roles.contains(Roles::STRUCTURE))
+            {
+                continue;
+            }
+            alive.insert(unit.entity_id, ty.id.clone());
+        }
+        alive
+    }
 }
 
 impl Brain for Policy {
@@ -681,6 +732,7 @@ impl Brain for Policy {
         }
         self.last_term = Some(tick);
         self.stats = Stats::default();
+        self.count_losses(rules, obs, tick);
 
         // A job whose target is gone — or which the unit cannot reach — is
         // finished before the term's proposals are collected, so the unit can be
@@ -978,6 +1030,13 @@ impl Brain for Policy {
                 self.stats.army,
                 self.stats.enemy
             );
+        }
+        if !self.lost.is_empty() && tick % 3600 == 0 {
+            // What the house lost, by type, because `own` alone cannot say
+            // whether a change killed soldiers or buildings. Without this, every
+            // judgement in this session ran on a number that counted survivors
+            // and never the dead.
+            log::info!("policy v2 losses: tick={tick} so_far={:?}", self.lost);
         }
     }
 
