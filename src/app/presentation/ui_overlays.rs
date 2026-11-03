@@ -1637,13 +1637,15 @@ pub(crate) fn techno_extras_for_parent(
     //709B0F/6F6A8E: nonbuilding scale starts at health anchor(-15,+10),
     //with the Infantry-only+11 X. The shared draw owner retains each arm's
     //origin independently, cargo and native relationship admission.
+    // `0x006F6A8E..0x006F6AB0` passes the draw point itself, without the
+    // Type+3E0 PixelSelectionBracketDelta that moves the health bar.
     if let Some(art) = overlay.scale_pips() {
         for pip in scale_pip_draws(sim, entity, hovered_id, local_owner, rules) {
             let x = sx - 15.0 + if infantry { 11.0 } else { 0.0 } + pip.offset_pixels[0] as f32;
             strip.scale.extend(instance(
                 art,
                 pip.frame,
-                (x, sy + delta + pip.offset_pixels[1] as f32),
+                (x, sy + pip.offset_pixels[1] as f32),
                 0.0004,
             ));
         }
@@ -1952,10 +1954,18 @@ fn active_cursor_sequence(state: &AppState) -> Option<(CursorId, &SoftwareCursor
         .match_presentation
         .software_cursor
         .as_ref()?;
-    let id: CursorId = current_cursor_feedback_kind(state)
+    let kind = current_cursor_feedback_kind(state);
+    state.match_state.input.note_shown_cursor(kind);
+    let id: CursorId = kind
         .and_then(cursor_id_for_feedback)
         .unwrap_or(CursorId::Default);
     cursor.get(id).map(|sequence| (id, sequence))
+}
+
+/// The cursor id the production draw shows now. Like a draw, it notes the
+/// shown cursor, so a held button over the sidebar keeps it.
+pub(crate) fn shown_cursor_id(state: &AppState) -> Option<CursorId> {
+    active_cursor_sequence(state).map(|(id, _)| id)
 }
 
 /// Observation of the same cursor selection used by the production draw.

@@ -71,13 +71,10 @@
 //! GameEntity owner implements709550 and the world commits class assignment.
 //! Flat scans deliberately clear candidates without appending.
 //!
-//! - The ring walk's wall fallback (`0x006F8C10`, per ring cell, read not
-//!   executed) is not ported: for a computer house it can return a cell
-//!   holding a `Wall=` overlay that the scanner's `Wall=` warhead and AG
-//!   projectile can hit, gated by a per-difficulty Rules byte (`+0x1581 +
-//!   difficulty * 0x50`, identity UNCHECKED), as the scan's cell target
-//!   (`0x006F9B55..0x006F9B5F`). Trigger: a computer unit on Guard or Area
-//!   Guard whose rings reach a wall. Effect: it does not shoot the wall.
+//! - The ring walk's wall fallback ([`wall_threat_score`], `0x006F8C10`)
+//!   lets a computer house whose difficulty row has `DestroyWalls=yes` pick
+//!   an enemy wall cell. Retail RULESMD sets `no` on all three rows and no
+//!   retail map sets the key, so stock games never take it.
 //! - The threat mask (the callsite literal, the class overrides and the
 //!   flags word) is [`super::threat_mask`]'s; its residuals are listed there.
 //!
@@ -719,6 +716,8 @@ struct ScanContext<'a> {
     /// VERA-only: the draws so far, so side-by-side scoring can tell which
     /// candidate drew ([`flat_scores`]).
     scenario_draws: std::cell::Cell<u32>,
+    /// VERA-only: [`ThreatScanOutcome`]'s `met_idle_disguise`.
+    met_idle_disguise: std::cell::Cell<bool>,
 }
 
 impl ScanContext<'_> {
@@ -1098,12 +1097,17 @@ fn disguise_detection_roll(
 /// Infantry class gate returned before reaching Foot4D9920.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ThreatScanOutcome {
-    target: Option<u64>,
+    /// An object, or a wall cell from the ring walk's fallback.
+    target: Option<super::TargetKind>,
     foot_wrapper_entered: bool,
     collected: Option<Vec<DistributedFireCandidate>>,
     /// The Scenario stream after the scan's draws, `None` when it drew
     /// nothing ([`ScanContext::computer_detects_disguise`]).
     scenario_rng: Option<SimRng>,
+    /// VERA-only: the scan refused a disguised candidate only because it was
+    /// not blinking, so a blink starting later would have it roll
+    /// (`techno_ai::scan_batch`).
+    met_idle_disguise: bool,
 }
 
 impl ThreatScanOutcome {
@@ -1116,8 +1120,26 @@ impl ThreatScanOutcome {
         self.scenario_rng.take()
     }
 
-    pub(crate) const fn target(&self) -> Option<u64> {
+    /// The scan drew from the Scenario stream.
+    pub(crate) const fn drew_scenario_rng(&self) -> bool {
+        self.scenario_rng.is_some()
+    }
+
+    /// See [`Self::met_idle_disguise`]'s field.
+    pub(crate) const fn met_idle_disguise(&self) -> bool {
+        self.met_idle_disguise
+    }
+
+    pub(crate) const fn target(&self) -> Option<super::TargetKind> {
         self.target
+    }
+
+    /// The pick when it is an object, as every pick but a wall cell is.
+    pub(crate) const fn object(&self) -> Option<u64> {
+        match self.target {
+            Some(target) => target.object_id(),
+            None => None,
+        }
     }
 
     pub(crate) const fn foot_wrapper_entered(&self) -> bool {
@@ -1241,18 +1263,20 @@ pub(crate) fn greatest_threat(
         // An override returned before Foot `0x004D9920`.
         ControlFlow::Break(target) => {
             return ThreatScanOutcome {
-                target,
+                target: target.map(super::TargetKind::Entity),
                 foot_wrapper_entered: false,
                 collected: None,
                 scenario_rng: None,
+                met_idle_disguise: false,
             };
         }
     };
-    let result = |target, collected, ctx: &ScanContext<'_>| ThreatScanOutcome {
-        target,
+    let result = |target: Option<u64>, collected, ctx: &ScanContext<'_>| ThreatScanOutcome {
+        target: target.map(super::TargetKind::Entity),
         foot_wrapper_entered,
         collected,
         scenario_rng: ctx.scenario_rng.take(),
+        met_idle_disguise: ctx.met_idle_disguise.get(),
     };
     // Base GreatestThreat6F8F80..6F8FA5 clears these two lists, retaining
     // history. Class returns before the base must preserve the prior lists.
@@ -1373,6 +1397,7 @@ pub(crate) fn greatest_threat(
         },
         scenario_rng: Default::default(),
         scenario_draws: Default::default(),
+        met_idle_disguise: Default::default(),
     };
 
     if flat {
@@ -1492,6 +1517,9 @@ pub(crate) fn greatest_threat(
         return result(best, collected, &ctx);
     }
 
+    // `[ESP+0x30]`/`[ESP+0x34]` (`0x006F93A1..0x006F93B3`): the best wall
+    // cell's score starts at 0, so a wall must score above it.
+    let mut wall: Option<((i16, i16), i32)> = None;
     for ring in 0..radius {
         for (x, y) in square_ring_cells((cx, cy), ring) {
             // Native ring coordinates cross the packed CellStruct seam before
@@ -1503,36 +1531,149 @@ pub(crate) fn greatest_threat(
             {
                 continue;
             }
-            let Some(candidate_id) = scan_cell_for_target(&ctx, coord, scanner_zone) else {
-                continue;
-            };
-            let Some(candidate) = entities.get(candidate_id) else {
-                continue;
-            };
-            // `0x006F9459..0x006F9497`, after `Scan_Cell_For_Target`.
-            let Some(score) = evaluate_candidate(&ctx, walk, candidate)
-                .filter(|_| ctx.house_gates_admit(candidate))
-            else {
-                continue;
-            };
-            //6F94A7/6F9654/6F9839/6F99ED: ring append points. Flat
-            //6F9B6E..6F9DA1 deliberately has no corresponding collection.
-            if let Some(entries) = &mut collected {
-                entries.push(DistributedFireCandidate {
-                    target: Some(super::TargetKind::Entity(candidate_id)),
-                    score,
-                });
+            if let Some(candidate_id) = scan_cell_for_target(&ctx, coord, scanner_zone)
+                && let Some(candidate) = entities.get(candidate_id)
+                // `0x006F9459..0x006F9497`, after `Scan_Cell_For_Target`.
+                && let Some(score) = evaluate_candidate(&ctx, walk, candidate)
+                    .filter(|_| ctx.house_gates_admit(candidate))
+            {
+                //6F94A7/6F9654/6F9839/6F99ED: ring append points. Flat
+                //6F9B6E..6F9DA1 deliberately has no corresponding collection.
+                if let Some(entries) = &mut collected {
+                    entries.push(DistributedFireCandidate {
+                        target: Some(super::TargetKind::Entity(candidate_id)),
+                        score,
+                    });
+                }
+                if score > best_score {
+                    best_score = score;
+                    best = Some(candidate_id);
+                }
             }
-            if score > best_score {
-                best_score = score;
-                best = Some(candidate_id);
+            // `0x006F9563..0x006F958B` (and the other three passes): each cell
+            // offers a wall while no object is held, strictly better only.
+            if best.is_none() {
+                let score = wall_threat_score(&ctx, coord);
+                if score > wall.map_or(0, |(_, best)| best) {
+                    wall = Some((coord, score));
+                }
             }
         }
         if best.is_some() && is_early_return_ring(ring, radius) {
             return result(best, collected, &ctx);
         }
+        // `0x006F9B1B..0x006F9B6B`: otherwise a wall found by this ring wins,
+        // as its Cell, even over an object a later cell of the ring found.
+        if let Some(((x, y), _)) = wall {
+            return ThreatScanOutcome {
+                target: Some(super::TargetKind::Cell(x as u16, y as u16)),
+                ..result(None, collected, &ctx)
+            };
+        }
     }
     result(best, collected, &ctx)
+}
+
+/// `TechnoClass::Cell_Threat_Fallback @ 0x006F8C10`: what a ring cell's wall
+/// scores for the scanner, 0 when it offers none. Each step is native:
+/// - a human house never shoots walls (`0x006F8C18..0x006F8C25`), and a
+///   computer one only with its difficulty row's `DestroyWalls=`
+///   (`Rules+0x1581 + House+0x184 * 0x50`, `0x006F8C2B..0x006F8C4C`);
+/// - the cell's overlay (`+0x44`) is a `Wall=` type (`0x006F8C52..0x006F8C80`);
+/// - IsCloseEnough3D (vt+0x164 `0x006F7970`) to the cell centre at Z 0 with
+///   SelectWeapon(cell): CanFireAt on that cell, as [`can_fire_at_target`]
+///   asks it (`0x006F8C86..0x006F8CD9`);
+/// - the CURRENT weapon (vt+0x3F4, not the selected one) has a warhead with
+///   `Wall=`, fired with no projectile or an `AG=` one (`0x006F8CDF..0x006F8D29`);
+/// - the wall has an owner (`+0x50`) the scanner's house is not allied with
+///   (`0x006F8D2F..0x006F8D52`);
+/// - the score is GetWeaponRange(0) less the scanner's GetCoords distance to
+///   the cell centre at Z 0, `(dx²+dz²)+dy²` through Sqrt_Approx and ftol
+///   (`0x006F8D58..0x006F8DD8`).
+///
+/// [`can_fire_at_target`]: crate::sim::combat::can_fire_at_target
+fn wall_threat_score(ctx: &ScanContext<'_>, cell: (i16, i16)) -> i32 {
+    let Some(house) = ctx.standing.house.filter(|_| !ctx.standing.human) else {
+        return 0;
+    };
+    if !ctx.rules.general.difficulty_rows[house.difficulty().table_index()].destroy_walls {
+        return 0;
+    }
+    let (Some(grid), Some(registry), Some(world), Some(terrain)) = (
+        ctx.los.overlay_grid,
+        ctx.los.overlay_registry,
+        ctx.fire_world,
+        ctx.terrain,
+    ) else {
+        return 0;
+    };
+    let overlay = grid.cell(cell.0 as u16, cell.1 as u16);
+    if !overlay
+        .overlay_id
+        .and_then(|id| registry.flags(id))
+        .is_some_and(|flags| flags.wall)
+    {
+        return 0;
+    }
+    let target = super::TargetKind::Cell(cell.0 as u16, cell.1 as u16);
+    if !super::can_fire_at_target(
+        world,
+        ctx.rules,
+        ctx.interner,
+        ctx.scanner.stable_id(),
+        &target,
+        terrain,
+        ctx.alliances(),
+        &ctx.los,
+    ) {
+        return 0;
+    }
+    let Some(weapon) = super::combat_weapon::current_weapon(
+        ctx.scanner,
+        ctx.attacker_obj,
+        ctx.entities,
+        ctx.rules,
+        ctx.interner,
+    ) else {
+        return 0;
+    };
+    let Some(warhead) = weapon
+        .warhead
+        .as_deref()
+        .and_then(|name| ctx.rules.warhead(name))
+    else {
+        return 0;
+    };
+    let fired_at_ground = weapon.projectile.as_deref().is_none_or(|name| {
+        ctx.rules
+            .projectile(name)
+            .is_some_and(|projectile| projectile.ag)
+    });
+    if !fired_at_ground || !warhead.wall {
+        return 0;
+    }
+    if overlay
+        .wall_owner
+        .is_none_or(|owner| ctx.is_ally_owner(owner))
+    {
+        return 0;
+    }
+    let from = object_get_coords(ctx.scanner, Some(terrain));
+    let (x, y) = (i32::from(cell.0) * 256 + 128, i32::from(cell.1) * 256 + 128);
+    let distance = crate::util::native_x87::sqrt_approx_length([
+        from.x.wrapping_sub(x),
+        from.z,
+        from.y.wrapping_sub(y),
+    ]);
+    super::combat_weapon::weapon_range(
+        ctx.scanner,
+        ctx.attacker_obj,
+        0,
+        ctx.entities,
+        ctx.rules,
+        ctx.interner,
+    )
+    .wrapping_sub(distance)
 }
 
 /// `Greatest_Threat`'s mask: the caller's literal through the scanner's
@@ -1766,15 +1907,19 @@ fn flat_scores(
             let draws = ctx.scenario_draws.get();
             let (score, stamped) = dummy.detached_stamps(|| flat_score(ctx, walk, candidate));
             let drew = ctx.scenario_draws.get() != draws;
-            (score, stamped, drew)
+            (score, stamped, drew, ctx.met_idle_disguise.replace(false))
         });
-        if scored.iter().all(|&(_, stamped, drew)| drew || !stamped) {
+        if scored.iter().all(|&(_, stamped, drew, _)| drew || !stamped) {
             let stream = ctx.scenario_rng.borrow().clone();
             let draws = ctx.scenario_draws.get();
+            let met_idle_disguise = ctx.met_idle_disguise.get();
             let scores: Option<Vec<_>> = scored
                 .into_iter()
                 .zip(candidates)
-                .map(|((score, _, drew), candidate)| {
+                .map(|((score, _, drew, met), candidate)| {
+                    if met {
+                        ctx.met_idle_disguise.set(true);
+                    }
                     if !drew {
                         return Some(score);
                     }
@@ -1790,6 +1935,7 @@ fn flat_scores(
             }
             *ctx.scenario_rng.borrow_mut() = stream;
             ctx.scenario_draws.set(draws);
+            ctx.met_idle_disguise.set(met_idle_disguise);
         }
     }
     candidates
@@ -2353,6 +2499,16 @@ fn evaluate_candidate(
         return None;
     }
 
+    // G20 — `0x006F8487..0x006F84AB` refuses an `IsTrain=` candidate (Type
+    // `+0xC94`) to an Infantry scanner (vt+0x2C == 0xF) whose type is a
+    // `VehicleThief=` (`InfantryType+0xEC6`): a thief never hunts a train.
+    // Dormant in retail data, which sets neither key; a map can set both.
+    // `vehicle_thief` is only read for `[InfantryTypes]`, so it carries the
+    // Infantry check.
+    if candidate_obj.is_train && ctx.attacker_obj.vehicle_thief {
+        return None;
+    }
+
     // G21 — the disguise arm at `0x006F84B1..0x006F854B`, in its native slot.
     //
     // A `DetectDisguise=` attacker TYPE skips the whole arm — the dogs',
@@ -2377,6 +2533,15 @@ fn evaluate_candidate(
     ) {
         crate::sim::cloak_disguise::DisguiseGateOutcome::Accept => {}
         crate::sim::cloak_disguise::DisguiseGateOutcome::Reject => {
+            // VERA-only: a computer scanner refused this candidate only for
+            // want of a blink (`techno_ai::scan_batch`).
+            if candidate_disguised_to_attacker
+                && !ctx.attacker_obj.detect_disguise
+                && blink == 0
+                && !ctx.standing.human
+            {
+                ctx.met_idle_disguise.set(true);
+            }
             return None;
         }
         crate::sim::cloak_disguise::DisguiseGateOutcome::AiDetectionRoll => {
@@ -2976,13 +3141,15 @@ mod tests {
                 .get_mut(ifv)
                 .unwrap()
                 .set_gunner_weapon(slot, object);
-            let pick = sim.greatest_threat_represented(
-                &rules,
-                None,
-                ifv,
-                super::super::ScanMission::Guard,
-                None,
-            );
+            let pick = sim
+                .greatest_threat_represented(
+                    &rules,
+                    None,
+                    ifv,
+                    super::super::ScanMission::Guard,
+                    None,
+                )
+                .and_then(super::super::TargetKind::object_id);
             assert_eq!(
                 pick,
                 expected.then_some(target),
@@ -3144,6 +3311,10 @@ mod disguise_tests;
 #[cfg(test)]
 #[path = "greatest_threat_unarmed_tests.rs"]
 mod unarmed_tests;
+
+#[cfg(test)]
+#[path = "greatest_threat_wall_tests.rs"]
+mod wall_tests;
 
 #[cfg(test)]
 #[path = "greatest_threat_healer_guard_tests.rs"]

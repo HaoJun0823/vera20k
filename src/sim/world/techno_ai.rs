@@ -1404,6 +1404,13 @@ fn drop_unsensed_cloaked_target_step(
 /// Tick the common `+0xC4` per-mission AI counter once per object visit
 /// (`0x006FA646..0x006FA64F`), then enter `MissionClass::AI @ 0x005B3060`
 /// (`0x006FA655`), whose first call is `ObjectClass::AI`'s sound block.
+///
+/// Returns false only when the fall failed. An object the fall kills (a unit
+/// on a destroyed bridge) runs on: `MissionClass::AI` skips its handler on
+/// IsAlive and Health (`0x005B306C`, `0x005B30A7`), but `AI_Update` still
+/// runs the passive scan (`0x006FA65A..0x006FA6EE`), the bomb tick
+/// (`0x006FA6F5..0x006FA712`) and the Slave and Capture managers
+/// (`0x006FA717..0x006FA730`) before its IsAlive test at `0x006FA735`.
 fn mission_counter_step(
     sim: &mut Simulation,
     id: u64,
@@ -1414,6 +1421,9 @@ fn mission_counter_step(
     if let Some(entity) = sim.substrate.entities.get_mut(id) {
         entity.mission.increment_ai_counter();
     }
+    // The sound block (`0x005F3E78..0x005F3F0C`) runs before the fall block
+    // (`0x005F3F11`), so a faller its landing kills still plays its sounds.
+    sim.object_ai_sounds(id, rules, ctx.effects);
     match sim.object_ai_fall(id, rules, ctx.overlay_registry, ctx.effects) {
         Ok((landed, changed)) => {
             outcome.landed |= landed;
@@ -1424,8 +1434,7 @@ fn mission_counter_step(
             return false;
         }
     }
-    sim.object_ai_sounds(id, rules, ctx.effects);
-    ai_alive(&sim.substrate, id)
+    true
 }
 
 // ===== TechnoClass common-body bracket =====
@@ -2075,10 +2084,7 @@ fn screen_visual_character(
         crate::sim::cloak_disguise::VisualCharacterQuery::screen(
             true,
             viewer.is_some(),
-            viewer.is_some_and(|viewer| {
-                sim.fog
-                    .has_sensor_for_house(viewer, entity.position.rx(), entity.position.ry())
-            }),
+            viewer.is_some_and(|viewer| sim.fog.senses_object_for_house(viewer, entity)),
             viewer.is_some_and(|viewer| allied(viewer, owner) && allied(owner, viewer)),
             !sim.session.game_mode_nonzero(),
             false,
@@ -3341,7 +3347,7 @@ mod tests {
             recruitable_b: true,
             group: -1,
             follows: None,
-            structure_upgrades: [None, None, None],
+            structure_columns: Default::default(),
             structure_ai_sellable: false,
             structure_ai_repairable: false,
             structure_online: true,

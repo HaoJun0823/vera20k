@@ -3337,6 +3337,7 @@ mod difficulty_tests {
                     build_time: bits(&v[6]),
                     repair_delay: bits(&v[7]),
                     build_delay: bits(&v[8]),
+                    ..Default::default()
                 }
             });
             let difficulty =
