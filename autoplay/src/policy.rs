@@ -593,6 +593,18 @@ impl Policy {
         let mut orders = Vec::new();
         for (unit, job) in self.jobs.iter() {
             let Some(goal) = Self::goal(job) else {
+                // A job with no goal is a job that never becomes an order, and
+                // until this line existed it was skipped in silence: the unit
+                // kept the job in the table, the assignment kept counting it as
+                // assigned, and the log showed a capture that lived one term.
+                if job.kind == JobKind::Capture {
+                    log::info!(
+                        "policy v2: capture goal missing at {} for unit {} target {:?}",
+                        obs.tick(),
+                        unit,
+                        job.target
+                    );
+                }
                 continue;
             };
             let retargeted =

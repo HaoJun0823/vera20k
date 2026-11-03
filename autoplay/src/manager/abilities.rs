@@ -108,12 +108,18 @@ impl Abilities {
             self.capturing.clear();
             return;
         }
+        // A capture is remembered until the engineer is gone, not until the
+        // building leaves sight. `visible_enemy_entities` is L2 and a building the
+        // capturer is walking towards can drop out of sight on the way — the
+        // engineer then lost its job on the very term it needed it, which is what
+        // `job=Capture ... standing=15` was: one term, then gone.
+        //
+        // The neutral list is unfogged by design (the wish list says every neutral
+        // building is visible from the start), so the enemy half is the only one
+        // that can blink.
         let alive: std::collections::BTreeSet<u64> =
             capturers.iter().map(|unit| unit.entity_id).collect();
-        let target_ids: std::collections::BTreeSet<u64> =
-            targets.iter().map(|target| target.entity_id).collect();
-        self.capturing
-            .retain(|unit, target| alive.contains(unit) && target_ids.contains(target));
+        self.capturing.retain(|unit, _| alive.contains(unit));
 
         // One capturer per building: two engineers sent to the same yard are the
         // second one standing at a building that is already the house's.
