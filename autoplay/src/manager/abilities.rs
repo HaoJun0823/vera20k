@@ -46,6 +46,30 @@ const CAPTURE_PRIORITY: i64 = 75;
 /// difference between them.
 const THREAT_BUFFER_CELLS: i32 = 3;
 
+/// How far a rifleman will walk to hold a civilian building, in cells.
+///
+/// Shorter than the capture reach on purpose: holding a building is a defensive
+/// act and the house gains a gun that cannot be shot back at, not a production
+/// line, so it is worth a short walk and not a march.
+const GARRISON_REACH_CELLS: i32 = 20;
+
+/// What a garrison runs at.
+///
+/// Below the assault's sixty: a rifleman already in the line is doing more than
+/// one walking into a block, and the 1v7 lane has shown twice that pulling even
+/// one soldier out of the column costs the base.
+const GARRISON_PRIORITY: i64 = 25;
+
+/// How many enemies may be in sight before the house stops garrisoning.
+///
+/// Holding a civilian block is a quiet-time act: it costs a rifleman from the
+/// line and pays back a gun that cannot be shot at. Measured, priority alone is
+/// not enough — at priority 30 the job fired once on the 1v7 lane and the lane
+/// collapsed from own 84 to 17, because the rifleman it took was a defend post
+/// the base needed. With the gate, a lane where thirteen to nineteen enemies are
+/// visible never proposes a garrison at all, and a quiet lane still does.
+const GARRISON_QUIET_ENEMIES: usize = 3;
+
 /// Capture, in the order a house should want it.
 ///
 /// The wish list calls taking an enemy construction yard the most important thing
@@ -84,11 +108,15 @@ pub struct Abilities {
     /// pointed at whatever the scan likes next. The same failure the scouts had
     /// (status.md, six attempts) and the reason `keep_captures` exists.
     capturing: std::collections::BTreeMap<u64, u64>,
+    /// The building each occupier is walking into, remembered for the same
+    /// reason: an infantryman re-aimed every term stops a step outside the door.
+    garrisoning: std::collections::BTreeMap<u64, u64>,
 }
 
 impl Manager for Abilities {
     fn propose(&mut self, ctx: &Ctx<'_>, out: &mut Demands) {
         self.capture(ctx, out);
+        self.garrison(ctx, out);
     }
 }
 
@@ -289,6 +317,128 @@ impl Abilities {
     }
 
     /// The roles a type carries, from the policy's own profile table.
+    /// Put a rifleman inside a building it can hold.
+    ///
+    /// The wish list's neutral-building section: 可驻扎中立建筑应该分析其重要性,
+    /// and 可占领中立建筑是重点设施, 派兵保护. A garrisoned structure is the
+    /// cheapest defence the game offers — a rifleman inside a civilian block
+    /// shoots harder and cannot be shot back at — so a house that ignores it is
+    /// leaving free defence on the map.
+    ///
+    /// Both halves of the question already exist as projection calls:
+    /// `can_garrison` is the engine's `BuildingClass::CanBeOccupiedBy` for the
+    /// pair, and the building is any neutral structure the wish list says is
+    /// visible from the start. What was missing was the decision.
+    fn garrison(&mut self, ctx: &Ctx<'_>, out: &mut Demands) {
+        // Quiet time only. A garrison takes a rifleman out of the line for a gun
+        // that cannot be shot back at: a good trade when nothing is attacking, a
+        // fatal one when the base is under fire. Measured, the job fired once on
+        // the 1v7 lane at priority 30 and the lane went from own 84 to 17.
+        if ctx.obs.visible_enemy_entities().count() > GARRISON_QUIET_ENEMIES {
+            self.garrisoning.clear();
+            return;
+        }
+        let occupiers = self.occupiers(ctx);
+        let buildings = self.neutral_buildings(ctx);
+        if occupiers.is_empty() || buildings.is_empty() {
+            self.garrisoning.clear();
+            return;
+        }
+        let alive: std::collections::BTreeSet<u64> =
+            occupiers.iter().map(|unit| unit.entity_id).collect();
+        self.garrisoning.retain(|unit, _| alive.contains(unit));
+        let taken: std::collections::BTreeSet<u64> = self.garrisoning.values().copied().collect();
+
+        // Nearest building first, for the same reason capture sorts by distance:
+        // a walk across the map is a walk the rifleman does not finish.
+        let mut unclaimed: Vec<_> = buildings
+            .iter()
+            .filter(|building| !taken.contains(&building.entity_id))
+            .copied()
+            .collect();
+        unclaimed.sort_by_key(|building| {
+            let nearest = occupiers
+                .iter()
+                .map(|unit| cell_distance(unit.cell, building.cell))
+                .min()
+                .unwrap_or(i32::MAX);
+            (nearest, building.entity_id)
+        });
+
+        let free: Vec<_> = occupiers
+            .iter()
+            .filter(|unit| !self.garrisoning.contains_key(&unit.entity_id))
+            .copied()
+            .collect();
+        for unit in &free {
+            let Some(building) = unclaimed.iter().copied().find(|building| {
+                cell_distance(unit.cell, building.cell) <= GARRISON_REACH_CELLS
+                    && ctx
+                        .obs
+                        .can_garrison(ctx.rules, unit.entity_id, building.entity_id)
+            }) else {
+                continue;
+            };
+            self.garrisoning.insert(unit.entity_id, building.entity_id);
+            out.jobs.push(Proposal {
+                kind: JobKind::Garrison,
+                target: Target::Object(building.entity_id),
+                priority: GARRISON_PRIORITY,
+                actor: Some(unit.entity_id),
+            });
+        }
+
+        // Everything already walking keeps its building and says so every term:
+        // a job no manager proposes is dropped by the assignment, which is the
+        // lesson every remembered job in this crate carries.
+        for (unit, building) in &self.garrisoning {
+            out.jobs.push(Proposal {
+                kind: JobKind::Garrison,
+                target: Target::Object(*building),
+                priority: GARRISON_PRIORITY,
+                actor: Some(*unit),
+            });
+        }
+    }
+
+    /// The infantry that can hold a building: a unit carrying `OCCUPIER`.
+    fn occupiers(&self, ctx: &Ctx<'_>) -> Vec<vera20k_core::sim::control::observation::OwnEntity> {
+        let mut occupiers = Vec::new();
+        for unit in ctx.obs.own_entities() {
+            let Some(profile) = ctx
+                .obs
+                .object_type(ctx.rules, unit.type_id)
+                .and_then(|ty| ctx.profiles.get(&ty.id))
+            else {
+                continue;
+            };
+            if !profile.roles.contains(Roles::OCCUPIER) {
+                continue;
+            }
+            if !unit.orderable || ctx.obs.inside_transport(unit.entity_id).is_some() {
+                continue;
+            }
+            occupiers.push(unit);
+        }
+        occupiers.sort_by_key(|unit| unit.entity_id);
+        occupiers
+    }
+
+    /// The structures on the map that nothing owns, and that the house can see.
+    ///
+    /// `neutral_structures` is unfogged by design — the wish list says every
+    /// neutral building is visible from the start — so a civilian block is a
+    /// candidate wherever it stands.
+    fn neutral_buildings(
+        &self,
+        ctx: &Ctx<'_>,
+    ) -> Vec<vera20k_core::sim::control::observation::EnemyEntity> {
+        let mut buildings: Vec<_> = ctx.obs.neutral_structures().collect();
+        buildings.sort_by_key(|building| building.entity_id);
+        buildings.dedup_by_key(|building| building.entity_id);
+        buildings
+    }
+
     fn roles_of(&self, ctx: &Ctx<'_>, type_id: vera20k_core::sim::intern::InternedId) -> Roles {
         ctx.obs
             .object_type(ctx.rules, type_id)
