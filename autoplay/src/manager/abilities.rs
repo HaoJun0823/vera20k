@@ -116,7 +116,10 @@ pub struct Abilities {
 impl Manager for Abilities {
     fn propose(&mut self, ctx: &Ctx<'_>, out: &mut Demands) {
         self.capture(ctx, out);
-        self.garrison(ctx, out);
+        // Disabled: measured, seven garrison jobs on the 1v7 lane collapse the base
+        // (own 84 -> 17) because every infantryman in the column is load-bearing.
+        // The code stays for the lane where the army has slack; see plan.md D-batch.
+        // self.garrison(ctx, out);
     }
 }
 
