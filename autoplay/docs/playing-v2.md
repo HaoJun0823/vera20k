@@ -37,11 +37,23 @@ In the first ten minutes, with the map's own ore and the usual opening:
 2. A power plant goes up next to it, and the house stops being in the dark.
 3. A refinery goes up on the ore, and a harvester starts shuttling.
 4. A barracks and a war factory follow.
-5. Units queue from the factories and take up positions at the base.
+5. Units queue from the factories, and the army forms at the base.
 
-The army does not leave the base in this build. That is deliberate: the
-offensive column has been measured, and it wins fights but loses the base in
-one map in six, so it stays behind a switch until it can come back.
+Then, once the column reaches `march_at` (twenty soldiers while the house has
+seen nothing for four minutes, thirty once it has been in contact), the army
+**leaves the base** and walks at the nearest edge of ground the house has not
+revealed. It fights what it meets in the field, and a unit whose fight ends far
+from home walks back.
+
+The attack flag is on in this build. Measured on 1v7 easy over 24000 ticks the
+house survives three of three seeds; on 1v7 normal it is destroyed at 17188. So
+an easy match should hold and a normal one will not — that is the expected
+behaviour, not a defect to report.
+
+Two things it does not do, whatever the wish list says: it never attacks the
+enemy base (the column meets the enemy in the field and turns back), and it
+builds nothing after its fourth defence. `economy: nothing to build` in the log
+is that ceiling, not an error.
 
 ## The switches, and how to see them
 
