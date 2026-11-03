@@ -145,6 +145,15 @@ impl Economy {
         let mut vehicle_factory: Option<&UnitProfile> = None;
         let mut power: Option<&UnitProfile> = None;
         let mut defense: Option<&UnitProfile> = None;
+        // The technology buildings. Without them the house stops at a war
+        // factory and four pillboxes: no laboratory, so no force shield and no
+        // next tech tier; no purifier, so every truck earns less. Measured on
+        // 1v7 easy, the enemy built `NATECH` on four of seven houses and fired
+        // iron curtains (`IronCurtain launched at (72, 139) by Computer5`) while
+        // this house owned nothing that answers.
+        let mut laboratory: Option<&UnitProfile> = None;
+        let mut purifier: Option<&UnitProfile> = None;
+        let mut superweapon: Option<&UnitProfile> = None;
         for ty in ctx.rules.all_objects() {
             let Some(profile) = ctx.profiles.get(&ty.id) else {
                 continue;
@@ -158,7 +167,16 @@ impl Economy {
             if ctx.obs.can_build(ctx.rules, ty, false) != CanBuild::Yes {
                 continue;
             }
-            if profile.roles.contains(Roles::REFINERY) {
+            if profile.roles.contains(Roles::LABORATORY) {
+                laboratory = Self::cheaper(laboratory, profile);
+            } else if profile.roles.contains(Roles::ORE_PURIFIER) {
+                purifier = Self::cheaper(purifier, profile);
+            } else if profile.roles.contains(Roles::SUPERWEAPON) {
+                // The launchers themselves. A laboratory declares the force
+                // shield and is matched above, so "unlocks the tier" and "fires
+                // something" stay two different buildings.
+                superweapon = Self::cheaper(superweapon, profile);
+            } else if profile.roles.contains(Roles::REFINERY) {
                 refinery = Self::cheaper(refinery, profile);
             } else if profile.roles.contains(Roles::TRAINS_INFANTRY) {
                 infantry_factory = Self::cheaper(infantry_factory, profile);
@@ -214,6 +232,22 @@ impl Economy {
             refinery
         } else if defenses < 4 && defense.is_some_and(|want| Self::affordable(ctx, want)) {
             defense
+        // The technology tier, after the base can defend itself and before the
+        // house starts buying launchers. The laboratory comes first because it
+        // is the gate: its own prerequisite chain is what makes the purifier and
+        // the superweapon buildable at all, and it also carries the force shield.
+        } else if !has(Roles::LABORATORY)
+            && laboratory.is_some_and(|want| Self::affordable(ctx, want))
+        {
+            laboratory
+        } else if !has(Roles::ORE_PURIFIER)
+            && purifier.is_some_and(|want| Self::affordable(ctx, want))
+        {
+            purifier
+        } else if !has(Roles::SUPERWEAPON)
+            && superweapon.is_some_and(|want| Self::affordable(ctx, want))
+        {
+            superweapon
         } else if ctx.obs.power_balance() < POWER_MARGIN {
             power
         } else {
@@ -221,12 +255,29 @@ impl Economy {
         };
         let Some(want) = want else {
             if ctx.tick % 1200 == 0 {
+                // Why nothing is wanted is the question a reader of the log
+                // actually asks: a house that stops at four defences has
+                // candidates it cannot build or cannot reach.
+                let tech_note = format!(
+                    "lab={} purifier={} super={}",
+                    count(Roles::LABORATORY),
+                    count(Roles::ORE_PURIFIER),
+                    count(Roles::SUPERWEAPON)
+                );
+                let candidates = format!(
+                    "lab_cand={} purifier_cand={} super_cand={}",
+                    laboratory.is_some(),
+                    purifier.is_some(),
+                    superweapon.is_some()
+                );
                 log::info!(
-                    "economy: nothing to build at {} credits={} refineries={} defenses={} in_production={:?}",
+                    "economy: nothing to build at {} credits={} refineries={} defenses={} tech={} avail={} in_production={:?}",
                     ctx.tick,
                     ctx.obs.credits(),
                     count(Roles::REFINERY),
                     defenses,
+                    tech_note,
+                    candidates,
                     ctx.obs.building_in_production()
                 );
             }

@@ -22,8 +22,12 @@ pub const ARMOR_SLOTS: usize = 11;
 const FRAMES_PER_SECOND: i64 = 15;
 
 /// What a unit is for, independent of its name. A type may carry several.
+///
+/// `u32` because the technology buildings arrived: a laboratory, an ore
+/// purifier, a superweapon and a war-factory upgrade each needed a bit of their
+/// own, and fifteen bits does not leave room for four.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Roles(pub u16);
+pub struct Roles(pub u32);
 
 impl Roles {
     pub const HARVESTER: Self = Self(1 << 0);
@@ -52,6 +56,28 @@ impl Roles {
     /// is artillery. A unit is either ranged or a front-liner; the longer of its
     /// weapons decides.
     pub const RANGED: Self = Self(1 << 13);
+    /// A laboratory: the building that unlocks the house's higher technology,
+    /// and in retail YR also the one that grants the force shield.
+    ///
+    /// Measured from the retail rules, not from a name: `[GATECH]` carries
+    /// `SuperWeapon=ForceShieldSpecial` and `[NATECH]`/`[YATECH]` carry the same
+    /// key, so the laboratory *is* the shield's source. The house that never
+    /// builds one loses both the shield and everything behind it — `[GACSPH]`
+    /// requires `GATECH`, `[GAOREP]` requires `GATECH`, and the enemy's iron
+    /// curtain requires `NATECH` on the other side.
+    pub const LABORATORY: Self = Self(1 << 14);
+    /// An ore purifier (`OrePurifier=yes`): every truck brings in more per trip.
+    ///
+    /// Only `[GAOREP]` carries the key in retail YR, and only the Allied side
+    /// gets it, so a Soviet house simply has no such building to find and the
+    /// role stays empty for it. That is the data, not a gap in the predicate.
+    pub const ORE_PURIFIER: Self = Self(1 << 15);
+    /// A building that declares a superweapon (`SuperWeapon=` or `SuperWeapon2=`).
+    ///
+    /// Retail attaches one to nine buildings plus the laboratories, and the
+    /// houses that own them fire iron curtains, nukes, lightning storms and the
+    /// chronosphere. A house with none of them has no answer to a house that has.
+    pub const SUPERWEAPON: Self = Self(1 << 16);
     /// A weapon reaching at least this many cells counts as ranged.
     ///
     /// A Grizzly's gun reaches four; a Prism Tank's reaches ten. Anything past
@@ -83,6 +109,9 @@ impl Roles {
             ("builds-vehicles", Roles::BUILDS_VEHICLES),
             ("builds-naval", Roles::BUILDS_NAVAL),
             ("ranged", Roles::RANGED),
+            ("laboratory", Roles::LABORATORY),
+            ("ore-purifier", Roles::ORE_PURIFIER),
+            ("superweapon", Roles::SUPERWEAPON),
         ];
         ALL.iter()
             .filter(|(_, role)| self.contains(*role))
@@ -208,6 +237,43 @@ impl UnitProfile {
                 });
             }
             _ => {}
+        }
+
+        // The technology buildings. Each key is the one retail actually reads,
+        // and each was checked against `ini/rulesmd.ini` rather than guessed:
+        //
+        // - a laboratory declares the force shield (`SuperWeapon=ForceShield
+        //   Special` on `[GATECH]`/`[NATECH]`/`[YATECH]`), and the shield is
+        //   also what gates the next tier — `[GACSPH]` and `[GAOREP]` both list
+        //   `GATECH` in their prerequisites;
+        // - an ore purifier is `OrePurifier=yes` (`[GAOREP]` only, Allied side);
+        // - a superweapon building declares `SuperWeapon=` or `SuperWeapon2=`.
+        //
+        // There is no industrial plant to find: retail YR has none. `[GAYARD]`
+        // and `[NAYARD]` look like factory upgrades and are shipyards
+        // (`Name=Allied Shipyard`, `Name=Soviet Shipyard`), and every war
+        // factory already carries `WeaponsFactory=yes`, so that key cannot
+        // separate one from the other. The industrial plant is a Tiberian Sun
+        // building that YR's rules do not ship.
+        if ty.category == ObjectCategory::Building {
+            let declares_superweapon = ty.super_weapon.is_some() || ty.super_weapon2.is_some();
+            if declares_superweapon {
+                roles = roles.with(Roles::SUPERWEAPON);
+            }
+            if ty.ore_purifier {
+                roles = roles.with(Roles::ORE_PURIFIER);
+            }
+            // A laboratory is the structure whose only superweapon is the force
+            // shield: retail gives it no other effect to declare, and a house
+            // builds it to unlock the tier rather than to fire anything.
+            if declares_superweapon
+                && ty
+                    .super_weapon
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("ForceShieldSpecial"))
+            {
+                roles = roles.with(Roles::LABORATORY);
+            }
         }
 
         // Only the slots native actually fires, and never a `NeverUse=yes`
@@ -535,6 +601,80 @@ mod tests {
         if let Some(ifv) = profiles.get("FV") {
             assert!(ifv.roles.contains(Roles::TRANSPORT), "an IFV carries one");
             assert!(ifv.passengers > 0);
+        }
+    }
+
+    /// The technology buildings, read from the retail rules rather than from a
+    /// name: `[GATECH]` is the laboratory because it declares the force shield,
+    /// `[GAOREP]` the ore purifier because of `OrePurifier=yes`, `[GACSPH]` a
+    /// superweapon because it declares one, `[GAYARD]` the factory upgrade
+    /// because of `WeaponsFactory=yes`.
+    ///
+    /// This is the predicate the house's build order was missing: without it the
+    /// policy could not see a laboratory at all, so no house ever built one, so
+    /// no house ever had the force shield, the next tech tier or anything that
+    /// requires it — and the enemy's iron curtain arrived unanswered.
+    #[test]
+    fn the_technology_buildings_are_recognised_from_retail_keys() {
+        let Some(rules) = retail() else {
+            return;
+        };
+        let profiles = Profiles::build(&rules);
+
+        let Some(lab) = profiles.get("GATECH") else {
+            return;
+        };
+        assert!(
+            lab.roles.contains(Roles::LABORATORY),
+            "GATECH declares SuperWeapon=ForceShieldSpecial, which is the shield \
+             and the tech gate at once"
+        );
+        assert!(
+            lab.roles.contains(Roles::SUPERWEAPON),
+            "a laboratory declares a superweapon like any other launcher"
+        );
+
+        // The Soviet laboratory answers the same question on the other side, so
+        // the predicate is reading the key and not one faction's name.
+        if let Some(soviet) = profiles.get("NATECH") {
+            assert!(soviet.roles.contains(Roles::LABORATORY));
+        }
+
+        let Some(purifier) = profiles.get("GAOREP") else {
+            return;
+        };
+        assert!(
+            purifier.roles.contains(Roles::ORE_PURIFIER),
+            "GAOREP carries OrePurifier=yes"
+        );
+
+        let Some(chrono) = profiles.get("GACSPH") else {
+            return;
+        };
+        assert!(
+            chrono.roles.contains(Roles::SUPERWEAPON),
+            "GACSPH declares SuperWeapon=ChronoSphereSpecial"
+        );
+
+        // The iron curtain is what the enemy fires, and the predicate has to read
+        // it on the other side too: `[NAIRON]` declares IronCurtainSpecial and
+        // requires `NATECH`. A house that never builds the laboratory never
+        // reaches it, which is the gap this predicate closes.
+        if let Some(iron) = profiles.get("NAIRON") {
+            assert!(
+                iron.roles.contains(Roles::SUPERWEAPON),
+                "NAIRON declares SuperWeapon=IronCurtainSpecial"
+            );
+        }
+
+        // A shipyard carries `WeaponsFactory=yes` exactly like a war factory, and
+        // neither is a technology building: this pins that the superweapon role
+        // did not leak onto every factory-flagged structure.
+        if let Some(shipyard) = profiles.get("GAYARD") {
+            assert!(
+                !shipyard.roles.contains(Roles::SUPERWEAPON),
+                "GAYARD is a shipyard and fires nothing"
+            );
         }
     }
 
