@@ -947,12 +947,18 @@ impl Brain for Policy {
                     .filter(|(cell, _)| *cell == unit.cell)
                     .map_or(0, |(_, since)| tick.saturating_sub(*since));
                 log::info!(
-                    "policy v2 unit: id={} {} job={} target={} standing={}",
+                    "policy v2 unit: id={} {} job={} target={} standing={} mission={:?}",
                     unit.entity_id,
                     ty.id,
                     kind,
                     target,
-                    standing
+                    standing,
+                    // What the engine thinks the unit is doing. The job is what the
+                    // policy asked for; without the mission there is no way to tell
+                    // "the order was never taken" from "it was taken and the walk
+                    // did not start", and a capture that lives one term looks the
+                    // same either way.
+                    unit.mission
                 );
             }
             log::info!(
