@@ -204,7 +204,11 @@ impl Policy {
     fn watched_by_mission(kind: JobKind) -> bool {
         matches!(
             kind,
-            JobKind::Harvest | JobKind::Assault | JobKind::Defend | JobKind::ReturnHome
+            JobKind::Harvest
+                | JobKind::Assault
+                | JobKind::Defend
+                | JobKind::ReturnHome
+                | JobKind::Capture
         )
     }
 
@@ -243,6 +247,13 @@ impl Policy {
             // A unit walking home is on the Move mission; re-sending the walk
             // would restart it every term.
             JobKind::ReturnHome => mission == MissionId::from_known(MissionType::Move),
+            // A capturer holds the Capture mission for the whole walk: the
+            // engine gives it from CaptureBuilding and keeps it until per_cell
+            // hands the arrival to the building receiver. Without this arm the
+            // job went out once, same_order suppressed every later term, and a
+            // measured engineer read job=Capture standing=15 before the
+            // assignment took it away again.
+            JobKind::Capture => mission == MissionId::from_known(MissionType::Capture),
             _ => false,
         }
     }
@@ -1223,12 +1234,21 @@ mod tests {
 
     #[test]
     fn only_a_job_with_a_mission_of_its_own_is_watched() {
-        for watched in [JobKind::Harvest, JobKind::Assault, JobKind::Defend] {
+        for watched in [
+            JobKind::Harvest,
+            JobKind::Assault,
+            JobKind::Defend,
+            JobKind::ReturnHome,
+            // A capturer walks for many terms, and the engine keeps it on the
+            // Capture mission until it arrives. Sent once and suppressed after,
+            // the job lived one term (`standing=15`) and the engineer was
+            // reassigned to a post while still walking.
+            JobKind::Capture,
+        ] {
             assert!(Policy::watched_by_mission(watched));
         }
         for once in [
             JobKind::Deploy,
-            JobKind::Capture,
             JobKind::Garrison,
             JobKind::Repair,
             JobKind::Transport,

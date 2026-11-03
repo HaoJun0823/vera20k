@@ -25,6 +25,17 @@ use crate::registry::JobKind;
 /// farther than a march is one the engineer never arrives at.
 const CAPTURE_REACH_CELLS: i32 = 40;
 
+/// The priority a capture runs at.
+///
+/// Above the assault's sixty, and that is the whole point. An engineer carries a
+/// sidearm, so the profile calls it `ARMED` and the military manager proposes it
+/// for an assault; a measured run had the engineer spend four thousand frames
+/// walking to an attack-move cell — `job=Assault target=Cell((160, 92))
+/// standing=4110` — before a building was ever offered to it. A capture is worth
+/// more than one more rifle in the line, because a yard is a production line, so
+/// it outranks the line's work.
+const CAPTURE_PRIORITY: i64 = 75;
+
 /// Capture, in the order a house should want it.
 ///
 /// The wish list calls taking an enemy construction yard the most important thing
@@ -119,20 +130,22 @@ impl Abilities {
             out.jobs.push(Proposal {
                 kind: JobKind::Capture,
                 target: Target::Object(target.entity_id),
-                priority: capture_rank(self.roles_of(ctx, target.type_id)),
+                priority: CAPTURE_PRIORITY + capture_rank(self.roles_of(ctx, target.type_id)),
                 actor: Some(unit.entity_id),
             });
         }
 
-        // A capturer already on its way keeps the building it was given.
+        // Every capturer already on its way keeps the building it was given, and
+        // says so every term. The assignment drops a job no manager proposes —
+        // `keep_scouts` in the military manager exists for exactly this reason —
+        // so a capture proposed once lives one term and then vanishes. Measured:
+        // `job=Capture ... standing=15`, one term and gone, and the engineer
+        // reassigned to a defend post while it was still walking.
         for (unit, target) in &self.capturing {
-            if free.iter().any(|free| free.entity_id == *unit) {
-                continue;
-            }
             out.jobs.push(Proposal {
                 kind: JobKind::Capture,
                 target: Target::Object(*target),
-                priority: 60,
+                priority: CAPTURE_PRIORITY,
                 actor: Some(*unit),
             });
         }
