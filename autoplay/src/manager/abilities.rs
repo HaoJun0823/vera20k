@@ -23,7 +23,7 @@ use crate::registry::JobKind;
 /// is a walk through whatever the enemy has between. Measured earlier in the
 /// project, a march covers about thirty cells before it stops, so a capture
 /// farther than a march is one the engineer never arrives at.
-const CAPTURE_REACH_CELLS: i32 = 40;
+const CAPTURE_REACH_CELLS: i32 = 20;
 
 /// The priority a capture runs at.
 ///
@@ -134,6 +134,22 @@ impl Abilities {
             .filter(|target| !taken.contains(&target.entity_id))
             .copied()
             .collect();
+
+        // Nearest building first, and that is not a preference: measured, a
+        // capture sent across the map never arrived — the `capture:` line never
+        // fired in a 24000-tick match and the engineer vanished mid-walk — while
+        // a house whose capturer is sent at a building it already stands beside
+        // arrives. The wish list asks for capture "with the least loss", and the
+        // shortest walk is the one with the least of it.
+        let mut unclaimed = unclaimed;
+        unclaimed.sort_by_key(|target| {
+            let nearest = capturers
+                .iter()
+                .map(|unit| cell_distance(unit.cell, target.cell))
+                .min()
+                .unwrap_or(i32::MAX);
+            (nearest, target.entity_id)
+        });
 
         for (unit, target) in free.iter().zip(unclaimed.iter()) {
             // The building has to be worth the walk: an engineer sent forty cells
