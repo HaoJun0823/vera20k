@@ -325,9 +325,6 @@ impl Military {
     /// The army attacks once it is big enough, and holds the base before that.
     fn commit(&mut self, ctx: &Ctx<'_>, out: &mut Demands) {
         let mut soldiers = Vec::new();
-        // Every structure the house owns, so home can be chosen by where the base
-        // actually is rather than by whichever one the entity store yielded first.
-        let mut structures: Vec<(u16, u16)> = Vec::new();
         let mut home: Option<(u16, u16)> = None;
         for unit in ctx.obs.own_entities() {
             let Some(ty) = ctx.obs.object_type(ctx.rules, unit.type_id) else {
@@ -337,7 +334,7 @@ impl Military {
                 continue;
             };
             if profile.roles.contains(Roles::STRUCTURE) {
-                structures.push(unit.cell);
+                home = home.or(Some(unit.cell));
                 continue;
             }
             if !profile.roles.contains(Roles::ARMED)
@@ -387,28 +384,6 @@ impl Military {
                     .unwrap_or(i32::MAX)
             })
             .map(|enemy| (enemy.entity_id, enemy.cell));
-        // Where the base is: the structure with the most neighbours inside the
-        // door radius. A captured enemy building is a structure too, and taking
-        // the first one met put `home` out at the enemy's base — measured, two
-        // captures made every enemy on the map read as being at the door
-        // (`seen=29 door=29`), which held `quiet` false for the whole match.
-        //
-        // Density is the honest answer: the main base is the cluster, a captured
-        // outpost is a lone building.
-        home = structures
-            .iter()
-            .max_by_key(|cell| {
-                let neighbours = structures
-                    .iter()
-                    .filter(|other| cell_distance(**cell, **other) <= NEAR_CELLS)
-                    .count();
-                (
-                    neighbours,
-                    std::cmp::Reverse(cell.0),
-                    std::cmp::Reverse(cell.1),
-                )
-            })
-            .copied();
         // A house with no structure yet holds the ground its own units stand
         // on: the starting force is the whole army until the yard is up, and a
         // unit with no post is a unit nobody owns.
@@ -463,20 +438,7 @@ impl Military {
         // an enemy until it goes looking, while at 1v7 the ground is contested
         // from the first minute.
         let held = ctx.obs.own_entities().count();
-        // Contact means contact **at home**. `!seen.is_empty()` counted any
-        // enemy anywhere on the map, and on the 1v7 lane that is every reading —
-        // `seen=29` from 14400 to 23400 — so `last_contact` was refreshed every
-        // term and `quiet` never became true. The army then had no reason to
-        // march for the whole match while seven houses dismantled the base.
-        //
-        // A raid the column can see but that is not near home is not what keeps
-        // the column home; it is what the column should go and meet.
-        let at_door_count = seen
-            .iter()
-            .filter(|enemy| cell_distance(enemy.cell, home) <= NEAR_CELLS)
-            .count();
-        let at_door = at_door_count > 0;
-        if at_door {
+        if !seen.is_empty() || self.held_last.is_some_and(|was| held < was) {
             self.last_contact = Some(ctx.tick);
         }
         self.held_last = Some(held);
@@ -488,21 +450,7 @@ impl Military {
         } else {
             ARMY_TO_MARCH
         };
-        // A march needs a column **and** a reason, and `target.is_none()` was only
-        // ever half the reason. It was written for the 1v1 lane, where the bases
-        // sit 116 cells apart and nothing walks between them, so the sight being
-        // empty is what says "go looking". On the 1v7 lane the sight is never
-        // empty — `seen=29` at every reading — so the condition read false for the
-        // whole match, `march=false` on every reading from 14400 to 23400, and the
-        // army stood at its own gate while seven houses dismantled it. Measured:
-        // every unit that died in that match died within fifteen cells of the
-        // base, and the column never left.
-        //
-        // The second half of the reason is whether the base can spare them: a
-        // column that is fighting at the door cannot also go out, and one that
-        // has been left alone is wasting the army it paid for. `quiet` is that
-        // judgement and it already exists above.
-        let march = ATTACK_ENABLED && soldiers.len() >= column && (target.is_none() || quiet);
+        let march = ATTACK_ENABLED && target.is_none() && soldiers.len() >= column;
         // With nothing in sight, a big-enough column marches at the edge of known
         // ground instead of guarding the base. Without it the army never leaves:
         // the bases are 116 cells apart, nothing walks between them, so `seen` is
@@ -543,26 +491,18 @@ impl Military {
         };
         if ctx.tick % 1800 == 0 {
             log::info!(
-                "military: tick={} enabled={} soldiers={} march_at={} quiet={} home={:?} seen={} reach={} door={} near={} engage={} march={} order={:?}",
+                "military: tick={} enabled={} soldiers={} march_at={} quiet={} seen={} reach={} near={} engage={} march={} order={:?}",
                 ctx.tick,
                 ATTACK_ENABLED,
                 soldiers.len(),
                 column,
                 quiet,
-                // Where home actually is. A captured enemy building is a structure
-                // too, and taking the first one met put home out at the enemy's
-                // base: measured, every enemy then read as being at the door.
-                home,
                 seen.len(),
                 // How many of the visible enemies any soldier can actually hurt.
                 // `seen` alone cannot show whether the Illegal filter is doing
                 // anything: a lane where every visible type is reachable reads the
                 // same as one where the filter never ran.
                 reachable.len(),
-                // Whether anything is within `NEAR_CELLS` of home, which is what
-                // `quiet` now depends on. Without it, "the gate never opened" and
-                // "the gate opened late" look the same on the log line.
-                at_door_count,
                 near_target,
                 engage,
                 march,
