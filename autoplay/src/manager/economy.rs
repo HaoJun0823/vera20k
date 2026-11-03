@@ -41,6 +41,7 @@ impl Manager for Economy {
         self.harvesters(ctx, out);
         self.place(ctx, out);
         self.harvesters_for_refineries(ctx, out);
+        Self::engineer(ctx, out);
         self.build(ctx, out);
     }
 }
@@ -385,8 +386,63 @@ impl Economy {
         out.intents.push(Intent::QueueProduction { type_id });
     }
 
-    /// Whether the wallet can pay for this and still have change: the margin
-    /// covers the next harvester or a repair.
+    /// One engineer, so the house can take a building.
+    ///
+    /// The wish list calls taking an enemy construction yard the centrepiece:
+    /// a yard is a production line the house did not have, and every prerequisite
+    /// that names that side's yard is satisfied by holding one
+    /// (`holds_a_captured_yard_of` in `can_build`). A capturer is also an engineer
+    /// for a repair or a garrison, so one on the field does three jobs.
+    ///
+    /// One is enough until it is spent: the building receiver consumes the
+    /// engineer that arrives, so a house that has none on the field and none in
+    /// production buys the cheapest capturer it can build and then stops asking.
+    fn engineer(ctx: &Ctx<'_>, out: &mut Demands) {
+        let mut capturers = 0;
+        for unit in ctx.obs.own_entities() {
+            if let Some(profile) = ctx
+                .obs
+                .object_type(ctx.rules, unit.type_id)
+                .and_then(|ty| ctx.profiles.get(&ty.id))
+            {
+                capturers += usize::from(
+                    profile.roles.contains(Roles::ENGINEER) || profile.roles.contains(Roles::AGENT),
+                );
+            }
+        }
+        if capturers > 0 {
+            return;
+        }
+        let mut want: Option<&UnitProfile> = None;
+        for ty in ctx.rules.all_objects() {
+            let Some(profile) = ctx.profiles.get(&ty.id) else {
+                continue;
+            };
+            if !(profile.roles.contains(Roles::ENGINEER) || profile.roles.contains(Roles::AGENT)) {
+                continue;
+            }
+            if ctx.obs.can_build(ctx.rules, ty, false) != CanBuild::Yes {
+                continue;
+            }
+            want = Self::cheaper(want, profile);
+        }
+        let Some(want) = want else {
+            return;
+        };
+        let Some(type_id) = ctx.obs.type_id(&want.id) else {
+            return;
+        };
+        if ctx.obs.in_production(ctx.rules, type_id) {
+            return;
+        }
+        // An engineer is not income and not the army: it is bought from the
+        // surplus, the same margin the second truck uses, so a base under attack
+        // buys soldiers first.
+        if ctx.obs.credits() < want.cost + EXTRA_HARVESTER_MARGIN {
+            return;
+        }
+        out.intents.push(Intent::QueueProduction { type_id });
+    }
     fn affordable(ctx: &Ctx<'_>, profile: &UnitProfile) -> bool {
         ctx.obs.credits() >= profile.cost + 200
     }

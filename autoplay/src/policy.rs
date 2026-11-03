@@ -153,7 +153,7 @@ impl Policy {
                 Box::new(Economy),
                 Box::new(Build),
                 Box::new(Military::default()),
-                Box::new(Abilities),
+                Box::new(Abilities::default()),
             ],
             jobs: Assignments::default(),
             last_term: None,
@@ -258,6 +258,17 @@ impl Policy {
             (JobKind::Assault, Target::Cell(cell)) => Some(Goal::AttackMove { cell }),
             (JobKind::Defend, Target::Cell(cell)) => Some(Goal::GuardAt { cell }),
             (JobKind::ReturnHome, Target::Cell(cell)) => Some(Goal::Move { cell }),
+            // The capture click a player makes on a building. The engine owns the
+            // walk and the arrival (`mission_capture`, the building receiver at
+            // `0x00519948`); the policy only has to name the engineer and the
+            // building.
+            (JobKind::Capture, Target::Object(target)) => Some(Goal::Capture { target }),
+            // A garrison is the Enter mission on a capturable civilian structure:
+            // same door a player uses to put a rifleman inside a hospital.
+            (JobKind::Garrison, Target::Object(target)) => Some(Goal::Enter { target }),
+            // A transport carries a passenger to a destination: the Enter click on
+            // the transport, which boards it.
+            (JobKind::Transport, Target::Object(target)) => Some(Goal::Enter { target }),
             (JobKind::Deploy, _) => Some(Goal::Deploy),
             _ => None,
         }
