@@ -36,6 +36,16 @@ const CAPTURE_REACH_CELLS: i32 = 40;
 /// it outranks the line's work.
 const CAPTURE_PRIORITY: i64 = 75;
 
+/// How close an armed enemy may be to the engineer's route before the house
+/// calls the walk unsafe, in cells.
+///
+/// A rifleman's sight is five and its reach four, so three keeps the walk clear
+/// of a unit that can see and shoot it without the engineer having to win a fight
+/// it cannot. Wider than the sight on purpose: the walk is a straight line the
+/// policy chose, not the path the engine will take, so the buffer absorbs the
+/// difference between them.
+const THREAT_BUFFER_CELLS: i32 = 3;
+
 /// Capture, in the order a house should want it.
 ///
 /// The wish list calls taking an enemy construction yard the most important thing
@@ -126,6 +136,16 @@ impl Abilities {
             if cell_distance(unit.cell, target.cell) > CAPTURE_REACH_CELLS {
                 continue;
             }
+            // And the route has to be clear of what would kill it on the way. An
+            // engineer has no weapon worth the name and cannot outrun anything:
+            // sending it into ground the house can see the enemy standing on is
+            // sending it to die, and the wish list's own words are "least loss".
+            // Measured before this check: one engineer was bought and sent on a
+            // 4000-frame walk that ended with the job dropped and no building
+            // taken.
+            if !Self::route_is_clear(ctx, unit.cell, target.cell) {
+                continue;
+            }
             self.capturing.insert(unit.entity_id, target.entity_id);
             out.jobs.push(Proposal {
                 kind: JobKind::Capture,
@@ -149,6 +169,57 @@ impl Abilities {
                 actor: Some(*unit),
             });
         }
+    }
+
+    /// Whether the straight walk from `from` to `to` passes near anything the
+    /// house can see that would kill an engineer.
+    ///
+    /// The route is the straight line, not the pathfinder's answer, because the
+    /// decision has to be cheap: this runs for every capturer every term, and a
+    /// full path per candidate is the kind of cost that makes a policy slow
+    /// without making it right. The line is what an engineer walks when nothing
+    /// blocks it, and it is the closest thing to "what will it meet".
+    ///
+    /// An enemy counts when it is armed and within [`THREAT_BUFFER_CELLS`] of any
+    /// cell on that line. A building does not count: a pillbox is a real danger
+    /// but its gun's reach is a weapon fact this manager does not own, and
+    /// counting every structure would refuse every route on a map where the
+    /// enemy's base is a wall of buildings.
+    fn route_is_clear(ctx: &Ctx<'_>, from: (u16, u16), to: (u16, u16)) -> bool {
+        let threats: Vec<(u16, u16)> = ctx
+            .obs
+            .visible_enemy_entities()
+            .filter(|enemy| {
+                ctx.obs
+                    .object_type(ctx.rules, enemy.type_id)
+                    .and_then(|ty| ctx.profiles.get(&ty.id))
+                    .is_some_and(|profile| {
+                        profile.roles.contains(Roles::ARMED)
+                            && !profile.roles.contains(Roles::STRUCTURE)
+                    })
+            })
+            .map(|enemy| enemy.cell)
+            .collect();
+        if threats.is_empty() {
+            return true;
+        }
+        // Sample the line in cells: a step per cell is the resolution the engine
+        // moves on, so a threat the line passes within a buffer of is a threat the
+        // walk passes.
+        let steps = cell_distance(from, to).max(1);
+        for step in 0..=steps {
+            let t = f64::from(step) / f64::from(steps);
+            let x = f64::from(from.0) + (f64::from(to.0) - f64::from(from.0)) * t;
+            let y = f64::from(from.1) + (f64::from(to.1) - f64::from(from.1)) * t;
+            let cell = (x.round() as u16, y.round() as u16);
+            if threats
+                .iter()
+                .any(|threat| cell_distance(cell, *threat) <= THREAT_BUFFER_CELLS)
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// The units that can take a building: an engineer or an agent.
