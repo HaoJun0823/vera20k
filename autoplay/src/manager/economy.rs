@@ -259,7 +259,7 @@ impl Economy {
             && refinery.is_some_and(|want| Self::affordable(ctx, want))
         {
             refinery
-        } else if defenses < 4 && defense.is_some_and(|want| Self::affordable(ctx, want)) {
+        } else if defenses < 8 && defense.is_some_and(|want| Self::affordable(ctx, want)) {
             defense
         // The technology tier, after the base can defend itself and before the
         // house starts buying launchers. The radar comes first because it is what
