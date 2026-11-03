@@ -563,15 +563,55 @@ def run_command(args: list[str]) -> int:
 
 
 def match_binary() -> Path | None:
-    """The fast-profile match binary, where cargo_run puts it."""
+    """The fast-profile match binary, where cargo_run puts it.
+
+    Two packages ship a binary with this name: the engine crate's
+    `src/bin/autoplay-match.rs`, which drives the retail brain only, and the
+    autoplay crate's `src/bin/match.rs`, which is the one that takes `--brain v2`.
+    The newest wins because that is the one the build in this run just wrote — and
+    that is exactly how a run went wrong after the upstream merge: the engine
+    binary was rebuilt last, the harness picked it, `--brain v2` was refused as an
+    unknown flag, the process exited during argument parsing, and the report read
+    `own=0 enemy=0 jobs=none` instead of saying the wrong binary had been chosen.
+
+    So the newest is still preferred, but a candidate that does not accept
+    `--brain` is not offered for a v2 run at all.
+    """
     owned = ROOT / "target" / "owned-worktrees"
     if not owned.is_dir():
         return None
     candidates = sorted(owned.glob("*/fast/autoplay-match.exe"))
     candidates += sorted(owned.glob("*/fast/autoplay-match"))
-    # Both packages ship a binary with this name; the newest is the one the
-    # build in this run just wrote.
-    return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
+    if not candidates:
+        return None
+    ready = [path for path in candidates if accepts_brain_flag(path)]
+    if ready:
+        return max(ready, key=lambda path: path.stat().st_mtime)
+    # No candidate takes the flag: fall back to the newest and let the run report
+    # the refusal rather than silently measuring the other policy.
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def accepts_brain_flag(binary: Path) -> bool:
+    """Whether this binary rejects `--brain`: its usage list is the answer.
+
+    `--help` exits through the same argument parser a run does, so a binary that
+    does not know the flag prints `unknown flag --brain` and a non-zero status.
+    Asked once per candidate and cached nowhere: a build in the same run can
+    replace the binary while the matrix is starting.
+    """
+    try:
+        done = subprocess.run(
+            [str(binary), "--brain", "v2", "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    text = (done.stdout or "") + (done.stderr or "")
+    return "unknown flag --brain" not in text
 
 
 def run_match(
