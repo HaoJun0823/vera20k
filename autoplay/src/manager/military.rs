@@ -46,6 +46,12 @@ const MARCH_IMPATIENCE: u64 = 3_600;
 /// practice: the odds gate below it already asks for twice the enemy's number.
 const ENGAGE_FLOOR: usize = 4;
 
+/// How many of ours per enemy make a fight worth taking.
+///
+/// Two was the value the lane was tuned to before the 1v7 work; three is the
+/// hypothesis the four reverted attempts point at.
+const ENGAGE_ODDS: usize = 3;
+
 /// How close counts as "around", in cells.
 ///
 /// One radius for two questions, so a target and a base are measured the same
@@ -560,7 +566,14 @@ impl Military {
         let at_home = target.is_some_and(|(_, cell)| cell_distance(cell, home) <= NEAR_CELLS);
         let engage = ATTACK_ENABLED
             && target.is_some()
-            && soldiers.len() >= near * 2
+            // Three to one, not two. Four measurements in a row showed this army
+            // doing better the less it committed: staying when an enemy was in
+            // sight helped, running when hurt helped, and every attempt to push
+            // the column forward — a real march, closing on an unreachable
+            // target, a forward rally — lost eighteen to one in the cells that had
+            // been safest. If committing is what hurts, the odds bar is where that
+            // lives.
+            && soldiers.len() >= near * ENGAGE_ODDS
             && soldiers.len() >= ENGAGE_FLOOR
             && (at_home || soldiers.len() >= ARMY_TO_MARCH);
         // A house that has seen nothing for two minutes is not waiting for
