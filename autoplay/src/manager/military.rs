@@ -154,6 +154,12 @@ const SCOUT_PRIORITY: i64 = 25;
 /// near means the cell has been looked at even when the bit has not flipped yet.
 const SCOUT_ARRIVED_CELLS: i32 = 4;
 
+/// Grid step for the scout's own search, in cells.
+///
+/// Four, the same order as the frontier search: walking a 256-cell grid every
+/// term is too much, and four cells is finer than a scout needs.
+const SCOUT_SCAN_STEP: u16 = 4;
+
 /// How many enemies the house may be facing before scouting stops.
 ///
 /// The gate is on the *enemy*, not on our own count, and that distinction is the
@@ -960,6 +966,44 @@ impl Military {
         Some((x, y))
     }
 
+    /// The furthest cell nobody has looked at that the scout can walk to.
+    ///
+    /// Its own search, deliberately not `march_cell`: that one is shared with the
+    /// column, and changing it moves the army.
+    ///
+    /// A wide grid walk with `SCOUT_SCAN_STEP` between samples, keeping the
+    /// furthest reachable unrevealed cell. `can_reach` decides "reachable" because
+    /// `is_cell_in_playfield` admits ground the zone grid refuses - the defect that
+    /// left a unit holding one order for 47400 frames one commit ago.
+    fn scout_cell(&self, ctx: &Ctx<'_>, home: (u16, u16), from: (u16, u16)) -> Option<(u16, u16)> {
+        let (width, height) = ctx.obs.map_extent();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let zone = vera20k_core::rules::locomotor_type::MovementZone::Normal;
+        let mut best: Option<((u16, u16), i32)> = None;
+        let mut y = 0;
+        while y < height {
+            let mut x = 0;
+            while x < width {
+                if !ctx.obs.is_cell_in_playfield(x, y)
+                    || ctx.obs.is_cell_revealed(x, y)
+                    || !ctx.obs.can_reach(zone, from, (x, y))
+                {
+                    x = x.saturating_add(SCOUT_SCAN_STEP);
+                    continue;
+                }
+                let away = cell_distance(home, (x, y));
+                if best.is_none_or(|(_, furthest)| away > furthest) {
+                    best = Some(((x, y), away));
+                }
+                x = x.saturating_add(SCOUT_SCAN_STEP);
+            }
+            y = y.saturating_add(SCOUT_SCAN_STEP);
+        }
+        best.map(|(cell, _)| cell)
+    }
+
     fn scout(
         &mut self,
         ctx: &Ctx<'_>,
@@ -1046,13 +1090,21 @@ impl Military {
         else {
             return;
         };
-        // The scout is told no direction on purpose. `march_cell` ranks a
-        // frontier towards whatever it is given, and giving it the last sighting
-        // sent the scout back towards the contact that had already been seen —
-        // Measured on Arena.mmx seed 0x5EED, its furthest reading was `y=64`
-        // against a base at `y=128..138`, which is not scouting, it is tidying up
-        // around home. A scout's job is the ground nobody has looked at.
-        let Some(cell) = march_cell(ctx, home, unit.cell, None) else {
+        // A scout gets its own path, not the column's.
+        //
+        // `march_cell` is shared with the army's march, so every attempt to make
+        // the scout reach further also sent the column there: in round seven that
+        // gained one seed and lost four and was reverted. The scout has needed its
+        // own answer since.
+        //
+        // Its question differs from a column's. A column wants the nearest walkable
+        // edge of known ground. A scout wants the furthest cell nobody has looked
+        // at that it can actually walk to. `march_cell`'s first ring reaches
+        // eighteen cells and `find_map` stops there, so the scout's five
+        // destinations in a whole 48000-tick match sat inside `x=76..100,
+        // y=36..52` while 473 of 25600 cells were revealed and 115 cells of
+        // walkable ground lay around it.
+        let Some(cell) = self.scout_cell(ctx, home, unit.cell) else {
             return;
         };
         self.scout = Some((unit.entity_id, cell));
