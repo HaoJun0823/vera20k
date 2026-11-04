@@ -94,6 +94,19 @@ const SCOUTS_OUT: usize = 1;
 /// up — which is what makes a scout useless in exactly the case it is wanted.
 const SCOUT_PRIORITY: i64 = 25;
 
+/// How many enemies the house may be facing before scouting stops.
+///
+/// The gate is on the *enemy*, not on our own count, and that distinction is the
+/// whole point: measured, the 1v1 lane never fields more than thirty-four
+/// soldiers in a whole match while the 1v7 lane fields sixty to seventy — so any
+/// "big enough army" threshold either suppresses the scout everywhere (fifty) or
+/// fires it exactly where it is unaffordable. What actually differs between the
+/// lanes is the odds.
+///
+/// Sending one scout on 1v7 took `own` from 84 to 20. That is the fifth time this
+/// session that spending a single soldier cost the lane.
+const SCOUT_MAX_ENEMIES: usize = 60;
+
 #[derive(Debug, Default)]
 pub struct Military {
     /// The tick the house last saw an enemy of its own.
@@ -607,6 +620,9 @@ impl Military {
             .visible_enemy_entities()
             .any(|enemy| cell_distance(enemy.cell, home) <= NEAR_CELLS);
         if at_door {
+            return;
+        }
+        if ctx.obs.visible_enemy_entities().count() > SCOUT_MAX_ENEMIES {
             return;
         }
         let Some(unit) = soldiers

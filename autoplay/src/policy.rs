@@ -156,7 +156,7 @@ impl Policy {
             roles: RoleTable::build(rules),
             managers: vec![
                 Box::new(Economy),
-                Box::new(Build),
+                Box::new(Build::default()),
                 Box::new(Military::default()),
                 Box::new(Abilities::default()),
             ],
