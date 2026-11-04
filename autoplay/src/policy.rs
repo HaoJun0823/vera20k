@@ -366,7 +366,7 @@ impl Policy {
     ///
     /// Jobs end before this term's proposals are collected, so the same unit can
     /// be given a live target in the same term.
-    fn finish_done_jobs(&mut self, obs: &Observation<'_>, tick: u64) {
+    fn finish_done_jobs(&mut self, obs: &Observation<'_>, rules: &RuleSet, tick: u64) {
         self.given_up.retain(|_, until| *until > tick);
         self.hitting.clear();
         let visible: Vec<u64> = obs
@@ -427,6 +427,24 @@ impl Policy {
             let unchanged_since = match seen {
                 Some((before, since)) if before == health => {
                     if tick.saturating_sub(since) >= INEFFECTIVE_FRAMES {
+                        // Say what was being shot. A target whose health does not
+                        // move for the whole window is either armoured past this
+                        // unit's warhead or not damageable at all, and which one it
+                        // is decides whether the fix belongs in targeting or in the
+                        // damage table. Measured on Arena.mmx seed 0x5EED, the
+                        // army spent the match on one object id and killed nothing.
+                        let name = obs
+                            .object_cell_and_type(target)
+                            .and_then(|(_, type_id)| obs.object_type(rules, type_id))
+                            .map(|ty| ty.id.clone())
+                            .unwrap_or_else(|| "<gone>".to_string());
+                        log::info!(
+                            "policy v2: ineffective target={} type={} health={} after {} frames",
+                            target,
+                            name,
+                            health,
+                            tick.saturating_sub(since)
+                        );
                         done.push((*unit, target, Ending::Ineffective));
                     }
                     since
@@ -866,7 +884,7 @@ impl Brain for Policy {
         // A job whose target is gone — or which the unit cannot reach — is
         // finished before the term's proposals are collected, so the unit can be
         // given a live one in the same term.
-        self.finish_done_jobs(obs, tick);
+        self.finish_done_jobs(obs, rules, tick);
         let mut demands = Demands::default();
         {
             let ctx = Ctx {
