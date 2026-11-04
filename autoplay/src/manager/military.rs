@@ -134,6 +134,16 @@ const SCOUT_PRIORITY: i64 = 25;
 /// session that spending a single soldier cost the lane.
 const SCOUT_MAX_ENEMIES: usize = 60;
 
+/// How many enemies near a hurt unit make it run rather than trade.
+///
+/// Three. One is an even fight, two is a losing one worth finishing; three around
+/// a unit already at a third of its health is a unit that is about to be gone.
+const RETREAT_OUTNUMBERED: usize = 3;
+
+/// What a retreat runs at: above an assault, because a unit that dies at its post
+/// is worth less than one that leaves it.
+const RETREAT_PRIORITY: i64 = 65;
+
 #[derive(Debug, Default)]
 pub struct Military {
     /// The tick the house last saw an enemy of its own.
@@ -652,6 +662,39 @@ impl Military {
             );
         }
         for unit in &soldiers {
+            // A hurt unit that is outnumbered where it stands goes home instead
+            // of dying where it is.
+            //
+            // Measured on Death.mmx seed 10 at 36000 ticks: fifteen Grizzlies
+            // destroyed with twelve still held, because a unit in contact with an
+            // enemy now stays — the previous commit made it stay, and staying is
+            // right when the fight is winnable. `JobKind::Retreat` has been in the
+            // registry since the start and nothing ever proposed it; this is the
+            // first arm that does.
+            //
+            // The test is the unit's own health, not the army's: a tank at a third
+            // of its strength with three enemies around it is not going to win
+            // that exchange no matter what the column overall is doing.
+            let hurt = ctx.obs.health(unit.entity_id).is_some_and(|health| {
+                ctx.obs
+                    .max_health(ctx.rules, unit.type_id)
+                    .is_some_and(|max| max > 0 && health * 3 <= max)
+            });
+            if hurt {
+                let pressing = seen
+                    .iter()
+                    .filter(|enemy| cell_distance(enemy.cell, unit.cell) <= NEAR_CELLS)
+                    .count();
+                if pressing >= RETREAT_OUTNUMBERED {
+                    out.jobs.push(Proposal {
+                        kind: JobKind::Retreat,
+                        target: Target::Cell(home),
+                        priority: RETREAT_PRIORITY,
+                        actor: Some(unit.entity_id),
+                    });
+                    continue;
+                }
+            }
             match order {
                 // An object, not a cell: an attack-move to a cell is a
                 // destination the unit reaches and then stands on, which is the

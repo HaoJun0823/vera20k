@@ -292,6 +292,10 @@ impl Policy {
             (JobKind::Assault, Target::Cell(cell)) => Some(Goal::AttackMove { cell }),
             (JobKind::Defend, Target::Cell(cell)) => Some(Goal::GuardAt { cell }),
             (JobKind::ReturnHome, Target::Cell(cell)) => Some(Goal::Move { cell }),
+            // A retreat is a walk, not a mission: the engine has no order for
+            // "leave", and a unit that is losing a fight only has to go somewhere
+            // else.
+            (JobKind::Retreat, Target::Cell(cell)) => Some(Goal::Move { cell }),
             // A scout walks to the frontier cell it was sent to. `Move` and not
             // `GuardAt`: guarding is standing somewhere, and standing on ground
             // already revealed is the one thing scouting is not.
