@@ -176,3 +176,42 @@ fn a_zero_damage_target_is_not_reported_as_unattackable() {
          狗咬坦克"
     );
 }
+
+#[test]
+fn a_dog_against_concrete_is_legal_and_worthless() {
+    let Some((mut sim, rules, owner)) = arena() else {
+        return;
+    };
+    // The case this session spent three rounds on: the army held position on one
+    // Soviet Iron Curtain device for a whole match and its health did not move.
+    // The report it printed was
+    //
+    //     ineffective target=2211 type=NAIRON health=750 after 450 frames
+    //
+    // and the reading that explains it is not a bug. `ADOG` carries
+    // `Primary=GoodTeeth` (`Warhead=ParasiteDog`, `Verses=100%,100%,100%,0%,0%,…` —
+    // zero against everything but infantry) *and* `Secondary=VirtualScanner`
+    // (`Damage=1`, `Warhead=SA`), and `answer` walks all eight weapon slots and
+    // takes the first that answers `Ok`. The scanner does answer `Ok`, so the dog
+    // is allowed to attack the curtain and does one point at a time.
+    //
+    // So the engine's `Illegal` gate is right and cannot be the thing that stops
+    // this. What is missing is a rule about whether the order is *worth giving*, and
+    // that belongs to the policy, measured in damage rather than in legality.
+    let dog = sim
+        .spawn_object("ADOG", "Americans", 20, 20, 0, &rules)
+        .expect("our attack dog");
+    let curtain = sim
+        .spawn_object("NAIRON", "Russians", 22, 20, 0, &rules)
+        .expect("their iron curtain");
+    assert!(dog > 0 && curtain > 0);
+    sim.resolve_type_handles(&rules);
+
+    let obs = Observation::new(&sim, owner);
+    assert_eq!(
+        obs.engage_error(&rules, dog, curtain),
+        None,
+        "the dog's secondary weapon answers Ok, so the order is legal; the engine is \
+         not wrong here and no assertion on legality can stop this"
+    );
+}
