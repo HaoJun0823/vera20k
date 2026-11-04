@@ -83,6 +83,14 @@ const INEFFECTIVE_FRAMES: u64 = 450;
 /// How long a unit stays off a target its attack could not hurt, in frames.
 const INEFFECTIVE_COOLDOWN: u64 = 1_800;
 
+/// How long the house stops offering a target nobody can hurt.
+///
+/// Long, because the fact does not change: a building's armour and a warhead's
+/// verses are both static, so the only honest reason to try again is a new unit
+/// type entering the army. Five minutes of frames is long enough for that to be
+/// worth a retry and short enough that a rebuilt enemy base is still reachable.
+const INEFFECTIVE_TARGET_COOLDOWN: u64 = 4_500;
+
 /// How an assault ended, for the trace and for the cooldown it records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ending {
@@ -148,6 +156,12 @@ pub struct Policy {
     /// Targets a unit has given up on, and the tick it may be proposed again:
     /// the last rung of the assault ladder.
     given_up: BTreeMap<(u64, u64), u64>,
+    /// Targets the whole house has found it cannot hurt, and when to try again.
+    ///
+    /// Keyed by target alone: a building nobody's warhead can touch stays
+    /// untouched whichever unit is sent, so remembering it per unit only makes
+    /// the army take turns.
+    ineffective_targets: BTreeMap<u64, u64>,
     /// What each unit's assault last saw of its target: the health it read and
     /// the tick it read it. A target whose health has not moved since then is a
     /// target the attack is not hurting — the design's `Ineffective` outcome,
@@ -192,6 +206,7 @@ impl Policy {
             issued: BTreeMap::new(),
             stood: BTreeMap::new(),
             given_up: BTreeMap::new(),
+            ineffective_targets: BTreeMap::new(),
             progress: BTreeMap::new(),
             hitting: std::collections::BTreeSet::new(),
             cargo_seen: BTreeMap::new(),
@@ -368,6 +383,7 @@ impl Policy {
     /// be given a live target in the same term.
     fn finish_done_jobs(&mut self, obs: &Observation<'_>, rules: &RuleSet, tick: u64) {
         self.given_up.retain(|_, until| *until > tick);
+        self.ineffective_targets.retain(|_, until| *until > tick);
         self.hitting.clear();
         let visible: Vec<u64> = obs
             .visible_enemy_entities()
@@ -511,6 +527,20 @@ impl Policy {
                 Ending::Ineffective => {
                     self.given_up
                         .insert((unit, target), tick + INEFFECTIVE_COOLDOWN);
+                    // And for the whole house, not just this unit.
+                    //
+                    // The per-unit key is too fine to stop anything: a target that
+                    // forty units each spent a window on is forty separate
+                    // cooldowns that each expire, so the army cycles through the
+                    // roster and comes back. Measured on Arena.mmx seed 0x5EED, the
+                    // column held one Soviet Iron Curtain device for a whole match
+                    // while `ineffective` climbed and nothing changed.
+                    //
+                    // A warhead that cannot hurt this building will not start
+                    // hurting it on the next unit, so the building is what should
+                    // be remembered.
+                    self.ineffective_targets
+                        .insert(target, tick + INEFFECTIVE_TARGET_COOLDOWN);
                     self.stats.ineffective += 1;
                 }
             }
@@ -665,6 +695,16 @@ impl Policy {
                 priority: proposal.priority,
                 given: tick,
             };
+            // A target nobody can hurt is not proposed to anybody. Checked before
+            // the per-unit cooldown because it is the wider fact: one warhead
+            // cannot touch one armour, and which unit carries that warhead does
+            // not change it.
+            if let Target::Object(target) = job.target
+                && self.ineffective_targets.contains_key(&target)
+            {
+                self.stats.cooled += 1;
+                continue;
+            }
             // A target this unit has already given up on is not proposed to it
             // again until the cooldown runs out. Without this the ladder ends in
             // a loop: give up, be told the same thing next term, stand still.
