@@ -655,7 +655,6 @@ impl Military {
         let far_target =
             target.is_some_and(|(_, cell)| cell_distance(cell, home) > FAR_TARGET_CELLS);
         let march = ATTACK_ENABLED && soldiers.len() >= column && (target.is_none() || far_target);
-        let target = if march && far_target { None } else { target };
         // With nothing in sight, a big-enough column marches at the edge of known
         // ground instead of guarding the base. Without it the army never leaves:
         // the bases are 116 cells apart, nothing walks between them, so `seen` is
@@ -683,6 +682,22 @@ impl Military {
             march_cell(ctx, home, column_at, toward)
         } else {
             None
+        };
+        // Walking past a distant target only works if there is somewhere to walk.
+        //
+        // The distant-target rule was applied before the frontier was looked up,
+        // so when the scan came back empty the army lost both: measured on
+        // Arena.mmx seed 0x5EED at tick 23400, `seen=2 reach=2 engage=true
+        // march=true target=None advance=None order=None` with thirty-nine
+        // soldiers — a column that neither attacked the enemy it could see nor
+        // marched, because the target had been cleared for a march that went
+        // nowhere.
+        //
+        // So the target is given up only when the march has a destination.
+        let target = if advance.is_some() && far_target {
+            None
+        } else {
+            target
         };
         // What the army is to do this term, if anything: the object a player's
         // click would name, the frontier cell a blind march takes, or nothing.
@@ -715,7 +730,7 @@ impl Military {
             let mut composition: Vec<(&str, usize)> = composition.into_iter().collect();
             composition.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
             log::info!(
-                "military: tick={} enabled={} soldiers={} march_at={} quiet={} seen={} reach={} near={} engage={} march={} order={:?} army={:?}",
+                "military: tick={} enabled={} soldiers={} march_at={} quiet={} seen={} reach={} near={} engage={} march={} target={:?} advance={:?} order={:?} army={:?}",
                 ctx.tick,
                 ATTACK_ENABLED,
                 soldiers.len(),
@@ -730,6 +745,11 @@ impl Military {
                 near_target,
                 engage,
                 march,
+                // The two inputs `order` is built from. Without them a reading of
+                // `order=None` cannot be told apart from a march that found no
+                // frontier, and the arm that produced it is unguessable.
+                target,
+                advance,
                 order,
                 composition,
             );
