@@ -8,9 +8,9 @@
 
 | 项 | 值 |
 |---|---|
-| commit | `34c2da8a3` |
+| commit | `c13d9b96e` |
 | 二进制 | `target/owned-worktrees/ae136fdc2a7d7d58/fast/vera20k.exe` |
-| 大小 / 时间 | 45.9 MB / 2026-11-04 14:27 |
+| 大小 / 时间 | 45.9 MB / 2026-11-04 15:24 |
 | 测试 | `cargo test -p vera20k-autoplay --lib` 34 通过 |
 | 环境变量 | `VERA20K_BRAIN=v2` 选择新策略，缺省仍是 retail |
 
@@ -66,6 +66,17 @@ false：**军队从来没有出击**。
 测的**。它们的"没有效果"因此不能说明决策好坏。
 
 修出击的尝试失败了（`own` 84 → 55），已回退。原因在 `docs/no-sortie.md`。
+
+## 能力边界（六种子实测）
+
+| 图 | easy | normal |
+|---|---|---|
+| **Barrel** | **6/6 全胜** | 1/3 |
+| Death | 0/6 | — |
+
+Death 在 48000 ticks 下也只有 1/6。**它和市场时长无关，是系统性失败。**
+
+这两个数字应该作为验收基线：Barrel 6/6 是回归标准，Death 0/6 是已知缺口。
 
 ## 六格成绩（24000 ticks，1v1 easy）
 
