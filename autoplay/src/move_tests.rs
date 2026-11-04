@@ -299,3 +299,96 @@ fn a_column_of_tanks_all_leave_the_yard() {
     }
     println!("column of {}: furthest tank got within {}", tanks.len(), closest);
 }
+
+#[test]
+fn a_tank_crosses_a_hundred_cells_of_open_ground() {
+    let Some(retail) = vera20k_core::rules::retail_ini_fixture::retail_battle_rules() else {
+        return;
+    };
+    let rules = retail.rules;
+    let mut sim = vera20k_core::sim::arena_fixture::rival_arena_with_size(&rules, 0xA18, 160);
+    sim.intern_rule_type_ids(&rules);
+    sim.resolve_type_handles(&rules);
+    let americans: InternedId = sim.intern("Americans");
+
+    // Arena.mmx is 160 cells square and its bases are about a hundred apart. The
+    // probes above all run on a 32-cell arena, so this is the same question at the
+    // size the match actually uses: can a tank walk a hundred cells of open ground
+    // at all, or does the distance itself defeat the order?
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 30, 30, 0, &rules)
+        .expect("a tank");
+    let target = (130, 30);
+
+    let funnel = Funnel::new(&sim, &rules, americans);
+    let command = funnel
+        .prepare(tank, Goal::AttackMove { cell: target })
+        .expect("an attack-move is admissible");
+    sim.queue_commands(vec![CommandEnvelope::new(
+        americans,
+        sim.session().tick(),
+        command,
+    )]);
+
+    let mut closest = 999;
+    let mut arrived_at = None;
+    for frame in 0..4000 {
+        let _ = sim.take_due_commands();
+        sim.advance_tick(&[], Some(&rules), None, None, 33);
+        let observation = Observation::new(&sim, americans);
+        let Some(cell) = observation
+            .own_entities()
+            .find(|entity| entity.entity_id == tank)
+            .map(|entity| entity.cell)
+        else {
+            break;
+        };
+        let away = i32::from(cell.0.abs_diff(target.0)).max(i32::from(cell.1.abs_diff(target.1)));
+        closest = closest.min(away);
+        if away <= 2 {
+            arrived_at = Some(frame);
+            break;
+        }
+    }
+    println!("100 cells: arrived={arrived_at:?} closest={closest}");
+    assert!(
+        arrived_at.is_some(),
+        "a tank must cross a hundred cells of open ground; it got within {closest}"
+    );
+}
+
+#[test]
+fn open_ground_and_a_walled_corner_differ_for_reachability() {
+    let Some(retail) = vera20k_core::rules::retail_ini_fixture::retail_battle_rules() else {
+        return;
+    };
+    let rules = retail.rules;
+    let mut sim = vera20k_core::sim::arena_fixture::rival_arena_with_size(&rules, 0xA19, 160);
+    sim.intern_rule_type_ids(&rules);
+    sim.resolve_type_handles(&rules);
+    let americans: InternedId = sim.intern("Americans");
+
+    // The question the probes could not answer: is the ground at the yard reachable
+    // from the field at all. `can_reach` is the zone grid's answer, and a unit that
+    // sits in a corner the grid calls unreachable would hold a Move order forever
+    // without moving — exactly the reading, `mission=MissionId(2)` and the same
+    // cell for 2775 frames.
+    let obs = Observation::new(&sim, americans);
+    println!(
+        "open 160x160: (30,30) -> (130,30) reachable={}",
+        obs.can_reach(
+            vera20k_core::rules::locomotor_type::MovementZone::Normal,
+            (30, 30),
+            (130, 30)
+        )
+    );
+    println!(
+        "open 160x160: (91,26) -> (112,52) reachable={}",
+        obs.can_reach(
+            vera20k_core::rules::locomotor_type::MovementZone::Normal,
+            (91, 26),
+            (112, 52)
+        )
+    );
+    println!("has_zone_grid={}", obs.has_zone_grid());
+}
