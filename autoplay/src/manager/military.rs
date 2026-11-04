@@ -424,6 +424,14 @@ impl Military {
     /// The army attacks once it is big enough, and holds the base before that.
     fn commit(&mut self, ctx: &Ctx<'_>, out: &mut Demands) {
         let mut soldiers = Vec::new();
+        /// Every structure the house holds. `home` is chosen from these rather
+        /// than from the first one met, because a captured civilian building is a
+        /// structure too and taking the first one put home out at an oil derrick:
+        /// measured on the 1v1 lane, `CAOILD` at (176, 81) became home, the tanks
+        /// read "far from home" the moment they left the yard, and every one of
+        /// them was turned around and sent back — `ReturnHome target=Cell((176,
+        /// 81)) standing=1680..2040` while the column sat beside it.
+        let mut structures: Vec<(u16, u16)> = Vec::new();
         let mut home: Option<(u16, u16)> = None;
         for unit in ctx.obs.own_entities() {
             let Some(ty) = ctx.obs.object_type(ctx.rules, unit.type_id) else {
@@ -433,7 +441,7 @@ impl Military {
                 continue;
             };
             if profile.roles.contains(Roles::STRUCTURE) {
-                home = home.or(Some(unit.cell));
+                structures.push(unit.cell);
                 continue;
             }
             if !profile.roles.contains(Roles::ARMED)
@@ -486,6 +494,22 @@ impl Military {
         // A house with no structure yet holds the ground its own units stand
         // on: the starting force is the whole army until the yard is up, and a
         // unit with no post is a unit nobody owns.
+        // The densest cluster, not the first structure met: a base is where the
+        // buildings are, a captured derrick is one building on its own.
+        home = structures
+            .iter()
+            .max_by_key(|cell| {
+                let neighbours = structures
+                    .iter()
+                    .filter(|other| cell_distance(**cell, **other) <= NEAR_CELLS)
+                    .count();
+                (
+                    neighbours,
+                    std::cmp::Reverse(cell.0),
+                    std::cmp::Reverse(cell.1),
+                )
+            })
+            .copied();
         let home = home.or_else(|| soldiers.first().map(|unit| unit.cell));
         let Some(home) = home else {
             return;

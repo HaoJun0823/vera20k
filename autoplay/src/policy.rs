@@ -32,6 +32,16 @@ const RETURN_HOME_TRIGGER: i32 = 20;
 /// How close to the base counts as home.
 const RETURN_HOME_ARRIVED: i32 = 3;
 
+/// How far a neighbour counts as company, in cells.
+const RETURN_HOME_COMPANY: i32 = 6;
+
+/// How many neighbours make a unit part of a column rather than a straggler.
+///
+/// Two. One neighbour is a pair that can be picked off together; three is a
+/// squad. Measured, the rule this replaces sent forty percent of all orders as
+/// "go home" and the army never held ground.
+const RETURN_HOME_COMPANY_MIN: usize = 2;
+
 /// How often the policy re-decides jobs, in frames: one second of the
 /// simulation. Reactive decisions do not wait for it; this is the slow loop.
 pub const TERM_FRAMES: u64 = 15;
@@ -378,11 +388,28 @@ impl Policy {
             // A unit that has finished its fight, and is far from home, walks
             // back before it is given another job. The base is what the army
             // is for, and a column that never returns is how the base is lost.
+            // Alone and far from home, walk back; in company, stay.
+            //
+            // The first rule sent every unit home after every finished fight, and
+            // measured on the 1v1 lane it produced 820 of 2033 unit decisions —
+            // forty percent of the army's orders were "go home", which is why the
+            // column never got anywhere: it walked out, killed something, and
+            // walked back. A unit with a friend within a few cells is a column and
+            // a column is safer where it stands than strung out on the road.
             if let Some(home) = self.home
                 && let Some(cell) = cells.get(&unit)
                 && cell_distance(*cell, home) >= RETURN_HOME_TRIGGER
             {
-                self.returning.insert(unit);
+                let company = cells
+                    .iter()
+                    .filter(|(other, _)| **other != unit)
+                    .filter(|(_, other_cell)| {
+                        cell_distance(*cell, **other_cell) <= RETURN_HOME_COMPANY
+                    })
+                    .count();
+                if company < RETURN_HOME_COMPANY_MIN {
+                    self.returning.insert(unit);
+                }
             }
             match ending {
                 Ending::Done => self.stats.finished += 1,
