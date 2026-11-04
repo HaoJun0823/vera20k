@@ -858,10 +858,45 @@ impl Military {
                     continue;
                 }
             }
+            // A target this unit cannot reach is walked towards before it is
+            // attacked.
+            //
+            // gamemd does this in `FootClass Approach_Target @ 0x004D5690`, which
+            // has no Rust port: this session searched for it and found only the
+            // flags it reads (`can_approach_target`, `object_type.rs:1148`) and
+            // nothing that acts on them. Without it a unit ordered to attack
+            // something out of range stands still with an attack order and never
+            // fires.
+            //
+            // Measured on Arena.mmx seed 0x5EED: the column reached `y=116` with
+            // the enemy base at `y=128..138`, held `order=Some(Object(1346))` on
+            // every reading from tick 19800 to the end, and that 1000-strength
+            // radar never lost a point — `ineffective target=1346 type=NARADR
+            // health=1000 after 450 frames`, thirty times.
+            //
+            // `UnitProfile::range_leptons` is the type's own `Range=`, so the test
+            // is arithmetic rather than another query: inside that reach the attack
+            // is issued, outside it the unit moves to the object instead.
+            let in_reach = match order {
+                Some(Target::Object(target)) => {
+                    ctx.obs
+                        .object_cell_and_type(target)
+                        .is_some_and(|(cell, _)| {
+                            reach_cells(ctx, unit.type_id) >= cell_distance(unit.cell, cell)
+                        })
+                }
+                _ => true,
+            };
             match order {
                 // An object, not a cell: an attack-move to a cell is a
                 // destination the unit reaches and then stands on, which is the
                 // stale-target failure status.md records.
+                Some(Target::Object(target)) if !in_reach => out.jobs.push(Proposal {
+                    kind: JobKind::Advance,
+                    target: Target::Object(target),
+                    priority: 55,
+                    actor: Some(unit.entity_id),
+                }),
                 Some(target) => out.jobs.push(Proposal {
                     kind: JobKind::Assault,
                     target,
@@ -1346,4 +1381,19 @@ mod tests {
         let need = shortfall_of(offered, brings, [0; ROLES.len()]);
         assert_eq!(need[anti_vehicle], 0, "the tanks answer anti-vehicle");
     }
+}
+
+/// How far this type's best weapon reaches, in cells.
+///
+/// `UnitProfile::range_leptons` is the retail `Range=`, in leptons at 256 per
+/// cell; a whole cell is the unit of every distance this module measures, so it is
+/// rounded up rather than down — a weapon that reaches 1.6 cells matters at two.
+fn reach_cells(ctx: &Ctx<'_>, type_id: vera20k_core::sim::intern::InternedId) -> i32 {
+    ctx.obs
+        .object_type(ctx.rules, type_id)
+        .and_then(|ty| ctx.profiles.get(&ty.id))
+        // The longest of its weapons, which is what a unit can theoretically
+        // reach; the engine's own selection is the authority on which one fires.
+        .and_then(|profile| profile.weapons.iter().map(|w| w.range_cells).max())
+        .unwrap_or(0)
 }

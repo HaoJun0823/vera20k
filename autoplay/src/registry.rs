@@ -62,6 +62,14 @@ pub enum JobKind {
     /// attack lane has: measured, Barrel.mmx seed 19 read own 46 -> 37 with
     /// the column out and nothing killed for it.
     ReturnHome,
+    /// Walk towards a target that is out of reach.
+    ///
+    /// The port of `FootClass Approach_Target @ 0x004D5690`, which the engine does
+    /// not have: a unit ordered to attack something outside its weapon's `Range=`
+    /// stands still with the order and never fires. Distinct from `Assault` so the
+    /// two are not confused in the log, and distinct from a march because the
+    /// destination is an object rather than a frontier cell.
+    Advance,
 }
 
 impl JobKind {
@@ -72,8 +80,13 @@ impl JobKind {
             Self::Harvest | Self::ReturnOre | Self::Deploy => Manager::Economy,
             Self::Repair => Manager::Build,
             Self::Capture | Self::Garrison | Self::Transport => Manager::Abilities,
-            Self::Breach | Self::Assault | Self::Defend | Self::Scout | Self::Retreat
-            | Self::ReturnHome => Manager::Military,
+            Self::Breach
+            | Self::Assault
+            | Self::Defend
+            | Self::Scout
+            | Self::Retreat
+            | Self::ReturnHome
+            | Self::Advance => Manager::Military,
         }
     }
 }

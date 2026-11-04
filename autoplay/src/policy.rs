@@ -243,7 +243,7 @@ impl Policy {
             JobKind::Transport => roles.contains(Roles::TRANSPORT),
             JobKind::Breach | JobKind::Assault | JobKind::Defend => roles.contains(Roles::ARMED),
             JobKind::Scout | JobKind::Retreat => true,
-            JobKind::ReturnHome => roles.contains(Roles::ARMED),
+            JobKind::ReturnHome | JobKind::Advance => roles.contains(Roles::ARMED),
         }
     }
 
@@ -258,6 +258,7 @@ impl Policy {
                 | JobKind::Assault
                 | JobKind::Defend
                 | JobKind::ReturnHome
+                | JobKind::Advance
                 | JobKind::Capture
         )
     }
@@ -333,6 +334,9 @@ impl Policy {
             // attack-move's destination is reached once and then stood on, and
             // that is the stale-target failure status.md records.
             (JobKind::Assault, Target::Object(target)) => Some(Goal::Attack { target }),
+            // The approach half of an attack: walk to the object, do not shell it
+            // from where the weapon cannot reach.
+            (JobKind::Advance, Target::Object(target)) => Some(Goal::MoveToObject { target }),
             (JobKind::Assault, Target::Cell(cell)) => Some(Goal::AttackMove { cell }),
             (JobKind::Defend, Target::Cell(cell)) => Some(Goal::GuardAt { cell }),
             (JobKind::ReturnHome, Target::Cell(cell)) => Some(Goal::Move { cell }),
