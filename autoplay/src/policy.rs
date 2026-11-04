@@ -138,6 +138,11 @@ pub struct Policy {
     /// The house's own objects last term, by stable id and type, so this term can
     /// say what went missing instead of only how many are left.
     alive_last: BTreeMap<u64, String>,
+    /// How many structures the house stood on last term.
+    ///
+    /// Used only to tell a deployment from a casualty: unfolding consumes the
+    /// vehicle and raises a yard, so the structure count rises as the unit goes.
+    structures_last: usize,
     /// Every object the house has lost, by type id, for the end-of-match reading.
     lost: BTreeMap<String, u64>,
     /// Targets a unit has given up on, and the tick it may be proposed again:
@@ -193,6 +198,7 @@ impl Policy {
             home: None,
             returning: std::collections::BTreeSet::new(),
             alive_last: BTreeMap::new(),
+            structures_last: 0,
             lost: BTreeMap::new(),
             stats: Stats::default(),
         }
@@ -787,12 +793,38 @@ impl Policy {
             return;
         }
         let alive = self.snapshot(rules, obs);
+        // A departed object is a loss unless it turned into something.
+        //
+        // The first version counted every disappearance, which made a deployment
+        // read as a destroyed MCV and cost this report its meaning: measured on
+        // Arena.mmx seed 7, `losses` opened with `{"AMCV": 1}` by tick 3600 while
+        // `GACNST` stood at `(134, 82)` — the MCV had unfolded and the yard was
+        // there. A 3000-credit loss that never happened is worse than no reading
+        // at all, because it becomes an argument for undoing good changes.
+        //
+        // Unfolding consumes the vehicle and raises the yard, so the structure
+        // count rises as the unit goes. A unit gone with no new structure is a
+        // unit that was destroyed.
+        let structures_now = own_structure_count(rules, &self.profiles, obs);
+        let gained = structures_now > self.structures_last;
         for (id, ty) in &self.alive_last {
             if alive.contains_key(id) {
                 continue;
             }
+            let unfolds = self.profiles.get(ty).is_some_and(|profile| {
+                // Only a deployer unfolds into a structure. A harvester that
+                // disappears in the same term a building finishes was destroyed,
+                // and counting it as a deployment would hide exactly the loss this
+                // report exists to show.
+                profile.roles.contains(Roles::DEPLOYER)
+            });
+            if unfolds && gained {
+                // A deployment, not a casualty.
+                continue;
+            }
             *self.lost.entry(ty.clone()).or_insert(0) += 1;
         }
+        self.structures_last = structures_now;
         self.alive_last = alive;
     }
 
@@ -1467,4 +1499,20 @@ mod tests {
             );
         }
     }
+}
+
+/// How many structures the house owns, counted the same way the profile table
+/// decides what a structure is.
+fn own_structure_count(
+    rules: &RuleSet,
+    profiles: &crate::profile::Profiles,
+    obs: &Observation<'_>,
+) -> usize {
+    obs.own_entities()
+        .filter(|unit| {
+            obs.object_type(rules, unit.type_id)
+                .and_then(|ty| profiles.get(&ty.id))
+                .is_some_and(|profile| profile.roles.contains(Roles::STRUCTURE))
+        })
+        .count()
 }
