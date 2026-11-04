@@ -522,3 +522,54 @@ fn an_attack_move_overrides_an_area_guard() {
         "a move order must replace a guard post; it got within {closest}"
     );
 }
+
+#[test]
+fn a_rifleman_walks_to_its_destination() {
+    let Some((mut sim, rules)) = arena() else {
+        return;
+    };
+    let americans: InternedId = sim.intern("Americans");
+    // Every probe in this file has used MTNK, a tank. The units that would not
+    // move in the match are E1 and ADOG - infantry - and the distinction was never
+    // varied: `stuck at 47400: E1 id=1154 job=Scout target=Cell((149, 149))
+    // cell=(88, 34) still=47400`, forty-seven thousand frames in one cell.
+    let soldier = sim
+        .spawn_object("E1", "Americans", 6, 6, 0, &rules)
+        .expect("a rifleman");
+    let target = (26, 26);
+
+    let funnel = Funnel::new(&sim, &rules, americans);
+    let command = funnel
+        .prepare(soldier, Goal::Move { cell: target })
+        .expect("a move is admissible");
+    sim.queue_commands(vec![CommandEnvelope::new(
+        americans,
+        sim.session().tick(),
+        command,
+    )]);
+
+    let mut closest = 999;
+    let mut arrived_at = None;
+    for frame in 0..1600 {
+        let _ = sim.take_due_commands();
+        sim.advance_tick(&[], Some(&rules), None, None, 33);
+        let observation = Observation::new(&sim, americans);
+        let Some(cell) = observation
+            .own_entities()
+            .find(|entity| entity.entity_id == soldier)
+            .map(|entity| entity.cell)
+        else {
+            break;
+        };
+        let away = i32::from(cell.0.abs_diff(target.0)).max(i32::from(cell.1.abs_diff(target.1)));
+        closest = closest.min(away);
+        if away <= 1 {
+            arrived_at = Some(frame);
+            break;
+        }
+    }
+    assert!(
+        arrived_at.is_some(),
+        "a rifleman must walk to its destination; it got within {closest}"
+    );
+}
