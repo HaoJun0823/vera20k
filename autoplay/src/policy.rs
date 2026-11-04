@@ -258,7 +258,6 @@ impl Policy {
                 | JobKind::Assault
                 | JobKind::Defend
                 | JobKind::ReturnHome
-                | JobKind::Advance
                 | JobKind::Capture
         )
     }
@@ -566,7 +565,19 @@ impl Policy {
     /// the army, so comparing it scattered the army before the base existed.
     fn same_order(issued: Option<&(JobKind, Target)>, job: &Job) -> bool {
         issued.is_some_and(|(kind, target)| {
-            *kind == job.kind && (job.kind != JobKind::Assault || *target == job.target)
+            // Assault and advance both name an object that can move or die, so both
+            // have to compare it: a job that changed target is a new order.
+            //
+            // `Advance` was excluded when it was added, which meant a unit sent to
+            // approach one enemy kept its order when the army's target moved to
+            // another — measured on Arena.mmx seed 19, `job=Advance
+            // target=Object(1162) standing=1005 mission=MissionId(5)` with the
+            // target's own position reading `(45, 83)` while the unit sat at
+            // `(122, 83)`: eighty cells apart, and the order was never re-issued
+            // because the kind had not changed.
+            *kind == job.kind
+                && (!matches!(job.kind, JobKind::Assault | JobKind::Advance)
+                    || *target == job.target)
         })
     }
 
