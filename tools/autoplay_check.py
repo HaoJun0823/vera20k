@@ -60,6 +60,20 @@ DEFAULT_DIFFICULTY = "normal"
 # not a shortcut — the frame budget simply has fewer activities live when
 # construction and infantry cadence are divided by seven.
 DEFAULT_SPEED = 6
+# Matches to run at once when the caller does not say.
+#
+# One per core is far too many: a single match is itself multi-threaded and
+# measures 4.26 cores of CPU per 1.0 core of wall clock, so oversubscribing only
+# makes every process wait. Measured on 24 cells of 12000 ticks at speed 6 on a
+# 32-core host (wall seconds, lower is better):
+#
+#     jobs   4     6     8    10    12    16    20    24
+#     wall 183   134   121   102   107   107   109   122
+#
+# Ten is the knee and a quarter of the cores is a rule that lands on it for this
+# host without hard-coding the number.
+def default_jobs() -> int:
+    return max(1, (os.cpu_count() or 4) // 3)
 
 # The fields one run is judged by. `own` is the reading at a fixed tick; the
 # result says whether the house was still standing when the ticks ran out.
@@ -724,7 +738,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="the computer's difficulty; recorded in the history row because "
                              "a Normal match is not comparable to a Hard one")
     parser.add_argument("--ticks", type=int, default=DEFAULT_TICKS, help="how many frames a match runs")
-    parser.add_argument("--jobs", type=int, default=0, help="how many matches at once (0: one per seed)")
+    parser.add_argument("--jobs", type=int, default=0,
+                        help="how many matches at once (0: cores/3, measured optimum; "
+                             "a match is itself multi-threaded, so one per core is slower)")
     parser.add_argument("--skip-build", action="store_true", help="use the binary as it is")
     parser.add_argument("--skip-tests", action="store_true", help="do not run the retail tests")
     parser.add_argument("--log-dir", default=None, help="where the match logs go")
@@ -775,7 +791,7 @@ def main(argv: list[str] | None = None) -> int:
     maps = [name.strip() for name in args.maps.split(",") if name.strip()] or [args.map]
     countries = [name.strip() for name in args.countries.split(",") if name.strip()] or ["america"]
     combos = [(name, country, seed) for name in maps for country in countries for seed in seeds]
-    jobs = args.jobs or len(combos)
+    jobs = args.jobs or min(len(combos), default_jobs())
     with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
         reports = list(pool.map(
             lambda combo: run_match(
