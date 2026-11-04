@@ -78,6 +78,21 @@ const UNIT_SPEND_FLOOR: i32 = 900;
 /// anything else, and an uncapped gap drowns every other job.
 const GAP_CAP: i64 = 3;
 
+/// How many main battle units the house keeps before role ratios get a say.
+///
+/// The composition reading showed the house holding five Grizzlies from tick 0 to
+/// tick 19800 while it added fifty-five units — every one a dog, an IFV or a
+/// rifleman. The cause is structural: `role_score` ranks a type by how much of a
+/// *role* gap it fills, a Grizzly fills the anti-infantry role as well as a
+/// conscript does, and the tie-break prefers the cheaper answer. So the cheap
+/// answer is bought forever and the armoured one never is.
+///
+/// A floor does not argue with the ratios; it keeps them from starving the one
+/// class that decides fights. Twelve is not derived from the rules — it is the
+/// number that came of asking "how many does a push take", and it is a number to
+/// move after measuring, not a number to defend.
+const MAIN_BATTLE_FLOOR: i64 = 12;
+
 /// How many units the house keeps out scouting at once.
 ///
 /// One. A scout is a soldier not holding the line, and the 1v7 lane has shown
@@ -207,7 +222,7 @@ impl Military {
         }
         let mut infantry: Option<(&UnitProfile, i64, i64)> = None;
         let mut vehicle: Option<(&UnitProfile, i64, i64)> = None;
-        for (ty, profile) in candidates {
+        for (ty, profile) in candidates.iter().copied() {
             let score = Self::role_score(ctx, &ty.id, &need);
             let holds = held.get(&ty.id).copied().unwrap_or(0);
             match ty.category {
@@ -218,6 +233,42 @@ impl Military {
                 _ => {}
             }
         }
+        // A main battle unit before anything else, while the house is short of
+        // them. Placed here, before the ratio-ranked pair, because it is a floor
+        // and not a preference: once it is met the loop below behaves exactly as
+        // it did.
+        //
+        // "Main battle" is a vehicle that is armed and not artillery — the class
+        // a Grizzly or a Rhino belongs to, and the one the composition reading
+        // showed the house never growing. Derived from roles, never from a type
+        // name, so a mod's tank is a tank.
+        let is_main_battle = |ty: &ObjectType, profile: &UnitProfile| {
+            ty.category == ObjectCategory::Vehicle
+                && profile.roles.contains(Roles::ARMED)
+                && !profile.roles.contains(Roles::RANGED)
+        };
+        let mut held_main = 0_i64;
+        for (ty, profile) in candidates.iter().copied() {
+            if is_main_battle(ty, profile) {
+                held_main += held.get(&ty.id).copied().unwrap_or(0);
+            }
+        }
+        if held_main < MAIN_BATTLE_FLOOR {
+            for (ty, profile) in candidates.iter().copied() {
+                if !is_main_battle(ty, profile) {
+                    continue;
+                }
+                let Some(type_id) = ctx.obs.type_id(&ty.id) else {
+                    continue;
+                };
+                if ctx.obs.in_production(ctx.rules, type_id) {
+                    continue;
+                }
+                out.intents.push(Intent::QueueProduction { type_id });
+                return;
+            }
+        }
+
         for want in [vehicle, infantry]
             .into_iter()
             .flatten()
