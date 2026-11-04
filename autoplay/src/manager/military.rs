@@ -652,9 +652,6 @@ impl Military {
         // time marches anyway. "Worth its time" is the same distance test a
         // retreat uses: an enemy within `NEAR_CELLS` is a fight at the door, one
         // further off is something to walk past on the way to the base.
-        let far_target =
-            target.is_some_and(|(_, cell)| cell_distance(cell, home) > FAR_TARGET_CELLS);
-        let march = ATTACK_ENABLED && soldiers.len() >= column && (target.is_none() || far_target);
         // With nothing in sight, a big-enough column marches at the edge of known
         // ground instead of guarding the base. Without it the army never leaves:
         // the bases are 116 cells apart, nothing walks between them, so `seen` is
@@ -677,6 +674,26 @@ impl Military {
             let n = soldiers.len() as u32;
             ((sx / n) as u16, (sy / n) as u16)
         };
+        // Whether the column should walk past a target depends on how far the
+        // column is from it, not on how far the target is from home.
+        //
+        // The order used to be decided by the target's distance from base, which
+        // reads the same while the army is standing next to the enemy: measured on
+        // Arena.mmx seed 0x5EED, `seen=2 reach=2 engage=true march=true
+        // target=None advance=Some((100, 48))` on every reading from tick 18000
+        // to the end, with 508 attack-moves to cells against a handful of attacks
+        // on an object. Two enemies were within reach the whole time and the
+        // column walked towards a frontier cell instead, forever, because the
+        // target was "far from home" whether the army stood beside it or not.
+        //
+        // A target the column has caught up with is a fight. One it has not
+        // reached yet is something to walk past, and only while the walk is going
+        // somewhere.
+        let far_target = target.is_some_and(|(_, cell)| {
+            cell_distance(cell, home) > FAR_TARGET_CELLS
+                && cell_distance(cell, column_at) > FAR_TARGET_CELLS
+        });
+        let march = ATTACK_ENABLED && soldiers.len() >= column && (target.is_none() || far_target);
         let advance = if march {
             let toward = self.enemy_direction();
             march_cell(ctx, home, column_at, toward)
@@ -995,15 +1012,34 @@ fn march_cell(
     // search before the map-wide ring is reached. A result that is still inside
     // `MARCH_NEAR_HOME` of home is treated as "nothing worthwhile here" and the
     // next ring gets its turn.
+    // The near-home filter exists so a *column* does not spend its march clearing
+    // its own doorstep. It must not apply to a scout, whose entire errand is to
+    // look at ground nobody has looked at: with it in place the first two rings
+    // were always rejected and the third found nothing, so `march_cell` returned
+    // `None` on every term and the house never scouted at all.
+    //
+    // Measured on Arena.mmx seed 0x5EED with the diagnostic line:
+    //
+    //     scout: chosen unit=1150 at=(88, 26) cell=None
+    //
+    // seven infantry available, 473 of 25600 cells revealed, and not one `Scout`
+    // order in a whole match.
     let near = |cell: (u16, u16)| cell_distance(home, cell) <= MARCH_NEAR_HOME;
-    [
+    let rings = [
         (from, MARCH_REACH_CELLS),
         (from, MARCH_FAR_CELLS),
         (home, MARCH_ACROSS_CELLS),
-    ]
-    .into_iter()
-    .filter_map(|(origin, reach)| march_cell_within(ctx, home, origin, reach, toward))
-    .find(|cell| !near(*cell))
+    ];
+    if toward.is_none() {
+        // A scout: nearest frontier first, wherever it is.
+        return rings
+            .into_iter()
+            .find_map(|(origin, reach)| march_cell_within(ctx, home, origin, reach, toward));
+    }
+    rings
+        .into_iter()
+        .filter_map(|(origin, reach)| march_cell_within(ctx, home, origin, reach, toward))
+        .find(|cell| !near(*cell))
 }
 
 fn march_cell_within(
