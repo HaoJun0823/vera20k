@@ -42,6 +42,12 @@ const RETURN_HOME_COMPANY: i32 = 6;
 /// "go home" and the army never held ground.
 const RETURN_HOME_COMPANY_MIN: usize = 2;
 
+/// How close an enemy has to be for a unit to count as still fighting.
+///
+/// Twelve cells, the range at which anything in the rules can shoot at it. Used
+/// only to keep the go-home order away from a unit with a target in sight.
+const RETURN_HOME_ENGAGED: i32 = 12;
+
 /// How often the policy re-decides jobs, in frames: one second of the
 /// simulation. Reactive decisions do not wait for it; this is the slow loop.
 pub const TERM_FRAMES: u64 = 15;
@@ -407,7 +413,19 @@ impl Policy {
                         cell_distance(*cell, **other_cell) <= RETURN_HOME_COMPANY
                     })
                     .count();
-                if company < RETURN_HOME_COMPANY_MIN {
+                // Standing in the enemy's base is not a place to walk home from.
+                // Measured on Death.mmx seed 19: units reached (183-186, 151-153)
+                // with the enemy base at (182-197, 137-141) and were ordered home
+                // from there, alone. The base was never dismantled because the
+                // only units that got to it were turned around at the door.
+                //
+                // A unit that can see an enemy is still fighting, whatever its
+                // company; walking away with a target in sight is the retreat this
+                // policy does not have and should not fake with a go-home order.
+                let engaged = obs
+                    .visible_enemy_entities()
+                    .any(|enemy| cell_distance(enemy.cell, *cell) <= RETURN_HOME_ENGAGED);
+                if company < RETURN_HOME_COMPANY_MIN && !engaged {
                     self.returning.insert(unit);
                 }
             }
