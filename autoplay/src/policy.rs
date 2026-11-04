@@ -825,6 +825,31 @@ impl Brain for Policy {
                 }
             }
         }
+        if !self.returning.is_empty() && tick % 1800 == 0 {
+            // Who is walking home and where home is. Without this, a unit that has
+            // arrived at the base but keeps being told to walk there is invisible:
+            // its `standing` grows, its `job` reads ReturnHome, and nothing says
+            // whether the arrival test ever ran.
+            let sample: Vec<(u64, Option<(u16, u16)>)> = self
+                .returning
+                .iter()
+                .take(4)
+                .map(|unit| {
+                    (
+                        *unit,
+                        obs.own_entities()
+                            .find(|e| e.entity_id == *unit)
+                            .map(|e| e.cell),
+                    )
+                })
+                .collect();
+            log::info!(
+                "policy v2: returning={} home={:?} sample={:?}",
+                self.returning.len(),
+                self.home,
+                sample
+            );
+        }
         demands.jobs.retain(|proposal| {
             let Some(unit) = proposal.actor else {
                 return true;
