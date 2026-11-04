@@ -51,6 +51,10 @@ DEFAULT_HISTORY = ROOT / "target" / "autoplay-results" / "history.jsonl"
 # this folder came to describe an easier game than the one being judged, so the
 # difficulty is now a recorded field and a flag.
 DEFAULT_DIFFICULTY = "normal"
+# The game speed index a headless run uses. Not cosmetic: `speed_normalize`
+# divides construction and infantry-action cadence by `speed + 1`, so a run at
+# the default index is not the match a player at max speed sees.
+DEFAULT_SPEED = 1
 
 # The fields one run is judged by. `own` is the reading at a fixed tick; the
 # result says whether the house was still standing when the ticks ran out.
@@ -627,6 +631,7 @@ def run_match(
     start_units: int | None = None,
     start_tech: int | None = None,
     difficulty: str = DEFAULT_DIFFICULTY,
+    speed: int = DEFAULT_SPEED,
 ) -> MatchReport:
     """Run one match and read its log.
 
@@ -634,7 +639,7 @@ def run_match(
     map and seed, all of them side by side.
     """
     stem = map_name.replace("/", "_").replace("\\", "_")
-    log = log_dir / f"match-{stem}-{seed}-{brain}-{country}-{difficulty}.log"
+    log = log_dir / f"match-{stem}-{seed}-{brain}-{country}-{difficulty}-s{speed}.log"
     started = time.monotonic()
     command = [
         str(binary),
@@ -645,6 +650,7 @@ def run_match(
         "--opponents", str(opponents),
         "--country", country,
         "--difficulty", difficulty,
+        "--speed", str(speed),
     ]
     for flag, value in (
         ("--credits", start_credits),
@@ -704,6 +710,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="compare --baseline with --history and run nothing")
     parser.add_argument("--opponents", type=int, default=1,
                         help="computer houses against the local one")
+    parser.add_argument("--speed", type=int, default=DEFAULT_SPEED,
+                        help="the game speed index 0..=6; changes construction and "
+                             "infantry cadence through speed_normalize, so a run at "
+                             "the wrong index is not the match a player sees")
     parser.add_argument("--difficulty", default=DEFAULT_DIFFICULTY,
                         choices=["easy", "normal", "hard"],
                         help="the computer's difficulty; recorded in the history row because "
@@ -767,7 +777,7 @@ def main(argv: list[str] | None = None) -> int:
                 binary, combo[2], combo[0], args.ticks, log_dir,
                 args.brain, args.opponents, combo[1],
                 args.start_credits, args.start_units, args.start_tech,
-                args.difficulty,
+                args.difficulty, args.speed,
             ),
             combos,
         ))

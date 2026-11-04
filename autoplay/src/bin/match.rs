@@ -77,6 +77,17 @@ struct Args {
     /// Which brain drives the local house: `retail` (the ported policy in
     /// core) or `v2` (the policy crate).
     brain: String,
+    /// The match's game speed index, 0..=6, as the in-game speed control sets
+    /// it (`GameOptions::apply_in_game_speed`).
+    ///
+    /// This is *not* cosmetic. `GameOptions::speed_normalize` (`0x005FB2E0`)
+    /// divides frame counts by `speed + 1`, and construction
+    /// (`sim/building_construction.rs`) and infantry action
+    /// (`sim/infantry_action.rs`) both call it — so a house at speed 6 builds
+    /// and acts at about a seventh of the frame cadence it has at speed 0. A
+    /// headless run at the default index therefore has to say so, or the numbers
+    /// describe a game nobody plays.
+    speed: u8,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -99,6 +110,7 @@ fn parse_args() -> Result<Args, String> {
     let mut dump = 0_u64;
     let mut dump_teams = 0_u64;
     let mut brain = "retail".to_string();
+    let mut speed: u8 = 1;
 
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -114,22 +126,45 @@ fn parse_args() -> Result<Args, String> {
             "--seed" => seed = value()?.parse().map_err(|_| "seed is a u32".to_string())?,
             "--ticks" => ticks = value()?.parse().map_err(|_| "ticks is a u64".to_string())?,
             "--progress" => {
-                progress = value()?.parse().map_err(|_| "progress is a u64".to_string())?
+                progress = value()?
+                    .parse()
+                    .map_err(|_| "progress is a u64".to_string())?
             }
             "--per-frame" => {
-                per_frame = value()?.parse().map_err(|_| "per-frame is a usize".to_string())?
+                per_frame = value()?
+                    .parse()
+                    .map_err(|_| "per-frame is a usize".to_string())?
             }
             "--opponent" => opponent = parse_country(&value()?)?,
             "--country" => country = parse_country(&value()?)?,
             "--credits" => {
-                credits = Some(value()?.parse().map_err(|_| "credits is an i32".to_string())?)
+                credits = Some(
+                    value()?
+                        .parse()
+                        .map_err(|_| "credits is an i32".to_string())?,
+                )
             }
-            "--units" => units = Some(value()?.parse().map_err(|_| "units is an i32".to_string())?),
+            "--units" => {
+                units = Some(
+                    value()?
+                        .parse()
+                        .map_err(|_| "units is an i32".to_string())?,
+                )
+            }
             "--tech" => tech = Some(value()?.parse().map_err(|_| "tech is an i32".to_string())?),
             "--opponents" => {
-                opponents = value()?.parse().map_err(|_| "opponents is a count".to_string())?
+                opponents = value()?
+                    .parse()
+                    .map_err(|_| "opponents is a count".to_string())?
             }
             "--difficulty" => difficulty = parse_difficulty(&value()?)?,
+            "--speed" => {
+                let parsed: u8 = value()?.parse().map_err(|_| "speed is a u8".to_string())?;
+                if parsed > 6 {
+                    return Err(format!("speed {parsed} is out of range: 0..=6"));
+                }
+                speed = parsed;
+            }
             "--dump" => dump = value()?.parse().map_err(|_| "dump is a u64".to_string())?,
             "--brain" => {
                 brain = value()?;
@@ -164,6 +199,7 @@ fn parse_args() -> Result<Args, String> {
         dump,
         dump_teams,
         brain,
+        speed,
     })
 }
 
@@ -208,6 +244,10 @@ autoplay-match: a headless skirmish with auto play on the local house
   --units <n>        starting units per house
   --tech <n>         starting tech level
   --difficulty <n>   easy | normal | hard (default normal)
+  --speed <n>        the game speed index 0..=6 (default 1). Not cosmetic:
+                     speed_normalize divides construction and infantry-action
+                     cadence by speed + 1, so the same tick count means
+                     different progress at different indices
   --dump <n>         print the brain's orders for the first n frames
   --dump-teams <n>   print the native team pipeline (teams, scripts, cursors,
                      members) for the first n frames, a census every 600
@@ -351,9 +391,9 @@ fn census_teams(
             if vm.team_for_member(entity.entity_id).is_some() {
                 continue;
             }
-            let combat = sim.object_type(entity.type_id, rules).is_some_and(|ty| {
-                ty.category != ObjectCategory::Building && entity.orderable
-            });
+            let combat = sim
+                .object_type(entity.type_id, rules)
+                .is_some_and(|ty| ty.category != ObjectCategory::Building && entity.orderable);
             census.loose += usize::from(combat);
         }
     }
@@ -362,12 +402,7 @@ fn census_teams(
 
 /// Prints one house's live teams: TeamType, script, cursor, current action,
 /// member count by unit type. Read-only.
-fn print_teams(
-    sim: &Simulation,
-    house: InternedId,
-    tick: u64,
-    previous: &BTreeMap<u64, i32>,
-) {
+fn print_teams(sim: &Simulation, house: InternedId, tick: u64, previous: &BTreeMap<u64, i32>) {
     let vm = sim.team_script_vm();
     let name = sim.interner().resolve(house);
     let mut types: BTreeMap<u64, InternedId> = BTreeMap::new();
@@ -403,7 +438,10 @@ fn print_teams(
             "refused"
         } else if !team.formed() {
             "forming"
-        } else if previous.get(&team.id()).is_none_or(|before| team.cursor() > *before) {
+        } else if previous
+            .get(&team.id())
+            .is_none_or(|before| team.cursor() > *before)
+        {
             "running"
         } else {
             "stalled"
@@ -547,12 +585,14 @@ fn main() -> Result<(), String> {
         }
     };
 
-    let seats: Vec<(LaunchCountry, AiDifficulty)> = std::iter::repeat_n(
-        (args.opponent, args.difficulty),
-        args.opponents.max(1),
-    )
-    .collect();
+    let seats: Vec<(LaunchCountry, AiDifficulty)> =
+        std::iter::repeat_n((args.opponent, args.difficulty), args.opponents.max(1)).collect();
     let mut options = SkirmishLaunchOptions::default();
+    // The speed index the match runs at. `speed_normalize` divides construction
+    // and infantry-action frame counts by `speed + 1`, so this changes what a
+    // tick means and a headless number is only comparable to a played match
+    // with the same index.
+    options.game_speed = i32::from(args.speed);
     if let Some(credits) = args.credits {
         options.starting_credits = credits;
     }
@@ -566,7 +606,8 @@ fn main() -> Result<(), String> {
     let start_tech = options.tech_level;
     let session =
         headless_scenario::battle_session_with_options(&args.map, &seats, args.country, options);
-    let mut scenario = headless_scenario::load_session(&args.ra2_dir, &args.map, args.seed, session)?;
+    let mut scenario =
+        headless_scenario::load_session(&args.ra2_dir, &args.map, args.seed, session)?;
     let sim = &scenario.runtime.simulation;
 
     let local = sim
@@ -625,6 +666,11 @@ fn main() -> Result<(), String> {
     }
 
     println!(
+        "autoplay-match: game speed {} reads {}/frame",
+        sim.session().game_options().game_speed,
+        sim.session().game_options().speed_normalize(8),
+    );
+    println!(
         "autoplay-match: {} on {}, seed {:#x}, {} ticks, {} per frame",
         sim.interner().resolve(local),
         args.map,
@@ -652,15 +698,24 @@ fn main() -> Result<(), String> {
     }
 
     let chosen: Box<dyn Brain> = match args.brain.as_str() {
-        "v2" => Box::new(autoplay::policy::Policy::new(&scenario.runtime.resources.rules)),
+        "v2" => Box::new(autoplay::policy::Policy::new(
+            &scenario.runtime.resources.rules,
+        )),
         _ => Box::new(RetailBrain::new(u64::from(args.seed))),
     };
     let mut host = AutoPlayHost::new(chosen, local, args.per_frame);
     let mut last = snapshot(sim, local, &enemies, 0, &host);
     println!(
         "{:>6} {:>9} {:>9} {:>7} {:>6} {:>6} {:>6} {:>9} {:>9}",
-        last.tick, last.credits, last.enemy_credits, last.power, last.own, last.enemy, last.ready,
-        last.rejected, last.not_ready
+        last.tick,
+        last.credits,
+        last.enemy_credits,
+        last.power,
+        last.own,
+        last.enemy,
+        last.ready,
+        last.rejected,
+        last.not_ready
     );
 
     // Both sides, so the report says who is fighting, not just how much.
@@ -728,8 +783,12 @@ fn main() -> Result<(), String> {
                 report_teams(sim, rules, &houses, tick, &mut team_cursors);
             } else {
                 for house in &houses {
-                    let census =
-                        census_teams(sim, rules, &[*house], team_cursors.entry(*house).or_default());
+                    let census = census_teams(
+                        sim,
+                        rules,
+                        &[*house],
+                        team_cursors.entry(*house).or_default(),
+                    );
                     println!(
                         "  teams@{tick} {}: {}",
                         sim.interner().resolve(*house),
@@ -779,10 +838,7 @@ fn main() -> Result<(), String> {
                 let yard = obs
                     .building_in_production()
                     .map(|(type_id, suspended)| {
-                        format!(
-                            "{} held={suspended}",
-                            sim.interner().resolve(type_id)
-                        )
+                        format!("{} held={suspended}", sim.interner().resolve(type_id))
                     })
                     .unwrap_or_else(|| "idle".to_owned());
                 let rules = &scenario.runtime.resources.rules;
@@ -794,9 +850,8 @@ fn main() -> Result<(), String> {
                             let text = obs
                                 .factory_product(category)
                                 .map(|(type_id, suspended)| {
-                                    let progress = obs
-                                        .production_progress(rules, type_id)
-                                        .unwrap_or(0);
+                                    let progress =
+                                        obs.production_progress(rules, type_id).unwrap_or(0);
                                     format!(
                                         "{}@{progress}{}",
                                         sim.interner().resolve(type_id),
