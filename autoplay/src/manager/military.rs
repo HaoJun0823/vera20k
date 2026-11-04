@@ -46,6 +46,12 @@ const MARCH_IMPATIENCE: u64 = 3_600;
 /// practice: the odds gate below it already asks for twice the enemy's number.
 const ENGAGE_FLOOR: usize = 4;
 
+/// How far from home a target is before a strong column walks past it.
+///
+/// Thirty cells: twice the range of anything that shoots, and far enough down an
+/// enemy's throat that continuing to the base is the better use of the column.
+const FAR_TARGET_CELLS: i32 = 30;
+
 /// How many of ours per enemy make a fight worth taking.
 ///
 /// Two was the value the lane was tuned to before the 1v7 work; three is the
@@ -127,6 +133,12 @@ const SCOUTS_OUT: usize = 1;
 /// up — which is what makes a scout useless in exactly the case it is wanted.
 const SCOUT_PRIORITY: i64 = 25;
 
+/// How close a scout has to get to its cell to call it explored.
+///
+/// Four cells: the fog is revealed in whole cells around a unit, so standing this
+/// near means the cell has been looked at even when the bit has not flipped yet.
+const SCOUT_ARRIVED_CELLS: i32 = 4;
+
 /// How many enemies the house may be facing before scouting stops.
 ///
 /// The gate is on the *enemy*, not on our own count, and that distinction is the
@@ -158,6 +170,27 @@ pub struct Military {
     /// the house has: a house that has watched nothing happen for two minutes
     /// is not waiting for anything, while one that was just in contact is.
     last_contact: Option<u64>,
+    /// The sum of enemy sighting cells and the count, so the column walks
+    /// towards the *average* of where the enemy has been, not at the last one.
+    ///
+    /// The last sighting was tried first and it is the wrong statistic: on
+    /// Arena.mmx seed 0x5EED a scout contact near home set the direction, and the
+    /// next march went to `(36, 76)` and then `(40, 80)` — left and downwards,
+    /// away from a base the enemy actually held at `(78-83, 128-138)`. One sighting
+    /// is a single sample of a moving enemy; the running average is the direction
+    /// the enemy lives in.
+    seen_sum: (i64, i64),
+    seen_count: u64,
+    /// Where an enemy was last seen, as `(cell, tick)`.
+    ///
+    /// The projection reports what is visible this frame and nothing else, so a
+    /// policy that wants to walk towards the enemy rather than away from home
+    /// has to remember. Measured on Arena.mmx seed 0x5EED: `march_cell` was
+    /// choosing `(56, 60)`, `(40, 76)` and `(40, 92)` — left of the base and
+    /// downwards — while the enemy held `(78-83, 128-138)`, and over the whole
+    /// match the army never put a single reading past `y=88`. Ranking a
+    /// frontier by distance *from home* has no idea which way the enemy is.
+    last_seen_enemy: Option<((u16, u16), u64)>,
     /// The unit sent to look at unexplored ground, and the cell it was sent to.
     ///
     /// Remembered for the same reason every other job here is: a destination
@@ -587,6 +620,14 @@ impl Military {
         if !seen.is_empty() || self.held_last.is_some_and(|was| held < was) {
             self.last_contact = Some(ctx.tick);
         }
+        for enemy in &seen {
+            self.seen_sum.0 += i64::from(enemy.cell.0);
+            self.seen_sum.1 += i64::from(enemy.cell.1);
+            self.seen_count += 1;
+        }
+        if let Some(enemy) = seen.first() {
+            self.last_seen_enemy = Some((enemy.cell, ctx.tick));
+        }
         self.held_last = Some(held);
         let quiet = self
             .last_contact
@@ -596,7 +637,25 @@ impl Military {
         } else {
             ARMY_TO_MARCH
         };
-        let march = ATTACK_ENABLED && target.is_none() && soldiers.len() >= column;
+        // A column that is strong enough to leave does not stay behind for a
+        // target it will have to walk past anyway.
+        //
+        // Measured on Arena.mmx seed 0x5EED at 24000 ticks: `seen=2`, `near=1`,
+        // `engage=true`, `march=true` on **three readings of the whole match**,
+        // and the army's footprint stayed inside `(80-86, 33-60)` while the enemy
+        // base stood at `(78-83, 128-138)` — a hundred cells away and never
+        // reached. One stray contact near home held the whole column, because
+        // `target.is_some()` shut the march off and the nearest-enemy rule kept
+        // re-picking that stray.
+        //
+        // So a column of at least the march size that has no target worth its
+        // time marches anyway. "Worth its time" is the same distance test a
+        // retreat uses: an enemy within `NEAR_CELLS` is a fight at the door, one
+        // further off is something to walk past on the way to the base.
+        let far_target =
+            target.is_some_and(|(_, cell)| cell_distance(cell, home) > FAR_TARGET_CELLS);
+        let march = ATTACK_ENABLED && soldiers.len() >= column && (target.is_none() || far_target);
+        let target = if march && far_target { None } else { target };
         // With nothing in sight, a big-enough column marches at the edge of known
         // ground instead of guarding the base. Without it the army never leaves:
         // the bases are 116 cells apart, nothing walks between them, so `seen` is
@@ -620,7 +679,8 @@ impl Military {
             ((sx / n) as u16, (sy / n) as u16)
         };
         let advance = if march {
-            march_cell(ctx, home, column_at)
+            let toward = self.enemy_direction();
+            march_cell(ctx, home, column_at, toward)
         } else {
             None
         };
@@ -748,6 +808,21 @@ impl Military {
     /// version on purpose: this army has no spare soldier (four attempts this
     /// session that spent one lost the lane), and a scout is worth having only on
     /// a lane with slack.
+    /// The cell the house believes the enemy lives towards.
+    ///
+    /// The mean of every sighting so far, or nothing before the first one. This
+    /// is the only "which way is the war" the projection offers, since it reports
+    /// what is visible this frame and never what was visible before.
+    fn enemy_direction(&self) -> Option<(u16, u16)> {
+        if self.seen_count == 0 {
+            return None;
+        }
+        let count = self.seen_count as i64;
+        let x = (self.seen_sum.0 / count).clamp(0, i64::from(u16::MAX)) as u16;
+        let y = (self.seen_sum.1 / count).clamp(0, i64::from(u16::MAX)) as u16;
+        Some((x, y))
+    }
+
     fn scout(
         &mut self,
         ctx: &Ctx<'_>,
@@ -756,9 +831,23 @@ impl Military {
         out: &mut Demands,
     ) {
         // A dead or arrived scout is no longer scouting.
+        //
+        // Arrival is a distance, not the cell's reveal bit. Waiting for
+        // `is_cell_revealed(cell)` was the wrong test and it deadlocked the
+        // scout: the destination is chosen *because* it is unrevealed, and a
+        // single rifleman standing on it does not necessarily reveal it, so the
+        // assignment never cleared, the unit was handed the same cell every term,
+        // and `standing` climbed — measured on Arena.mmx seed 0x5EED, a scout sat
+        // on `(76, 40)` with `standing=645`, forty-three seconds of a one-cell
+        // errand, and the far half of the map was never looked at.
         if let Some((unit, cell)) = self.scout
-            && (!soldiers.iter().any(|live| live.entity_id == unit)
-                || ctx.obs.is_cell_revealed(cell.0, cell.1))
+            && match soldiers.iter().find(|live| live.entity_id == unit) {
+                None => true,
+                Some(live) => {
+                    cell_distance(live.cell, cell) <= SCOUT_ARRIVED_CELLS
+                        || ctx.obs.is_cell_revealed(cell.0, cell.1)
+                }
+            }
         {
             self.scout = None;
         }
@@ -775,15 +864,21 @@ impl Military {
             return;
         }
 
-        // Nothing to look for, or no time to look: a scout pulled out while the
-        // base is being shot at is a soldier lost for nothing.
-        let at_door = ctx
-            .obs
-            .visible_enemy_entities()
-            .any(|enemy| cell_distance(enemy.cell, home) <= NEAR_CELLS);
-        if at_door {
-            return;
-        }
+        // A scout is not called off by a fight at the door.
+        //
+        // It used to be, on the reasoning that a soldier pulled out while the base
+        // was being shot at is a soldier lost for nothing. Measured on Arena.mmx
+        // seed 0x5EED, that reasoning closes a loop the lane never escapes: a
+        // contact near home stops the scout, so nothing learns where the enemy
+        // lives, so `march_cell` has no direction and ranks the frontier by
+        // distance from home, so the column walks sideways, so the enemy is never
+        // found — the army's footprint stayed inside `y=0..64` for the whole
+        // match against a base at `y=128..138`, with `y>=100` reached on *zero*
+        // of 1190 readings.
+        //
+        // The defender that answers a raid is the Defend squad, and the scout is
+        // the one unit whose whole job is to be somewhere else. Standing it down
+        // for every stray contact means the map past the base is never looked at.
         if ctx.obs.visible_enemy_entities().count() > SCOUT_MAX_ENEMIES {
             return;
         }
@@ -814,7 +909,13 @@ impl Military {
         else {
             return;
         };
-        let Some(cell) = march_cell(ctx, home, unit.cell) else {
+        // The scout is told no direction on purpose. `march_cell` ranks a
+        // frontier towards whatever it is given, and giving it the last sighting
+        // sent the scout back towards the contact that had already been seen —
+        // Measured on Arena.mmx seed 0x5EED, its furthest reading was `y=64`
+        // against a base at `y=128..138`, which is not scouting, it is tidying up
+        // around home. A scout's job is the ground nobody has looked at.
+        let Some(cell) = march_cell(ctx, home, unit.cell, None) else {
             return;
         };
         self.scout = Some((unit.entity_id, cell));
@@ -843,14 +944,19 @@ impl Military {
 /// keeps opening new ground instead of clearing its own neighbourhood. That was
 /// the previous version's other bug: nearest-from-home marched east while the
 /// enemy held the west.
-fn march_cell(ctx: &Ctx<'_>, home: (u16, u16), from: (u16, u16)) -> Option<(u16, u16)> {
+fn march_cell(
+    ctx: &Ctx<'_>,
+    home: (u16, u16),
+    from: (u16, u16),
+    toward: Option<(u16, u16)>,
+) -> Option<(u16, u16)> {
     // One march's reach first, and a longer one only when that finds nothing:
     // by 12000 ticks on Death.mmx seed 19 every cell within eighteen of the
     // column was already revealed, the house read `march=true order=None` with
     // thirty-five units, and the army stood at its post for the rest of the
     // match. A frontier just past one march is still the next place to go.
-    march_cell_within(ctx, home, from, MARCH_REACH_CELLS)
-        .or_else(|| march_cell_within(ctx, home, from, MARCH_FAR_CELLS))
+    march_cell_within(ctx, home, from, MARCH_REACH_CELLS, toward)
+        .or_else(|| march_cell_within(ctx, home, from, MARCH_FAR_CELLS, toward))
 }
 
 fn march_cell_within(
@@ -858,11 +964,16 @@ fn march_cell_within(
     home: (u16, u16),
     from: (u16, u16),
     reach: u16,
+    toward: Option<(u16, u16)>,
 ) -> Option<(u16, u16)> {
     let (width, height) = ctx.obs.map_extent();
     if width == 0 || height == 0 {
         return None;
     }
+    // Which way the enemy is. A remembered sighting is the only answer the
+    // projection offers, and without it a frontier is ranked by distance from
+    // home — which walks a column sideways rather than at the enemy.
+    let towards = toward;
     let mut best: Option<((u16, u16), i32, i32)> = None;
     let mut y = 0;
     while y < height {
@@ -879,11 +990,18 @@ fn march_cell_within(
                 // A cell right on the known edge is a cell a unit could have
                 // walked to. Rank by how close it is to that edge, then by how far
                 // it takes the column from home.
+                // Rank by how close it is to the known edge, then by whether it
+                // moves the column towards where the enemy was last seen, then
+                // by distance from home as the last tie-break.
                 let reach = cell_distance(home, (x, y));
+                let towards = match towards {
+                    Some(enemy) => -cell_distance(enemy, (x, y)),
+                    None => reach,
+                };
                 let better = match best {
                     None => true,
                     Some((_, best_edge, best_reach)) => {
-                        edge < best_edge || (edge == best_edge && reach > best_reach)
+                        edge < best_edge || (edge == best_edge && towards > best_reach)
                     }
                 };
                 if better {

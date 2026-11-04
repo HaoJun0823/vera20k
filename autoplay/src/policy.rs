@@ -61,6 +61,12 @@ pub const TERM_FRAMES: u64 = 15;
 /// the point at which standing still is no longer a fight in progress.
 const UNREACHABLE_FRAMES: u64 = 450;
 
+/// How close a scout has to get to its cell for the errand to count as done.
+///
+/// Four cells, matching the manager's own arrival test: the fog reveals whole
+/// cells around a unit, so this is near enough that the ground has been looked at.
+const SCOUT_ARRIVED_CELLS: i32 = 4;
+
 /// How long a unit stays off a target it could not reach, in frames: two
 /// minutes, the same order of magnitude as one battle.
 const UNREACHABLE_COOLDOWN: u64 = 1_800;
@@ -349,6 +355,27 @@ impl Policy {
             .map(|unit| (unit.entity_id, unit.cell))
             .collect();
         let mut done: Vec<(u64, u64, Ending)> = Vec::new();
+        // A scout that has reached its cell has finished the errand.
+        //
+        // Without this arm nothing ever ended a `Scout`, because the loop below
+        // only closes an `Assault` on an object: the manager re-proposed the same
+        // cell every term, `watched_by_mission` does not watch `Scout`, and the
+        // unit held one order forever. Measured on Arena.mmx seed 0x5EED, a
+        // rifleman sat on `(76, 40)` with `standing=3045` — fifty seconds on a
+        // one-cell errand — and the far half of the map was never looked at, so
+        // the column never learned which way the enemy was.
+        for (unit, job) in self.jobs.iter() {
+            if !matches!((job.kind, job.target), (JobKind::Scout, Target::Cell(_))) {
+                continue;
+            }
+            let cell = cells.get(unit).copied().unwrap_or((0, 0));
+            let Some(Target::Cell(destination)) = Some(job.target) else {
+                continue;
+            };
+            if cell_distance(cell, destination) <= SCOUT_ARRIVED_CELLS {
+                done.push((*unit, *unit, Ending::Done));
+            }
+        }
         for (unit, job) in self.jobs.iter() {
             let (JobKind::Assault, Target::Object(target)) = (job.kind, job.target) else {
                 continue;
