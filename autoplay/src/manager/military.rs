@@ -583,7 +583,16 @@ impl Military {
             })
             .copied()
             .collect();
-
+        let target = reachable
+            .iter()
+            .min_by_key(|enemy| {
+                soldiers
+                    .iter()
+                    .map(|unit| cell_distance(unit.cell, enemy.cell))
+                    .min()
+                    .unwrap_or(i32::MAX)
+            })
+            .map(|enemy| (enemy.entity_id, enemy.cell));
         // A house with no structure yet holds the ground its own units stand
         // on: the starting force is the whole army until the yard is up, and a
         // unit with no post is a unit nobody owns.
@@ -611,36 +620,6 @@ impl Military {
         // that reads the house's structures, and the policy learns it from here
         // rather than keeping a second answer.
         out.home = Some(home);
-        // The field force goes where the enemy *lives*, not where the nearest
-        // stray happens to be.
-        //
-        // Nearest-first is what kept the army at home for a whole match: measured
-        // on Arena.mmx seed 0x5EED at 48000 ticks, seven units chased one target
-        // and every one of them stood inside `(78-83, 33-38)` — its own yard —
-        // because that target was always the closest, and the army's median
-        // position was `y=40` against an enemy base at `y=130..138`. 1152 of 1269
-        // readings were nearer the base than the front.
-        //
-        // So a target further from home is preferred, and the nearest one only
-        // wins among targets at similar distance. Strays at the door are the
-        // garrison's business, and it now has a third of the army for it.
-        let target = reachable
-            .iter()
-            .min_by_key(|enemy| {
-                let from_home = cell_distance(home, enemy.cell);
-                // Furthest from home first, then nearest to the column, so the
-                // army is not asked to walk past everything it can see.
-                (
-                    std::cmp::Reverse(from_home),
-                    soldiers
-                        .iter()
-                        .map(|unit| cell_distance(unit.cell, enemy.cell))
-                        .min()
-                        .unwrap_or(i32::MAX),
-                    enemy.entity_id,
-                )
-            })
-            .map(|enemy| (enemy.entity_id, enemy.cell));
         // Enough to go is not enough to win: the group commits only when it
         // outnumbers what stands within reach of the target, at three to two.
         // An army that walks into twice its number is an army the house loses
