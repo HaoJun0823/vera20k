@@ -78,6 +78,22 @@ const UNIT_SPEND_FLOOR: i32 = 900;
 /// anything else, and an uncapped gap drowns every other job.
 const GAP_CAP: i64 = 3;
 
+/// How many units the house keeps out scouting at once.
+///
+/// One. A scout is a soldier not holding the line, and the 1v7 lane has shown
+/// four times that this army has no spare soldier — but on the 1v1 lane the army
+/// is large enough that one is affordable, and without a scout the house never
+/// learns what is off its own doorstep: measured, the whole footprint stayed
+/// within about thirty cells of the base for a whole match.
+const SCOUTS_OUT: usize = 1;
+
+/// What a scout runs at: above Defend's twenty, below Assault's sixty.
+///
+/// It has to outrank standing at the post or nobody ever leaves, and it must not
+/// outrank a fight or the scout is pulled off the walk the moment anything shows
+/// up — which is what makes a scout useless in exactly the case it is wanted.
+const SCOUT_PRIORITY: i64 = 25;
+
 #[derive(Debug, Default)]
 pub struct Military {
     /// The tick the house last saw an enemy of its own.
@@ -86,6 +102,13 @@ pub struct Military {
     /// the house has: a house that has watched nothing happen for two minutes
     /// is not waiting for anything, while one that was just in contact is.
     last_contact: Option<u64>,
+    /// The unit sent to look at unexplored ground, and the cell it was sent to.
+    ///
+    /// Remembered for the same reason every other job here is: a destination
+    /// recomputed each term is a unit that walks one step, sees the cell it was
+    /// heading for is still dark, and is pointed at whatever the scan likes next.
+    /// It gives up when it arrives, when it dies, or when the cell is revealed.
+    scout: Option<(u64, (u16, u16))>,
     /// How many objects the house held at the last reading.
     ///
     /// Losing one is contact, whatever the fog says: a house that is being shot
@@ -509,7 +532,7 @@ impl Military {
                 order,
             );
         }
-        for unit in soldiers {
+        for unit in &soldiers {
             match order {
                 // An object, not a cell: an attack-move to a cell is a
                 // destination the unit reaches and then stands on, which is the
@@ -528,6 +551,80 @@ impl Military {
                 }),
             }
         }
+        self.scout(ctx, &soldiers, home, out);
+    }
+
+    /// Send one unit to look at ground the house has not seen.
+    ///
+    /// `JobKind::Scout` was in the registry from the start and nothing ever
+    /// proposed it, which is why the job table has read `Scout` under "never
+    /// asked for" on every match: measured, the army's whole footprint stayed
+    /// inside about thirty cells of the base for 24000 ticks, because nothing is
+    /// ever sent to find out what is further out.
+    ///
+    /// The destination comes from [`march_cell`], the same frontier rule a blind
+    /// march uses, and for the same reason: the previous attempt to aim at "the
+    /// farthest unrevealed cell" ordered a column at ground it could not stand
+    /// on and the column stood still for the rest of the match. A cell that
+    /// touches known ground is one something on the known ground could have
+    /// walked to.
+    ///
+    /// One scout, only when the base is not being attacked. That is the narrow
+    /// version on purpose: this army has no spare soldier (four attempts this
+    /// session that spent one lost the lane), and a scout is worth having only on
+    /// a lane with slack.
+    fn scout(
+        &mut self,
+        ctx: &Ctx<'_>,
+        soldiers: &[vera20k_core::sim::control::observation::OwnEntity],
+        home: (u16, u16),
+        out: &mut Demands,
+    ) {
+        // A dead or arrived scout is no longer scouting.
+        if let Some((unit, cell)) = self.scout
+            && (!soldiers.iter().any(|live| live.entity_id == unit)
+                || ctx.obs.is_cell_revealed(cell.0, cell.1))
+        {
+            self.scout = None;
+        }
+
+        if let Some((unit, cell)) = self.scout {
+            // Still walking: say so every term, or the assignment drops it and
+            // the unit is given a defend post mid-walk.
+            out.jobs.push(Proposal {
+                kind: JobKind::Scout,
+                target: Target::Cell(cell),
+                priority: SCOUT_PRIORITY,
+                actor: Some(unit),
+            });
+            return;
+        }
+
+        // Nothing to look for, or no time to look: a scout pulled out while the
+        // base is being shot at is a soldier lost for nothing.
+        let at_door = ctx
+            .obs
+            .visible_enemy_entities()
+            .any(|enemy| cell_distance(enemy.cell, home) <= NEAR_CELLS);
+        if at_door {
+            return;
+        }
+        let Some(unit) = soldiers
+            .iter()
+            .min_by_key(|unit| (cell_distance(unit.cell, home), unit.entity_id))
+        else {
+            return;
+        };
+        let Some(cell) = march_cell(ctx, home, unit.cell) else {
+            return;
+        };
+        self.scout = Some((unit.entity_id, cell));
+        out.jobs.push(Proposal {
+            kind: JobKind::Scout,
+            target: Target::Cell(cell),
+            priority: SCOUT_PRIORITY,
+            actor: Some(unit.entity_id),
+        });
     }
 }
 

@@ -276,6 +276,10 @@ impl Policy {
             (JobKind::Assault, Target::Cell(cell)) => Some(Goal::AttackMove { cell }),
             (JobKind::Defend, Target::Cell(cell)) => Some(Goal::GuardAt { cell }),
             (JobKind::ReturnHome, Target::Cell(cell)) => Some(Goal::Move { cell }),
+            // A scout walks to the frontier cell it was sent to. `Move` and not
+            // `GuardAt`: guarding is standing somewhere, and standing on ground
+            // already revealed is the one thing scouting is not.
+            (JobKind::Scout, Target::Cell(cell)) => Some(Goal::Move { cell }),
             // The capture click a player makes on a building. The engine owns the
             // walk and the arrival (`mission_capture`, the building receiver at
             // `0x00519948`); the policy only has to name the engineer and the
