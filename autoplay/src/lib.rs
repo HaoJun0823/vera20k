@@ -20,4 +20,6 @@ mod guard_move_tests;
 #[cfg(test)]
 mod move_tests;
 #[cfg(test)]
+mod never_wrong_tests;
+#[cfg(test)]
 mod transport_tests;
