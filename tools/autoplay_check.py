@@ -54,12 +54,18 @@ DEFAULT_DIFFICULTY = "normal"
 # The game speed index a headless run uses. Not cosmetic: `speed_normalize`
 # divides construction and infantry-action cadence by `speed + 1`, so a run at
 # the default index is not the match a player at max speed sees.
-# Six, the in-game maximum, because that is the index a player uses **and** it
-# runs faster: measured on 12000 ticks of Death.mmx 1v1 easy, index 1 takes 43 s
-# and index 6 takes 26 s, with the same own/enemy result. The saving is real and
-# not a shortcut — the frame budget simply has fewer activities live when
-# construction and infantry cadence are divided by seven.
-DEFAULT_SPEED = 6
+# One. The game speed changes construction and infantry cadence through
+# `speed_normalize`, and it is **not** a performance knob: measured on the 1v7
+# lane, 24000 ticks, three seeds,
+#
+#     speed 1: own 77 / 33 / 19
+#     speed 6: own 11 / 5 / 47
+#
+# which is the difference between a lane that holds and one that does not. An
+# earlier revision of this file defaulted to 6 for the 20-40% wall-clock saving,
+# on a 12000-tick 1v1 measurement that showed no difference at all — the wrong
+# lane and the wrong length to notice it.
+DEFAULT_SPEED = 1
 # Matches to run at once when the caller does not say.
 #
 # One per core is far too many: a single match is itself multi-threaded and

@@ -93,6 +93,18 @@ const GAP_CAP: i64 = 3;
 /// move after measuring, not a number to defend.
 const MAIN_BATTLE_FLOOR: i64 = 12;
 
+/// How many visible enemies turn the main battle floor off.
+///
+/// Measured with the floor on: the 1v1 lane reads own 85 with twelve Grizzlies
+/// where it read 89 with four, and the 1v7 lane collapses from 87/82/16 to
+/// 11/5/47. The difference is what a Grizzly costs — four riflemen — and on the
+/// 1v7 lane the house is outnumbered six to one, so bodies beat quality.
+///
+/// So the floor is a peace-time rule: it applies while the odds are winnable and
+/// yields to sheer numbers when they are not. Sixty is the same bar the scout
+/// uses, for the same reason, measured the same way.
+const MAIN_BATTLE_MAX_ENEMIES: usize = 60;
+
 /// How many units the house keeps out scouting at once.
 ///
 /// One. A scout is a soldier not holding the line, and the 1v7 lane has shown
