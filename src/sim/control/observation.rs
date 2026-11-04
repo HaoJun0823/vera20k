@@ -271,8 +271,27 @@ impl<'a> Observation<'a> {
 
     /// The map's extent in cells, as the fog grid measures it: what a scan of
     /// the map is bounded by.
+    ///
+    /// This is the **buffer**, not the ground. A policy that asks "how big is this
+    /// map" to scale a distance wants [`Self::ground_extent`]: `fog` is padded, and
+    /// every map reports the same padded figure. Three changes this session
+    /// misread it that way — a scout's far corner landed at `(255, 255)`, and a
+    /// far-target threshold became fifty-one cells on two maps whose bases are a
+    /// hundred and thirty cells apart.
     pub fn map_extent(&self) -> (u16, u16) {
         (self.sim.fog().width(), self.sim.fog().height())
+    }
+
+    /// The walkable ground's extent in cells.
+    ///
+    /// The map's own declared playfield, which is what a distance meant "relative
+    /// to the map" has to be measured against. `None` only when the scenario has
+    /// not declared one.
+    pub fn ground_extent(&self) -> Option<(u16, u16)> {
+        let bounds = self.sim.playfield_bounds()?;
+        let width = u16::try_from(bounds.off_104).ok()?;
+        let height = u16::try_from(bounds.off_108).ok()?;
+        Some((width, height))
     }
 
     /// Whether `rx, ry` is ground a unit can stand on, rather than the fog grid's
