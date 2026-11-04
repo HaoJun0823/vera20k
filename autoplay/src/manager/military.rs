@@ -1131,7 +1131,69 @@ fn march_cell(
         (home, MARCH_ACROSS_CELLS),
     ];
     if toward.is_none() {
-        // A scout: nearest frontier first, wherever it is.
+        // A scout: the far side of the map, whether or not there is known ground
+        // on the way.
+        //
+        // `march_cell_within` only offers a cell with known ground within
+        // `FRONTIER_SEARCH` (four) cells, which is right for a column that has to
+        // walk there and wrong for a scout, whose whole errand is to look at what
+        // nobody has looked at. With it in place the scout can only ever advance
+        // the edge of what the army already knows, and the army does not advance:
+        // measured on Arena.mmx seed 0x5EED at 48000 ticks, the scout's five
+        // destinations in a whole match were `(100, 48)`, `(76, 40)`, `(76, 52)`,
+        // `(88, 48)`, `(92, 36)` — all inside `x=76..100, y=36..52` — while 473 of
+        // 25600 cells were revealed and the enemy base stood at `y=130..138`.
+        //
+        // A scout does not need a walkable frontier. It needs a direction, and the
+        // map's own extent is the only thing that knows where the unexplored half
+        // is.
+        let (width, height) = ctx.obs.map_extent();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        // The fog grid is not the map: it covers the whole buffer, and here that is
+        // 256 cells with the playfield offset inside it. Asking for the grid's own
+        // corner named `(255, 255)`, which is not ground, so the fallback ran and
+        // the scout kept its five old destinations exactly - the first version of
+        // this change measured no difference at all.
+        //
+        // `is_cell_in_playfield` is the only thing that knows the walkable extent,
+        // so the largest walkable coordinate is found by walking in from the edge.
+        // Scanning row zero and column zero is not reliable: on this map the
+        // playfield is offset inside the fog grid, so those lines can lie outside
+        // it and the scan finds nothing. They did, and the scout stopped being
+        // sent anywhere at all — measured as zero `Scout` orders in a 48000-tick
+        // match, with the revealed count unchanged at 473 of 25600.
+        //
+        // Walking in from the middle of the grid finds the edge whichever way the
+        // playfield is offset.
+        let mid_x = width / 2;
+        let mid_y = height / 2;
+        let right = (0..width)
+            .rev()
+            .find(|x| ctx.obs.is_cell_in_playfield(*x, mid_y))?;
+        let bottom = (0..height)
+            .rev()
+            .find(|y| ctx.obs.is_cell_in_playfield(mid_x, *y))?;
+        // A cell inside the playfield is not necessarily a cell a unit can stand
+        // on: `is_cell_in_playfield` is height-aware and still admits ground the
+        // zone grid refuses. Ordered at one, the scout held the order for 47400
+        // frames at `(88, 34)` without moving - `stuck at 47400: E1 id=1154
+        // job=Scout target=Cell((149, 149)) cell=(88, 34) still=47400` - which is
+        // the same reading every earlier probe failed to explain.
+        //
+        // `can_reach` is the zone grid's own answer, so a corner is only offered
+        // when a unit standing at `home` could actually walk to it.
+        let zone = vera20k_core::rules::locomotor_type::MovementZone::Normal;
+        let far = [(0, 0), (right, 0), (0, bottom), (right, bottom)]
+            .into_iter()
+            .filter(|cell| !ctx.obs.is_cell_revealed(cell.0, cell.1))
+            .filter(|cell| ctx.obs.can_reach(zone, home, *cell))
+            .max_by_key(|cell| cell_distance(home, *cell));
+        if let Some(far) = far {
+            return Some(far);
+        }
+        // The corner is known, so fall back to the nearest unknown frontier.
         return rings
             .into_iter()
             .find_map(|(origin, reach)| march_cell_within(ctx, home, origin, reach, toward));
