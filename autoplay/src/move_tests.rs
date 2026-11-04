@@ -392,3 +392,133 @@ fn open_ground_and_a_walled_corner_differ_for_reachability() {
     );
     println!("has_zone_grid={}", obs.has_zone_grid());
 }
+
+#[test]
+fn a_long_march_reissued_every_term_still_arrives() {
+    let Some(retail) = vera20k_core::rules::retail_ini_fixture::retail_battle_rules() else {
+        return;
+    };
+    let rules = retail.rules;
+    let mut sim = vera20k_core::sim::arena_fixture::rival_arena_with_size(&rules, 0xA20, 160);
+    sim.intern_rule_type_ids(&rules);
+    sim.resolve_type_handles(&rules);
+    let americans: InternedId = sim.intern("Americans");
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 30, 30, 0, &rules)
+        .expect("a tank");
+    let target = (130, 30);
+
+    // The combination the two tests above do not cover: a hundred cells of ground
+    // *and* the policy's fifteen-frame re-decide. A short walk survives a restart
+    // every fifteen frames; a hundred-cell walk restarts the whole path, and the
+    // measured army neither arrived nor moved at all.
+    let mut closest = 999;
+    let mut arrived_at = None;
+    for frame in 0..4000 {
+        if frame % 15 == 0 {
+            let funnel = Funnel::new(&sim, &rules, americans);
+            if let Ok(command) = funnel.prepare(tank, Goal::AttackMove { cell: target }) {
+                sim.queue_commands(vec![CommandEnvelope::new(
+                    americans,
+                    sim.session().tick(),
+                    command,
+                )]);
+            }
+        }
+        let _ = sim.take_due_commands();
+        sim.advance_tick(&[], Some(&rules), None, None, 33);
+        let observation = Observation::new(&sim, americans);
+        let Some(cell) = observation
+            .own_entities()
+            .find(|entity| entity.entity_id == tank)
+            .map(|entity| entity.cell)
+        else {
+            break;
+        };
+        let away = i32::from(cell.0.abs_diff(target.0)).max(i32::from(cell.1.abs_diff(target.1)));
+        closest = closest.min(away);
+        if away <= 2 {
+            arrived_at = Some(frame);
+            break;
+        }
+    }
+    println!("long + re-issued: arrived={arrived_at:?} closest={closest}");
+    assert!(
+        arrived_at.is_some(),
+        "a hundred-cell march re-issued every fifteen frames must still arrive; it got within {closest}"
+    );
+}
+
+#[test]
+fn an_attack_move_overrides_an_area_guard() {
+    let Some((mut sim, rules)) = arena() else {
+        return;
+    };
+    let americans: InternedId = sim.intern("Americans");
+    let tank = sim
+        .spawn_object("MTNK", "Americans", 6, 6, 0, &rules)
+        .expect("a tank");
+    let post = (6, 6);
+    let target = (26, 26);
+
+    // Every probe so far gave an idle unit its first order. The match does not:
+    // measured on Arena.mmx seed 0x5EED, the units that would not move held
+    // `mission=MissionId(11)` — AreaGuard — for 11880 frames at `(83, 37)`, five
+    // cells from their own base, while their job read `Assault target=Cell((112,
+    // 52))`. The policy had given the order; the unit was guarding.
+    //
+    // So the question is whether a move order replaces a guard post at all.
+    let funnel = Funnel::new(&sim, &rules, americans);
+    let command = funnel
+        .prepare(tank, Goal::GuardAt { cell: post })
+        .expect("a guard is admissible");
+    sim.queue_commands(vec![CommandEnvelope::new(
+        americans,
+        sim.session().tick(),
+        command,
+    )]);
+    for _ in 0..60 {
+        let _ = sim.take_due_commands();
+        sim.advance_tick(&[], Some(&rules), None, None, 33);
+    }
+    let mission = Observation::new(&sim, americans)
+        .own_entities()
+        .find(|entity| entity.entity_id == tank)
+        .map(|entity| entity.mission);
+    println!("after guard: mission={mission:?}");
+
+    let funnel = Funnel::new(&sim, &rules, americans);
+    let command = funnel
+        .prepare(tank, Goal::AttackMove { cell: target })
+        .expect("an attack-move is admissible");
+    sim.queue_commands(vec![CommandEnvelope::new(
+        americans,
+        sim.session().tick(),
+        command,
+    )]);
+
+    let mut closest = 999;
+    let mut arrived_at = None;
+    for frame in 0..1200 {
+        let _ = sim.take_due_commands();
+        sim.advance_tick(&[], Some(&rules), None, None, 33);
+        let observation = Observation::new(&sim, americans);
+        let Some(cell) = observation
+            .own_entities()
+            .find(|entity| entity.entity_id == tank)
+            .map(|entity| entity.cell)
+        else {
+            break;
+        };
+        let away = i32::from(cell.0.abs_diff(target.0)).max(i32::from(cell.1.abs_diff(target.1)));
+        closest = closest.min(away);
+        if away <= 1 {
+            arrived_at = Some(frame);
+            break;
+        }
+    }
+    assert!(
+        arrived_at.is_some(),
+        "a move order must replace a guard post; it got within {closest}"
+    );
+}
