@@ -544,6 +544,16 @@ impl Military {
         });
         let garrison_size = soldiers.len() / GARRISON_DIVISOR;
         let garrison: Vec<_> = soldiers.drain(..garrison_size).collect();
+        // How many soldiers the house has, not how many are in the field force.
+        //
+        // The march threshold is about whether the house can afford to send a
+        // column, and a quarter of the army standing on its own yard does not make
+        // that less affordable — it makes the base safer. Counting only the field
+        // force reads as a house that can never leave: measured on Arena.mmx seed
+        // 0x5EED, `soldiers=26 march_at=30` from tick 19800 to the end, with
+        // `march=false` on every reading and the army inside `y=0..59` against an
+        // enemy base at `y=128..138`.
+        let army_size = soldiers.len() + garrison_size;
         // What the house can see, not what the world holds. The projection's own
         // enemy list is omniscient (the native computer AI is, and a policy that
         // reused it would inherit that); the spec forbids aiming at anything the
@@ -649,9 +659,9 @@ impl Military {
             // target, a forward rally — lost eighteen to one in the cells that had
             // been safest. If committing is what hurts, the odds bar is where that
             // lives.
-            && soldiers.len() >= near * ENGAGE_ODDS
-            && soldiers.len() >= ENGAGE_FLOOR
-            && (at_home || soldiers.len() >= ARMY_TO_MARCH);
+            && army_size >= near * ENGAGE_ODDS
+            && army_size >= ENGAGE_FLOOR
+            && (at_home || army_size >= ARMY_TO_MARCH);
         // A house that has seen nothing for two minutes is not waiting for
         // anything, and it marches with what it has. One that was just in
         // contact waits for the full column, because whatever it meets next is
@@ -736,7 +746,7 @@ impl Military {
             cell_distance(cell, home) > FAR_TARGET_CELLS
                 && cell_distance(cell, column_at) > FAR_TARGET_CELLS
         });
-        let march = ATTACK_ENABLED && soldiers.len() >= column && (target.is_none() || far_target);
+        let march = ATTACK_ENABLED && army_size >= column && (target.is_none() || far_target);
         let advance = if march {
             let toward = self.enemy_direction();
             march_cell(ctx, home, column_at, toward)
