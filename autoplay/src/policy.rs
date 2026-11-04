@@ -282,7 +282,24 @@ impl Policy {
             // job went out once, same_order suppressed every later term, and a
             // measured engineer read job=Capture standing=15 before the
             // assignment took it away again.
-            JobKind::Capture => mission == MissionId::from_known(MissionType::Capture),
+            // A capturer walking to its building is `Move`, not `Capture`, and
+            // re-issuing the order on every `Move` frame restarting the walk is
+            // the reason a capture never landed.
+            //
+            // Measured on Arena.mmx seed 0x5EED at 24000 ticks: one engineer was
+            // bought, thirty `Capture` proposals were made, and **zero** buildings
+            // changed hands; the unit line showed `MissionId(8)` and `MissionId(2)`
+            // alternating every term at `(89, 37)`, a few cells from the target.
+            // It walked two cells, was handed the order again, had its walk
+            // restarted, and repeated that for the rest of the match.
+            //
+            // The engine gives `Capture` from CaptureBuilding and keeps it until
+            // per_cell hands the arrival to the building receiver, so the walk
+            // towards the target is the same errand in progress.
+            JobKind::Capture => {
+                mission == MissionId::from_known(MissionType::Capture)
+                    || mission == MissionId::from_known(MissionType::Move)
+            }
             _ => false,
         }
     }

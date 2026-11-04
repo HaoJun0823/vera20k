@@ -305,6 +305,25 @@ impl Abilities {
     /// information outside L0/L2, which spec §2.5 forbids. `neutral_structures`
     /// is L0 by definition — the wish list says every neutral building is visible
     /// from the start — and `visible_enemy_entities` is L2.
+    /// Whether any capturer the house owns could take this building.
+    fn capturers_can_take_any(ctx: &Ctx<'_>, building: u64) -> bool {
+        ctx.obs
+            .own_entities()
+            .filter(|unit| {
+                ctx.obs
+                    .object_type(ctx.rules, unit.type_id)
+                    .and_then(|ty| ctx.profiles.get(&ty.id))
+                    .is_some_and(|profile| {
+                        profile.roles.contains(crate::profile::Roles::ENGINEER)
+                            || profile.roles.contains(crate::profile::Roles::AGENT)
+                    })
+            })
+            .any(|unit| {
+                ctx.obs
+                    .can_take_building(ctx.rules, unit.entity_id, building)
+            })
+    }
+
     fn capture_targets(
         &self,
         ctx: &Ctx<'_>,
@@ -313,6 +332,20 @@ impl Abilities {
             .obs
             .visible_enemy_entities()
             .chain(ctx.obs.neutral_structures())
+            // A building an engineer cannot take is not a target, and offering one
+            // costs a whole errand.
+            //
+            // Measured on Arena.mmx seed 0x5EED at 24000 ticks: thirty-six
+            // `Capture` proposals for one engineer, one engineer bought, **zero**
+            // buildings taken, and the unit line showed `MissionId(8)`/`(2)`/`(5)`
+            // alternating around `(89, 37)` — the engineer never left the
+            // neighbourhood of its own yard. `Goal::Capture` is admitted by
+            // `Observation::can_take_building`, and a target that fails that test
+            // never becomes an order, so the manager re-proposed an errand the
+            // engine would not accept on every term.
+            //
+            // The same predicate the order path uses answers it up front.
+            .filter(|target| Self::capturers_can_take_any(ctx, target.entity_id))
             .collect();
         targets.sort_by_key(|target| target.entity_id);
         targets.dedup_by_key(|target| target.entity_id);

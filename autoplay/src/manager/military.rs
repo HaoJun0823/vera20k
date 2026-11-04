@@ -955,8 +955,35 @@ fn march_cell(
     // column was already revealed, the house read `march=true order=None` with
     // thirty-five units, and the army stood at its post for the rest of the
     // match. A frontier just past one march is still the next place to go.
-    march_cell_within(ctx, home, from, MARCH_REACH_CELLS, toward)
-        .or_else(|| march_cell_within(ctx, home, from, MARCH_FAR_CELLS, toward))
+    //
+    // And a third fallback that reaches across the map. The first two are
+    // measured from where the column stands, which is the right origin for "where
+    // does this march go" and the wrong one for "where is there anything left to
+    // look at": a column that has not left home cannot see further than forty
+    // cells from home either, so on a map whose enemy is a hundred cells away
+    // every candidate is inside friendly ground and the search is empty by
+    // construction.
+    //
+    // Measured on Arena.mmx seed 0x5EED (160x160, enemy base at `y=128..138`,
+    // home at `y=26..33`): the foot of the army never passed `y=76` in 1165
+    // readings, and the scout's furthest destination was `y=40`. The reason was
+    // not that it chose badly — there were no candidates to choose from.
+    //
+    // The rings are tried in order and a ring that answers is not automatically
+    // the answer: the first two are centred on the column, so on a big map they
+    // can only ever return ground near home, and returning it would stop the
+    // search before the map-wide ring is reached. A result that is still inside
+    // `MARCH_NEAR_HOME` of home is treated as "nothing worthwhile here" and the
+    // next ring gets its turn.
+    let near = |cell: (u16, u16)| cell_distance(home, cell) <= MARCH_NEAR_HOME;
+    [
+        (from, MARCH_REACH_CELLS),
+        (from, MARCH_FAR_CELLS),
+        (home, MARCH_ACROSS_CELLS),
+    ]
+    .into_iter()
+    .filter_map(|(origin, reach)| march_cell_within(ctx, home, origin, reach, toward))
+    .find(|cell| !near(*cell))
 }
 
 fn march_cell_within(
@@ -1061,6 +1088,20 @@ const MARCH_FAR_CELLS: u16 = 40;
 
 /// How coarsely the march scan samples the map, in cells.
 const MARCH_SCAN_STEP: u16 = 4;
+
+/// The reach of the last-resort march, in cells, measured from home.
+///
+/// 120 covers an Arena-scale 160-cell map edge to edge from either corner, which
+/// is the point: this fallback exists so a column whose own neighbourhood has
+/// nothing left to reveal still has somewhere to go.
+const MARCH_ACROSS_CELLS: u16 = 120;
+
+/// A march destination closer than this to home is not worth leaving for.
+///
+/// Twenty cells: about one march. Inside it the column is still clearing its own
+/// neighbourhood, which the first ring already does, and accepting such a
+/// destination would keep the map-wide ring from ever being consulted.
+const MARCH_NEAR_HOME: i32 = 20;
 
 /// Chebyshev distance in cells: how far a walk is on this grid.
 fn cell_distance(a: (u16, u16), b: (u16, u16)) -> i32 {
