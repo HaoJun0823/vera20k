@@ -52,6 +52,21 @@ const ENGAGE_FLOOR: usize = 4;
 /// enemy's throat that continuing to the base is the better use of the column.
 const FAR_TARGET_CELLS: i32 = 30;
 
+/// What fraction of the army stays behind as a garrison.
+///
+/// Three, so a third of the cheapest units hold the base while the rest is free to
+/// be sent somewhere. The cheap end is the right end for a garrison: a rifleman on
+/// a post costs the same whether it is at the yard or at the front, and the
+/// expensive units are the ones worth having where the fighting is.
+const GARRISON_DIVISOR: usize = 3;
+
+/// What a garrison post is worth against a field order.
+///
+/// Below the assault priority on purpose: a garrison unit standing at the yard
+/// should be releasable when the enemy is at the door, and the defend arm below is
+/// what holds it there the rest of the time.
+const GARRISON_PRIORITY: i64 = 20;
+
 /// How many of ours per enemy make a fight worth taking.
 ///
 /// Two was the value the lane was tuned to before the 1v7 work; three is the
@@ -501,6 +516,34 @@ impl Military {
             }
             soldiers.push(unit);
         }
+        // Split the army into a garrison and a field force.
+        //
+        // Every unit is one pool today, and the march direction is shared by all
+        // of it: measured on Arena.mmx, teaching the scout to reach the far side
+        // also told the whole column to walk there, and an army a hundred cells
+        // from its base loses its base. Seed 10 gained (`own` 72 -> 83) and four
+        // seeds lost, which is what a shared direction does when one part of the
+        // army has a different job.
+        //
+        // The smallest split that fixes that is a number, not a formation: the
+        // cheapest third stays home and the rest is the field force. The garrison
+        // never marches, so its units keep their post; the field force is what
+        // `march`, `engage` and the target rules below are about.
+        //
+        // It is deliberately not a squad system — nothing here has a role, a
+        // membership or a state. That is the next layer, and this is the
+        // measurement that says the layer is needed.
+        soldiers.sort_by_key(|unit| {
+            (
+                ctx.obs
+                    .object_type(ctx.rules, unit.type_id)
+                    .and_then(|ty| ctx.profiles.get(&ty.id))
+                    .map_or(i32::MAX, |profile| profile.cost),
+                unit.entity_id,
+            )
+        });
+        let garrison_size = soldiers.len() / GARRISON_DIVISOR;
+        let garrison: Vec<_> = soldiers.drain(..garrison_size).collect();
         // What the house can see, not what the world holds. The projection's own
         // enemy list is omniscient (the native computer AI is, and a policy that
         // reused it would inherit that); the spec forbids aiming at anything the
@@ -822,6 +865,18 @@ impl Military {
                     actor: Some(unit.entity_id),
                 }),
             }
+        }
+        // The garrison holds its post and is not asked for anything else. It is
+        // what answers a raid while the field force is away, and giving it a march
+        // direction would put it in exactly the situation the split exists to
+        // avoid.
+        for unit in &garrison {
+            out.jobs.push(Proposal {
+                kind: JobKind::Defend,
+                target: Target::Cell(home),
+                priority: GARRISON_PRIORITY,
+                actor: Some(unit.entity_id),
+            });
         }
         self.scout(ctx, &soldiers, home, out);
     }
