@@ -526,8 +526,26 @@ impl Military {
             _ => None,
         };
         if ctx.tick % 1800 == 0 {
+            // What the army is actually made of, by type, most numerous first.
+            //
+            // The wish list asks a house to "produce units according to the fight
+            // and each unit's character", and the measured answer so far has been
+            // an even spread across every role — which is what `shortfall`'
+            // proportional ranking must produce. Without this line that is an
+            // opinion about a composition nobody counted; with it, `5 MTNK out of
+            // 106 objects` becomes a number that can be argued with.
+            let mut composition: std::collections::BTreeMap<&str, usize> =
+                std::collections::BTreeMap::new();
+            for unit in &soldiers {
+                let Some(ty) = ctx.obs.object_type(ctx.rules, unit.type_id) else {
+                    continue;
+                };
+                *composition.entry(ty.id.as_str()).or_insert(0) += 1;
+            }
+            let mut composition: Vec<(&str, usize)> = composition.into_iter().collect();
+            composition.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
             log::info!(
-                "military: tick={} enabled={} soldiers={} march_at={} quiet={} seen={} reach={} near={} engage={} march={} order={:?}",
+                "military: tick={} enabled={} soldiers={} march_at={} quiet={} seen={} reach={} near={} engage={} march={} order={:?} army={:?}",
                 ctx.tick,
                 ATTACK_ENABLED,
                 soldiers.len(),
@@ -543,6 +561,7 @@ impl Military {
                 engage,
                 march,
                 order,
+                composition,
             );
         }
         for unit in &soldiers {
@@ -625,9 +644,30 @@ impl Military {
         if ctx.obs.visible_enemy_entities().count() > SCOUT_MAX_ENEMIES {
             return;
         }
+        // A scout is infantry. Measured, the first version picked the nearest
+        // soldier and sent thirteen Grizzlies to look at fog: an armoured unit
+        // costs four times a rifleman, and a tank is the one thing this army
+        // cannot replace — the composition reading showed the house holding five
+        // Grizzlies from tick 0 to tick 19800 while every unit it added in
+        // between was a dog, an IFV or a rifleman.
+        //
+        // The cheapest soldier that can walk is the right scout: it sees the same
+        // ground and costs the least to lose.
         let Some(unit) = soldiers
             .iter()
-            .min_by_key(|unit| (cell_distance(unit.cell, home), unit.entity_id))
+            .filter(|unit| {
+                ctx.obs
+                    .object_type(ctx.rules, unit.type_id)
+                    .is_some_and(|ty| ty.category == ObjectCategory::Infantry)
+            })
+            .min_by_key(|unit| {
+                let cost = ctx
+                    .obs
+                    .object_type(ctx.rules, unit.type_id)
+                    .and_then(|ty| ctx.profiles.get(&ty.id))
+                    .map_or(i32::MAX, |profile| profile.cost);
+                (cost, cell_distance(unit.cell, home), unit.entity_id)
+            })
         else {
             return;
         };
