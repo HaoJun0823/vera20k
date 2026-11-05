@@ -1340,3 +1340,30 @@ fn a_house_whose_last_base_unit_is_destroyed_is_defeated() {
         "a house whose last base unit is gone must be defeated"
     );
 }
+
+#[test]
+fn a_house_with_no_base_unit_from_the_start_is_defeated() {
+    // Arena.mmx places no MCV and no construction yard for anybody: its `[Units]`
+    // and `[Infantry]` sections are all `Neutral`, `[Structures]` is 155 civilian
+    // buildings, and there is no `[Base]` section at all. An opposing house on that
+    // map therefore begins with nothing `short_game` counts as survival, and the
+    // defeat gate should finish it on the first frame.
+    //
+    // It does not, which is why a 48000-tick match can end with `enemy=0` and still
+    // report a timeout. This is the smallest form of that question: a house, no base
+    // unit, one frame.
+    let rules = rules(3);
+    let (mut sim, houses) = sim_with_houses(&[0, 1]);
+    let owner = houses[1];
+    assert!(
+        sim.session().game_options().short_game,
+        "the fixture runs short games, which is the mode Arena's matches use"
+    );
+
+    sim.check_defeat(Some(&rules), None);
+
+    assert!(
+        sim.houses[&owner].is_defeated(),
+        "a house that never had a base unit must be defeated under short_game"
+    );
+}
