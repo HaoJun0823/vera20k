@@ -73,6 +73,34 @@ const GARRISON_PRIORITY: i64 = 20;
 /// hypothesis the four reverted attempts point at.
 const ENGAGE_ODDS: usize = 3;
 
+/// How many wall-breakers the army keeps before the ranking decides again.
+///
+/// Four. A base is a dozen buildings and one unit cannot dismantle it before it
+/// is killed, so one is a token; four is enough that a column arriving at a base
+/// can start on a wall the moment the fight allows it, and small enough that it
+/// cannot take over the build queue from the line.
+const WALL_BREAKERS_ENOUGH: usize = 4;
+
+/// Permille of damage per second against `concrete` a wall-breaker needs.
+///
+/// A hundred: a rifleman reads 6, a battle tank 9 and an IFV 3, so none of them
+/// comes close; the Apocalypse reads 26 and the Tesla Coil, which is a building
+/// and never a candidate here, 28. What clears it is air power - the `ORCA` reads
+/// 168 permille against concrete for 1200 credits and the `BEAG` 225 - which is
+/// `0.140` credits of damage per credit of unit against a battle tank's `0.013`.
+///
+/// Anything lower admits the whole roster and the floor stops meaning anything,
+/// which is what happened when it was gated on the `AntiStructure` weight and
+/// again at twenty.
+const WALL_BREAKER_DPS: i64 = 100;
+
+/// Where a mandatory wall-breaker sits among the other demands.
+///
+/// Above the line units, because an army that cannot break a wall cannot finish a
+/// match, and below the economy, because a house with no income cannot build
+/// anything at all.
+const WALL_BREAKER_PRIORITY: i64 = 80;
+
 /// How close counts as "around", in cells.
 ///
 /// One radius for two questions, so a target and a base are measured the same
@@ -308,6 +336,52 @@ impl Military {
         for unit in ctx.obs.own_entities() {
             if let Some(ty) = ctx.obs.object_type(ctx.rules, unit.type_id) {
                 *held.entry(ty.id.clone()).or_insert(0) += 1;
+            }
+        }
+        // A floor: the army keeps a wall-breaker.
+        //
+        // The score below answers "what is this type good at", and the IFV is first
+        // or second in all seven roles - anti-infantry 0.900, anti-vehicle 0.888,
+        // anti-air 0.898, anti-structure 0.606, artillery 0.866 - so a rule that
+        // ranks on that answer alone keeps buying it. Measured on Arena.mmx over
+        // six seeds, `FV` was the most expensive line item at 5400..6000 against a
+        // battle tank's 4900, while doing 3 permille against `concrete` where the
+        // tank does 9 and a 200-credit rifleman does 6.
+        //
+        // Four attempts to fix that through the ranking failed: counting buildings
+        // in the threat changed nothing, correcting the role weights cost 110% more
+        // losses, capping base defences moved the freed credits into more IFVs, and
+        // dividing the score by a price band changed nothing at all. The ranking is
+        // not the lever, so this is a floor instead of a preference: while the
+        // army cannot break a wall, the next unit is a wall-breaker whatever the
+        // score says. Once it can, the ranking decides everything again.
+        //
+        // "Can break a wall" is the `AntiStructure` weight at `ROLE_FLOOR` or above,
+        // which is the same bar every other caller uses to mean "really does this
+        // job" rather than "carries some of it".
+        let wall_breakers = ctx
+            .obs
+            .own_entities()
+            .filter(|unit| {
+                ctx.obs
+                    .object_type(ctx.rules, unit.type_id)
+                    .and_then(|ty| ctx.profiles.get(&ty.id))
+                    .is_some_and(is_wall_breaker)
+            })
+            .count();
+        if wall_breakers < WALL_BREAKERS_ENOUGH {
+            for (ty, profile) in candidates.iter().copied() {
+                if !is_wall_breaker(profile) {
+                    continue;
+                }
+                let Some(type_id) = ctx.obs.type_id(&ty.id) else {
+                    continue;
+                };
+                if ctx.obs.in_production(ctx.rules, type_id) {
+                    continue;
+                }
+                out.intents.push(Intent::QueueProduction { type_id });
+                return;
             }
         }
         let mut infantry: Option<(&UnitProfile, i64, i64)> = None;
@@ -1417,6 +1491,30 @@ const MARCH_ACROSS_CELLS: u16 = 120;
 /// neighbourhood, which the first ring already does, and accepting such a
 /// destination would keep the map-wide ring from ever being consulted.
 const MARCH_NEAR_HOME: i32 = 20;
+
+/// Whether this type digs into a wall fast enough to be worth buying for it.
+///
+/// Permille of damage per second against `concrete`, which is the armour an
+/// opposing base is built of. The bar is high on purpose, because the `AntiStructure`
+/// weight is not: the IFV reads 0.606 in that role - the highest in the retail
+/// table - while doing 3 permille against concrete, the least of any fighting
+/// vehicle, and a battle tank reads 0.285 while doing 9. Every unit therefore
+/// clears `ROLE_FLOOR` and a floor gated on the weight would never fire, which
+/// is exactly what happened the first time this was written.
+///
+/// Measured against concrete, the retail army reads: rifleman 6, battle tank 9,
+/// IFV 3, and only the Tesla tank at 28 and the Apocalypse at 26 reach this bar.
+/// That is the honest split - three quarters of the roster cannot dismantle a base
+/// in reasonable time, and buying more of them does not change that.
+fn is_wall_breaker(profile: &UnitProfile) -> bool {
+    profile
+        .weapons
+        .iter()
+        .map(|weapon| weapon.dps_permille.get(8).copied().unwrap_or(0))
+        .max()
+        .unwrap_or(0)
+        >= WALL_BREAKER_DPS
+}
 
 /// Chebyshev distance in cells: how far a walk is on this grid.
 fn cell_distance(a: (u16, u16), b: (u16, u16)) -> i32 {
