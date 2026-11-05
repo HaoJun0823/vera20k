@@ -151,8 +151,22 @@ pub struct Policy {
     /// Used only to tell a deployment from a casualty: unfolding consumes the
     /// vehicle and raises a yard, so the structure count rises as the unit goes.
     structures_last: usize,
-    /// Every object the house has lost, by type id, for the end-of-match reading.
-    lost: BTreeMap<String, u64>,
+    /// Every object the house has lost, by type, with what one of them cost.
+    lost: BTreeMap<String, Tally>,
+    /// Every structure the house stood on last term, keyed by stable id.
+    ///
+    /// `snapshot` holds the units only, so without this a destroyed building
+    /// never reaches the ledger and the dearest half of the economy goes
+    /// unread.
+    structures_alive_last: BTreeMap<u64, String>,
+    /// Everything the house produced this match, by type.
+    ///
+    /// `own` counts survivors and never the dead or the spent, so a change that
+    /// trades twelve tanks for forty riflemen looks like a win on it. This and
+    /// `lost` are the other half of that reading.
+    built: BTreeMap<String, Tally>,
+    /// Engineers produced, and what became of them.
+    engineers: EngineerLedger,
     /// Targets a unit has given up on, and the tick it may be proposed again:
     /// the last rung of the assault ladder.
     given_up: BTreeMap<(u64, u64), u64>,
@@ -215,6 +229,9 @@ impl Policy {
             alive_last: BTreeMap::new(),
             structures_last: 0,
             lost: BTreeMap::new(),
+            structures_alive_last: BTreeMap::new(),
+            built: BTreeMap::new(),
+            engineers: EngineerLedger::default(),
             stats: Stats::default(),
         }
     }
@@ -863,9 +880,11 @@ impl Policy {
         if tick == 0 {
             // Nothing was alive last term; the opening force is not a loss.
             self.alive_last = self.snapshot(rules, obs);
+            self.structures_alive_last = self.structure_snapshot(rules, obs);
             return;
         }
         let alive = self.snapshot(rules, obs);
+        let structures = self.structure_snapshot(rules, obs);
         // A departed object is a loss unless it turned into something.
         //
         // The first version counted every disappearance, which made a deployment
@@ -879,29 +898,113 @@ impl Policy {
         // count rises as the unit goes. A unit gone with no new structure is a
         // unit that was destroyed.
         let structures_now = own_structure_count(rules, &self.profiles, obs);
-        let gained = structures_now > self.structures_last;
+        let mut gained_structures = structures_now.saturating_sub(self.structures_last);
+
+        // Anything this house owns now that it did not own last term was produced
+        // for it: a factory finished it, or an engineer handed it over. Units
+        // arrive no other way, so "new" reads as "built".
+        for (id, ty) in &alive {
+            if self.alive_last.contains_key(id) {
+                continue;
+            }
+            let profile = self.profiles.get(ty);
+            let cost = profile.map_or(0, |profile| i64::from(profile.cost));
+            let engineer = profile.is_some_and(|profile| profile.roles.contains(Roles::ENGINEER));
+            note_built(&mut self.built, &mut self.engineers, ty, cost, engineer);
+        }
+
+        // A building is the dearest thing a house owns, so it is counted on
+        // both sides like a unit.
+        for (id, ty) in &structures {
+            if self.structures_alive_last.contains_key(id) {
+                continue;
+            }
+            let cost = self
+                .profiles
+                .get(ty)
+                .map_or(0, |profile| i64::from(profile.cost));
+            note_built(&mut self.built, &mut self.engineers, ty, cost, false);
+        }
+        for (id, ty) in &self.structures_alive_last {
+            if structures.contains_key(id) {
+                continue;
+            }
+            let cost = self
+                .profiles
+                .get(ty)
+                .map_or(0, |profile| i64::from(profile.cost));
+            note_lost(&mut self.lost, ty, cost);
+        }
+        self.structures_alive_last = structures;
+
         for (id, ty) in &self.alive_last {
             if alive.contains_key(id) {
                 continue;
             }
-            let unfolds = self.profiles.get(ty).is_some_and(|profile| {
+            let profile = self.profiles.get(ty);
+            let unfolds = profile.is_some_and(|profile| {
                 // Only a deployer unfolds into a structure. A harvester that
                 // disappears in the same term a building finishes was destroyed,
                 // and counting it as a deployment would hide exactly the loss this
                 // report exists to show.
                 profile.roles.contains(Roles::DEPLOYER)
             });
-            if unfolds && gained {
-                // A deployment, not a casualty.
+            if unfolds && gained_structures > 0 {
+                // A deployment, not a casualty, and it used the structure that
+                // went up with it.
+                gained_structures -= 1;
                 continue;
             }
-            *self.lost.entry(ty.clone()).or_insert(0) += 1;
+            let cost = profile.map_or(0, |profile| i64::from(profile.cost));
+            let engineer = profile.is_some_and(|profile| profile.roles.contains(Roles::ENGINEER));
+            note_lost(&mut self.lost, ty, cost);
+            if engineer {
+                // An engineer is consumed by success exactly as by failure, so a
+                // disappearance says nothing on its own. A structure that went up
+                // this term and was not a deployment is what a capture produced.
+                //
+                // Approximate, and worth naming: a building of ours finishing
+                // construction also raises the structure count, so an engineer
+                // that died in the same term one of ours completed is credited as
+                // a capture. Counting captures any other way needs ownership kept
+                // per object, which the projection does not carry.
+                if gained_structures > 0 {
+                    gained_structures -= 1;
+                    self.engineers.captured += 1;
+                } else {
+                    self.engineers.wasted += 1;
+                    self.engineers.wasted_value += cost;
+                }
+            }
         }
         self.structures_last = structures_now;
         self.alive_last = alive;
     }
 
     /// The house's own non-structure objects, keyed by stable id.
+    /// The house's own structures, keyed by stable id.
+    ///
+    /// The other half of [`Self::snapshot`]: that one skips structures so a
+    /// building finishing does not read as a unit appearing, and this one keeps
+    /// only them so a destroyed building is not invisible.
+    fn structure_snapshot(&self, rules: &RuleSet, obs: &Observation<'_>) -> BTreeMap<u64, String> {
+        let mut alive = BTreeMap::new();
+        for unit in obs.own_entities() {
+            let Some(ty) = obs.object_type(rules, unit.type_id) else {
+                continue;
+            };
+            if !self
+                .profiles
+                .get(&ty.id)
+                .is_some_and(|profile| profile.roles.contains(Roles::STRUCTURE))
+            {
+                continue;
+            }
+            alive.insert(unit.entity_id, ty.id.clone());
+        }
+        alive
+    }
+
     fn snapshot(&self, rules: &RuleSet, obs: &Observation<'_>) -> BTreeMap<u64, String> {
         let mut alive = BTreeMap::new();
         for unit in obs.own_entities() {
@@ -1263,12 +1366,31 @@ impl Brain for Policy {
                 self.stats.enemy
             );
         }
-        if !self.lost.is_empty() && tick % 3600 == 0 {
-            // What the house lost, by type, because `own` alone cannot say
-            // whether a change killed soldiers or buildings. Without this, every
-            // judgement in this session ran on a number that counted survivors
-            // and never the dead.
-            log::info!("policy v2 losses: tick={tick} so_far={:?}", self.lost);
+        if tick % 3600 == 0 && (!self.built.is_empty() || !self.lost.is_empty()) {
+            // What the house built and what it lost, by type and by price,
+            // because `own` alone cannot say whether a change traded a cheap army
+            // for an expensive one. Without this, every judgement in this session
+            // ran on a number that counted survivors and never the dead or the
+            // spent.
+            log::info!(
+                "ledger: tick={tick} spent={} lost_value={} built=[{}] lost=[{}]",
+                ledger_value(&self.built),
+                ledger_value(&self.lost),
+                render_ledger(&self.built),
+                render_ledger(&self.lost)
+            );
+        }
+        if tick % 3600 == 0 && self.engineers.built > 0 {
+            // An engineer is spent by success and by failure alike, so its count
+            // says nothing on its own. In retail three engineer deaths cost about
+            // one ore truck, which is the whole economy if it happens every match.
+            log::info!(
+                "ledger: tick={tick} engineers built={} captured={} wasted={} wasted_value={}",
+                self.engineers.built,
+                self.engineers.captured,
+                self.engineers.wasted,
+                self.engineers.wasted_value
+            );
         }
     }
 
@@ -1588,4 +1710,174 @@ fn own_structure_count(
                 .is_some_and(|profile| profile.roles.contains(Roles::STRUCTURE))
         })
         .count()
+}
+
+/// Count one produced object, what it cost, and whether it was an engineer.
+fn note_built(
+    built: &mut BTreeMap<String, Tally>,
+    engineers: &mut EngineerLedger,
+    ty: &str,
+    cost: i64,
+    engineer: bool,
+) {
+    let entry = built.entry(ty.to_string()).or_insert(Tally {
+        count: 0,
+        unit_cost: cost,
+    });
+    entry.count += 1;
+    if entry.unit_cost == 0 {
+        entry.unit_cost = cost;
+    }
+    if engineer {
+        engineers.built += 1;
+    }
+}
+
+/// Count one dead object and what it cost.
+fn note_lost(lost: &mut BTreeMap<String, Tally>, ty: &str, cost: i64) {
+    let entry = lost.entry(ty.to_string()).or_insert(Tally {
+        count: 0,
+        unit_cost: cost,
+    });
+    entry.count += 1;
+    if entry.unit_cost == 0 {
+        entry.unit_cost = cost;
+    }
+}
+
+/// How many of one type, and what one of them costs.
+///
+/// Two numbers rather than one because the questions differ: the count says
+/// whether an army is being thrown away, the price says whether it was
+/// affordable in the first place.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Tally {
+    count: u64,
+    unit_cost: i64,
+}
+
+impl Tally {
+    /// What the whole group cost to build, or to lose.
+    fn value(&self) -> i64 {
+        self.unit_cost * self.count as i64
+    }
+}
+
+/// Engineers produced, and what became of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct EngineerLedger {
+    built: u64,
+    captured: u64,
+    wasted: u64,
+    /// What the wasted engineers cost to build.
+    wasted_value: i64,
+}
+
+/// What a whole per-type ledger cost.
+fn ledger_value(tallies: &BTreeMap<String, Tally>) -> i64 {
+    tallies.values().map(Tally::value).sum()
+}
+
+/// A ledger as one readable line, dearest first.
+///
+/// Ordered by value rather than by count: twenty riflemen and one ore truck are
+/// both entries, and the one that decides the economy should be the one read
+/// first.
+fn render_ledger(tallies: &BTreeMap<String, Tally>) -> String {
+    let mut rows: Vec<(&String, Tally)> =
+        tallies.iter().map(|(name, tally)| (name, *tally)).collect();
+    rows.sort_by(|a, b| b.1.value().cmp(&a.1.value()).then_with(|| a.0.cmp(b.0)));
+    rows.into_iter()
+        .map(|(name, tally)| {
+            format!(
+                "{name}x{}@${}=${}",
+                tally.count,
+                tally.unit_cost,
+                tally.value()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+impl Drop for Policy {
+    /// The final ledger, written when the match drops its brain.
+    ///
+    /// The periodic report lands on a 3600-tick boundary, so at the end of a
+    /// 48000-tick match the last one read can be most of a minute stale, and
+    /// comparing two runs is the whole point of the numbers.
+    fn drop(&mut self) {
+        if self.built.is_empty() && self.lost.is_empty() {
+            return;
+        }
+        log::info!(
+            "ledger final: spent={} lost_value={} built=[{}] lost=[{}] engineers built={} captured={} wasted={} wasted_value={}",
+            ledger_value(&self.built),
+            ledger_value(&self.lost),
+            render_ledger(&self.built),
+            render_ledger(&self.lost),
+            self.engineers.built,
+            self.engineers.captured,
+            self.engineers.wasted,
+            self.engineers.wasted_value
+        );
+    }
+}
+
+#[cfg(test)]
+mod ledger_tests {
+    use super::*;
+
+    fn tally(count: u64, unit_cost: i64) -> Tally {
+        Tally { count, unit_cost }
+    }
+
+    #[test]
+    fn a_tally_values_what_it_cost_to_build() {
+        // The price is the point: twenty riflemen and three miners are both
+        // entries, and only one of them decides the economy.
+        assert_eq!(tally(20, 200).value(), 4000);
+        assert_eq!(tally(3, 1400).value(), 4200);
+        assert_eq!(tally(0, 1400).value(), 0);
+    }
+
+    #[test]
+    fn a_ledger_reads_dearest_first() {
+        let mut built = BTreeMap::new();
+        built.insert("E1".to_string(), tally(20, 200));
+        built.insert("CMIN".to_string(), tally(3, 1400));
+        built.insert("GGI".to_string(), tally(5, 400));
+        // Dearest first is what makes the line readable: the reader wants the
+        // miner bill before the rifleman bill.
+        assert_eq!(
+            render_ledger(&built),
+            "CMINx3@$1400=$4200 E1x20@$200=$4000 GGIx5@$400=$2000"
+        );
+    }
+
+    #[test]
+    fn a_ledger_total_adds_every_row() {
+        let mut lost = BTreeMap::new();
+        lost.insert("E1".to_string(), tally(4, 200));
+        lost.insert("ENGINEER".to_string(), tally(2, 500));
+        assert_eq!(ledger_value(&lost), 1800);
+    }
+
+    #[test]
+    fn noting_a_type_keeps_one_price_and_counts_the_rest() {
+        let mut built = BTreeMap::new();
+        let mut engineers = EngineerLedger::default();
+        note_built(&mut built, &mut engineers, "E1", 200, false);
+        note_built(&mut built, &mut engineers, "E1", 200, false);
+        assert_eq!(built["E1"], tally(2, 200));
+        assert_eq!(engineers.built, 0, "a rifleman is not an engineer");
+
+        note_built(&mut built, &mut engineers, "ENGINEER", 500, true);
+        assert_eq!(engineers.built, 1);
+
+        let mut lost = BTreeMap::new();
+        note_lost(&mut lost, "ENGINEER", 500);
+        note_lost(&mut lost, "ENGINEER", 500);
+        assert_eq!(lost["ENGINEER"], tally(2, 500));
+    }
 }
