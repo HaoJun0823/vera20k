@@ -683,27 +683,6 @@ impl Military {
         // does with the army it has, wherever the enemy stands; going out to a
         // target away from home is a march, and a march wants a column.
         let at_home = target.is_some_and(|(_, cell)| cell_distance(cell, home) <= NEAR_CELLS);
-        // A building does not shoot back, so it is not the fight the odds gate was
-        // tuned for.
-        //
-        // Three to one is what four measurements said a *field* fight wants: every
-        // attempt to push the column forward lost eighteen to one in the cells that
-        // had been safest. A base answers that rule by never letting the army
-        // commit at all - on Arena.mmx with eleven targets sampled around the enemy
-        // base the column would have needed thirty-three soldiers and it fielded
-        // nineteen, so `target` fell back to `None` and the buildings were seen and
-        // never attacked.
-        //
-        // What protects a column from a building is its warheads, not its size, and
-        // `reachable` has already asked whether anything in the group can hurt the
-        // thing. So a building takes a one-to-one bar.
-        let target_is_building = target.is_some_and(|(entity_id, _)| {
-            ctx.obs
-                .object_cell_and_type(entity_id)
-                .and_then(|(_, type_id)| ctx.obs.object_type(ctx.rules, type_id))
-                .is_some_and(|ty| ty.category == ObjectCategory::Building)
-        });
-        let odds = if target_is_building { 1 } else { ENGAGE_ODDS };
         let engage = ATTACK_ENABLED
             && target.is_some()
             // Three to one, not two. Four measurements in a row showed this army
@@ -713,16 +692,9 @@ impl Military {
             // target, a forward rally — lost eighteen to one in the cells that had
             // been safest. If committing is what hurts, the odds bar is where that
             // lives.
-            && army_size >= near * odds
+            && army_size >= near * ENGAGE_ODDS
             && army_size >= ENGAGE_FLOOR
-            // A march away from home wants a full column, because whatever it
-            // meets in the fog is not the thing it can see. A building is the thing
-            // it can see, and it does not move, so the column size that protects
-            // against an ambush is not the number that decides whether a wall can
-            // be dismantled. `ARMY_TO_MARCH` is thirty and Arena's army peaked at
-            // nineteen, which is why a building seen at tick 18000 was still not
-            // attacked at tick 21600.
-            && (at_home || target_is_building || army_size >= ARMY_TO_MARCH);
+            && (at_home || army_size >= ARMY_TO_MARCH);
         // A house that has seen nothing for two minutes is not waiting for
         // anything, and it marches with what it has. One that was just in
         // contact waits for the full column, because whatever it meets next is
