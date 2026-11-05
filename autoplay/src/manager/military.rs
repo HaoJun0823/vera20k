@@ -597,14 +597,33 @@ impl Military {
             })
             .copied()
             .collect();
+        // A building comes first, then the nearest thing.
+        //
+        // `short_game` keeps an opposing house alive while it holds any building,
+        // so an army that only kills units can be ahead on money and never win.
+        // Measured across six seeds on Arena.mmx: every entry under `enemy_lost`
+        // was a unit - `HTNK`, `SMCV`, `HTK`, `DRON`, `SPYP`, `SHK` - and not one
+        // of the enemy's twenty-six buildings was ever destroyed, with the whole
+        // match issuing 118 `Assault` orders against a single object.
+        //
+        // The nearest target is right for a field fight and wrong for the thing
+        // the match is scored on, so distance is the tie-break inside each band
+        // rather than the whole ordering.
         let target = reachable
             .iter()
             .min_by_key(|enemy| {
-                soldiers
+                let is_building = ctx
+                    .obs
+                    .object_type(ctx.rules, enemy.type_id)
+                    .is_some_and(|ty| ty.category == ObjectCategory::Building);
+                let nearest = soldiers
                     .iter()
                     .map(|unit| cell_distance(unit.cell, enemy.cell))
                     .min()
-                    .unwrap_or(i32::MAX)
+                    .unwrap_or(i32::MAX);
+                // Zero sorts first, so a building outranks every unit whatever
+                // the distance, and two buildings are decided by who is closer.
+                (if is_building { 0 } else { 1 }, nearest)
             })
             .map(|enemy| (enemy.entity_id, enemy.cell));
         // A house with no structure yet holds the ground its own units stand
