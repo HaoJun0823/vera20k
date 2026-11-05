@@ -7622,6 +7622,33 @@ impl Simulation {
                     max_ry
                 );
             }
+            // What each house actually holds, by type.
+            //
+            // The census above says how many and where, which cannot answer "does this
+            // house still have a base unit" - the question the defeat gate asks and the
+            // one a match that ends at `enemy=0` with a timeout turns on. Reading it out
+            // of the placement log instead does not work: Arena.mmx defines no `[Base]`
+            // section at all, so an opponent's starting base unit is made at runtime and
+            // never appears in a `placed` line.
+            let mut by_owner: DiagMap<String, DiagMap<String, u32>> = DiagMap::new();
+            for entity in self.substrate.entities.values() {
+                let owner = self.interner.resolve(entity.owner()).to_string();
+                // The interner holds the name the scenario registered, so this needs no
+                // rule set; `object_type` would, and this census has none.
+                let type_name = self.interner.resolve(entity.type_ref()).to_string();
+                *by_owner
+                    .entry(owner)
+                    .or_default()
+                    .entry(type_name)
+                    .or_default() += 1;
+            }
+            for (owner, types) in &by_owner {
+                let listed: Vec<String> = types
+                    .iter()
+                    .map(|(name, count)| format!("{name}x{count}"))
+                    .collect();
+                log::info!("  Holds '{}': {}", owner, listed.join(" "));
+            }
         }
     }
 
