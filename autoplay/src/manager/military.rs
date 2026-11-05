@@ -1011,38 +1011,45 @@ impl Military {
         home: (u16, u16),
         out: &mut Demands,
     ) {
-        // A dead or arrived scout is no longer scouting.
+        // Arrival is a post, not an ending.
         //
-        // Arrival is a distance, not the cell's reveal bit. Waiting for
-        // `is_cell_revealed(cell)` was the wrong test and it deadlocked the
-        // scout: the destination is chosen *because* it is unrevealed, and a
-        // single rifleman standing on it does not necessarily reveal it, so the
-        // assignment never cleared, the unit was handed the same cell every term,
-        // and `standing` climbed — measured on Arena.mmx seed 0x5EED, a scout sat
-        // on `(76, 40)` with `standing=645`, forty-three seconds of a one-cell
-        // errand, and the far half of the map was never looked at.
-        if let Some((unit, cell)) = self.scout
-            && match soldiers.iter().find(|live| live.entity_id == unit) {
-                None => true,
+        // The memory used to be cleared when the scout got within four cells **or**
+        // when the destination cell was revealed, and the destination is chosen
+        // precisely because it is unrevealed - so any unit passing near it ended
+        // the errand from a distance. The unit then had no memory, the picker
+        // re-ran, and `scout_cell` returns the furthest unrevealed cell, which
+        // moves as the walk reveals ground. Measured on Arena.mmx seed 0x5EED:
+        // seven different unit ids held the job in one match, the positions swung
+        // `(95,90) (83,51) (94,106) (83,39) (90,77)`, the destination `(84,152)`
+        // was never reached, and the whole army issued 118 `Assault` orders
+        // against a single object because a target has to be in line of sight and
+        // nothing ever looked at the enemy base.
+        //
+        // So a scout that has arrived keeps the post until it dies. It walks there
+        // once and stays, and what it watches is the ground it was sent to watch.
+        if let Some((unit, cell)) = self.scout {
+            let present = soldiers.iter().find(|live| live.entity_id == unit);
+            match present {
+                None => self.scout = None,
                 Some(live) => {
-                    cell_distance(live.cell, cell) <= SCOUT_ARRIVED_CELLS
-                        || ctx.obs.is_cell_revealed(cell.0, cell.1)
+                    // Standing on the post is a post; walking to it is a walk.
+                    // Re-issuing the walk would keep it there anyway, but `Defend`
+                    // is what the job becomes once it has arrived, and it stops the
+                    // assault layer re-tasking a unit that is looking out.
+                    let arrived = cell_distance(live.cell, cell) <= SCOUT_ARRIVED_CELLS;
+                    out.jobs.push(Proposal {
+                        kind: if arrived {
+                            JobKind::Defend
+                        } else {
+                            JobKind::Scout
+                        },
+                        target: Target::Cell(cell),
+                        priority: SCOUT_PRIORITY,
+                        actor: Some(unit),
+                    });
+                    return;
                 }
             }
-        {
-            self.scout = None;
-        }
-
-        if let Some((unit, cell)) = self.scout {
-            // Still walking: say so every term, or the assignment drops it and
-            // the unit is given a defend post mid-walk.
-            out.jobs.push(Proposal {
-                kind: JobKind::Scout,
-                target: Target::Cell(cell),
-                priority: SCOUT_PRIORITY,
-                actor: Some(unit),
-            });
-            return;
         }
 
         // A scout is not called off by a fight at the door.
