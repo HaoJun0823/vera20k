@@ -218,7 +218,15 @@ pub struct Military {
     /// recomputed each term is a unit that walks one step, sees the cell it was
     /// heading for is still dark, and is pointed at whatever the scan likes next.
     /// It gives up when it arrives, when it dies, or when the cell is revealed.
-    scout: Option<(u64, (u16, u16))>,
+    /// The unit that holds the scouting job, and the cell it is walking to.
+    ///
+    /// The unit is kept across arrivals so the errand cannot change hands every
+    /// term; the cell is dropped when it is reached, so a scout that walked into
+    /// the enemy base is sent somewhere else instead of standing in the arc of
+    /// everything that shoots. Keeping both was the previous change, and it made
+    /// unit 1154 walk `(88,34) (86,53) (85,73) (95,90) (93,109) (83,127)` and then
+    /// die at the wall with `seen` still at four.
+    scout: Option<(u64, Option<(u16, u16)>)>,
     /// How many objects the house held at the last reading.
     ///
     /// Losing one is contact, whatever the fog says: a house that is being shot
@@ -1027,27 +1035,38 @@ impl Military {
         //
         // So a scout that has arrived keeps the post until it dies. It walks there
         // once and stays, and what it watches is the ground it was sent to watch.
-        if let Some((unit, cell)) = self.scout {
-            let present = soldiers.iter().find(|live| live.entity_id == unit);
-            match present {
-                None => self.scout = None,
-                Some(live) => {
-                    // Standing on the post is a post; walking to it is a walk.
-                    // Re-issuing the walk would keep it there anyway, but `Defend`
-                    // is what the job becomes once it has arrived, and it stops the
-                    // assault layer re-tasking a unit that is looking out.
-                    let arrived = cell_distance(live.cell, cell) <= SCOUT_ARRIVED_CELLS;
-                    out.jobs.push(Proposal {
-                        kind: if arrived {
-                            JobKind::Defend
-                        } else {
-                            JobKind::Scout
-                        },
-                        target: Target::Cell(cell),
-                        priority: SCOUT_PRIORITY,
-                        actor: Some(unit),
-                    });
-                    return;
+        if let Some((unit, target)) = self.scout {
+            let alive = soldiers.iter().any(|live| live.entity_id == unit);
+            if !alive {
+                self.scout = None;
+            } else {
+                match target {
+                    // Still walking. Say so every term, or the assignment drops it
+                    // and the unit is given a defend post mid-walk.
+                    Some(cell) => {
+                        let arrived = soldiers
+                            .iter()
+                            .find(|live| live.entity_id == unit)
+                            .is_some_and(|live| {
+                                cell_distance(live.cell, cell) <= SCOUT_ARRIVED_CELLS
+                            });
+                        if !arrived {
+                            out.jobs.push(Proposal {
+                                kind: JobKind::Scout,
+                                target: Target::Cell(cell),
+                                priority: SCOUT_PRIORITY,
+                                actor: Some(unit),
+                            });
+                            return;
+                        }
+                        // Arrived: keep the scout, drop the destination. The next
+                        // term picks a new cell for the same unit, which is what
+                        // stops it standing at the enemy's wall waiting to be shot.
+                        self.scout = Some((unit, None));
+                    }
+                    // No destination: this term chooses one for the unit that
+                    // already holds the job, so it does not change hands.
+                    None => {}
                 }
             }
         }
@@ -1114,7 +1133,7 @@ impl Military {
         let Some(cell) = self.scout_cell(ctx, home, unit.cell) else {
             return;
         };
-        self.scout = Some((unit.entity_id, cell));
+        self.scout = Some((unit.entity_id, Some(cell)));
         out.jobs.push(Proposal {
             kind: JobKind::Scout,
             target: Target::Cell(cell),
