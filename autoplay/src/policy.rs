@@ -153,6 +153,19 @@ pub struct Policy {
     structures_last: usize,
     /// Every object the house has lost, by type, with what one of them cost.
     lost: BTreeMap<String, Tally>,
+    /// Every object the enemy held last term, keyed by stable id.
+    ///
+    /// `enemy_entities` walks the whole object store without a visibility
+    /// filter, so a difference against this is the enemy's real losses and not
+    /// what one rifleman happened to see.
+    enemy_alive_last: BTreeMap<u64, String>,
+    /// What the enemy lost, by type, with what one of them was worth.
+    ///
+    /// This is the other side of the money: `lost` says what our army cost,
+    /// and this says what it bought. A house that trades a hundred credits of
+    /// rifleman for two hundred of the enemy's is ahead even if it never holds
+    /// more ground.
+    destroyed: BTreeMap<String, Tally>,
     /// Every structure the house stood on last term, keyed by stable id.
     ///
     /// `snapshot` holds the units only, so without this a destroyed building
@@ -229,6 +242,8 @@ impl Policy {
             alive_last: BTreeMap::new(),
             structures_last: 0,
             lost: BTreeMap::new(),
+            enemy_alive_last: BTreeMap::new(),
+            destroyed: BTreeMap::new(),
             structures_alive_last: BTreeMap::new(),
             built: BTreeMap::new(),
             engineers: EngineerLedger::default(),
@@ -881,10 +896,12 @@ impl Policy {
             // Nothing was alive last term; the opening force is not a loss.
             self.alive_last = self.snapshot(rules, obs);
             self.structures_alive_last = self.structure_snapshot(rules, obs);
+            self.enemy_alive_last = self.enemy_snapshot(rules, obs);
             return;
         }
         let alive = self.snapshot(rules, obs);
         let structures = self.structure_snapshot(rules, obs);
+        let enemy = self.enemy_snapshot(rules, obs);
         // A departed object is a loss unless it turned into something.
         //
         // The first version counted every disappearance, which made a deployment
@@ -936,6 +953,19 @@ impl Policy {
             note_lost(&mut self.lost, ty, cost);
         }
         self.structures_alive_last = structures;
+
+        // What the enemy lost is what this house's army bought.
+        for (id, ty) in &self.enemy_alive_last {
+            if enemy.contains_key(id) {
+                continue;
+            }
+            let cost = self
+                .profiles
+                .get(ty)
+                .map_or(0, |profile| i64::from(profile.cost));
+            note_lost(&mut self.destroyed, ty, cost);
+        }
+        self.enemy_alive_last = enemy;
 
         for (id, ty) in &self.alive_last {
             if alive.contains_key(id) {
@@ -1001,6 +1031,22 @@ impl Policy {
                 continue;
             }
             alive.insert(unit.entity_id, ty.id.clone());
+        }
+        alive
+    }
+
+    /// Every object an enemy house holds, keyed by stable id.
+    ///
+    /// Not `visible_enemy_entities`: this is the ledger's input, and a loss
+    /// book that only counts what was seen understates exactly the kills made
+    /// out of sight.
+    fn enemy_snapshot(&self, rules: &RuleSet, obs: &Observation<'_>) -> BTreeMap<u64, String> {
+        let mut alive = BTreeMap::new();
+        for enemy in obs.enemy_entities() {
+            let Some(ty) = obs.object_type(rules, enemy.type_id) else {
+                continue;
+            };
+            alive.insert(enemy.entity_id, ty.id.clone());
         }
         alive
     }
@@ -1373,11 +1419,15 @@ impl Brain for Policy {
             // ran on a number that counted survivors and never the dead or the
             // spent.
             log::info!(
-                "ledger: tick={tick} spent={} lost_value={} built=[{}] lost=[{}]",
+                "ledger: tick={tick} spent={} lost={} destroyed={} net={} exchange={} built=[{}] our_lost=[{}] enemy_lost=[{}]",
                 ledger_value(&self.built),
                 ledger_value(&self.lost),
+                ledger_value(&self.destroyed),
+                ledger_value(&self.destroyed) - ledger_value(&self.lost),
+                render_exchange(ledger_value(&self.destroyed), ledger_value(&self.lost)),
                 render_ledger(&self.built),
-                render_ledger(&self.lost)
+                render_ledger(&self.lost),
+                render_ledger(&self.destroyed)
             );
         }
         if tick % 3600 == 0 && self.engineers.built > 0 {
@@ -1811,11 +1861,15 @@ impl Drop for Policy {
             return;
         }
         log::info!(
-            "ledger final: spent={} lost_value={} built=[{}] lost=[{}] engineers built={} captured={} wasted={} wasted_value={}",
+            "ledger final: spent={} lost={} destroyed={} net={} exchange={} built=[{}] our_lost=[{}] enemy_lost=[{}] engineers built={} captured={} wasted={} wasted_value={}",
             ledger_value(&self.built),
             ledger_value(&self.lost),
+            ledger_value(&self.destroyed),
+            ledger_value(&self.destroyed) - ledger_value(&self.lost),
+            render_exchange(ledger_value(&self.destroyed), ledger_value(&self.lost)),
             render_ledger(&self.built),
             render_ledger(&self.lost),
+            render_ledger(&self.destroyed),
             self.engineers.built,
             self.engineers.captured,
             self.engineers.wasted,
@@ -1864,6 +1918,18 @@ mod ledger_tests {
     }
 
     #[test]
+    fn an_exchange_reads_as_money_earned_per_credit_lost() {
+        // The benchmark this exists for: a hundred-credit rifleman that kills two
+        // hundred credits of the enemy is ahead, and a ratio is how that is read
+        // without counting survivors.
+        assert_eq!(render_exchange(200, 100), "2.000x");
+        assert_eq!(render_exchange(100, 200), "0.500x");
+        assert_eq!(render_exchange(500, 500), "1.000x");
+        // Nothing lost is not an infinite ratio; it is a question with no answer.
+        assert_eq!(render_exchange(400, 0), "-");
+    }
+
+    #[test]
     fn noting_a_type_keeps_one_price_and_counts_the_rest() {
         let mut built = BTreeMap::new();
         let mut engineers = EngineerLedger::default();
@@ -1880,4 +1946,18 @@ mod ledger_tests {
         note_lost(&mut lost, "ENGINEER", 500);
         assert_eq!(lost["ENGINEER"], tally(2, 500));
     }
+}
+
+/// What the army earned for each credit it lost, as text.
+///
+/// Integer permille arithmetic rather than a float: this number gets compared
+/// between runs, and a ratio that drifts in its last digit makes two runs look
+/// different when they are not. A house that lost nothing has no ratio to
+/// report, and `-` says so rather than pretending to infinity.
+fn render_exchange(destroyed: i64, lost: i64) -> String {
+    if lost <= 0 {
+        return "-".to_string();
+    }
+    let permille = destroyed.saturating_mul(1000) / lost;
+    format!("{}.{:03}x", permille / 1000, permille % 1000)
 }
