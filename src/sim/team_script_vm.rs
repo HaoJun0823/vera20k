@@ -693,7 +693,13 @@ impl TeamScriptState {
             .map(|pair| pair[1].id)
     }
 
-    #[cfg(test)]
+    /// How many members the team holds.
+    ///
+    /// `telemetry` rather than `test` because a controller outside the engine has
+    /// to tell "created" from "recruited", and the count is the only reading that
+    /// answers it. Every one of these three is a plain field read behind `&self`:
+    /// nothing here changes what a script does.
+    #[cfg(any(test, feature = "telemetry"))]
     pub fn member_count(&self) -> usize {
         self.members.len()
     }
@@ -716,12 +722,23 @@ impl TeamScriptState {
         )
     }
 
-    #[cfg(test)]
+    /// Whether the team's script ran to its end (action 49).
+    ///
+    /// `telemetry` for the same reason as `member_count`: without it an observer
+    /// cannot tell a script that is still working from one that finished, which is
+    /// the difference between "issued" and "completed".
+    #[cfg(any(test, feature = "telemetry"))]
     pub fn succeeded(&self) -> bool {
         self.succeeded
     }
 
-    #[cfg(test)]
+    /// The first action this team's script could not run, if any.
+    ///
+    /// `TeamScriptRefusal` is a public type with no gate of its own, so widening
+    /// this method is enough for a caller outside the engine to read the reason.
+    /// Most useful of the three: it separates "the script is waiting" from "the
+    /// script reached something this engine does not implement".
+    #[cfg(any(test, feature = "telemetry"))]
     pub fn refusal(&self) -> Option<TeamScriptRefusal> {
         self.refusal
     }
