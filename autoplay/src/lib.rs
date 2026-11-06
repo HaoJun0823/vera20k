@@ -25,6 +25,7 @@
 
 pub mod arbiter;
 pub mod control;
+pub mod eligibility;
 pub mod executor;
 pub mod handover;
 pub mod observe;
@@ -36,6 +37,7 @@ mod tests;
 
 pub use arbiter::{Admission, Arbiter, Validated};
 pub use control::{ControlState, Refusal, Subsystem};
+pub use eligibility::{Ineligible, eligibility};
 pub use executor::{Execution, Executor};
 pub use handover::{MissionSnapshot, has_pending_replacement, order_still_stands};
 pub use observe::{Cell, Outcome};
