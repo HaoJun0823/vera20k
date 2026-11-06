@@ -355,7 +355,8 @@ fn install_team_scene(
         ));
     let old_team = sim
         .team_script_vm
-        .create_team_from_type(owner, team_types[1], &[], 7);
+        .create_team_from_type(owner, team_types[1], &[], 7)
+        .expect("the fixture registers team type 1");
     (old_team, team_types)
 }
 

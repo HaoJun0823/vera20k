@@ -487,8 +487,13 @@ impl TeamAiInstallDiagnostic {
     }
 }
 
-/// A candidate member passed to a test seam's TaskForce admission.
-#[cfg(any(test, feature = "test-support"))]
+/// A candidate member offered for TaskForce admission.
+///
+/// Was a test seam's input only. It is the same shape a policy needs when it forms
+/// a team itself, so the gate now matches `create_team_from_type`'s: the type has no
+/// behaviour of its own, and a caller that cannot name a candidate cannot form a
+/// team.
+#[cfg(any(test, feature = "test-support", feature = "autoplay"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamScriptMember {
     pub entity_id: u64,
@@ -1591,22 +1596,25 @@ impl TeamScriptVm {
     /// `candidates` admitted in TaskForce-entry order, preserving input order
     /// within each type, listed in admission order and all initiated: the
     /// state after it formed and ran into its first action (cursor 0).
-    #[cfg(any(test, feature = "test-support"))]
+    ///
+    /// `None` when the TeamType or its TaskForce is not registered, which is the
+    /// only precondition the caller can get wrong. A policy outside the engine may
+    /// name a type the map never defined, and a panic there would turn a
+    /// recoverable mistake into a crash.
+    ///
+    /// Nothing here checks authority. Ownership, whether an automated player is
+    /// switched on, and whether a player has taken the units are the caller's
+    /// responsibility; see the `autoplay` feature's note in Cargo.toml.
+    #[cfg(any(test, feature = "test-support", feature = "autoplay"))]
     pub fn create_team_from_type(
         &mut self,
         owner: InternedId,
         team_type_id: InternedId,
         candidates: &[TeamScriptMember],
         current_frame: i32,
-    ) -> u64 {
-        let team_type = *self
-            .team_types
-            .get(&team_type_id)
-            .expect("the seam's TeamType is registered");
-        let task_force = self
-            .task_forces
-            .get(&team_type.task_force_id)
-            .expect("the seam's TaskForce is registered");
+    ) -> Option<u64> {
+        let team_type = *self.team_types.get(&team_type_id)?;
+        let task_force = self.task_forces.get(&team_type.task_force_id)?;
         let mut used = vec![false; candidates.len()];
         let mut members = Vec::new();
         let mut slot_counts = [0; 6];
@@ -1655,7 +1663,7 @@ impl TeamScriptVm {
         }
         team.members = members;
         self.teams.insert(id, team);
-        id
+        Some(id)
     }
 }
 
@@ -1734,7 +1742,9 @@ pub(crate) fn join_team_for_test(
             member_type,
         })
         .collect();
-    teams.create_team_from_type(owner, team_type_id, &candidates, 0)
+    teams
+        .create_team_from_type(owner, team_type_id, &candidates, 0)
+        .expect("the test registers its TeamType and TaskForce")
 }
 
 #[cfg(test)]
@@ -1873,12 +1883,69 @@ mod tests {
             entity_id,
             member_type,
         });
-        let team = vm.create_team_from_type(owner, team_type, &candidates, 0);
+        let team = vm
+            .create_team_from_type(owner, team_type, &candidates, 0)
+            .expect("the test registers its TeamType and TaskForce");
 
         let state = vm.team(team).expect("team");
         assert_eq!(state.members().collect::<Vec<_>>(), [20, 30, 10]);
         assert_eq!(state.slot_counts[..2], [2, 1]);
         assert!(state.full_strength);
+    }
+
+    /// A caller that names a type the map never defined gets `None`, not a panic.
+    ///
+    /// `create_team_from_type` used to `expect` both registrations because its only
+    /// callers were fixtures that had just made them. Widening it to the `autoplay`
+    /// feature puts it in reach of a policy reading type ids out of rules, where a
+    /// missing TeamType is a recoverable answer - so the two lookups became `?`.
+    #[test]
+    fn an_unregistered_team_type_is_refused_rather_than_panicking() {
+        let mut vm = TeamScriptVm::default();
+        let owner = InternedId::from_index(1);
+        let never_registered = InternedId::from_index(99);
+        assert!(
+            vm.create_team_from_type(owner, never_registered, &[], 0)
+                .is_none(),
+            "no TeamType of that id was registered"
+        );
+
+        // The same holds when the TeamType exists but its TaskForce does not: the
+        // second lookup is the one that fails, and it must fail the same way.
+        let team_type = InternedId::from_index(4);
+        let identity = TeamMemberTypeIdentity {
+            category: ObjectCategory::Infantry,
+            id: InternedId::from_index(6),
+        };
+        vm.team_types.insert(
+            team_type,
+            TeamTypeDefinition {
+                id: team_type,
+                // A TaskForce id that nothing registered.
+                task_force_id: InternedId::from_index(77),
+                script_id: InternedId::from_index(78),
+                priority: 0,
+                is_base_defense: false,
+                suicide: false,
+                aggressive: false,
+                combined_movement_zone: MovementZone::Normal,
+                base_zone_relation_enforced: false,
+                transport_crossing_required: false,
+            },
+        );
+        let candidates = [TeamScriptMember {
+            entity_id: 10,
+            member_type: identity,
+        }];
+        assert!(
+            vm.create_team_from_type(owner, team_type, &candidates, 0)
+                .is_none(),
+            "its TaskForce was never registered"
+        );
+        assert!(
+            vm.teams_in_order().next().is_none(),
+            "a refused call creates no team"
+        );
     }
 
     #[test]
@@ -1910,7 +1977,9 @@ mod tests {
                     member_type,
                 }
             });
-        let team = vm.create_team_from_type(owner, team_type, &candidates, 0);
+        let team = vm
+            .create_team_from_type(owner, team_type, &candidates, 0)
+            .expect("the test registers its TeamType and TaskForce");
 
         assert_eq!(
             vm.team(team).unwrap().members().collect::<Vec<_>>(),

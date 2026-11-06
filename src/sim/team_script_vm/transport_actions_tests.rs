@@ -306,6 +306,7 @@ impl Fixture {
         self.sim
             .team_script_vm
             .create_team_from_type(self.owner, team_type, &candidates, 0)
+            .expect("the fixture registers its TeamType and TaskForce")
     }
 
     /// Put `count` new E1 aboard `transport` as boarding leaves them:

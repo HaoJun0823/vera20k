@@ -1526,10 +1526,7 @@ fn restore_object_references(
         }
 
         for (field, system_id) in [
-            (
-                "fire_particle_system",
-                entity.fire_particle_system.system(),
-            ),
+            ("fire_particle_system", entity.fire_particle_system.system()),
             (
                 "spark_particle_system",
                 entity.spark_particle_system.system(),
@@ -4675,15 +4672,18 @@ mod tests {
                 source: crate::rules::team_ai_ini::TeamAiDefinitionSource::FixedAimd,
             },
         );
-        let team_id = sim.team_script_vm.create_team_from_type(
-            owner,
-            team_type_id,
-            &[crate::sim::team_script_vm::TeamScriptMember {
-                entity_id: 1,
-                member_type: member_identity,
-            }],
-            sim.session.binary_frame() as i32,
-        );
+        let team_id = sim
+            .team_script_vm
+            .create_team_from_type(
+                owner,
+                team_type_id,
+                &[crate::sim::team_script_vm::TeamScriptMember {
+                    entity_id: 1,
+                    member_type: member_identity,
+                }],
+                sim.session.binary_frame() as i32,
+            )
+            .expect("the fixture registers its TeamType and TaskForce");
         let resources = crate::sim::runtime::SimResources::empty();
         sim.suspend_teams_for_base_defense(
             owner,

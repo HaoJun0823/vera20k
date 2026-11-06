@@ -299,15 +299,17 @@ fn gsi_04_05_zero_budget_still_suspends_low_priority_teams_before_scan_exit() {
         base_zone_relation_enforced: true,
         transport_crossing_required: false,
     });
-    let team_id = teams.create_team_from_type(
-        victim_owner,
-        team_type_id,
-        &[TeamScriptMember {
-            entity_id: 99,
-            member_type: member_identity,
-        }],
-        0,
-    );
+    let team_id = teams
+        .create_team_from_type(
+            victim_owner,
+            team_type_id,
+            &[TeamScriptMember {
+                entity_id: 99,
+                member_type: member_identity,
+            }],
+            0,
+        )
+        .expect("the fixture registers its TeamType and TaskForce");
     sim.scenario_rng = SimRng::new(0x0405);
     let rng_before = sim.scenario_rng.logical_state();
 

@@ -358,15 +358,17 @@ fn team(
             base_zone_relation_enforced: true,
             transport_crossing_required: false,
         });
-        sim.team_script_vm.create_team_from_type(
-            owner,
-            typ,
-            &[TeamScriptMember {
-                entity_id: actor,
-                member_type,
-            }],
-            0,
-        )
+        sim.team_script_vm
+            .create_team_from_type(
+                owner,
+                typ,
+                &[TeamScriptMember {
+                    entity_id: actor,
+                    member_type,
+                }],
+                0,
+            )
+            .expect("the fixture registers its TeamType and TaskForce")
     } else {
         sim.team_script_vm
             .create_team(owner, script, vec![actor], 0)

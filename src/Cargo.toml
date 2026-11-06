@@ -59,6 +59,20 @@ dev-overlays = []
 telemetry = []
 # Offline trainer state and diagnostic event hooks, absent from normal builds.
 debug-tools = ["telemetry"]
+
+# Building a native team from outside the engine, for an automated player.
+#
+# `create_team_from_type` used to be reached only through `test-support`, which put a
+# write path behind a testing feature. A policy that drives a house needs to form
+# teams itself, so the ability gets its own switch: it is not telemetry, because it
+# changes the game, and it is not test-support, because a release build must be able
+# to enable it without enabling fixtures.
+#
+# It grants no authority. The caller is responsible for every check the engine does
+# not make - who owns the house, whether the automated player is switched on, and
+# whether a player has taken the units - which is why the only intended caller is
+# the arbiter in the autoplay crate.
+autoplay = []
 # Test fixtures and helpers that client tests share; the client enables it
 # through its dev-dependency.
 test-support = []

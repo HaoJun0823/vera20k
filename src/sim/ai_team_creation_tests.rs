@@ -190,6 +190,7 @@ fn selector_fixture(row: &Value) -> SelectorFixture {
         let vm = &mut sim.team_script_vm;
         teams.push(if team.get("formed").is_some_and(flag) {
             vm.create_team_from_type(team_owner, team_type, &[], created)
+                .expect("the fixture registers its TeamType and TaskForce")
         } else {
             vm.construct_team(team_type, team_owner, true, created, false, None)
                 .unwrap()

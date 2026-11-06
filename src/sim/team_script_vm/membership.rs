@@ -634,12 +634,7 @@ impl Simulation {
                 break;
             };
             if type_id == Some(team_type) {
-                self.destroy_team(
-                    id,
-                    rules,
-                    frame_effects,
-                    TeamEndReason::DestroyedByAction,
-                );
+                self.destroy_team(id, rules, frame_effects, TeamEndReason::DestroyedByAction);
             } else {
                 index += 1;
             }

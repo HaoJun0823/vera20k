@@ -71,12 +71,10 @@ fn scene(extra: &str) -> Option<(RuleSet, Simulation, u64, u64)> {
         member_type: member_type_identity(sim.entities().get(actor).unwrap()),
     };
     let kind = sim.interner.get("E1PanicTeam").unwrap();
-    let team = sim.team_script_vm.create_team_from_type(
-        owner,
-        kind,
-        &[member],
-        sim.session.binary_frame() as i32,
-    );
+    let team = sim
+        .team_script_vm
+        .create_team_from_type(owner, kind, &[member], sim.session.binary_frame() as i32)
+        .expect("the fixture registers its TeamType and TaskForce");
     assert!(sim.team_script_vm.team(team).unwrap().formed());
     Some((rules, sim, team, actor))
 }
