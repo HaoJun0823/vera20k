@@ -27,6 +27,8 @@ pub mod arbiter;
 pub mod control;
 pub mod executor;
 pub mod observe;
+pub mod trace;
+pub mod world;
 
 #[cfg(test)]
 mod tests;
@@ -35,3 +37,5 @@ pub use arbiter::{Admission, Arbiter, Validated};
 pub use control::{ControlState, Refusal, Subsystem};
 pub use executor::{Execution, Executor};
 pub use observe::{Cell, Outcome};
+pub use trace::{Candidate, Decision, Trace};
+pub use world::{Object, Snapshot};
