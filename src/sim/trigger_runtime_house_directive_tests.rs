@@ -612,7 +612,12 @@ fn house_directive_target_kind_reaches_first_own_team_threat_scan_and_real_super
         .get_mut(&houses[0])
         .unwrap()
         .clear_preferred_super_weapon_target();
-    sim.destroy_team(team, &rules, FrameEffects::default());
+    sim.destroy_team(
+        team,
+        &rules,
+        FrameEffects::default(),
+        crate::sim::team_script_vm::TeamEndReason::DestroyedByAction,
+    );
     sim.sound_events.clear_for_test();
     crate::sim::superweapon::chronosphere_tests::charge_super(&mut sim, houses[0], "REVEAL");
     let rng = sim.rng_state();

@@ -251,7 +251,13 @@ impl Simulation {
                 }
             }
             if (cursor as u32) >= count {
-                self.destroy_team(team_id, rules, frame_effects);
+                // Off the end of the action list: the script ran to completion.
+                self.destroy_team(
+                    team_id,
+                    rules,
+                    frame_effects,
+                    crate::sim::team_script_vm::TeamEndReason::ScriptCompleted,
+                );
                 return;
             }
             self.team_assign_mission_target(team_id, None, rules, registry, frame_effects);

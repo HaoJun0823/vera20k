@@ -2122,7 +2122,12 @@ fn action4_recruits_real_released_members_then_script50_and_cleanup_share_owners
     let reinforcement = *sim.team_script_vm.teams.keys().next().unwrap();
     let mut original_members: Vec<_> = sim.team_script_vm.teams[&reinforcement].members().collect();
     original_members.sort_unstable();
-    sim.destroy_team(reinforcement, &rules, FrameEffects::default());
+    sim.destroy_team(
+        reinforcement,
+        &rules,
+        FrameEffects::default(),
+        crate::sim::team_script_vm::TeamEndReason::DestroyedByAction,
+    );
     let rng_before = [
         sim.scenario_rng.native_state_hex(),
         sim.main_rng.native_state_hex(),

@@ -187,9 +187,45 @@ fn main() {
         seen.values().filter(|t| t.last_members >= 4).count()
     );
     println!("advanced past 0     {advanced}");
-    println!("script completed    {completed}");
+    println!("script reached 49   {completed}");
     println!("ever refused        {ever_refused}");
     println!("left the array      {left_total}");
+
+    // Every departure the engine recorded, by reason. This separates "the script
+    // finished" from "the team was culled to stay under the house cap" - both look
+    // identical when all that can be seen is an id leaving the array.
+    let ended = scenario.sim().team_script_vm().ended_in_order();
+    let mut by_reason: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for record in ended {
+        *by_reason.entry(format!("{:?}", record.reason)).or_insert(0) += 1;
+    }
+
+    println!();
+    println!("=== departures by reason ===");
+    if by_reason.is_empty() {
+        println!("(none recorded)");
+    } else {
+        for (reason, count) in &by_reason {
+            println!("{reason:<22} {count}");
+        }
+        println!();
+        println!(
+            "{:>8}  {:>9}  {:>9}  {:>7}  {:>9}  reason",
+            "team", "frame", "cursor", "members", "reached49"
+        );
+        for record in ended {
+            println!(
+                "{:>8}  {:>9}  {:>9}  {:>7}  {:>9}  {:?}",
+                record.team_id,
+                record.frame,
+                record.cursor,
+                record.members,
+                record.succeeded,
+                record.reason,
+            );
+        }
+    }
 
     if !seen.is_empty() {
         println!();

@@ -190,7 +190,12 @@ fn sov02_discovered_battle_fortresses_focus_then_load_after_reload() {
                 .len(),
             1
         );
-        sim.destroy_team(team, &rules, FrameEffects::default());
+        sim.destroy_team(
+            team,
+            &rules,
+            FrameEffects::default(),
+            crate::sim::team_script_vm::TeamEndReason::DestroyedByAction,
+        );
         assert!(sim.team_script_vm.team(team).is_none());
         assert!(
             sim.entities()

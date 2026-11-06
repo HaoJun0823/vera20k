@@ -39,6 +39,7 @@ use crate::map::entities::EntityCategory;
 use crate::rules::overlay_types::OverlayTypeRegistry;
 use crate::rules::ruleset::RuleSet;
 use crate::sim::movement::ground_pose::position_world_xy;
+use crate::sim::team_script_vm::{TeamEndReason, TeamEndRecord};
 use crate::sim::world::FrameEffects;
 use crate::sim::world::Simulation;
 
@@ -578,13 +579,32 @@ impl Simulation {
     /// outcome, then every member leaves, head first, and the team is gone.
     /// The house's and TeamType's live-team counts (`+0x566C`, `+0xDC`) are
     /// counted from the team list.
+    ///
+    /// `reason` is diagnostics only. It is read out of the team before the
+    /// members are released - after that the count is zero and every departure
+    /// looks the same - and it changes nothing about what the destructor does.
     pub(crate) fn destroy_team(
         &mut self,
         team_id: u64,
         rules: &RuleSet,
         frame_effects: FrameEffects<'_>,
+        reason: TeamEndReason,
     ) {
         let team_rules = TeamRules::new(&rules.general, self.session.game_mode_nonzero());
+        if let Some(team) = self.team_script_vm.teams.get(&team_id) {
+            // Read the fields directly rather than through `succeeded()` and
+            // `member_count()`: those accessors are gated on test or telemetry,
+            // and this has to compile in an ordinary build too.
+            let record = TeamEndRecord {
+                team_id,
+                frame: self.session.binary_frame() as i32,
+                reason,
+                succeeded: team.succeeded_flag(),
+                cursor: team.cursor(),
+                members: team.member_total(),
+            };
+            self.team_script_vm.note_ended(record);
+        }
         self.team_script_vm
             .record_trigger_outcome(team_id, &team_rules);
         self.team_remove_all_members(team_id, rules, frame_effects);
@@ -614,7 +634,12 @@ impl Simulation {
                 break;
             };
             if type_id == Some(team_type) {
-                self.destroy_team(id, rules, frame_effects);
+                self.destroy_team(
+                    id,
+                    rules,
+                    frame_effects,
+                    TeamEndReason::DestroyedByAction,
+                );
             } else {
                 index += 1;
             }

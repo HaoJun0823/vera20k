@@ -860,7 +860,12 @@ impl Simulation {
             }
         }
         if members.is_empty() && transports.is_empty() {
-            self.destroy_team(team, rules, effects);
+            self.destroy_team(
+                team,
+                rules,
+                effects,
+                crate::sim::team_script_vm::TeamEndReason::ReinforcementEmpty,
+            );
             return None;
         }
         //65DF63..65E004: both +30 temporary chains prepend on construction.

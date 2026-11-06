@@ -230,7 +230,12 @@ pub(crate) fn select_team_types_with(
         } else if let Some(oldest) = oldest_defense_team(sim, owner) {
             teams -= 1;
             defense_full = true;
-            sim.destroy_team(oldest, rules, frame_effects);
+            sim.destroy_team(
+                oldest,
+                rules,
+                frame_effects,
+                crate::sim::team_script_vm::TeamEndReason::CulledForTeamCap,
+            );
         }
         if teams < team_cap {
             picked = draw_ai_trigger(sim, rules, owner, enemy, defense_full, eligible, draw);

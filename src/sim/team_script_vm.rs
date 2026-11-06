@@ -495,6 +495,57 @@ pub struct TeamScriptMember {
     pub member_type: TeamMemberTypeIdentity,
 }
 
+/// How many departures the diagnostics keep. A match can form and disband teams
+/// for a long time; the oldest records are dropped so the list stays bounded
+/// without limiting play.
+pub const ENDED_CAPACITY: usize = 256;
+
+/// Why a team left the live array.
+///
+/// `destroy_team` is the only removal path (`TeamClass::~TeamClass @ 0x006E8DE0`
+/// through the scalar deleting destructor), but it is reached from seven places
+/// for five different reasons, and a controller outside the engine needs to tell
+/// them apart: "the script finished" and "the team was culled to stay under the
+/// house's team cap" are opposite outcomes that look identical from an id merely
+/// disappearing.
+///
+/// Diagnostics only. Nothing reads it back into play, and it is deliberately not
+/// in `hash_state`, which lists its fields explicitly and follows the captured
+/// YR 1.001 `TeamClass::ComputeCRC` sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TeamEndReason {
+    /// The script ran off the end of its action list (`cursor >= count`), which
+    /// is how a script that completes looks from outside. `actions.rs`, arm 24/49.
+    ScriptCompleted,
+    /// The team went empty and had once been full, or could not fill before
+    /// `DissolveUnfilledTeamDelay=` (`dissolves()`, `TeamClass::AI @ 0x006E9140`).
+    /// Covers both "every member died" and "recruitment timed out".
+    Dissolved,
+    /// A new team needed room: the house was at `TotalAITeamCap=` and its oldest
+    /// defensive team was culled (`ai_team_creation.rs`).
+    CulledForTeamCap,
+    /// Every member of the team was gone while building a reinforcement wave.
+    ReinforcementEmpty,
+    /// `TeamTypeClass::DestroyAll6F0A70`, from TAction 5: every team of one type,
+    /// whatever its state.
+    DestroyedByAction,
+}
+
+/// One team's departure, kept for the diagnostics that asked for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TeamEndRecord {
+    pub team_id: u64,
+    pub frame: i32,
+    pub reason: TeamEndReason,
+    /// Whether `succeeded` was set when it went. Note that this flag only means
+    /// the script reached action 49; see `TeamScriptState::succeeded`.
+    pub succeeded: bool,
+    /// The script cursor it had reached.
+    pub cursor: i32,
+    /// How many members it still held.
+    pub members: usize,
+}
+
 /// The first unported action a team's script reached, kept for diagnostics.
 /// The team stays on it, running everything else `TeamClass::AI` does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -673,6 +724,21 @@ impl TeamScriptState {
         self.cursor
     }
 
+    /// The action-49 flag, unconditionally.
+    ///
+    /// `succeeded()` is the same value behind a test-or-telemetry gate, which is
+    /// right for an observer outside the crate but not for `destroy_team`, whose
+    /// departure record is written in every build. Two accessors because they have
+    /// two audiences; neither mutates anything.
+    pub(crate) fn succeeded_flag(&self) -> bool {
+        self.succeeded
+    }
+
+    /// How many members the team holds, unconditionally; see `succeeded_flag`.
+    pub(crate) fn member_total(&self) -> usize {
+        self.members.len()
+    }
+
     #[cfg(test)]
     pub fn advance_pending(&self) -> bool {
         self.advance_pending
@@ -798,6 +864,13 @@ pub struct TeamScriptVm {
     /// with them.
     #[serde(default)]
     member_team: BTreeMap<u64, u64>,
+    /// Every team that left the live array, in departure order, with the reason.
+    ///
+    /// Diagnostics only: `hash_state` lists its fields explicitly and does not
+    /// read this, and nothing in play consults it. Bounded by
+    /// [`ENDED_CAPACITY`] so a long match cannot grow it without limit.
+    #[serde(default)]
+    ended: Vec<TeamEndRecord>,
     /// Each object's team to rejoin (`TechnoClass+0x434`): a
     /// `RejoinTeamIfLimboed=` Foot's team as it LimboLaunches at an Infantry
     /// target (`TechnoClass::Fire @ 0x006FF7A3..0x006FF7E9`), which its
@@ -923,6 +996,24 @@ impl TeamScriptVm {
     /// Live teams in TeamClass::Array order (their construction order).
     pub fn teams_in_order(&self) -> impl Iterator<Item = &TeamScriptState> {
         self.teams.values()
+    }
+
+    /// Every team that has left the live array, oldest first, with its reason.
+    ///
+    /// The complement of [`Self::teams_in_order`]: between them a caller outside
+    /// the engine can account for every team id it ever saw, which is what makes
+    /// "the script finished" distinguishable from "the team was culled".
+    pub fn ended_in_order(&self) -> &[TeamEndRecord] {
+        &self.ended
+    }
+
+    /// Record a departure. Called from `destroy_team` only, after the state has
+    /// been read and before the team is removed.
+    pub(crate) fn note_ended(&mut self, record: TeamEndRecord) {
+        if self.ended.len() >= ENDED_CAPACITY {
+            self.ended.remove(0);
+        }
+        self.ended.push(record);
     }
 
     /// TeamType6F1F70: first live registry entry of this exact type, without

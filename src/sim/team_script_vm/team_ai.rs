@@ -231,7 +231,12 @@ impl Simulation {
                     frame_effects,
                 );
             }
-            self.destroy_team(team_id, rules, frame_effects);
+            self.destroy_team(
+                team_id,
+                rules,
+                frame_effects,
+                crate::sim::team_script_vm::TeamEndReason::Dissolved,
+            );
             return;
         }
         // The head member's warp-in (`vt+0x1D8`, Techno `+0x271`).
@@ -338,7 +343,12 @@ impl Simulation {
                         frame_effects,
                     );
                 }
-                self.destroy_team(team_id, rules, frame_effects);
+                self.destroy_team(
+                    team_id,
+                    rules,
+                    frame_effects,
+                    crate::sim::team_script_vm::TeamEndReason::Dissolved,
+                );
                 return false;
             }
         } else {
