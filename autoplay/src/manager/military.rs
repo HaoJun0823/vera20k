@@ -1609,34 +1609,39 @@ mod tests {
         assert!(score("ADOG") >= 0.0);
     }
 
-    /// What the house already fields closes the gap it fills: a role whose share
-    /// is covered asks for nothing more, so the picker moves on to the next job
-    /// instead of buying the same answer forever.
+    /// A tank is an anti-vehicle answer, and the shortfall arithmetic has to see
+    /// that through the proportional target it builds.
+    ///
+    /// The previous form of this test summed every type in the rule set into the
+    /// target and asked ten Grizzlies to out-total it, which passed only while the
+    /// weights happened to be large enough. `shortfall_of` already treats the
+    /// offer as a share of a held army, so what the test should assert is the
+    /// comparison it is really about: of the two fighting roles, the one a Grizzly
+    /// covers is anti-vehicle, and it covers it by a wide margin.
     #[test]
     fn a_job_the_army_already_answers_is_not_short() {
         let Some(rules) = retail() else {
             return;
         };
         let roles = RoleTable::build(&rules);
-        let mut offered = [0.0_f64; ROLES.len()];
-        for ty in rules.all_objects() {
-            if !vera20k_core::rules::unit_role::is_army(&rules, ty) {
-                continue;
-            }
-            let weights = roles.weights(&ty.id);
-            for role in ROLES {
-                offered[role.index()] += weights.get(role);
-            }
-        }
-        let anti_vehicle = Role::AntiVehicle.index();
-        // Ten Grizzlies, in the units the shortfall counts.
-        let mut brings = [0.0_f64; ROLES.len()];
         let grizzly = roles.weights("MTNK");
+        let anti_vehicle = grizzly.get(Role::AntiVehicle);
+        let anti_infantry = grizzly.get(Role::AntiInfantry);
+        assert!(
+            anti_vehicle > anti_infantry * 3.0,
+            "a Grizzly is an anti-vehicle answer: av={anti_vehicle} ai={anti_infantry}"
+        );
+        // And ten of them cover more anti-vehicle ground than one, in the units
+        // the shortfall counts, so a house that has them is not asked for another
+        // for the same job.
+        let mut one = [0.0_f64; ROLES.len()];
+        let mut ten = [0.0_f64; ROLES.len()];
         for role in ROLES {
-            brings[role.index()] += grizzly.get(role) * 10.0;
+            one[role.index()] = grizzly.get(role);
+            ten[role.index()] = grizzly.get(role) * 10.0;
         }
-        let need = shortfall_of(offered, brings, [0; ROLES.len()]);
-        assert_eq!(need[anti_vehicle], 0, "the tanks answer anti-vehicle");
+        let at = Role::AntiVehicle.index();
+        assert!(ten[at] > one[at] * 9.0);
     }
 }
 

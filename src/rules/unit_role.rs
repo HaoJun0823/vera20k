@@ -223,31 +223,23 @@ impl RoleTable {
                 raw.insert(ty.id.to_ascii_uppercase(), assess(rules, ty));
             }
         }
-        // How hard the best type hits, on the log scale: a weapon that fires
-        // every four frames must not be allowed to make every other type look
-        // like it has no role at all.
-        let best_punch = raw
-            .values()
-            .map(|profile| profile.dps.ln_1p())
-            .fold(0.0, f64::max);
-
-        // Half of a weight is the job, half is how hard the type hits at it.
+        // No separate punch term.
+        //
+        // A weight used to be `aim * (PUNCH_FLOOR + (1 - PUNCH_FLOOR) * punch)`,
+        // where `punch` was one total damage rate for the whole type on a log
+        // scale. That was the second half of the same mistake: `aim` is now the
+        // real damage against the role's own armour, so multiplying by a total
+        // rate counts the damage twice, and counting it once from the wrong weapon.
+        // Tanya and the Navy SEAL both carry a `Sapper` at 2500 damage for walls,
+        // and a total-rate punch read that bomb for both of them while they fought
+        // with pistols and an SMG.
         let mut scored: BTreeMap<String, RoleWeights> = raw
             .iter()
             .map(|(id, raw)| {
-                let punch = if best_punch > 0.0 {
-                    raw.dps.ln_1p() / best_punch
-                } else {
-                    0.0
-                };
                 let mut weights = RoleWeights::default();
                 for role in ROLES {
                     let at = role.index();
-                    weights.0[at] = if role.is_job_only() {
-                        raw.aim[at]
-                    } else {
-                        raw.aim[at] * (PUNCH_FLOOR + (1.0 - PUNCH_FLOOR) * punch)
-                    };
+                    weights.0[at] = raw.aim[at];
                 }
                 (id.clone(), weights)
             })
@@ -258,19 +250,67 @@ impl RoleTable {
         // "we are short of anti-air" has to be answerable in a rule set where
         // only two types can reach the sky, and no amount of good anti-tank
         // options may drown it out.
-        let mut best = [0.0f64; ROLES.len()];
-        for weights in scored.values() {
-            for at in 0..ROLES.len() {
-                best[at] = best[at].max(weights.0[at]);
+        //
+        // One ceiling for every role.
+        //
+        // Scaling each role against its own best answer made the columns
+        // incomparable, and that is not a cosmetic problem: a Grizzly's round is
+        // aimed at armour, and dividing anti-infantry by the best anti-infantry
+        // type and anti-vehicle by the best anti-vehicle type turned its 0.953
+        // against vehicles and 0.217 against infantry into 0.004 and 0.007 - the
+        // ordering of its own two jobs, inverted by the scale it was printed on.
+        // A weight answers "how much of this job does this type do", so one unit
+        // of weight has to mean the same thing in every column and on every row.
+        //
+        // The ceiling is taken from priced types only. A campaign bomber carries
+        // the heaviest anti-infantry figure in the rule set - the `BPLN` reads
+        // 1.000 and everything else falls under 0.22 - and it costs nothing and
+        // cannot be built, so scoring against it compressed the whole ground
+        // roster into the bottom fifth of the scale.
+        let mut ceiling = 0.0f64;
+        let mut job_ceiling = [0.0f64; ROLES.len()];
+        for (id, weights) in &scored {
+            // Types no house buys never set the scale. Retail marks them with a
+            // nominal price: `ARND` and `CLNT` are the Terminator and Clint
+            // Eastwood easter eggs at ten credits, and between them they carried
+            // the highest anti-infantry figure in the rule set - a `TERMIGUN`
+            // firing 125 damage every five frames - so every real unit was being
+            // divided by a joke. The campaign bomber is the same problem at zero.
+            if raw
+                .get(id)
+                .is_none_or(|profile| profile.cost < PURCHASABLE_COST)
+            {
+                continue;
+            }
+            for role in ROLES {
+                let at = role.index();
+                if role.is_job_only() {
+                    job_ceiling[at] = job_ceiling[at].max(weights.0[at]);
+                } else {
+                    ceiling = ceiling.max(weights.0[at]);
+                }
             }
         }
 
         let mut profiles = BTreeMap::new();
         for (id, raw) in raw {
             let mut weights = scored.remove(&id).unwrap_or_default();
-            for (at, weight) in weights.0.iter_mut().enumerate() {
-                *weight = if best[at] > 0.0 {
-                    *weight / best[at]
+            for role in ROLES {
+                let at = role.index();
+                // The two job-only roles are ratios - seeing, carrying, being an
+                // engineer - and the fighting roles are damage per second. One
+                // ceiling cannot serve both: a sight of nine cells is nothing next
+                // to a hundred damage a second, so the shared scale flattened
+                // `Scout` to zero for every type in the game. They keep a ceiling
+                // of their own, which costs nothing because no code compares a
+                // job-only weight against a fighting one.
+                let divisor = if role.is_job_only() {
+                    job_ceiling[at]
+                } else {
+                    ceiling
+                };
+                weights.0[at] = if divisor > 0.0 {
+                    weights.0[at] / divisor
                 } else {
                     0.0
                 };
@@ -318,6 +358,9 @@ struct RawProfile {
     speed: i32,
     /// `Sight=`, in cells.
     sight: i32,
+    /// `Cost=`. Zero marks a type no house buys, which keeps such a type out of
+    /// the per-role ceiling the weights are normalised against.
+    cost: i32,
 }
 
 /// The armour classes each role answers, as indices into `Verses=`
@@ -344,6 +387,27 @@ const PUNCH_FLOOR: f64 = 0.5;
 /// things that shoot back, which is what makes a piece artillery rather than
 /// merely long-ranged.
 const LINE_RANGE_CELLS: f64 = 6.0;
+/// Single-shot damage past which a weapon is an ability, not a way of fighting.
+///
+/// Retail's ordinary guns top out at a hundred: a Prism tank's `Comet` is 100 and
+/// an Apocalypse's `120mmx` is 90. What goes past this is a special: the Magnetron's
+/// `MagneticBeam` lifts a vehicle for 5000, Tanya's and the Navy SEAL's `Sapper`
+/// levels a building for 2500, and the campaign bomber's `Maverick3` drops 750.
+///
+/// Those were setting the scale for everything else. `MagneticBeam` reads 3750
+/// permille against vehicle armour, forty times a Grizzly's best, so it became the
+/// ceiling every type was divided by and the whole roster compressed to two
+/// decimal places. An ability belongs in the army's plan - the Magnetron is worth
+/// building - but it is not "how hard does this hit", which is what a role weight
+/// answers.
+const ABILITY_DAMAGE: i32 = 500;
+/// Price below which a type is an easter egg or a scenario prop, not a purchase.
+///
+/// Retail prices its jokes at ten credits - the Terminator and the Clint Eastwood
+/// infantry - and its campaign props at zero. A real unit starts at two hundred
+/// for a rifleman, so a hundred separates "something a house buys" from
+/// "something a map places" with room on both sides.
+const PURCHASABLE_COST: i32 = 100;
 /// `Speed=` is a percentage and `Sight=` is a count of cells; these are the
 /// scales that put them on one axis, not thresholds a type has to clear.
 const SCOUT_SPEED_SCALE: f64 = 100.0;
@@ -371,6 +435,10 @@ fn assess(rules: &RuleSet, ty: &ObjectType) -> RawProfile {
         if weapon.never_use {
             continue;
         }
+        // An ability is not a way of fighting; see `ABILITY_DAMAGE`.
+        if weapon.damage >= ABILITY_DAMAGE {
+            continue;
+        }
         let shots = weapon.damage.max(0) as f64 * weapon.burst.max(1) as f64;
         let rate = if weapon.rof > 0 {
             60.0 / f64::from(weapon.rof)
@@ -391,12 +459,27 @@ fn assess(rules: &RuleSet, ty: &ObjectType) -> RawProfile {
             .and_then(|name| rules.warhead(name))
             .map_or([1.0; 11], |warhead| warhead.verses_f64);
 
-        // How much of the damage each bracket lets through.
+        // How much damage this weapon actually puts into each bracket: the raw
+        // rate times the share the warhead lets through.
+        //
+        // The share alone was the defect. `Verses=` is a penetration ratio, not a
+        // strength, so scoring a type by it rewards a wide warhead and penalises a
+        // hard-hitting one for the same real damage. Measured on retail: Tanya's
+        // `DoublePistols` fire 125 damage every 5 frames for a raw 1500, and pass
+        // 25% through infantry armour, for 375 real; the Navy SEAL's `MP5` fire the
+        // same 125 every 10 frames for 750 raw and pass 50%, also 375. The two are
+        // exactly equal against infantry and the table read the SEAL at 0.900 and
+        // Tanya at 0.675, because 0.50 > 0.25 and nothing else was in the number.
+        //
+        // `versus` therefore carries the rate, and the normalisation in
+        // `RoleTable::build` — which already scales each role against the best
+        // answer the rule set offers for it — is what turns it into a weight.
         let versus = |armours: &[usize]| -> f64 {
-            armours.iter().map(|&at| verses[at]).sum::<f64>() / armours.len() as f64
+            armours.iter().map(|&at| verses[at]).sum::<f64>() / armours.len() as f64 * weapon_dps
         };
-        // The hardest this weapon hits anything, which is what it would carry
-        // out of the line's reach.
+        // The share this weapon's warhead lets through the toughest bracket it can
+        // reach, with no rate in it: artillery is scored on the reach it carries
+        // plus that share, and the rate already arrived with `aim` below.
         let mut payload = 0.0f64;
 
         // What it can engage at all is a fact, not a degree: a weapon that
@@ -408,10 +491,10 @@ fn assess(rules: &RuleSet, ty: &ObjectType) -> RawProfile {
                 (Role::AntiVehicle, VEHICLE_ARMOURS),
                 (Role::AntiStructure, STRUCTURE_ARMOURS),
             ] {
-                let mean = versus(armours);
+                let real = versus(armours);
                 let at = role.index();
-                aim[at] = aim[at].max(mean);
-                payload = payload.max(mean);
+                aim[at] = aim[at].max(real);
+                payload = payload.max(real);
             }
         }
         if projectile.aa {
@@ -448,6 +531,7 @@ fn assess(rules: &RuleSet, ty: &ObjectType) -> RawProfile {
         range_leptons,
         speed: ty.speed,
         sight: ty.sight,
+        cost: ty.cost,
     }
 }
 
@@ -458,10 +542,26 @@ fn assess(rules: &RuleSet, ty: &ObjectType) -> RawProfile {
 /// everything — so letting them in would make every elite-capable type look
 /// like it has no speciality at all. Elite weapons are only a fallback for a
 /// type whose ordinary list is empty.
+///
+/// A transport's `Weapon=` list is not its own firepower. The IFV fills
+/// seventeen slots and the later ones are its passengers' guns — `CRNuke`,
+/// `CRMindControl`, `CRRadBeamWeapon` and the rest — which it can only fire while
+/// carrying that particular infantryman and only one at a time. Scoring every
+/// entry made the IFV the best answer to all seven roles at once, off a nuclear
+/// warhead it can reach only by loading a specific soldier: measured, it read
+/// 0.875 anti-infantry against Tanya's 0.750 while its own `HoverMissile` does
+/// sixty damage a second against her fifteen hundred. The first slot is the
+/// vehicle; the rest belong to whoever is riding.
 fn weapon_names(ty: &ObjectType) -> Vec<String> {
     let mut names = dedup(&ty.weapon_list);
+    if ty.passengers > 0 {
+        names.truncate(1);
+    }
     if names.is_empty() {
         names = dedup(&ty.elite_weapon_list);
+        if ty.passengers > 0 {
+            names.truncate(1);
+        }
     }
     names
 }

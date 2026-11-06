@@ -10,7 +10,7 @@ fn main() {
     };
     let rules = retail.rules;
     let table = RoleTable::build(&rules);
-    let mut rows: Vec<(i32, String, Vec<f64>)> = Vec::new();
+    let mut rows: Vec<(i32, String, Vec<f64>, f64)> = Vec::new();
     for ty in rules.all_objects() {
         // Aircraft too: `is_army` admits them and `RoleTable::build` scores them,
         // so omitting them here made the one type that can actually break a wall
@@ -29,6 +29,7 @@ fn main() {
             ty.cost,
             ty.id.to_ascii_uppercase(),
             profile.weights.0.to_vec(),
+            profile.dps,
         ));
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
@@ -37,13 +38,13 @@ fn main() {
         .map(|role| format!("{role:?}"))
         .collect::<Vec<_>>()
         .join(" ");
-    println!("{:<10}{:>5}  {header}", "type", "cost");
-    for (cost, id, weights) in &rows {
+    println!("{:<10}{:>5}  {header}   dps", "type", "cost");
+    for (cost, id, weights, dps) in &rows {
         let cells = weights
             .iter()
             .map(|w| format!("{w:.3}"))
             .collect::<Vec<_>>()
             .join(" ");
-        println!("{id:<10}{cost:>5}  {cells}");
+        println!("{id:<10}{cost:>5}  {cells}  {dps:6.1}");
     }
 }
