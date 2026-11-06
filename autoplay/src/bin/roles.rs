@@ -12,9 +12,13 @@ fn main() {
     let table = RoleTable::build(&rules);
     let mut rows: Vec<(i32, String, Vec<f64>)> = Vec::new();
     for ty in rules.all_objects() {
+        // Aircraft too: `is_army` admits them and `RoleTable::build` scores them,
+        // so omitting them here made the one type that can actually break a wall
+        // invisible in the table it was chosen from. The `ORCA` reads 168 permille
+        // against concrete and never appeared in this dump.
         if !matches!(
             ty.category,
-            ObjectCategory::Infantry | ObjectCategory::Vehicle
+            ObjectCategory::Infantry | ObjectCategory::Vehicle | ObjectCategory::Aircraft
         ) {
             continue;
         }
