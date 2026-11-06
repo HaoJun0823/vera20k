@@ -21,6 +21,8 @@ pub mod bridge_test_evidence;
 mod building_after_destruction;
 #[cfg(test)]
 mod building_after_destruction_tests;
+#[cfg(test)]
+mod autoplay_command_path_tests;
 pub(crate) mod building_anim;
 mod building_scatter;
 mod building_upgrade_art;
