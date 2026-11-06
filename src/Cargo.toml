@@ -19,6 +19,11 @@ path = "core_lib.rs"
 name = "parity-digest"
 path = "bin/parity-digest.rs"
 
+# Read-only probe of the retail team AI over a match (see its module doc).
+[[bin]]
+name = "autoplay-teams"
+path = "bin/autoplay-teams.rs"
+
 # Release-build simulation tick benchmark at scale (see its module doc).
 [[bin]]
 name = "sim-bench"
