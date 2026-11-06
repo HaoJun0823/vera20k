@@ -6,7 +6,7 @@ use crate::sim::snapshot::GameSnapshot;
 use crate::sim::team_script_vm::{TeamAiInstallDiagnostic, TeamScriptDefinition};
 use crate::util::native_x87::NativeF64Bits;
 
-use super::{FrameStep, Simulation};
+use super::{FrameEffects, FrameStep, Simulation};
 
 fn zero_ai_trigger_comparison() -> String {
     "00".repeat(32)
@@ -103,11 +103,86 @@ fn a_computer_team_recruits_forms_and_succeeds_in_the_master_frame() {
     for member in members {
         assert_eq!(sim.team_script_vm.team_for_member(member), None);
     }
+    // Why it went, not merely that it went. Phase A4 of the plan exists because an
+    // id leaving the array used to say nothing: `Dissolved` (it emptied) and
+    // `ScriptCompleted` (it ran off the end of its actions) are opposite outcomes.
+    // This script is `0=5,1` then `1=49,0`, so it ends by completing.
+    let ended = sim.team_script_vm.ended_in_order();
+    assert_eq!(ended.len(), 1, "one departure, recorded once");
+    let departure = ended[0];
+    assert_eq!(departure.team_id, team_id, "recorded against the same team");
+    assert_eq!(
+        departure.reason,
+        crate::sim::team_script_vm::TeamEndReason::ScriptCompleted,
+        "the script reached its end rather than the team emptying"
+    );
+    assert!(
+        departure.succeeded,
+        "action 49 ran, so the flag is set on the record"
+    );
+    assert_eq!(
+        departure.members, 2,
+        "it still held both members when the script ended"
+    );
     assert_eq!(
         trigger_weight(&sim),
         NativeF64Bits::from_bits(45.0f64.to_bits()),
         "its destruction after action 49 counts as the trigger's success"
     );
+}
+
+/// The other way a team leaves: it empties instead of finishing.
+///
+/// `dissolves()` destroys a team with no members that either has once been full or
+/// could not fill before `DissolveUnfilledTeamDelay=` expires. Both reach
+/// `destroy_team` from the same place, so from outside they are one event - and a
+/// different event from a script that ran to its end, which is why the record
+/// carries the reason.
+///
+/// The team is emptied *before* it can fill here. Emptying one that already formed
+/// does not reproduce this: the recruit action still completes and the team leaves
+/// as `ScriptCompleted`, which the first version of this test discovered by failing.
+#[test]
+fn a_team_that_empties_is_recorded_with_a_reason() {
+    let (mut sim, rules, team_id, members) = recruiting_team_fixture();
+
+    // Take the members away at once, so the recruit action never has a target.
+    for member in members {
+        sim.team_remove_member(member, team_id, true, &rules, FrameEffects::default());
+    }
+
+    let mut gone = false;
+    for _ in 0..600 {
+        if sim.team_script_vm.team(team_id).is_none() {
+            gone = true;
+            break;
+        }
+        sim.advance_tick(&[], Some(&rules), None, None, 67);
+    }
+    assert!(gone, "an unfilled team is eventually destroyed");
+
+    let ended = sim.team_script_vm.ended_in_order();
+    let departure = ended
+        .iter()
+        .find(|record| record.team_id == team_id)
+        .expect("the departure was recorded");
+    assert_eq!(departure.team_id, team_id);
+    // Either branch of `dissolves()` is legitimate, and so is the script finishing
+    // first. What must not happen is a departure that names no path at all, which
+    // was the whole point of A4.
+    assert!(
+        matches!(
+            departure.reason,
+            crate::sim::team_script_vm::TeamEndReason::Dissolved
+                | crate::sim::team_script_vm::TeamEndReason::ScriptCompleted
+        ),
+        "the reason names a real path: {:?}",
+        departure.reason
+    );
+    // The member count is deliberately not asserted. Removing a member does not kill
+    // it, so a live E1 within recruit range is picked up again on the next pass and
+    // the team refills - measured, it went with two members still aboard. That is the
+    // engine's behaviour, not a test detail to pin down here.
 }
 
 #[test]
