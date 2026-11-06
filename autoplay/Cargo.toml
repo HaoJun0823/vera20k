@@ -1,0 +1,18 @@
+[package]
+name = "vera20k-autoplay"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Automated player for Vera20k: world model, task management and command arbitration."
+
+[dependencies]
+# The engine. A separate crate on purpose: an automated player that reaches into
+# `vera20k-core`'s internals cannot be tested against a different build, and the
+# compiler enforces that everything it touches is public API.
+vera20k-core = { path = "../src" }
+
+[dev-dependencies]
+# The same crate with its fixture hooks on: retail rules, flat ground and the house
+# registries a test scene needs. Only tests see this feature, so the shipped crate
+# cannot depend on fixture code by accident.
+vera20k-core = { path = "../src", features = ["test-support"] }
