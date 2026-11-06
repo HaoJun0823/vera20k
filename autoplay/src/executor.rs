@@ -55,7 +55,7 @@ impl Executor {
     ) -> Execution {
         let frame = runtime.advance_frame(
             std::slice::from_ref(&validated.envelope),
-            1000 / vera20k_core::util::fixed_math::RA2_LOGIC_FRAMES_PER_SECOND,
+            vera20k_core::headless_scenario::SIM_TICK_MS,
             TickLane::Ordinary,
             FrameEffects::default(),
         );
@@ -80,7 +80,7 @@ impl Executor {
     pub fn submit_idle(runtime: &mut vera20k_core::sim::runtime::SimRuntime) -> Execution {
         let frame = runtime.advance_frame(
             &[],
-            1000 / vera20k_core::util::fixed_math::RA2_LOGIC_FRAMES_PER_SECOND,
+            vera20k_core::headless_scenario::SIM_TICK_MS,
             TickLane::Ordinary,
             FrameEffects::default(),
         );
