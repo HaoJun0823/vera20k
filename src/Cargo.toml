@@ -24,6 +24,11 @@ path = "bin/parity-digest.rs"
 name = "autoplay-teams"
 path = "bin/autoplay-teams.rs"
 
+# B1 reachability probe: read state, form a move, admit it, read the result.
+[[bin]]
+name = "autoplay-slice"
+path = "bin/autoplay-slice.rs"
+
 # Release-build simulation tick benchmark at scale (see its module doc).
 [[bin]]
 name = "sim-bench"
