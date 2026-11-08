@@ -117,7 +117,63 @@ fn a_unit_inside_a_transport_is_not_obviously_free_to_act() {
     assert!(avail.is_not_obviously_blocked());
 }
 
-/// A destroyed object has no availability, which is an answer rather than an error.
+/// Mind control is read, and its absence is not the same as its presence.
+///
+/// This is the case that defeats an ownership check: a controlled unit keeps its original
+/// owner, so `eligibility` would call it eligible while it obeys somebody else. The engine
+/// exposes it through `MindControlLink::controller()`, which is what makes it readable at all.
+///
+/// Establishing control is not done here because `MindControlLink` has no public constructor -
+/// it is set by the capture path, which is a different system with its own tests. What this can
+/// establish is that the field is read from the engine rather than defaulted: a fresh unit
+/// reports no controller, and the accessor is the link's own.
+#[test]
+fn mind_control_is_absent_for_an_uncontrolled_unit() {
+    let Some((sim, _rules, _americans, tank)) = scene() else {
+        return;
+    };
+    let avail = availability_of(&sim, tank).expect("exists");
+    assert_eq!(
+        avail.mind_controlled_by, None,
+        "an uncontrolled unit has no controller"
+    );
+    assert!(!avail.is_mind_controlled());
+    // And the entity's own link agrees with what was read, so the field is not a separate copy.
+    let entity = sim.entities().get(tank).expect("exists");
+    assert_eq!(
+        entity.mind_control.controller(),
+        avail.mind_controlled_by,
+        "the availability value is the link's, not a second source"
+    );
+}
+
+/// A controlled unit would be reported as blocked, which is why `is_not_obviously_blocked`
+/// has to consult it.
+#[test]
+fn a_controlled_unit_is_not_obviously_free_to_act() {
+    // Constructed rather than spawned: `MindControlLink` has no public setter, and going
+    // through the real capture path would be testing that system instead of this one. The
+    // point is the relationship between the field and the predicate.
+    let controlled = crate::availability::Availability {
+        ammo: None,
+        inside_transport: None,
+        deployed: false,
+        target: None,
+        cargo: None,
+        cargo_capacity: None,
+        mind_controlled_by: Some(999),
+    };
+    assert!(controlled.is_mind_controlled());
+    assert!(
+        !controlled.is_not_obviously_blocked(),
+        "a unit obeying somebody else must not be treated as free to act"
+    );
+    assert!(
+        controlled.has_ammo(),
+        "and it may still have ammunition - the two are different questions"
+    );
+}
+
 #[test]
 fn a_gone_object_has_no_availability() {
     let Some((mut sim, _rules, _americans, tank)) = scene() else {

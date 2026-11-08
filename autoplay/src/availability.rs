@@ -21,10 +21,16 @@
 //! subtlety, because a second calculation of the same thing is a second owner. Every field here
 //! is a read.
 //!
-//! What is not available, and is named rather than guessed: whether a unit is disabled, frozen,
-//! mind-controlled or otherwise unable to act. The engine does not expose those as queries
-//! today. A planner that needs them must get them added to the engine first, and until then it
-//! must not assume a unit is free to act just because this struct says nothing.
+//! What is not available, and is named rather than guessed: whether a unit is paralysed, EMP'd
+//! or otherwise disabled. The engine has no query for those today - `disable_weapons` exists as
+//! a `pub(crate)` field inside the Phobos multiplier struct, which is not a general answer. A
+//! planner that needs it must get it added to the engine first, and until then it must not
+//! assume a unit is free to act just because this struct is silent.
+//!
+//! Mind control, by contrast, *is* readable and was wrongly assumed unavailable once already:
+//! `TechnoClass+0x2C0` is exposed through `MindControlLink::controller()`. It is included because
+//! it is the case that defeats ownership checks - a mind-controlled unit keeps its original
+//! owner and would pass `eligibility` while obeying somebody else.
 
 use vera20k_core::sim::combat::TargetKind;
 use vera20k_core::sim::world::Simulation;
@@ -53,6 +59,13 @@ pub struct Availability {
     pub cargo: Option<u32>,
     /// The capacity of its hold, for a transport.
     pub cargo_capacity: Option<u32>,
+    /// Who controls it, when that is not its owner.
+    ///
+    /// Mind control is the case that makes ownership alone insufficient: a unit keeps its
+    /// owner and looks normal in every field here while obeying somebody else. Read from
+    /// `TechnoClass+0x2C0` rather than inferred, because inferring it would mean recomputing
+    /// the engine's control rules.
+    pub mind_controlled_by: Option<u64>,
 }
 
 impl Availability {
@@ -66,11 +79,20 @@ impl Availability {
 
     /// Whether it could be ordered to move or fight at all.
     ///
-    /// Does not cover being disabled or mind-controlled, because the engine will not say. The
-    /// name says "not obviously blocked" rather than "able", so a caller is not misled into
-    /// thinking this is the whole answer.
+    /// Does not cover being paralysed or disabled, because the engine has no query for those
+    /// today - see the module doc. The name says "not obviously blocked" rather than "able",
+    /// so a caller is not misled into thinking this is the whole answer.
     pub fn is_not_obviously_blocked(&self) -> bool {
-        self.inside_transport.is_none() && self.has_ammo()
+        self.inside_transport.is_none() && self.has_ammo() && !self.is_mind_controlled()
+    }
+
+    /// Whether somebody other than the owner is driving it.
+    ///
+    /// The case ownership checks miss: a mind-controlled unit still reports its original
+    /// owner, so [`crate::eligibility`] would call it eligible while it obeys somebody else.
+    /// Anything that commands units has to consult this too.
+    pub fn is_mind_controlled(&self) -> bool {
+        self.mind_controlled_by.is_some()
     }
 
     /// Whether it is a transport carrying something.
@@ -103,6 +125,7 @@ pub fn availability_of(sim: &Simulation, id: u64) -> Option<Availability> {
         target: entity.archive_target(),
         cargo,
         cargo_capacity,
+        mind_controlled_by: entity.mind_control.controller(),
     })
 }
 
