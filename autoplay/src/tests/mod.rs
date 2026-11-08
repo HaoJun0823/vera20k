@@ -3,6 +3,7 @@
 
 mod basic_five;
 mod control_and_arbiter;
+mod dispatch;
 mod handover;
 mod observe;
 mod world_and_trace;
