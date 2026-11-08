@@ -3,6 +3,7 @@
 
 mod basic_five;
 mod claims;
+mod conflict;
 mod control_and_arbiter;
 mod dispatch;
 mod handover;

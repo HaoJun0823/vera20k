@@ -20,6 +20,7 @@
 use vera20k_core::sim::command::{Command, CommandEnvelope};
 use vera20k_core::sim::world::Simulation;
 
+use crate::claims::{Claims, Conceded, Source};
 use crate::control::{ControlState, Refusal, Subsystem};
 
 /// An order that passed every check, with the frame it becomes due on.
@@ -83,6 +84,41 @@ impl Arbiter {
         subject: u64,
         payload: Command,
     ) -> Admission {
+        // Every caller that does not say otherwise is this crate, and this crate is the
+        // lowest source. Delegating rather than repeating the checks keeps one body for
+        // them: a copy would drift, and drift here means an order that passes one path and
+        // fails the other.
+        Self::admit_with_source(
+            sim,
+            control,
+            None,
+            Source::AutoPlay,
+            subsystem,
+            subject,
+            payload,
+        )
+    }
+
+    /// Check one order, conceding to a better claim on the same unit.
+    ///
+    /// `claims` is optional because a caller that has no arbiter state - every existing
+    /// test - still gets the permission and ownership checks. Passing it adds the source
+    /// ranking, which only matters once more than one party can write the same unit.
+    ///
+    /// The order of the checks is deliberate. Permission first, because a switched-off
+    /// automated player should not even look at the world. Ownership second, because "this
+    /// is not mine" is a stronger statement than "somebody else claimed it": a foreign
+    /// object is not in this player's gift to concede or contest. Source rank last, because
+    /// it is only meaningful among parties that could all legitimately write the unit.
+    pub fn admit_with_source(
+        sim: &Simulation,
+        control: &ControlState,
+        claims: Option<&Claims>,
+        source: Source,
+        subsystem: Subsystem,
+        subject: u64,
+        payload: Command,
+    ) -> Admission {
         if !control.is_global_enabled() {
             return Admission::Refused(Refusal::GlobalDisabled);
         }
@@ -101,6 +137,11 @@ impl Arbiter {
                 owner,
                 house: control.house(),
             });
+        }
+        if let Some(claims) = claims
+            && let Err(conceded) = claims.may_write(subject, source)
+        {
+            return Admission::Refused(Refusal::Conceded(conceded));
         }
         // `execute_tick` is the frame the order becomes due, and the scheduler compares
         // it against `tick + 1`. Dating it at the current tick leaves it one frame early

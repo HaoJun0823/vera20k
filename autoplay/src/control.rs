@@ -17,6 +17,7 @@
 //! the first B1 probe conclude that movement did not work: a command naming an object
 //! the issuing house does not own is admitted by the queue and then silently dropped.
 
+use crate::claims::Conceded;
 use vera20k_core::sim::intern::InternedId;
 
 /// The automated player's authority over one house, at one moment.
@@ -155,6 +156,11 @@ pub enum Refusal {
     },
     /// No object with that id exists, or it has been destroyed.
     NoSuchObject { id: u64 },
+    /// A better claim holds the unit, so this order would be covering somebody else's.
+    ///
+    /// Separate from the others because it is not a defect: the caller did everything right
+    /// and the world simply has a competing claim, which the plan says to respect.
+    Conceded(Conceded),
 }
 
 impl Refusal {
@@ -169,6 +175,7 @@ impl Refusal {
                 format!("object belongs to {owner:?}, this player speaks for {house:?}")
             }
             Self::NoSuchObject { id } => format!("no object with id {id}"),
+            Self::Conceded(conceded) => conceded.describe(),
         }
     }
 }
