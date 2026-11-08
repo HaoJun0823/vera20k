@@ -30,6 +30,7 @@ pub mod eligibility;
 pub mod executor;
 pub mod handover;
 pub mod observe;
+pub mod replan;
 pub mod trace;
 pub mod world;
 
@@ -43,5 +44,6 @@ pub use eligibility::{Ineligible, eligibility};
 pub use executor::{Execution, Executor};
 pub use handover::{MissionSnapshot, has_pending_replacement, order_still_stands};
 pub use observe::{Cell, Outcome};
+pub use replan::{Attempts, FollowUp, MAX_ATTEMPTS};
 pub use trace::{Candidate, Decision, Trace};
 pub use world::{Object, Snapshot};

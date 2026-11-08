@@ -156,6 +156,15 @@ impl Dispatcher {
         self.orders.contains_key(&id)
     }
 
+    /// Whether the last order for `id` is still believed to be in force.
+    ///
+    /// `None` when nothing is remembered. Kept public because it is the fact the duplicate
+    /// filter turns on, and a test that could not see it would have to reconstruct the
+    /// answer from outcomes - which is exactly the guessing this module avoids.
+    pub fn is_in_force(&self, id: u64) -> Option<bool> {
+        self.orders.get(&id).map(|issued| issued.in_force)
+    }
+
     /// Forget one object, as a destroyed or captured unit should be.
     pub fn forget(&mut self, id: u64) {
         self.orders.remove(&id);

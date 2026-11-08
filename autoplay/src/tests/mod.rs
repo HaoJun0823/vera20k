@@ -6,4 +6,5 @@ mod control_and_arbiter;
 mod dispatch;
 mod handover;
 mod observe;
+mod replan;
 mod world_and_trace;
