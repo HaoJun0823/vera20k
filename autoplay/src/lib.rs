@@ -24,6 +24,7 @@
 //! automated player is switched off mid-match.
 
 pub mod arbiter;
+pub mod availability;
 pub mod claims;
 pub mod control;
 pub mod dispatch;
@@ -39,6 +40,7 @@ pub mod world;
 mod tests;
 
 pub use arbiter::{Admission, Arbiter, Validated};
+pub use availability::{Availability, availability_of};
 pub use claims::{Claims, Conceded, Source};
 pub use control::{ControlState, Refusal, Subsystem};
 pub use dispatch::{Dispatcher, Suppression};

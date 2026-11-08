@@ -1,6 +1,7 @@
 //! Tests for control state, the arbiter, the executor, observation, the world snapshot,
 //! the decision trace, handover and the architecture document's five basic cases.
 
+mod availability;
 mod basic_five;
 mod claims;
 mod conflict;
