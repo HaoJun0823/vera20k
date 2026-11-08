@@ -116,9 +116,7 @@ impl Attempts {
                 // would be suppressed as a duplicate of itself.
                 dispatcher.note_failed(id);
                 if *attempt >= MAX_ATTEMPTS {
-                    FollowUp::GiveUp {
-                        attempts: *attempt,
-                    }
+                    FollowUp::GiveUp { attempts: *attempt }
                 } else {
                     FollowUp::Retry { attempt: *attempt }
                 }
