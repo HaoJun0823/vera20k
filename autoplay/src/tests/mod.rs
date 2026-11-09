@@ -8,6 +8,7 @@ mod conflict;
 mod control_and_arbiter;
 mod dispatch;
 mod handover;
+mod ledger;
 mod match_run;
 mod observe;
 mod replan;
