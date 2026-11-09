@@ -19,14 +19,13 @@
 
 use std::path::PathBuf;
 
-use vera20k_autoplay::arbiter::{Admission, Arbiter};
-use vera20k_autoplay::control::{ControlState, Subsystem};
+use vera20k_autoplay::control::ControlState;
 use vera20k_autoplay::executor::Executor;
-use vera20k_autoplay::idle::{TaskBoard, lapsed};
+use vera20k_autoplay::frame::plan_frame;
+use vera20k_autoplay::idle::TaskBoard;
 use vera20k_autoplay::ledger::Ledger;
 use vera20k_autoplay::world::Snapshot;
 use vera20k_core::headless_scenario;
-use vera20k_core::sim::command::Command;
 use vera20k_core::skirmish_launch::{AiDifficulty, LaunchCountry};
 
 fn main() {
@@ -81,32 +80,14 @@ fn main() {
         let snapshot = Snapshot::take(scenario.sim(), &scenario.runtime.resources.rules, house);
         ledger.observe(&snapshot);
 
-        // Close tasks whose unit can no longer carry them, with a named reason.
-        for (unit, end) in lapsed(&snapshot, &control, &tasks) {
-            tasks.finish(unit, end);
-        }
+        // One frame's decision, as a value: the order to submit (if any) and the task
+        // endings already applied to the board. The client will use the same API.
+        let plan = plan_frame(scenario.sim(), &snapshot, &control, &mut tasks);
 
-        // Give one unit without a task something to do, through the same arbiter and
-        // executor a client would use. One order per frame keeps the frame advance in
-        // one place; the remaining units are picked up on later frames.
-        let next = tasks
-            .unassigned(&snapshot, &control)
-            .into_iter()
-            .find_map(|unit| {
-                let order = Command::Guard {
-                    entity_id: unit,
-                    target: None,
-                };
-                match Arbiter::admit(scenario.sim(), &control, Subsystem::Combat, unit, order) {
-                    Admission::Allowed(validated) => Some(validated),
-                    Admission::Refused(_) => None,
-                }
-            });
-
-        match next {
-            Some(validated) => {
-                let subject = validated.subject;
-                if Executor::submit(&mut scenario.runtime, &validated).is_committed() {
+        match plan {
+            Some(plan) => {
+                let subject = plan.validated.subject;
+                if Executor::submit(&mut scenario.runtime, &plan.validated).is_committed() {
                     tasks.assign(subject);
                     assignments += 1;
                 }

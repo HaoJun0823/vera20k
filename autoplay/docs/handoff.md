@@ -46,7 +46,8 @@
 | `a15e299e0` | Income 账本：资金存量 + 净流量，Snapshot 带上房屋现金余额（D） |
 | `cd143bb5f` | `autoplay-match` 运行入口（真实对局跑账本）+ 清理 3 个 unused import |
 | `6acd6ed0c` | v2 可靠性判定 + 第 2 步起点：TaskBoard 与挂机基线 |
-| 本次提交 | 任务生命周期（具名结束 + lapsed）+ 派活闭环 |
+| `913ba1942` | 任务生命周期（具名结束 + lapsed）+ 派活闭环 |
+| 本次提交 | 提炼 `plan_frame` 生产 API，bin 改为调用它 |
 
 ### 阶段 A：引擎侧前置改造
 
@@ -279,8 +280,18 @@ mission 状态读——那正是 v2「单位在家挂机」却查不出来的原
 - 派的是「守在岗位」，单位仍不动。它不是许愿书里的进攻 / 占领 / 微操，那些在第
   4–6 步。这一步交付的是「每个单位都有任务、任务能结束」的骨架，不是战术。
 
-下一块：**把四个快捷键与每帧驱动接进游戏客户端**，让实机按开关能真正接管；
-同时给任务补「完成 / 被取代」判定，让 `ended` 在真实对局里也能出现。
+本次又把这段每帧决策提炼成 `frame.rs::plan_frame`：返回一条已准入的命令与本帧
+具名任务结束，`autoplay-match` 改为调用它，行为不变（600 帧 `assignments=13`）。
+**客户端接入点已定位**：`src/app/match_runtime/sim_tick.rs:1585` 在
+`sim.take_due_commands()` 之前，AutoPlay 命令应经 `issue_local_command` 注入同一条
+玩家命令通道；`MatchState` 只有一个构造点（`src/app/initialize.rs:967`）；
+反馈用 `post_selection_navigation_text`。注意 `command!` 宏末位是本地化参数，
+**不是默认键位**，默认键得另找 INI 绑定入口。
+
+下一块：根 `Cargo.toml` 加依赖 → `MatchState` 加每局状态（默认关）→ 四个快捷键
+（`HotkeyCommand` / catalog / dispatch）→ 在 `take_due_commands()` 前注入
+`plan_frame` 的命令。仍待办：给任务补「完成 / 被取代」判定，让 `ended` 在真实
+对局里也能出现；确认默认键位怎么给。
 
 ### 已完成：完整对局测试（`45df4d618`）
 `tests/match_run.rs` 让原生队伍 AI 与 AutoPlay 在同一局里跑，四个测试断言的是
@@ -377,6 +388,7 @@ $root = "E:\Projects\vera20k-autoplay\target\owned-worktrees\072666c56a10730e\fa
 | `autoplay/src/bin/autoplay-match.rs` | 可运行入口：真实对局跑账本 |
 | `autoplay/docs/v2-assessment.md` | v2 可靠性判定与测量规矩（施工依据） |
 | `autoplay/src/idle.rs` | 第 2 步起点：任务板与挂机读数 |
+| `autoplay/src/frame.rs` | 每帧决策 API（客户端接入用） |
 
 ---
 

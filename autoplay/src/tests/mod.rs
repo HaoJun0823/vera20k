@@ -7,6 +7,7 @@ mod claims;
 mod conflict;
 mod control_and_arbiter;
 mod dispatch;
+mod frame;
 mod handover;
 mod idle;
 mod ledger;
