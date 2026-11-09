@@ -7,8 +7,10 @@
 //! from a running game, not from a hand-built test scene.
 //!
 //! The game client does not depend on this crate yet, so this binary is the runnable build
-//! for now. It is deliberately read-only: no orders are issued, and the native team AI plays
-//! both sides as it normally would.
+//! for now. It issues at most one Guard order per frame, through Arbiter and Executor,
+//! to give a unit without a task one. That is the smallest honest task loop: no strategy
+//! and no target selection, just "hold your post" - the one behaviour v2's measured runs
+//! support. Everything else in the match still runs as the native AI plays it.
 //!
 //! ```text
 //! python -m tools.cargo_run -- build --profile fast -p vera20k-autoplay --bin autoplay-match
@@ -17,14 +19,15 @@
 
 use std::path::PathBuf;
 
-use vera20k_autoplay::control::ControlState;
-use vera20k_autoplay::idle::TaskBoard;
+use vera20k_autoplay::arbiter::{Admission, Arbiter};
+use vera20k_autoplay::control::{ControlState, Subsystem};
+use vera20k_autoplay::executor::Executor;
+use vera20k_autoplay::idle::{TaskBoard, lapsed};
 use vera20k_autoplay::ledger::Ledger;
 use vera20k_autoplay::world::Snapshot;
 use vera20k_core::headless_scenario;
-use vera20k_core::sim::world::{FrameEffects, TickLane};
+use vera20k_core::sim::command::Command;
 use vera20k_core::skirmish_launch::{AiDifficulty, LaunchCountry};
-use vera20k_core::util::fixed_math::RA2_LOGIC_FRAMES_PER_SECOND;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -68,34 +71,64 @@ fn main() {
         scenario.sim().entities().len()
     );
 
-    let frame_ms = 1000 / RA2_LOGIC_FRAMES_PER_SECOND;
-    // An enabled state is an observation lens, not a claim that the client switched
-    // AutoPlay on: it asks "of this house's units, how many have nothing to do".
+    // An enabled state is the lens for this run. There is no client switch yet, so the
+    // binary drives the task loop itself to prove it against a live match.
     let control = ControlState::enabled(house);
     let mut ledger = Ledger::new();
-    // No planner exists yet, so nothing is ever assigned: the number is the baseline of
-    // how much work Phase 2 has to take on, not a claim that AutoPlay is running.
-    let tasks = TaskBoard::new();
+    let mut tasks = TaskBoard::new();
+    let mut assignments = 0usize;
     for frame in 0..ticks {
         let snapshot = Snapshot::take(scenario.sim(), &scenario.runtime.resources.rules, house);
         ledger.observe(&snapshot);
-        let idle = tasks.unassigned(&snapshot, &control).len();
-        let _ = scenario.runtime.advance_frame(
-            &[],
-            frame_ms,
-            TickLane::Ordinary,
-            FrameEffects::default(),
-        );
+
+        // Close tasks whose unit can no longer carry them, with a named reason.
+        for (unit, end) in lapsed(&snapshot, &control, &tasks) {
+            tasks.finish(unit, end);
+        }
+
+        // Give one unit without a task something to do, through the same arbiter and
+        // executor a client would use. One order per frame keeps the frame advance in
+        // one place; the remaining units are picked up on later frames.
+        let next = tasks
+            .unassigned(&snapshot, &control)
+            .into_iter()
+            .find_map(|unit| {
+                let order = Command::Guard {
+                    entity_id: unit,
+                    target: None,
+                };
+                match Arbiter::admit(scenario.sim(), &control, Subsystem::Combat, unit, order) {
+                    Admission::Allowed(validated) => Some(validated),
+                    Admission::Refused(_) => None,
+                }
+            });
+
+        match next {
+            Some(validated) => {
+                let subject = validated.subject;
+                if Executor::submit(&mut scenario.runtime, &validated).is_committed() {
+                    tasks.assign(subject);
+                    assignments += 1;
+                }
+            }
+            None => {
+                let _ = Executor::submit_idle(&mut scenario.runtime);
+            }
+        }
+
         if (frame + 1) % 150 == 0 {
             println!(
-                "  frame {}: produced={} destroyed={} transferred={} idle={idle}",
+                "  frame {}: produced={} destroyed={} transferred={} active={} ended={:?}",
                 frame + 1,
                 ledger.produced().values().sum::<usize>(),
                 ledger.destroyed().values().sum::<usize>(),
                 ledger.transferred().values().sum::<usize>(),
+                tasks.assignment_count(),
+                tasks.endings(),
             );
         }
     }
+    println!("assignments={assignments}");
 
     println!("observations={}", ledger.observations());
     println!("produced={:?}", ledger.produced());

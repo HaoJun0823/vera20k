@@ -49,7 +49,7 @@ pub use dispatch::{Dispatcher, Suppression};
 pub use eligibility::{Ineligible, eligibility};
 pub use executor::{Execution, Executor};
 pub use handover::{MissionSnapshot, has_pending_replacement, order_still_stands};
-pub use idle::TaskBoard;
+pub use idle::{TaskBoard, TaskEnd, lapsed};
 pub use ledger::{Departure, Holding, Ledger, Movement};
 pub use observe::{Cell, Outcome};
 pub use replan::{Attempts, FollowUp, MAX_ATTEMPTS};
