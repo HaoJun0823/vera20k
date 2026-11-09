@@ -26,7 +26,7 @@ fn scene() -> Option<(Simulation, RuleSet, InternedId, u64)> {
         house.project_country_mults(&rules, sim.interner());
         sim.houses_mut_for_test().register(house);
     }
-    let tank = sim.spawn_object("MTNK", "Americans", 40, 40, 0, &rules)?;
+    let tank = sim.spawn_object("MTNK", "Americans", 8, 8, 0, &rules)?;
     let americans = sim.interner().get("Americans")?;
     Some((sim, rules, americans, tank))
 }
@@ -49,7 +49,7 @@ fn ammunition_is_none_when_the_type_has_none_and_a_number_when_it_does() {
     );
 
     // An infantryman is the case that would break if `None` were read as zero.
-    let Some(gi) = sim.spawn_object("E1", "Americans", 42, 40, 0, &rules) else {
+    let Some(gi) = sim.spawn_object("E1", "Americans", 10, 8, 0, &rules) else {
         return;
     };
     let gi_avail = availability_of(&sim, gi).expect("the soldier exists");
@@ -88,7 +88,7 @@ fn cargo_is_reported_only_for_a_transport() {
     }
 
     // An IFV has Passengers= in retail rules and starts empty.
-    if let Some(ifv) = sim.spawn_object("FV", "Americans", 44, 40, 0, &rules) {
+    if let Some(ifv) = sim.spawn_object("FV", "Americans", 12, 8, 0, &rules) {
         let ifv_avail = availability_of(&sim, ifv).expect("exists");
         if let Some(capacity) = ifv_avail.cargo_capacity {
             assert!(

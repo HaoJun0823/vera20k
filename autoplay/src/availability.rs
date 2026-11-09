@@ -110,7 +110,13 @@ pub fn availability_of(sim: &Simulation, id: u64) -> Option<Availability> {
     // `ammo()` returns `None` for a type with no ammunition, which this preserves rather than
     // flattening to zero: the distinction between "out" and "does not apply" decides whether a
     // planner waits or picks a different unit.
-    let ammo = entity.ammo().map(|tracker| tracker.current());
+    // `Ammo=` defaults to -1 (unlimited), and TechnoClass+0x2FC is a signed count: a
+    // negative value means the type has no ammunition question at all, which is `None`
+    // here, not "out of ammunition". Only a non-negative count is remaining rounds.
+    let ammo = entity
+        .ammo()
+        .map(|tracker| tracker.current())
+        .filter(|rounds| *rounds >= 0);
     let (cargo, cargo_capacity) = match entity.passenger_role.cargo() {
         Some(hold) => (Some(hold.count()), Some(hold.capacity())),
         None => (None, None),
