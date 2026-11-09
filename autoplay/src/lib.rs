@@ -49,7 +49,7 @@ pub use control::{ControlState, Refusal, Subsystem};
 pub use dispatch::{Dispatcher, Suppression};
 pub use eligibility::{Ineligible, eligibility};
 pub use executor::{Execution, Executor};
-pub use frame::{FramePlan, plan_frame};
+pub use frame::{FramePlan, OrderKind, plan_frame};
 pub use handover::{MissionSnapshot, has_pending_replacement, order_still_stands};
 pub use idle::{REASSESS_FRAMES, TaskBoard, TaskEnd, lapsed};
 pub use ledger::{Departure, Holding, Ledger, Movement};

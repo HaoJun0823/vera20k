@@ -49,7 +49,9 @@
 | `913ba1942` | 任务生命周期（具名结束 + lapsed）+ 派活闭环 |
 | `1bc645d97` | 提炼 `plan_frame` 生产 API，bin 改为调用它 |
 | `890539cae` | 四个快捷键接进客户端 + 每帧命令注入 |
-| 本次提交 | 任务有限窗口（Reassess），`ended` 在真实对局出现 |
+| `019c9aebb` | 任务有限窗口（Reassess），`ended` 在真实对局出现 |
+| `193a229e3` | 记录测试版交付与 7 个既有失败 |
+| 本次提交 | Phase 4 第一刀：攻击最近的可见敌人 |
 
 ### 阶段 A：引擎侧前置改造
 
@@ -285,8 +287,8 @@ mission 状态读——那正是 v2「单位在家挂机」却查不出来的原
 - ~~「结束」只有单元测试证据~~ 已补上，见下方本次推进。仍缺的是「被别的写入者
   取代」判定（Superseded）：自己刚发的命令也会进引擎的 queued mission，直接判
   `has_pending_replacement` 会误报，要先能区分「自己刚发的」和「别人抢的」。
-- 派的是「守在岗位」，单位仍不动。它不是许愿书里的进攻 / 占领 / 微操，那些在第
-  4–6 步。这一步交付的是「每个单位都有任务、任务能结束」的骨架，不是战术。
+- ~~派的是「守在岗位」~~ 已补上基础攻击（见下方本次推进）。仍缺威胁评估、撤退、
+  小队搭配、分弹、微操，那些在第 4–6 步。当前只是 Phase 4 的第一刀。
 
 本次又把这段每帧决策提炼成 `frame.rs::plan_frame`：返回一条已准入的命令与本帧
 具名任务结束，`autoplay-match` 改为调用它，行为不变（600 帧 `assignments=13`）。
@@ -307,10 +309,26 @@ mission 状态读——那正是 v2「单位在家挂机」却查不出来的原
 `ended={Reassess: 39}`、`assignments=52`、`active=13` 稳定——「结束」这一半
 终于有真实对局证据，不再只靠单元测试。
 
+本次推进（Phase 4 第一刀，基础作战）：`frame.rs::plan_frame` 现在给每个无任务
+单位挑**自己最近的可见敌人**（`Snapshot::enemy_visible`，曼哈顿格距，整数），
+发 `Command::Attack`；没有可见敌人时退回 `Command::Guard`。目标是可见的才打，
+不用引擎全知的 `enemy()`——许愿书明确禁止作弊。`Command::Attack` 在
+`world_commands.rs:1986` 转成 `MissionType::Attack`，不是空命令。
+`OrderKind` 让报告能区分「打」与「守」。
+
+真实对局（Arena.mmx，seed 0x5EED）：
+- 600 帧：`assignments=52 attacks=52 guards=0`（开局有可见敌人，全部发起攻击）
+- 3000 帧：`assignments=260 attacks=52 guards=208`（敌人消失后退回防守）
+- `active=13` 稳定，`ended={Reassess: 247}`，账本不变
+两个新测试固定「可见敌人才打、看不见的不打」。90 个 crate 测试通过，客户端
+`--profile fast` 编译成功。
+
 **仍待办**：
 1. 「被别的写入者取代」判定（Superseded），难点见上：要先能区分自己刚发的命令
    与别人抢的命令，否则会误报。
-2. 战术：目前接管的单位只收到「守在岗位」，不会进攻 / 占领 / 微操，那些是第 4–6 步。
+2. 战术深化：现在只会「打最近的可见敌人」，没有威胁评估、撤退、集火分配、
+   分弹、小队搭配、卡射程。多个单位可能同时打同一个目标造成伤害溢出。占领 /
+   渗透 / 运输 / 中立建筑 / 分基地更是尚未开始（第 5–6 步）。
 3. 实机验证：绑定四个键后开一局离线 Skirmish，看状态提示与单位是否被接管。
 4. 若要默认键位，得改 `hotkeys.rs` 的默认绑定逻辑（VeraX AutoLoad 的 Ctrl+D
    是特判），`command!` 宏末位不是默认键。
@@ -378,7 +396,7 @@ $root = "E:\Projects\vera20k-autoplay\target\owned-worktrees\072666c56a10730e\fa
 ### 可实机测试的构建（2026-11-09，`019c9aebb`）
 
 客户端 exe：`E:\Projects\vera20k-autoplay\target\owned-worktrees\072666c56a10730e\fast\vera20k.exe`
-（`--profile fast`，48 MB，含四个快捷键与每帧命令注入）。Windows 上
+（`--profile fast`，48 MB，含四个快捷键、每帧命令注入与基础攻击决策）。Windows 上
 `enter_data_folder()` 不切目录，所以**从 v3 工作树根目录启动**即可读到工作树里
 已配好 `ra2_dir` 的 `config.toml`，无需 RA2_DIR 环境变量。
 

@@ -7,6 +7,12 @@
 //!
 //! At most one order per frame: the engine's local command channel is a batch the caller
 //! already owns, and keeping one decision per frame leaves the frame advance in one place.
+//!
+//! Phase 4's first slice: a unit with no task attacks the nearest enemy it can actually
+//! see, or holds its post when there is none. [`Snapshot::enemy_visible`] is the only
+//! target source - the engine knows every object, but aiming at one the player has not
+//! revealed would be cheating rather than playing. Threat assessment, retreat, squad
+//! composition and target priority beyond "nearest" are deliberately not here yet.
 
 use vera20k_core::sim::command::Command;
 use vera20k_core::sim::world::Simulation;
@@ -15,6 +21,15 @@ use crate::arbiter::{Admission, Arbiter, Validated};
 use crate::control::{ControlState, Subsystem};
 use crate::idle::{TaskBoard, TaskEnd, lapsed};
 use crate::world::Snapshot;
+
+/// What the frame's order is for, so a report can say what AutoPlay did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderKind {
+    /// Attack a visible enemy.
+    Attack,
+    /// Hold position: nothing visible to fight.
+    Guard,
+}
 
 /// What AutoPlay asks for on one frame.
 pub struct FramePlan {
@@ -27,6 +42,43 @@ pub struct FramePlan {
     /// The simulation frame this decision was made on, so a successful assignment
     /// starts its reassessment window at the right tick.
     pub frame: u64,
+    /// Whether the order was an attack or a hold, for diagnostics.
+    pub kind: OrderKind,
+}
+
+/// The nearest enemy this unit can actually see, by Manhattan cell distance.
+///
+/// Integers only - a distance used for a decision must be identical on every platform.
+fn nearest_visible_enemy(snapshot: &Snapshot, unit: u64) -> Option<u64> {
+    let own = snapshot.objects.get(&unit)?;
+    snapshot
+        .enemy_visible()
+        .filter(|enemy| enemy.in_playfield)
+        .min_by_key(|enemy| {
+            (own.cell.0 as i32 - enemy.cell.0 as i32).abs()
+                + (own.cell.1 as i32 - enemy.cell.1 as i32).abs()
+        })
+        .map(|enemy| enemy.id)
+}
+
+/// One unit's order for this frame, and what kind of order it was.
+fn combat_order(snapshot: &Snapshot, unit: u64) -> (Command, OrderKind) {
+    match nearest_visible_enemy(snapshot, unit) {
+        Some(target_id) => (
+            Command::Attack {
+                attacker_id: unit,
+                target_id,
+            },
+            OrderKind::Attack,
+        ),
+        None => (
+            Command::Guard {
+                entity_id: unit,
+                target: None,
+            },
+            OrderKind::Guard,
+        ),
+    }
 }
 
 /// Decide one frame's work, applying any lapsed tasks to `tasks`.
@@ -49,16 +101,13 @@ pub fn plan_frame(
         tasks.finish(*unit, *end);
     }
 
-    let validated = tasks
+    let (validated, kind) = tasks
         .unassigned(snapshot, control)
         .into_iter()
         .find_map(|unit| {
-            let order = Command::Guard {
-                entity_id: unit,
-                target: None,
-            };
+            let (order, kind) = combat_order(snapshot, unit);
             match Arbiter::admit(sim, control, Subsystem::Combat, unit, order) {
-                Admission::Allowed(validated) => Some(validated),
+                Admission::Allowed(validated) => Some((validated, kind)),
                 Admission::Refused(_) => None,
             }
         })?;
@@ -66,5 +115,6 @@ pub fn plan_frame(
         validated,
         endings,
         frame,
+        kind,
     })
 }

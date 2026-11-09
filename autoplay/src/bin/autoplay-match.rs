@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 use vera20k_autoplay::control::ControlState;
 use vera20k_autoplay::executor::Executor;
-use vera20k_autoplay::frame::plan_frame;
+use vera20k_autoplay::frame::{OrderKind, plan_frame};
 use vera20k_autoplay::idle::TaskBoard;
 use vera20k_autoplay::ledger::Ledger;
 use vera20k_autoplay::world::Snapshot;
@@ -76,6 +76,8 @@ fn main() {
     let mut ledger = Ledger::new();
     let mut tasks = TaskBoard::new();
     let mut assignments = 0usize;
+    let mut attacks = 0usize;
+    let mut guards = 0usize;
     for frame in 0..ticks {
         let snapshot = Snapshot::take(scenario.sim(), &scenario.runtime.resources.rules, house);
         ledger.observe(&snapshot);
@@ -90,6 +92,10 @@ fn main() {
                 if Executor::submit(&mut scenario.runtime, &plan.validated).is_committed() {
                     tasks.assign(subject, plan.frame);
                     assignments += 1;
+                    match plan.kind {
+                        OrderKind::Attack => attacks += 1,
+                        OrderKind::Guard => guards += 1,
+                    }
                 }
             }
             None => {
@@ -109,7 +115,7 @@ fn main() {
             );
         }
     }
-    println!("assignments={assignments}");
+    println!("assignments={assignments} attacks={attacks} guards={guards}");
 
     println!("observations={}", ledger.observations());
     println!("produced={:?}", ledger.produced());
