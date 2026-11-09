@@ -1,9 +1,9 @@
 # AutoPlay v3 交接文档
 
 **生成时间**：2026-11-09
-**分支**：`feature/autoplay-v3` @ `7e848480b`（最后一个代码提交；本文档是它的下一个提交）
+**分支**：`feature/autoplay-v3`（代码与交接文档同批提交，HEAD 以 `git log -1` 为准）
 **工作树**：`E:\Projects\vera20k-autoplay-v3`，干净，无未提交改动
-**测试**：`vera20k-autoplay` 74 通过；`vera20k-core` 命令路径测试 2 通过（均带 `VERA20K_REQUIRE_RETAIL_INI=1`）
+**测试**：`vera20k-autoplay` 77 通过；`vera20k-core` 命令路径测试 2 通过（均带 `VERA20K_REQUIRE_RETAIL_INI=1`）
 
 ---
 
@@ -43,6 +43,7 @@
 | `265bfe684` | 心灵控制可读，纠正「引擎说不了」的误判（C） |
 | `6286f1a98` | 无弹药上限的单位报 `None` 而非负数（C） |
 | `7e848480b` | 生产 / 损失 / 资产三账本（D 首段） |
+| 本次提交 | Income 账本：资金存量 + 净流量，Snapshot 带上房屋现金余额（D） |
 
 ### 阶段 A：引擎侧前置改造
 
@@ -169,8 +170,16 @@
 从未发生的事。代价：两次观测之间消失又返回的对象会被漏掉，靠观测频率控制。
 事件日后可补充「为什么」而不改变「发生了什么」。
 
-**明确没做**：Combat（伤害归属）与 Income（资金），`Snapshot` 两者都不携带，
-不猜一个看起来像读数的字段。这是计划 D 的剩余部分，不是已完成。
+**Income 账本**（本次提交）：`Snapshot` 现在带上每个房屋的 `HouseClass+0x30C`
+现金余额，与对象在同一次读取里取得。`Ledger` 分开保存**存量**（最后一次余额）
+与**流量**（逐次观测的余额差累计），首帧只建基线、不把启动资金算成收入。它覆盖
+引擎列出的每个房屋，包括一个单位都没有的房屋；三个回归测试固定了这三点。
+
+**明确没做 / residual**：
+- Combat 账本（伤害归属）：`Snapshot` 不携带，也未从引擎事件里读。
+- 收入与支出的**拆分**：快照只有余额，只能给净流量。触发条件：任何要把经济维度
+  拆成「赚了多少 / 花了多少」的评估；影响：目前只能回答净额；频率：每次经济报告；
+  下游风险：把净额当收入会高估经济表现。计划 D 的事件驱动部分仍是这一步的前提。
 
 ---
 
@@ -207,12 +216,13 @@
 - 按来源优先级让步：玩家 > 脚本 > AutoPlay
 - 读单位当前能力（弹药、载员、部署、目标、心灵控制）
 - 按观测累计生产、损失、所有权转移，区分流量与存量
+- 读每个房屋的现金余额，分开报告资金存量与累计净流量
 
 ### 不能
 - 让原生队伍 AI 与 AutoPlay 在同一局里实际争抢**同一个单位**（`match_run`
   目前只验证准入与归属不变量）
 - 回答玩家是否选中某单位（app 层状态，仿真层不可见）
-- 回答伤害归属与资金收支（Combat / Income 账本未落地）
+- 回答伤害归属（Combat 账本未落地）与收入/支出的拆分（只有净流量）
 - 判断单位是否瘫痪 / EMP（引擎无查询接口）
 - 战略规划、任务管理、小队协同（计划明确不做）
 - **阻止原生 AI 或触发器写同一单位**——本 crate 看不到它们的命令，
@@ -227,10 +237,12 @@
 不变量（只指挥本方房屋、不碰已败房屋、拒绝都具名），不是胜负——计划的验收
 口径从不用「击败零售 AI」。缺零售 install 时提前返回。
 
-### 优先级一：计划 D 剩余两本
-Combat 与 Income。Combat 需要伤害归属（谁打谁），Income 需要房屋资金余额
-（`sim::economy::Economy`，由 `HouseState` 持有），两者都不在 `Snapshot` 里。
-方案未定：扩展快照，或让账本读引擎的所有者；**不要在 autoplay crate 里另建
+### 优先级一：Combat 账本与收入/支出拆分
+Income 已落地存量与净流量；剩下两件事：
+- Combat：需要伤害归属（谁打谁），`Snapshot` 不携带。
+- 收入/支出拆分：需要引擎的 `Spend_Money` / `Add_Credits` 事件或更细读数，
+  快照法只能给净额。
+方案未定：扩展快照，或让账本读引擎事件；**不要在 autoplay crate 里另建
 一份资金或伤害状态**。
 
 ### 优先级二：计划 C 剩余字段
@@ -297,8 +309,9 @@ python -m tools.cargo_run -- build --profile fast -p vera20k-core --bin autoplay
 | `src/sim/world/autoplay_command_path_tests.rs` | 命令路径的两个回归测试 |
 | `autoplay/src/lib.rs` | 模块总览，含各处设计理由 |
 | `autoplay/src/availability.rs` | C 阶段只读能力模型，含「引擎说不了」的纠正 |
-| `autoplay/src/ledger.rs` | D 阶段三账本，含改用快照对比的理由 |
-| `autoplay/src/tests/ledger.rs` | 账本的七个回归测试 |
+| `autoplay/src/ledger.rs` | D 阶段四账本，含改用快照对比的理由与 residual |
+| `autoplay/src/world.rs` | Snapshot：同帧读取对象与房屋现金余额 |
+| `autoplay/src/tests/ledger.rs` | 账本的十个回归测试 |
 
 ---
 

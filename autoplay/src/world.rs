@@ -74,6 +74,9 @@ pub struct Snapshot {
     pub house: InternedId,
     /// Every object, keyed by id so two snapshots can be compared without ordering noise.
     pub objects: BTreeMap<u64, Object>,
+    /// Each house's cash balance (`HouseClass+0x30C`) at this frame. Read in the same
+    /// pass as the objects, so an economy report and an object report describe one frame.
+    pub credits: BTreeMap<InternedId, i32>,
 }
 
 impl Snapshot {
@@ -119,10 +122,16 @@ impl Snapshot {
                 },
             );
         }
+        let credits = sim
+            .houses()
+            .iter()
+            .map(|(id, house)| (*id, house.economy().credits()))
+            .collect();
         Self {
             frame: sim.session().tick(),
             house,
             objects,
+            credits,
         }
     }
 

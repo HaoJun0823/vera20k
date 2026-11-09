@@ -1,11 +1,10 @@
-//! Production, loss and asset, kept apart on purpose.
+//! Production, loss, asset and income, kept apart on purpose.
 //!
 //! The plan asks for five ledgers: production, loss, combat, income and asset. A [`Snapshot`]
-//! can answer the first, second and fifth today. Combat needs damage attribution and income
-//! needs a house's credit balance, neither of which the snapshot carries, so those two stay
-//! open in the plan rather than being filled with a guess a reader could not tell from a real
-//! reading. Two rules shape the whole design and both come from mistakes that are easy to make
-//! and hard to notice.
+//! can answer four today. Combat needs damage attribution and income's split into earnings
+//! and spending needs the engine's spend events; neither is in the snapshot, so both gaps
+//! stay open in the plan rather than being filled with a guess. Two rules shape the whole
+//! design and both come from mistakes that are easy to make and hard to notice.
 //!
 //! **Flow versus stock.** "Produced 30 tanks" and "has 30 tanks" are different numbers and a
 //! ledger that stores one cannot answer the other. Production is a flow; what a house owns is a
@@ -258,6 +257,11 @@ pub struct Ledger {
     destroyed: BTreeMap<String, usize>,
     /// Total objects transferred between houses, by type.
     transferred: BTreeMap<String, usize>,
+    /// Last observed cash balance per house, so the next comparison has a "before".
+    credits: BTreeMap<InternedId, i32>,
+    /// Net cash flow per house across the match, accumulated from balance deltas. A flow,
+    /// never a stock: the balance is kept beside it rather than derived from it.
+    net_flow: BTreeMap<InternedId, i64>,
     /// How many observations have been taken.
     observations: usize,
 }
@@ -357,6 +361,18 @@ impl Ledger {
         }
 
         self.owners = current_owners;
+
+        // Income is its own ledger, read from the same snapshot but kept apart from the
+        // object ledgers. It covers every house the engine names, including one that owns
+        // nothing. The first observation is a baseline: a match does not begin by earning
+        // the cash it starts with.
+        for (&house, &balance) in &snapshot.credits {
+            if let Some(&before) = self.credits.get(&house) {
+                *self.net_flow.entry(house).or_insert(0) += i64::from(balance) - i64::from(before);
+            }
+            self.credits.insert(house, balance);
+        }
+
         self.observations += 1;
         out
     }
@@ -384,5 +400,18 @@ impl Ledger {
     /// The last stock for one house.
     pub fn holding(&self, house: InternedId) -> Option<&Holding> {
         self.holdings.get(&house)
+    }
+
+    /// The last observed cash balance for one house (income's stock).
+    pub fn credits(&self, house: InternedId) -> Option<i32> {
+        self.credits.get(&house).copied()
+    }
+
+    /// Net cash flow for one house across the whole match (income's flow).
+    ///
+    /// This is a net figure: a snapshot carries the balance, not the income and spend
+    /// events that would separate the two. Splitting it is a recorded gap in the plan.
+    pub fn net_flow(&self, house: InternedId) -> i64 {
+        self.net_flow.get(&house).copied().unwrap_or(0)
     }
 }

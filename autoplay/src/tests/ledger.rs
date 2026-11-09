@@ -286,3 +286,79 @@ fn a_replacement_of_the_same_type_is_still_production() {
         "the stock is still one"
     );
 }
+
+fn set_credits(sim: &mut Simulation, house: InternedId, amount: i32) {
+    sim.houses_mut_for_test()
+        .get_mut(&house)
+        .expect("the house exists")
+        .economy_mut_for_test()
+        .set_credits_for_test(amount);
+}
+
+/// A match does not begin by earning the cash it starts with: the first observation
+/// records the balance as stock and reports no flow.
+#[test]
+fn the_first_observation_records_cash_without_earning_it() {
+    let Some((mut sim, rules, americans, _russians)) = scene() else {
+        return;
+    };
+    set_credits(&mut sim, americans, 5_000);
+    sim.spawn_object("MTNK", "Americans", 8, 8, 0, &rules);
+    let first = Snapshot::take(&sim, &rules, americans);
+    let mut ledger = Ledger::new();
+    ledger.observe(&first);
+
+    assert_eq!(
+        ledger.credits(americans),
+        Some(5_000),
+        "the stock is recorded"
+    );
+    assert_eq!(ledger.net_flow(americans), 0, "starting cash is not income");
+}
+
+/// Cash movements accumulate as a flow while the balance reports only the last stock.
+#[test]
+fn cash_movements_accumulate_as_a_flow_not_a_stock() {
+    let Some((mut sim, rules, americans, _russians)) = scene() else {
+        return;
+    };
+    set_credits(&mut sim, americans, 1_000);
+    let mut ledger = Ledger::new();
+    ledger.observe(&Snapshot::take(&sim, &rules, americans));
+
+    set_credits(&mut sim, americans, 1_300);
+    ledger.observe(&Snapshot::take(&sim, &rules, americans));
+    set_credits(&mut sim, americans, 1_150);
+    ledger.observe(&Snapshot::take(&sim, &rules, americans));
+
+    assert_eq!(ledger.net_flow(americans), 150, "300 in, 150 out");
+    assert_eq!(
+        ledger.credits(americans),
+        Some(1_150),
+        "the balance is the stock at the last observation"
+    );
+    assert_eq!(ledger.observations(), 3);
+}
+
+/// Income is read for every house the engine names, not only houses that own objects.
+#[test]
+fn a_house_with_no_units_still_reports_its_cash() {
+    let Some((mut sim, rules, americans, _russians)) = scene() else {
+        return;
+    };
+    set_credits(&mut sim, americans, 2_000);
+    let mut ledger = Ledger::new();
+    ledger.observe(&Snapshot::take(&sim, &rules, americans));
+    set_credits(&mut sim, americans, 2_500);
+    ledger.observe(&Snapshot::take(&sim, &rules, americans));
+
+    assert!(
+        ledger.holding(americans).is_none_or(|h| h.total() == 0),
+        "the object ledgers hold nothing for this house"
+    );
+    assert_eq!(
+        ledger.net_flow(americans),
+        500,
+        "no objects does not mean no economy"
+    );
+}
