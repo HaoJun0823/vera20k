@@ -375,6 +375,26 @@ $root = "E:\Projects\vera20k-autoplay\target\owned-worktrees\072666c56a10730e\fa
 
 注意：`cargo_run` 只构建，运行需调用解析后的 `.exe`。二进制落在**主检出**的 `target/owned-worktrees/`，不在工作树内。
 
+### 可实机测试的构建（2026-11-09，`019c9aebb`）
+
+客户端 exe：`E:\Projects\vera20k-autoplay\target\owned-worktrees\072666c56a10730e\fast\vera20k.exe`
+（`--profile fast`，48 MB，含四个快捷键与每帧命令注入）。Windows 上
+`enter_data_folder()` 不切目录，所以**从 v3 工作树根目录启动**即可读到工作树里
+已配好 `ra2_dir` 的 `config.toml`，无需 RA2_DIR 环境变量。
+
+启动后进 Options → Keyboard，给 `AutoPlay` / `AutoPlayForces` / `AutoPlayBuild` /
+`AutoPlayAbilities` 四个命令绑定按键（它们无默认键），再开一局离线 Skirmish。
+
+**全量 `cargo test -p vera20k --lib` 有 7 个既有失败**（3719 通过 / 280 忽略），
+与 autoplay 无关，v3 的 36 个提交没碰过这些文件：
+- 6 个本地化断言：本机零售安装是繁体中文，例如 `retail_ifv_tip...` 期望
+  `"Rocket IFV"`、实得 `"火箭 多功能步兵戰鬥車"`；同类还有 selection_navigation
+  的语音/历史、CSF 标签等测试。
+- 1 个 `architecture_guards::raw_ini_walks_have_pinned_production_callers`：静态
+  pin 清单期望 `rules/ruleset.rs registry_ids` 为 3、实际源码里是 2，属上游漂移。
+与改动直接相关的验证全绿：客户端 hotkeys 25 个、autoplay crate 88 个、
+`cargo check -p vera20k --bin vera20k` 无错误、`--profile fast` 编译成功。
+
 ---
 
 ## 七、需要知道的踩坑
