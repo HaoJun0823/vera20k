@@ -24,6 +24,9 @@ pub struct FramePlan {
     /// Task endings detected this frame, with their named reasons. They have already
     /// been applied to the board, so this is a report, not a to-do list.
     pub endings: Vec<(u64, TaskEnd)>,
+    /// The simulation frame this decision was made on, so a successful assignment
+    /// starts its reassessment window at the right tick.
+    pub frame: u64,
 }
 
 /// Decide one frame's work, applying any lapsed tasks to `tasks`.
@@ -40,7 +43,8 @@ pub fn plan_frame(
         return None;
     }
 
-    let endings = lapsed(snapshot, control, tasks);
+    let frame = sim.session().tick();
+    let endings = lapsed(snapshot, control, tasks, frame);
     for (unit, end) in &endings {
         tasks.finish(*unit, *end);
     }
@@ -58,5 +62,9 @@ pub fn plan_frame(
                 Admission::Refused(_) => None,
             }
         })?;
-    Some(FramePlan { validated, endings })
+    Some(FramePlan {
+        validated,
+        endings,
+        frame,
+    })
 }

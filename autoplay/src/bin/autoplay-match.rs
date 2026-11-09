@@ -88,7 +88,7 @@ fn main() {
             Some(plan) => {
                 let subject = plan.validated.subject;
                 if Executor::submit(&mut scenario.runtime, &plan.validated).is_committed() {
-                    tasks.assign(subject);
+                    tasks.assign(subject, plan.frame);
                     assignments += 1;
                 }
             }

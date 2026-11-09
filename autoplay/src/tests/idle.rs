@@ -12,7 +12,7 @@ use vera20k_core::sim::intern::InternedId;
 use vera20k_core::sim::world::Simulation;
 
 use crate::control::ControlState;
-use crate::idle::{TaskBoard, TaskEnd, lapsed};
+use crate::idle::{REASSESS_FRAMES, TaskBoard, TaskEnd, lapsed};
 use crate::world::Snapshot;
 
 fn scene() -> Option<(Simulation, RuleSet, InternedId, u64, u64)> {
@@ -82,7 +82,7 @@ fn an_assigned_unit_is_not_reported_and_a_released_one_is_again() {
     let snapshot = Snapshot::take(&sim, &rules, americans);
     let mut board = TaskBoard::new();
 
-    board.assign(ours);
+    board.assign(ours, 0);
     assert!(board.has(ours));
     assert!(!board.unassigned(&snapshot, &control).contains(&ours));
 
@@ -101,10 +101,10 @@ fn a_task_whose_unit_is_gone_ends_by_name() {
     let control = ControlState::enabled(americans);
     let mut snapshot = Snapshot::take(&sim, &rules, americans);
     let mut board = TaskBoard::new();
-    board.assign(ours);
+    board.assign(ours, 0);
 
     snapshot.objects.remove(&ours);
-    let ended = lapsed(&snapshot, &control, &board);
+    let ended = lapsed(&snapshot, &control, &board, 0);
     assert_eq!(ended, vec![(ours, TaskEnd::ObjectGone)]);
     for (unit, end) in ended {
         board.finish(unit, end);
@@ -130,12 +130,12 @@ fn a_unit_that_changes_hands_ends_as_owner_changed() {
     let control = ControlState::enabled(americans);
     let mut snapshot = Snapshot::take(&sim, &rules, americans);
     let mut board = TaskBoard::new();
-    board.assign(ours);
+    board.assign(ours, 0);
 
     let new_owner = snapshot.objects.get(&theirs).expect("exists").owner;
     snapshot.objects.get_mut(&ours).expect("exists").owner = new_owner;
     assert_eq!(
-        lapsed(&snapshot, &control, &board),
+        lapsed(&snapshot, &control, &board, 0),
         vec![(ours, TaskEnd::OwnerChanged)]
     );
 }
@@ -148,10 +148,38 @@ fn switching_off_ends_every_task_as_disabled() {
     };
     let snapshot = Snapshot::take(&sim, &rules, americans);
     let mut board = TaskBoard::new();
-    board.assign(ours);
+    board.assign(ours, 0);
     let off = ControlState::disabled(americans);
     assert_eq!(
-        lapsed(&snapshot, &off, &board),
+        lapsed(&snapshot, &off, &board, 0),
         vec![(ours, TaskEnd::Disabled)]
     );
+}
+
+/// A task that has run its window ends for reassessment, and the unit is then
+/// reported as needing work again - so a stale order cannot sit on a unit forever.
+#[test]
+fn a_task_past_its_window_ends_for_reassessment() {
+    let Some((sim, rules, americans, ours, _)) = scene() else {
+        return;
+    };
+    let control = ControlState::enabled(americans);
+    let snapshot = Snapshot::take(&sim, &rules, americans);
+    let mut board = TaskBoard::new();
+    board.assign(ours, 10);
+
+    assert!(
+        lapsed(&snapshot, &control, &board, 10 + REASSESS_FRAMES - 1).is_empty(),
+        "one frame before the window the task is still in force"
+    );
+    let at_window = 10 + REASSESS_FRAMES;
+    assert_eq!(
+        lapsed(&snapshot, &control, &board, at_window),
+        vec![(ours, TaskEnd::Reassess)]
+    );
+    for (unit, end) in lapsed(&snapshot, &control, &board, at_window) {
+        board.finish(unit, end);
+    }
+    assert_eq!(board.endings().get(&TaskEnd::Reassess), Some(&1));
+    assert_eq!(board.unassigned(&snapshot, &control), vec![ours]);
 }

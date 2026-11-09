@@ -1585,7 +1585,10 @@ fn advance_one_simulation_frame(
             if let Some(plan) = plan {
                 let subject = plan.validated.subject;
                 if sim.issue_local_command(plan.validated.envelope) {
-                    state.match_state.auto_play_tasks.assign(subject);
+                    state
+                        .match_state
+                        .auto_play_tasks
+                        .assign(subject, plan.frame);
                 }
             }
         }

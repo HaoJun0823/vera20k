@@ -52,7 +52,7 @@ fn a_unit_that_already_has_a_task_gets_no_second_order() {
     let control = ControlState::enabled(americans);
     let snapshot = Snapshot::take(&sim, &rules, americans);
     let mut tasks = TaskBoard::new();
-    tasks.assign(ours);
+    tasks.assign(ours, 0);
 
     assert!(plan_frame(&sim, &snapshot, &control, &mut tasks).is_none());
 }
