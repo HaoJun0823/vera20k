@@ -44,7 +44,8 @@
 | `6286f1a98` | 无弹药上限的单位报 `None` 而非负数（C） |
 | `7e848480b` | 生产 / 损失 / 资产三账本（D 首段） |
 | `a15e299e0` | Income 账本：资金存量 + 净流量，Snapshot 带上房屋现金余额（D） |
-| 本次提交 | `autoplay-match` 运行入口（真实对局跑账本）+ 清理 3 个 unused import |
+| `cd143bb5f` | `autoplay-match` 运行入口（真实对局跑账本）+ 清理 3 个 unused import |
+| 本次提交 | v2 可靠性判定 + 第 2 步起点：TaskBoard 与挂机基线 |
 
 ### 阶段 A：引擎侧前置改造
 
@@ -244,12 +245,32 @@ headless 运行入口：它加载零售地图跑一局真实对局，逐帧 `Sna
 
 ## 五、下一步
 
+### 方向变更（2026-11-09，owner 决定）
+
+范围改为：**许愿书 `G:/Documents/autoplay-v2.txt` 内容全部实现，在此基础之上再迭代
+强度**。第一版合格线是许愿书逐条打勾；「强度 ≥ v1」是交付后的迭代，不是门槛。
+`plan.md` 第十节「不做完整战略行为」「暂不写完整 Task Manager」与该范围冲突，
+不再适用；裁决与 v2 可靠性判定记在 `v2-assessment.md`，`plan.md` 原文保留不改。
+施工按 1249 行架构书 `G:/Documents/autoplay-v3.txt` 的 Phase 0–6 顺序推进。
+
+### 当前在做：第 2 步（任务系统）
+
+`v2-assessment.md` 判定了 v2 哪些可靠：基础建造链、命令通道、不作弊、单位能力解析、
+账本与有效性读数可复用；进攻、绕路、侦察、驻扎、调参全部实测回退，**不可照搬**；
+占领、渗透、微操、运输、中立建筑、分基地、跨阵营等 v2 从没做过。
+
+`idle.rs` 立了 `TaskBoard`：记录 AutoPlay 给哪些单位派过活。**关键发现**：引擎给每个
+新单位一个默认任务（实测 `current: MissionId(5)`），所以「有没有活干」不能从引擎
+mission 状态读——那正是 v2「单位在家挂机」却查不出来的原因。权威必须是 AutoPlay
+自己的分配记录。真实对局基线：`Arena.mmx` 600 帧，本方 13 个单位全部 `unassigned`
+（还没有 planner）。下一步是给这些单位真正派活并跟踪到完成，让这个数字下降。
+
 ### 已完成：完整对局测试（`45df4d618`）
 `tests/match_run.rs` 让原生队伍 AI 与 AutoPlay 在同一局里跑，四个测试断言的是
 不变量（只指挥本方房屋、不碰已败房屋、拒绝都具名），不是胜负——计划的验收
 口径从不用「击败零售 AI」。缺零售 install 时提前返回。
 
-### 优先级一：Combat 账本与收入/支出拆分
+### 后续：Combat 账本与收入/支出拆分
 Income 已落地存量与净流量；剩下两件事：
 - Combat：需要伤害归属（谁打谁），`Snapshot` 不携带。
 - 收入/支出拆分：需要引擎的 `Spend_Money` / `Add_Credits` 事件或更细读数，
@@ -337,6 +358,8 @@ $root = "E:\Projects\vera20k-autoplay\target\owned-worktrees\072666c56a10730e\fa
 | `autoplay/src/world.rs` | Snapshot：同帧读取对象与房屋现金余额 |
 | `autoplay/src/tests/ledger.rs` | 账本的十个回归测试 |
 | `autoplay/src/bin/autoplay-match.rs` | 可运行入口：真实对局跑账本 |
+| `autoplay/docs/v2-assessment.md` | v2 可靠性判定与测量规矩（施工依据） |
+| `autoplay/src/idle.rs` | 第 2 步起点：任务板与挂机读数 |
 
 ---
 

@@ -17,6 +17,8 @@
 
 use std::path::PathBuf;
 
+use vera20k_autoplay::control::ControlState;
+use vera20k_autoplay::idle::TaskBoard;
 use vera20k_autoplay::ledger::Ledger;
 use vera20k_autoplay::world::Snapshot;
 use vera20k_core::headless_scenario;
@@ -67,10 +69,17 @@ fn main() {
     );
 
     let frame_ms = 1000 / RA2_LOGIC_FRAMES_PER_SECOND;
+    // An enabled state is an observation lens, not a claim that the client switched
+    // AutoPlay on: it asks "of this house's units, how many have nothing to do".
+    let control = ControlState::enabled(house);
     let mut ledger = Ledger::new();
+    // No planner exists yet, so nothing is ever assigned: the number is the baseline of
+    // how much work Phase 2 has to take on, not a claim that AutoPlay is running.
+    let tasks = TaskBoard::new();
     for frame in 0..ticks {
         let snapshot = Snapshot::take(scenario.sim(), &scenario.runtime.resources.rules, house);
         ledger.observe(&snapshot);
+        let idle = tasks.unassigned(&snapshot, &control).len();
         let _ = scenario.runtime.advance_frame(
             &[],
             frame_ms,
@@ -79,7 +88,7 @@ fn main() {
         );
         if (frame + 1) % 150 == 0 {
             println!(
-                "  frame {}: produced={} destroyed={} transferred={}",
+                "  frame {}: produced={} destroyed={} transferred={} idle={idle}",
                 frame + 1,
                 ledger.produced().values().sum::<usize>(),
                 ledger.destroyed().values().sum::<usize>(),
