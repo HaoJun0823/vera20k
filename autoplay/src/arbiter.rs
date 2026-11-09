@@ -20,7 +20,7 @@
 use vera20k_core::sim::command::{Command, CommandEnvelope};
 use vera20k_core::sim::world::Simulation;
 
-use crate::claims::{Claims, Conceded, Source};
+use crate::claims::{Claims, Source};
 use crate::control::{ControlState, Refusal, Subsystem};
 
 /// An order that passed every check, with the frame it becomes due on.

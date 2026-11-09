@@ -5,6 +5,12 @@ edition = "2024"
 publish = false
 description = "Automated player for Vera20k: world model, task management and command arbitration."
 
+# A real-match entry point for play-testing the observation layer. The game client
+# does not depend on this crate yet, so this binary is the runnable build for now.
+[[bin]]
+name = "autoplay-match"
+path = "src/bin/autoplay-match.rs"
+
 [dependencies]
 # The engine. A separate crate on purpose: an automated player that reaches into
 # `vera20k-core`'s internals cannot be tested against a different build, and the

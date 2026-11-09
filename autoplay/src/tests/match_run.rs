@@ -19,7 +19,6 @@
 use std::path::Path;
 
 use vera20k_core::headless_scenario;
-use vera20k_core::sim::combat::TargetKind;
 use vera20k_core::sim::command::Command;
 use vera20k_core::skirmish_launch::{AiDifficulty, LaunchCountry};
 

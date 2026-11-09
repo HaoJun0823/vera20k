@@ -19,7 +19,7 @@ use vera20k_core::sim::house_state::HouseState;
 use vera20k_core::sim::intern::InternedId;
 use vera20k_core::sim::world::Simulation;
 
-use crate::arbiter::{Admission, Arbiter};
+use crate::arbiter::Arbiter;
 use crate::control::{ControlState, Subsystem};
 use crate::eligibility::{self, Ineligible};
 

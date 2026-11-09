@@ -43,7 +43,8 @@
 | `265bfe684` | 心灵控制可读，纠正「引擎说不了」的误判（C） |
 | `6286f1a98` | 无弹药上限的单位报 `None` 而非负数（C） |
 | `7e848480b` | 生产 / 损失 / 资产三账本（D 首段） |
-| 本次提交 | Income 账本：资金存量 + 净流量，Snapshot 带上房屋现金余额（D） |
+| `a15e299e0` | Income 账本：资金存量 + 净流量，Snapshot 带上房屋现金余额（D） |
+| 本次提交 | `autoplay-match` 运行入口（真实对局跑账本）+ 清理 3 个 unused import |
 
 ### 阶段 A：引擎侧前置改造
 
@@ -217,6 +218,7 @@
 - 读单位当前能力（弹药、载员、部署、目标、心灵控制）
 - 按观测累计生产、损失、所有权转移，区分流量与存量
 - 读每个房屋的现金余额，分开报告资金存量与累计净流量
+- 跑一局真实对局并打印账本（`autoplay-match`）
 
 ### 不能
 - 让原生队伍 AI 与 AutoPlay 在同一局里实际争抢**同一个单位**（`match_run`
@@ -227,6 +229,16 @@
 - 战略规划、任务管理、小队协同（计划明确不做）
 - **阻止原生 AI 或触发器写同一单位**——本 crate 看不到它们的命令，
   只能在自己要写时让步（见 `claims.rs` 模块文档）
+
+### 关于「实机」的一个边界
+
+`vera20k`（游戏客户端）**不依赖** `vera20k-autoplay`，`cargo build -p vera20k`
+出来的 `vera20k.exe` 里没有任何 AutoPlay 行为——它跑的是上游游戏本身，
+原生队伍 AI 照常打两边。要看到 AutoPlay 的输出，用 `autoplay-match` 这个
+headless 运行入口：它加载零售地图跑一局真实对局，逐帧 `Snapshot::take` +
+`Ledger::observe`，打印四本账。它只读，不发命令，所以它是**观测层的实机
+验证**，不是「自动玩家在打一局」。把 AutoPlay 接进客户端运行路径是下一步
+的一条独立链，尚未做。
 
 ---
 
@@ -277,7 +289,18 @@ $exe = "E:\Projects\vera20k-autoplay\target\owned-worktrees\072666c56a10730e\fas
 # 队伍诊断
 python -m tools.cargo_run -- build --profile fast -p vera20k-core --bin autoplay-teams --features telemetry
 & "...\autoplay-teams.exe" "$env:RA2_DIR" Arena.mmx 30000 1
+
+# 可运行版本：游戏客户端 + AutoPlay 真实对局入口
+python -m tools.cargo_run -- build --profile fast -p vera20k --bin vera20k
+python -m tools.cargo_run -- build --profile fast -p vera20k-autoplay --bin autoplay-match
+$root = "E:\Projects\vera20k-autoplay\target\owned-worktrees\072666c56a10730e\fast"
+& "$root\autoplay-match.exe"          # 不传位置参数，用上面的 RA2_DIR
 ```
+
+实测（`Arena.mmx`，seed `0x5EED`，600 tick，5 房屋 / 232 对象）：
+`produced` 6（GACNST / GAPILE / GAPOWR / NACNST / NAHAND / NAPOWR），
+`destroyed` 2（AMCV / SMCV），`transferred` 0，
+`credits=10000` / `net_flow=0` / `stock=13`。这是账本在真实对局里跑出的第一组数字。
 
 注意：`cargo_run` 只构建，运行需调用解析后的 `.exe`。二进制落在**主检出**的 `target/owned-worktrees/`，不在工作树内。
 
@@ -296,6 +319,7 @@ python -m tools.cargo_run -- build --profile fast -p vera20k-core --bin autoplay
 | `flat_ground` 是 32×32，坐标超出地图 spawn 不会完整构造 | 测试会空真通过，把对象放进地图内 |
 | `TechnoClass+0x2FC` 为负表示无限弹药 | 负值是「不适用」，不是「没弹药」 |
 | `entities_mut_for_test().remove()` 后再 spawn | display_registry 残留 id 会 panic；用 `change_owner` 或先造后转 |
+| `autoplay-match` 第一个位置参数是**零售目录** | 只给 `Arena.mmx` 会被当成 retail 路径；用 `RA2_DIR` 时干脆不传位置参数 |
 
 ---
 
@@ -312,6 +336,7 @@ python -m tools.cargo_run -- build --profile fast -p vera20k-core --bin autoplay
 | `autoplay/src/ledger.rs` | D 阶段四账本，含改用快照对比的理由与 residual |
 | `autoplay/src/world.rs` | Snapshot：同帧读取对象与房屋现金余额 |
 | `autoplay/src/tests/ledger.rs` | 账本的十个回归测试 |
+| `autoplay/src/bin/autoplay-match.rs` | 可运行入口：真实对局跑账本 |
 
 ---
 
