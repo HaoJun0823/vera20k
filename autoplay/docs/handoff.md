@@ -47,7 +47,8 @@
 | `cd143bb5f` | `autoplay-match` 运行入口（真实对局跑账本）+ 清理 3 个 unused import |
 | `6acd6ed0c` | v2 可靠性判定 + 第 2 步起点：TaskBoard 与挂机基线 |
 | `913ba1942` | 任务生命周期（具名结束 + lapsed）+ 派活闭环 |
-| 本次提交 | 提炼 `plan_frame` 生产 API，bin 改为调用它 |
+| `1bc645d97` | 提炼 `plan_frame` 生产 API，bin 改为调用它 |
+| 本次提交 | 四个快捷键接进客户端 + 每帧命令注入 |
 
 ### 阶段 A：引擎侧前置改造
 
@@ -242,7 +243,13 @@ headless 运行入口：它加载零售地图跑一局真实对局，逐帧 `Sna
 `Ledger::observe`，并跑任务循环（每帧最多一条 `Command::Guard`，走 Arbiter +
 Executor），打印四本账与任务数。它**会发命令**，但只发「守在岗位」这一条，
 没有战术，所以它证明的是**命令链与任务生命周期通了**，不是「自动玩家在打一局」。
-把 AutoPlay 接进客户端运行路径仍是下一步的一条独立链，尚未做。
+客户端接入**已完成**（本次提交）：根 `Cargo.toml` 依赖 `vera20k-autoplay`，
+`MatchState` 带每局的 `ControlState` + `TaskBoard`（每局默认关、状态不跨局），
+四个快捷键进 `vera20k` 分类，`sim_tick.rs` 在 `take_due_commands()` 之前把
+`plan_frame` 的命令经 `issue_local_command` 注入玩家同一条命令通道（仅离线对局）。
+**四个键没有默认键位**，要在 Options → Keyboard 里给 `AutoPlay` /
+`AutoPlayForces` / `AutoPlayBuild` / `AutoPlayAbilities` 绑定后才能按——这一点
+与 v2 一致，也是上次「按了没反应」的原因。
 
 ---
 
@@ -288,10 +295,18 @@ mission 状态读——那正是 v2「单位在家挂机」却查不出来的原
 反馈用 `post_selection_navigation_text`。注意 `command!` 宏末位是本地化参数，
 **不是默认键位**，默认键得另找 INI 绑定入口。
 
-下一块：根 `Cargo.toml` 加依赖 → `MatchState` 加每局状态（默认关）→ 四个快捷键
-（`HotkeyCommand` / catalog / dispatch）→ 在 `take_due_commands()` 前注入
-`plan_frame` 的命令。仍待办：给任务补「完成 / 被取代」判定，让 `ended` 在真实
-对局里也能出现；确认默认键位怎么给。
+客户端接入已完成，验证：`cargo check -p vera20k --bin vera20k` 无错误；
+`cargo test -p vera20k --lib -- hotkeys` 25 个通过（键盘页 fixture 用的是
+`retail_commands()` 87 条原始命令，新增 4 条只进 `registered_commands()`，不冲突）；
+87 个 autoplay crate 测试通过。
+
+**仍待办**：
+1. 给任务补「完成 / 被取代」判定，让 `ended` 在真实对局里也能出现（目前 Guard
+   任务只有失效条件，没有完成条件）。
+2. 战术：目前接管的单位只收到「守在岗位」，不会进攻 / 占领 / 微操，那些是第 4–6 步。
+3. 实机验证：绑定四个键后开一局离线 Skirmish，看状态提示与单位是否被接管。
+4. 若要默认键位，得改 `hotkeys.rs` 的默认绑定逻辑（VeraX AutoLoad 的 Ctrl+D
+   是特判），`command!` 宏末位不是默认键。
 
 ### 已完成：完整对局测试（`45df4d618`）
 `tests/match_run.rs` 让原生队伍 AI 与 AutoPlay 在同一局里跑，四个测试断言的是
@@ -389,6 +404,7 @@ $root = "E:\Projects\vera20k-autoplay\target\owned-worktrees\072666c56a10730e\fa
 | `autoplay/docs/v2-assessment.md` | v2 可靠性判定与测量规矩（施工依据） |
 | `autoplay/src/idle.rs` | 第 2 步起点：任务板与挂机读数 |
 | `autoplay/src/frame.rs` | 每帧决策 API（客户端接入用） |
+| `src/app/match_runtime/sim_tick.rs` | 客户端每帧注入 AutoPlay 命令的位置 |
 
 ---
 

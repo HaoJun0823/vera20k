@@ -2029,7 +2029,106 @@ fn dispatch_retail_hotkey(state: &mut AppState, command: HotkeyCommand) {
         HotkeyCommand::AutoLoad => crate::app::input::autoload::hotkey_pressed(state),
         #[cfg(not(feature = "verax"))]
         HotkeyCommand::AutoLoad => {}
+        HotkeyCommand::ToggleAutoPlay => toggle_auto_play(state),
+        HotkeyCommand::ToggleAutoPlayForces => toggle_auto_play_switch(
+            state,
+            vera20k_autoplay::control::Subsystem::Combat,
+        ),
+        HotkeyCommand::AutoPlayBuild => toggle_auto_play_switch(
+            state,
+            vera20k_autoplay::control::Subsystem::Production,
+        ),
+        HotkeyCommand::AutoPlayAbilities => toggle_auto_play_switch(
+            state,
+            vera20k_autoplay::control::Subsystem::Ability,
+        ),
     }
+}
+
+/// AutoPlay's four switches. The master key is all-or-nothing; each subsystem key
+/// flips one half. Switching everything off also clears the task board, so no stale
+/// assignment survives into the next frame or the next match.
+fn auto_play_house(state: &AppState) -> Option<vera20k_core::sim::intern::InternedId> {
+    state
+        .match_state
+        .sim_runtime
+        .as_ref()
+        .and_then(|rt| rt.simulation.session().current_house())
+}
+
+fn post_auto_play_state(state: &mut AppState) {
+    use vera20k_autoplay::control::Subsystem;
+    let message = match state.match_state.auto_play_control {
+        Some(control) => format!(
+            "AutoPlay on: production={} combat={} abilities={}",
+            control.is_subsystem_enabled(Subsystem::Production),
+            control.is_subsystem_enabled(Subsystem::Combat),
+            control.is_subsystem_enabled(Subsystem::Ability),
+        ),
+        None => "AutoPlay off".to_string(),
+    };
+    crate::app::input::messages::post_selection_navigation_text(state, &message);
+}
+
+fn toggle_auto_play(state: &mut AppState) {
+    use vera20k_autoplay::control::{ControlState, Subsystem};
+    use vera20k_autoplay::idle::TaskBoard;
+    let Some(house) = auto_play_house(state) else {
+        crate::app::input::messages::post_selection_navigation_text(
+            state,
+            "AutoPlay: no local house",
+        );
+        return;
+    };
+    let all_on = state.match_state.auto_play_control.is_some_and(|control| {
+        control.is_global_enabled()
+            && control.is_subsystem_enabled(Subsystem::Production)
+            && control.is_subsystem_enabled(Subsystem::Combat)
+            && control.is_subsystem_enabled(Subsystem::Ability)
+    });
+    state.match_state.auto_play_control = if all_on {
+        None
+    } else {
+        Some(ControlState::enabled(house))
+    };
+    if state.match_state.auto_play_control.is_none() {
+        state.match_state.auto_play_tasks = TaskBoard::new();
+    }
+    post_auto_play_state(state);
+}
+
+fn toggle_auto_play_switch(
+    state: &mut AppState,
+    subsystem: vera20k_autoplay::control::Subsystem,
+) {
+    use vera20k_autoplay::control::ControlState;
+    use vera20k_autoplay::idle::TaskBoard;
+    let Some(house) = auto_play_house(state) else {
+        crate::app::input::messages::post_selection_navigation_text(
+            state,
+            "AutoPlay: no local house",
+        );
+        return;
+    };
+    let mut control = state.match_state.auto_play_control.unwrap_or_else(|| {
+        let mut fresh = ControlState::disabled(house);
+        fresh.set_global_enabled(true);
+        fresh
+    });
+    let currently = control.is_subsystem_enabled(subsystem);
+    control.set_subsystem_enabled(subsystem, !currently);
+    let any = [
+        vera20k_autoplay::control::Subsystem::Production,
+        vera20k_autoplay::control::Subsystem::Combat,
+        vera20k_autoplay::control::Subsystem::Ability,
+    ]
+    .iter()
+    .any(|s| control.is_subsystem_enabled(*s));
+    state.match_state.auto_play_control = any.then_some(control);
+    if !any {
+        state.match_state.auto_play_tasks = TaskBoard::new();
+    }
+    post_auto_play_state(state);
 }
 
 /// A superweapon cameo press. Phobos's `FireTacticalSW` keys call

@@ -1562,6 +1562,33 @@ fn advance_one_simulation_frame(
         let mut hud_messages = Vec::new();
         // Carried out of the sim borrow so the census can read `state` freely below.
         let mut census_tick: Option<u64> = None;
+        // AutoPlay: one frame's decision, injected into the same local command FIFO the
+        // player's clicks use. This runs before the frame drains that FIFO below, so the
+        // order takes effect this frame. Offline matches only - a network match's command
+        // stream is shared and must not gain a local writer.
+        if !replaying
+            && !resuming
+            && tick_lane == TickLane::Ordinary
+            && let Some(control) = state.match_state.auto_play_control
+            && let Some(rt) = state.match_state.sim_runtime.as_mut()
+            && !rt.simulation.session().game_mode().is_network()
+        {
+            let rules = &rt.resources.rules;
+            let sim = &mut rt.simulation;
+            let snapshot = vera20k_autoplay::world::Snapshot::take(sim, rules, control.house());
+            let plan = vera20k_autoplay::frame::plan_frame(
+                sim,
+                &snapshot,
+                &control,
+                &mut state.match_state.auto_play_tasks,
+            );
+            if let Some(plan) = plan {
+                let subject = plan.validated.subject;
+                if sim.issue_local_command(plan.validated.envelope) {
+                    state.match_state.auto_play_tasks.assign(subject);
+                }
+            }
+        }
         if let Some(rt) = state.match_state.sim_runtime.as_mut() {
             let sim = &mut rt.simulation;
             let native_frame = sim.session().binary_frame();

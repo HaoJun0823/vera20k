@@ -33,6 +33,11 @@ pub(crate) struct MatchState {
     /// same sockets are owned by live_network. Session owns admitted endpoints.
     pub(crate) lan_service: Option<crate::app::lan_service::LanService>,
     pub(crate) sim_runtime: Option<crate::sim::runtime::SimRuntime>,
+    /// AutoPlay's authority for this match. `None` means switched off; a new match
+    /// installs `None`, so no AutoPlay state carries over from the previous one.
+    pub(crate) auto_play_control: Option<vera20k_autoplay::control::ControlState>,
+    /// AutoPlay's task board for this match, reset with every new match.
+    pub(crate) auto_play_tasks: vera20k_autoplay::idle::TaskBoard,
     /// Match input owner (F12): camera, zoom, cursor, keys, hotkeys.
     pub(crate) input: crate::app::input::state::MatchInputState,
     /// Match presentation owner (F12), part 1: per-match atlases + cursor.

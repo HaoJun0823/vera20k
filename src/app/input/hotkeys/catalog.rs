@@ -28,12 +28,51 @@ macro_rules! command {
     };
 }
 
+/// AutoPlay's four switches, in VERA's own category. They carry no default key:
+/// KEYBOARDMD.INI has no entry for them, so the player assigns one on the Keyboard
+/// page. The CSF has no entry either, so the page shows these strings themselves.
+const AUTOPLAY_COMMANDS: [CommandMetadata; 4] = [
+    command!(
+        HotkeyCommand::ToggleAutoPlay,
+        "AutoPlay",
+        "AutoPlay (all)",
+        "vera20k",
+        "Switch every AutoPlay subsystem on or off",
+        None
+    ),
+    command!(
+        HotkeyCommand::ToggleAutoPlayForces,
+        "AutoPlayForces",
+        "AutoPlay: forces",
+        "vera20k",
+        "Switch only combat orders on or off",
+        None
+    ),
+    command!(
+        HotkeyCommand::AutoPlayBuild,
+        "AutoPlayBuild",
+        "AutoPlay: production",
+        "vera20k",
+        "Switch only production orders on or off",
+        None
+    ),
+    command!(
+        HotkeyCommand::AutoPlayAbilities,
+        "AutoPlayAbilities",
+        "AutoPlay: abilities",
+        "vera20k",
+        "Switch only special abilities on or off",
+        None
+    ),
+];
+
 pub(crate) fn registered_commands() -> &'static [CommandMetadata] {
     use std::sync::OnceLock;
     static ALL: OnceLock<Vec<CommandMetadata>> = OnceLock::new();
     ALL.get_or_init(|| {
         let mut all = RETAIL_COMMANDS.to_vec();
         all.extend_from_slice(&CAMERA_COMMANDS);
+        all.extend_from_slice(&AUTOPLAY_COMMANDS);
         #[cfg(feature = "verax")]
         all.extend_from_slice(&VERA_COMMANDS);
         #[cfg(feature = "phobos")]

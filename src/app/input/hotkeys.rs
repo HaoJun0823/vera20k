@@ -63,6 +63,14 @@ pub(crate) enum HotkeyCommand {
     Taunt(usize),
     ScreenCapture,
     SetView(usize),
+    /// AutoPlay: master switch (all four on, or all off).
+    ToggleAutoPlay,
+    /// AutoPlay: flip only the forces/combat half.
+    ToggleAutoPlayForces,
+    /// AutoPlay: flip only the production half.
+    AutoPlayBuild,
+    /// AutoPlay: flip only the abilities half.
+    AutoPlayAbilities,
     /// VeraX: load the selection into nearby transports. Registered in the
     /// `vera20k` keyboard category with the Ctrl+D default.
     AutoLoad,
