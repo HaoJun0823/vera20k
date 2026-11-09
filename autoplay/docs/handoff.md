@@ -1,9 +1,9 @@
 # AutoPlay v3 交接文档
 
-**生成时间**：2026-11-08
-**分支**：`feature/autoplay-v3` @ `5163516c3`
+**生成时间**：2026-11-09
+**分支**：`feature/autoplay-v3` @ `7e848480b`（最后一个代码提交；本文档是它的下一个提交）
 **工作树**：`E:\Projects\vera20k-autoplay-v3`，干净，无未提交改动
-**测试**：`vera20k-autoplay` 54 通过；`vera20k-core` 命令路径测试 2 通过
+**测试**：`vera20k-autoplay` 74 通过；`vera20k-core` 命令路径测试 2 通过（均带 `VERA20K_REQUIRE_RETAIL_INI=1`）
 
 ---
 
@@ -38,6 +38,11 @@
 | `d7dec87f1` | 失败重规划 `replan`（B3） |
 | `ea10567f0` | 命令来源仲裁 `claims`（B3） |
 | `5163516c3` | `claims` 接入 `Arbiter::admit`（B3 收尾） |
+| `45df4d618` | 完整对局测试 `match_run`（原生 AI 与 AutoPlay 同局） |
+| `a2dae5489` | `availability`：只读单位当前能力（C 首段） |
+| `265bfe684` | 心灵控制可读，纠正「引擎说不了」的误判（C） |
+| `6286f1a98` | 无弹药上限的单位报 `None` 而非负数（C） |
+| `7e848480b` | 生产 / 损失 / 资产三账本（D 首段） |
 
 ### 阶段 A：引擎侧前置改造
 
@@ -130,6 +135,43 @@
 
 架构书 §18.1 五条对应五个测试。**第五条「编队单位不托管」明确记录为无法从仿真层回答**：选中状态在 app 层（`MatchInputState.selection_order`），从不进入 `Simulation`。用纯仿真场景断言会**因为错误的原因通过**（空真）。计划的结构性答案是「一个房屋、一个控制器」。
 
+### 阶段 C：能力模型（首段）
+
+**`availability.rs`**（`a2dae5489`、`265bfe684`、`6286f1a98`）
+只读引擎的运行时状态，不重算弹药、装填、载员、武器切换。已读字段：弹药、
+载员数与容量、部署、当前目标、是否在运输工具内、心灵控制者。
+
+两处纠正值得记住：
+
+1. `MindControlLink::controller()`（`TechnoClass+0x2C0`）一直可读，之前说「引擎
+   说不了」是读错了。被控单位保留原属主，`eligibility` 会放行，所以
+   `is_not_obviously_blocked` 必须同时查它。
+2. `TechnoClass+0x2FC` 是**有符号**计数，`Ammo=` 默认 -1 表示无限
+   （`src/rules/object_type.rs:4515`、`src/sim/ammo.rs:45`）。负值意味着「没有弹药
+   这个问题」，对应 `Availability.ammo` 的 `None`，不是「没弹药了」。旧测试在
+   `flat_ground` 的 32×32 地图**之外** spawn，对象没有完成构造，`ammo()` 为 `None`，
+   两个断言是空真通过；把坐标移进地图内才暴露真缺陷。
+
+仍不可读：瘫痪 / EMP / `disable_weapons`（Phobos 内部配置标志，不是活体查询）。
+要真答案得在引擎侧加查询，不能用相邻字段冒充。
+
+### 阶段 D：账本（首段）
+
+**`ledger.rs`**（`7e848480b`）
+五个账本里 `Snapshot` 能回答的三个：生产、损失、资产。流量与存量分开；按
+**object id** 计流量，「造一个、丢一个」仍是生产 1，按类型存量差会漏掉。占领
+从生产里扣除，仍在世界里换手的记为转移而非击杀。
+
+**对计划的一处主动偏离**：plan.md 要求「以引擎事件为主，定期用快照对账」，实现
+改为**只比较连续快照**。理由写在模块头：`LifecycleOutput` 里没有普通死亡事件
+（`ObjectPointerExpired` 只是 Techno 指针过期的导航清理），唯一的占领事件
+`ConstructionYardCaptured` 只覆盖一种建筑；依赖事件流会漏记真实死亡、同时记下
+从未发生的事。代价：两次观测之间消失又返回的对象会被漏掉，靠观测频率控制。
+事件日后可补充「为什么」而不改变「发生了什么」。
+
+**明确没做**：Combat（伤害归属）与 Income（资金），`Snapshot` 两者都不携带，
+不猜一个看起来像读数的字段。这是计划 D 的剩余部分，不是已完成。
+
 ---
 
 ## 三、关键架构决策与理由
@@ -163,10 +205,15 @@
 - 抑制重复命令，同时不阻止失败后的重试
 - 失败后按结果决定重试/放弃/等待/不决策
 - 按来源优先级让步：玩家 > 脚本 > AutoPlay
+- 读单位当前能力（弹药、载员、部署、目标、心灵控制）
+- 按观测累计生产、损失、所有权转移，区分流量与存量
 
 ### 不能
-- 驱动原生队伍 AI 打完整一局并实际争抢单位（需要战斗场景 fixture）
+- 让原生队伍 AI 与 AutoPlay 在同一局里实际争抢**同一个单位**（`match_run`
+  目前只验证准入与归属不变量）
 - 回答玩家是否选中某单位（app 层状态，仿真层不可见）
+- 回答伤害归属与资金收支（Combat / Income 账本未落地）
+- 判断单位是否瘫痪 / EMP（引擎无查询接口）
 - 战略规划、任务管理、小队协同（计划明确不做）
 - **阻止原生 AI 或触发器写同一单位**——本 crate 看不到它们的命令，
   只能在自己要写时让步（见 `claims.rs` 模块文档）
@@ -175,23 +222,25 @@
 
 ## 五、下一步
 
-### 优先级一：完整对局测试
-现有 54 个测试都是**单元级**：构造一个场景，验证一个行为。
-唯一能证明整条链路在真实比赛里成立的证据，是让原生队伍 AI 与 AutoPlay
-在同一局里跑起来，看交接是否真的按规则发生。
+### 已完成：完整对局测试（`45df4d618`）
+`tests/match_run.rs` 让原生队伍 AI 与 AutoPlay 在同一局里跑，四个测试断言的是
+不变量（只指挥本方房屋、不碰已败房屋、拒绝都具名），不是胜负——计划的验收
+口径从不用「击败零售 AI」。缺零售 install 时提前返回。
 
-需要的东西：用 `battle_session` + `MatchScenario::setup` 构造的战斗场景，
-即 `sim_bench_match` 已经在用的那套。B1 探测已经验证过地形与房屋可用。
+### 优先级一：计划 D 剩余两本
+Combat 与 Income。Combat 需要伤害归属（谁打谁），Income 需要房屋资金余额
+（`sim::economy::Economy`，由 `HouseState` 持有），两者都不在 `Snapshot` 里。
+方案未定：扩展快照，或让账本读引擎的所有者；**不要在 autoplay crate 里另建
+一份资金或伤害状态**。
 
-### 优先级二：计划 C 阶段
-Observation 扩展：`current_ammo`、`reload_state`、`PassengerCargo`、
-当前有效武器、当前目标、行动状态、装载/运输/部署/瘫痪。
+### 优先级二：计划 C 剩余字段
+`reload_state`、当前有效武器、行动状态、装载/运输/卸载、瘫痪。
+硬规则不变：**绝不重新实现引擎的弹药/装填/载员规则**，只读。
+瘫痪需要引擎侧先加查询。
 
-计划这里有一条硬规则：**绝不重新实现引擎的弹药/装填/载员规则**，只读。
-
-### 优先级三：计划 D 阶段
-五个账本（生产、损失、战斗、收入、资产）做成事件驱动，且
-**流量与存量分离**。六维向量，永不单一加权分数。
+### 优先级三：把账本接到评估
+六维向量（经济、军事、领土、科技、目标、生存），永不压成单一加权分数。
+验收用固定地图/种子/资源的 AutoPlay 版本自身横向对比。
 
 ### 已知风险
 - 计划 §4 列的验收**从不用「击败零售 AI」**衡量：7 电脑测试显示零售 AI 是不稳定基准。改为固定地图/种子/资源/阵营/房屋数，六个维度（经济、军事、领土、科技、目标、生存）横向比较 AutoPlay 版本自身。
@@ -204,6 +253,7 @@ Observation 扩展：`current_ammo`、`reload_state`、`PassengerCargo`、
 # 测试
 cd E:\Projects\vera20k-autoplay-v3
 $env:RA2_DIR = "I:\SteamLibrary\steamapps\common\Command & Conquer Red Alert II"
+$env:VERA20K_REQUIRE_RETAIL_INI = "1"
 python -m tools.cargo_run -- test -p vera20k-autoplay --lib
 python -m tools.cargo_run -- test -p vera20k-core --lib autoplay_command_path
 
@@ -231,6 +281,9 @@ python -m tools.cargo_run -- build --profile fast -p vera20k-core --bin autoplay
 | 命令走 `issue_local_command` 后无反应 | 用 `advance_frame(commands, ...)` 的参数 |
 | 自己写的 `.py` 脚本被 PowerShell heredoc 吃掉 | 用 `write` 工具直接写文件 |
 | `Select-String \| Select-Object -Skip -1` 报错 | 用 `Get-Content \| Select-Object -Skip N` |
+| `flat_ground` 是 32×32，坐标超出地图 spawn 不会完整构造 | 测试会空真通过，把对象放进地图内 |
+| `TechnoClass+0x2FC` 为负表示无限弹药 | 负值是「不适用」，不是「没弹药」 |
+| `entities_mut_for_test().remove()` 后再 spawn | display_registry 残留 id 会 panic；用 `change_owner` 或先造后转 |
 
 ---
 
@@ -243,6 +296,9 @@ python -m tools.cargo_run -- build --profile fast -p vera20k-core --bin autoplay
 | `autoplay/docs/team-controller-interface.md` | 102 行队伍控制器接口定义 |
 | `src/sim/world/autoplay_command_path_tests.rs` | 命令路径的两个回归测试 |
 | `autoplay/src/lib.rs` | 模块总览，含各处设计理由 |
+| `autoplay/src/availability.rs` | C 阶段只读能力模型，含「引擎说不了」的纠正 |
+| `autoplay/src/ledger.rs` | D 阶段三账本，含改用快照对比的理由 |
+| `autoplay/src/tests/ledger.rs` | 账本的七个回归测试 |
 
 ---
 
