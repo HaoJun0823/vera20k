@@ -320,6 +320,9 @@ mission 状态读——那正是 v2「单位在家挂机」却查不出来的原
 - 600 帧：`assignments=52 attacks=52 guards=0`（开局有可见敌人，全部发起攻击）
 - 3000 帧：`assignments=260 attacks=52 guards=208`（敌人消失后退回防守）
 - `active=13` 稳定，`ended={Reassess: 247}`，账本不变
+- 3000 帧逐段读数：`visible_enemies=1` 持续到 frame 450（对应 52 次攻击），
+  frame 600 起变 0，同期 `destroyed` 从 2 升到 3，之后 208 次全是 Guard。
+  目标随战局变化，不是盲目开火（`autoplay-match` 现打印 `visible_enemies`）。
 两个新测试固定「可见敌人才打、看不见的不打」。90 个 crate 测试通过，客户端
 `--profile fast` 编译成功。
 

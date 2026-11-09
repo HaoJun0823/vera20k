@@ -105,12 +105,13 @@ fn main() {
 
         if (frame + 1) % 150 == 0 {
             println!(
-                "  frame {}: produced={} destroyed={} transferred={} active={} ended={:?}",
+                "  frame {}: produced={} destroyed={} transferred={} active={} visible_enemies={} ended={:?}",
                 frame + 1,
                 ledger.produced().values().sum::<usize>(),
                 ledger.destroyed().values().sum::<usize>(),
                 ledger.transferred().values().sum::<usize>(),
                 tasks.assignment_count(),
+                snapshot.enemy_visible().count(),
                 tasks.endings(),
             );
         }
