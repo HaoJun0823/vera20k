@@ -255,9 +255,10 @@ Executor），打印四本账与任务数。它**会发命令**，但只发「�
 `MatchState` 带每局的 `ControlState` + `TaskBoard`（每局默认关、状态不跨局），
 四个快捷键进 `vera20k` 分类，`sim_tick.rs` 在 `take_due_commands()` 之前把
 `plan_frame` 的命令经 `issue_local_command` 注入玩家同一条命令通道（仅离线对局）。
-**四个键没有默认键位**，要在 Options → Keyboard 里给 `AutoPlay` /
-`AutoPlayForces` / `AutoPlayBuild` / `AutoPlayAbilities` 绑定后才能按——这一点
-与 v2 一致，也是上次「按了没反应」的原因。
+**当时四个键没有默认键位**（与 v2 一致，是上次「按了没反应」的原因）。
+T06 已补上启动默认键 `Ctrl+Shift+A/F/B/P`，玩家在 Keyboard 页已有的绑定优先；
+本机 `KeyboardMD.ini` 里 `AutoPlay=192`、`AutoPlayForces=1216` 两条是 v2 时期
+手动绑的，会被保留。以 `autoplay/tasks/T06-hotkey-defaults.md` 为准。
 
 ---
 

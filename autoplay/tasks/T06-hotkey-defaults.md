@@ -2,11 +2,11 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 待办 |
+| 状态 | 已完成（实机验证待用户） |
 | 层 | 4 单位意图与执行（客户端侧） |
 | 依赖 | 无（可与其它卡并行） |
-| 负责人 | （谁领谁填） |
-| 完成证据 | 提交号 + 实测数字（完成时填） |
+| 负责人 | 本会话 |
+| 完成证据 | 提交 `vera20k: give the four AutoPlay switches default keys (T06)`（2026-11-10）；热键回归 **28 passed / 0 failed**（原 25 + 新增 3）；客户端 `check` 与 `--profile fast` 编译通过 |
 
 ## 1 要做什么
 
@@ -22,10 +22,10 @@
 ## 3 合格线（可数）
 
 - 四个命令各有默认键位，且**不与现有键冲突**（列出四个组合并说明查重方式）。
-- 键盘页回归测试通过：当前 `cargo test -p vera20k --lib -- hotkeys` 为 **25 个通过**，
-  数量不减少；`retail_commands()` 的 87 条 fixture 不受影响。
+- 键盘页回归测试通过：`cargo test -p vera20k --lib -- hotkeys` 为 **28 个通过**
+  （原 25 + 新增 3）；`retail_commands()` 的 87 条 fixture 不受影响。
 - 实机验证：离线 Skirmish 里按全局键 → 屏幕提示状态变化 → 接管单位；
-  联机对局**不注入** AutoPlay 命令（避免破坏同步）。
+  联机对局**不注入** AutoPlay 命令（避免破坏同步）。**本会话无法运行 GUI，见 §8。**
 - `cargo check -p vera20k --bin vera20k` 无错误；`--profile fast` 客户端编译成功。
 
 ## 4 不许复发
@@ -46,6 +46,12 @@
 - 客户端从 v3 工作树根目录启动时读到已配好 `ra2_dir` 的 `config.toml`，无需 `RA2_DIR`。
 - 全量 `cargo test -p vera20k --lib` 有 **7 个既有失败**（繁中本地化 6 + 上游 pin 漂移 1），
   与本分支无关，**不要顺手改**，也不要把它当回归（`DESIGN.md` §5）。
+- **实测查重**：读本机 `KeyboardMD.ini` 的 `[Hotkey]` 段（87 条），`0x300–0x3FF`
+  （Ctrl+Shift 组合）完全空闲；已占用的是 Shift+数字、Ctrl+数字、Ctrl+F1..F4、
+  Ctrl+Alt+数字。故选 Ctrl+Shift+A / F / B / P = `833/834/838/848`。
+- **实测发现**：本机 `KeyboardMD.ini` 已有 `AutoPlay=192`、`AutoPlayForces=1216`
+  两条手动绑定（v2 时期留下的），所以这两个命令尊重玩家已有绑定、不装默认；
+  `AutoPlayBuild` / `AutoPlayAbilities` 用默认键。这解释了「设过键却只有部分有反应」。
 
 ## 6 验证命令
 
@@ -68,7 +74,16 @@ python -m tools.cargo_run -- build --profile fast -p vera20k --bin vera20k
 `retail_commands()` 的 87 条 fixture。
 一个状态一个主人：`ControlState` 仍归 `MatchState`。
 
-## 8 收尾要写什么
+## 8 收尾记录
 
-做到哪、下一张卡、四个默认键位与查重结论、25 个测试结果、实机观察（状态提示 +
-单位是否真的动）、未决项；同步更新 `INDEX.md` 与 `docs/handoff.md` 里「无默认键」的说明。
+- 做到哪：`from_ini_bytes`（启动路径）按「命令未绑定 + 键未被占用」安装四个默认键；
+  `reload_from_ini_bytes`（Cancel / Reset All）保持纯 INI 回放，不强制装键——
+  这样三个原生绑定回归测试不用改断言，只把一个序列化期望补上四行。
+  `catalog.rs` 的「无默认键」注释、`docs/handoff.md` 的说明同步更正。
+- 默认键：`Ctrl+Shift+A` 全局 / `Ctrl+Shift+F` 战斗 /
+  `Ctrl+Shift+B` 生产 / `Ctrl+Shift+P` 能力（`833/834/838/848`）。
+- 实测：28 个热键测试通过（新增 3 个：新配置有默认键、玩家绑定优先、
+  键被占用时不抢占）；客户端 `check` 与 `--profile fast` 编译通过。
+- **未完成 / 如实留白**：**实机验证没做**——本会话无法运行 GUI。离线 Skirmish 里
+  按全局键后的屏幕提示、单位是否真的被接管、联机对局不注入命令，都需要用户实机确认。
+- 下一张卡：T02 / T03 / T05 均可并行（T01 依赖已满足）。

@@ -224,6 +224,23 @@ pub(crate) fn physical_scroll_key(
     }
 }
 
+/// Default shortcuts for AutoPlay's four switches: Ctrl+Shift+A / F / B / P.
+/// The retail `[Hotkey]` section leaves the whole `0x300` range unused (it binds
+/// Shift+digits, Ctrl+digits, Ctrl+F1..F4 and Ctrl+Alt+digits), so these four
+/// cannot collide with a retail command on a fresh profile.
+const AUTOPLAY_DEFAULT_KEYS: [(HotkeyCommand, u16); 4] = [
+    (HotkeyCommand::ToggleAutoPlay, CTRL_BIT | SHIFT_BIT | 0x41),
+    (
+        HotkeyCommand::ToggleAutoPlayForces,
+        CTRL_BIT | SHIFT_BIT | 0x46,
+    ),
+    (HotkeyCommand::AutoPlayBuild, CTRL_BIT | SHIFT_BIT | 0x42),
+    (
+        HotkeyCommand::AutoPlayAbilities,
+        CTRL_BIT | SHIFT_BIT | 0x50,
+    ),
+];
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct HotkeyBindings {
     by_key: BTreeMap<u16, HotkeyCommand>,
@@ -249,6 +266,16 @@ impl HotkeyBindings {
         bindings
             .by_key
             .insert(VK_SPACE, HotkeyCommand::CenterOnRadarEvent);
+        // AutoPlay's four switches are unusable on a fresh profile without a trip to
+        // the Keyboard page: retail KEYBOARDMD.INI has no entries for them. Install
+        // their defaults at startup only - reload (Cancel / Reset All) stays a pure
+        // replay of the INI, which is what the native binding tests pin. A binding the
+        // player assigned, or another command already holding the key, takes precedence.
+        for (command, key) in AUTOPLAY_DEFAULT_KEYS {
+            if bindings.first_key(command).is_none() && !bindings.by_key.contains_key(&key) {
+                bindings.by_key.insert(key, command);
+            }
+        }
         bindings
     }
 
@@ -701,6 +728,39 @@ fn command_from_name(name: &str) -> Option<HotkeyCommand> {
 mod tests {
     use super::*;
 
+    /// A fresh profile can toggle AutoPlay without visiting the Keyboard page.
+    #[test]
+    fn autoplay_switches_have_defaults_on_a_fresh_profile() {
+        let bindings = HotkeyBindings::from_ini_bytes(None);
+        for (command, key) in AUTOPLAY_DEFAULT_KEYS {
+            assert_eq!(bindings.first_key(command), Some(key));
+            assert_eq!(bindings.command_at(key), Some(command));
+        }
+    }
+
+    /// Bindings the player assigned on the Keyboard page are never overwritten.
+    #[test]
+    fn a_player_binding_wins_over_the_autoplay_default() {
+        let bindings = HotkeyBindings::from_ini_bytes(Some(
+            b"[Hotkey]\nAutoPlay=65\nAutoPlayBuild=66\nAutoPlayAbilities=67\nAutoPlayForces=68\n",
+        ));
+        assert_eq!(bindings.first_key(HotkeyCommand::ToggleAutoPlay), Some(65));
+        assert_eq!(bindings.command_at(65), Some(HotkeyCommand::ToggleAutoPlay));
+        for (_command, key) in AUTOPLAY_DEFAULT_KEYS {
+            assert_eq!(bindings.command_at(key), None);
+        }
+    }
+
+    /// The default is skipped when another command already holds that key.
+    #[test]
+    fn an_occupied_default_key_is_not_stolen() {
+        let key = CTRL_BIT | SHIFT_BIT | 0x41;
+        let ini = format!("[Hotkey]\nStopObject={key}\n");
+        let bindings = HotkeyBindings::from_ini_bytes(Some(ini.as_bytes()));
+        assert_eq!(bindings.command_at(key), Some(HotkeyCommand::StopObject));
+        assert_eq!(bindings.first_key(HotkeyCommand::ToggleAutoPlay), None);
+    }
+
     #[test]
     fn camera_bindings_use_normal_assignment_conflicts_and_persistence() {
         let mut bindings = HotkeyBindings::from_ini_bytes(Some(
@@ -941,10 +1001,13 @@ mod tests {
             HotkeyBindings::from_ini_bytes(Some(b"[Hotkey]\nDelete=110\nStopObject=83\n"));
         assert_eq!(startup.first_key(HotkeyCommand::Delete), Some(46));
         let serialized = startup.to_ini_string();
+        // Startup installs the three native keys plus AutoPlay's four defaults
+        // (833/834/838/848 = Ctrl+Shift+A/B/F/P). VeraX AutoLoad has its own
+        // Ctrl+D default when that feature is on.
         #[cfg(feature = "verax")]
-        let expected = "[Hotkey]\nOptions=27\nCenterOnRadarEvent=32\nDelete=110\nStopObject=83\nAutoLoad=580\n";
+        let expected = "[Hotkey]\nOptions=27\nCenterOnRadarEvent=32\nDelete=110\nStopObject=83\nAutoLoad=580\nAutoPlay=833\nAutoPlayBuild=834\nAutoPlayForces=838\nAutoPlayAbilities=848\n";
         #[cfg(not(feature = "verax"))]
-        let expected = "[Hotkey]\nOptions=27\nCenterOnRadarEvent=32\nDelete=110\nStopObject=83\n";
+        let expected = "[Hotkey]\nOptions=27\nCenterOnRadarEvent=32\nDelete=110\nStopObject=83\nAutoPlay=833\nAutoPlayBuild=834\nAutoPlayForces=838\nAutoPlayAbilities=848\n";
         assert_eq!(serialized, expected);
         let mut reloaded = HotkeyBindings::reload_from_ini_bytes(Some(serialized.as_bytes()));
         assert_eq!(reloaded.command_at(46), None);
