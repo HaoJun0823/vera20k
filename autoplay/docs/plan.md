@@ -1,5 +1,10 @@
 # AutoPlay V3 计划书
 
+> **本文是历史记录，不是范围裁决。** 权威源为 [`../DESIGN.md`](../DESIGN.md)；
+> 子任务与状态见 [`../tasks/INDEX.md`](../tasks/INDEX.md)。
+> 本文 §10 第 5 条「不做完整战略行为」已按 owner 范围撤销（许愿书全实现），
+> 原文保留仅供追溯。接手请先读 `DESIGN.md`。
+
 **日期**：2026-11-07（第二版，吸收评审意见）
 **基线**：`upstream/main` @ `535469ca0`，分支 `feature/autoplay-v3`
 **当前 HEAD**：`d36241d9a`
