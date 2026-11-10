@@ -25,20 +25,24 @@
 | `019c9aebb` | 任务 150 帧 `Reassess` 窗口 | 600 帧 `ended={Reassess: 39}` |
 | `a1ed68461` | 基础作战：打最近的可见敌人 | 600 帧 `attacks=52` |
 | `6558ee2a7` | `autoplay-match` 打印 `visible_enemies` | 3000 帧可见敌人 1→0、攻击转防守 |
+| 本批 | T01 单位意图追踪（L4）：相同命令不重发、任务续期 | 600 帧 `assignments` 52→16、3000 帧 260→29；93 测试通过 |
 
-当前基线（2026-11-10，`6558ee2a7`）：90 个 crate 测试通过；
-真实对局 600 帧 `assignments=52 attacks=52 guards=0`、`active=13`、
-`ended={Reassess: 39}`、`produced=6 destroyed=3`、`stock=13`。
+当前基线（2026-11-10，T01 后）：**93** 个 crate 测试通过；
+真实对局 600 帧 `assignments=16 attacks=16 guards=0`
+（`suppressed_still_running=36`）、`active=13`、`ended={Reassess: 39}`、
+`produced=6 destroyed=3`、`stock=13`；
+3000 帧 `assignments=29 attacks=16 guards=13`（`suppressed_still_running=231`）、
+`active=13`、`ended={Reassess: 247}`、`produced=14 destroyed=4 stock=13`。
 
 ---
 
-## 2. 待办卡（首批）
+## 2. 首批卡
 
 依赖已满足的卡可以并行；不同开发者各领一张，互不覆盖文件（见每张卡的「接口边界」）。
 
 | 卡 | 名称 | 层 | 依赖 | 状态 | 游戏里能看到什么 | 覆盖功能 |
 |---|---|---|---|---|---|---|
-| [T01](T01-tracked-orders.md) | 单位意图追踪（L4） | 4 | 无 | 待办 | 单位不再因反复下令而不开火，同一命令不刷屏 | F01 F04 F06 |
+| [T01](T01-tracked-orders.md) | 单位意图追踪（L4） | 4 | 无 | **已完成** | 单位不再因反复下令而不开火，同一命令不刷屏 | F01 F04 F06 |
 | [T02](T02-superseded.md) | 任务「被取代」判定 | 4 | T01 | 待办 | 单位被玩家/原生 AI 接管后，AutoPlay 不再重复派活 | F01 F07 |
 | [T03](T03-threat-and-retreat.md) | 威胁评估与撤退 | 3 | T01 | 待办 | 不再正面冲防御塔，劣势会撤，无路可退才拼 | F25 F26 |
 | [T04](T04-target-allocation.md) | 目标分配与集火 | 3 | T03 | 待办 | 不再一堆单位叠同一目标，GI 打载具不追飞机 | F27 F28 F30 F31 F34 |
@@ -46,7 +50,7 @@
 | [T06](T06-hotkey-defaults.md) | 默认键位 + 实机验证 | 4 | 无（可并行） | 待办 | 编译后直接按键就能开关，不用先去设置里绑 | F04 F07 |
 | [T07](T07-capture-first-slice.md) | 占领第一刀（重中之重） | 3 | T04 | 待办 | 派工程师占领建筑，夺取敌方建造场拿到额外生产线 | F40 F46 F09 |
 
-**建议顺序**：先 T01（它是 T02/T03/T05 的前置），T06 可随时并行；
+**建议顺序**：T01 已完成，T02 / T03 / T05 / T06 的依赖现已全部满足，可并行领卡；
 T03→T04→T07 是一条链。
 
 ---

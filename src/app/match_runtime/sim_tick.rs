@@ -1581,10 +1581,17 @@ fn advance_one_simulation_frame(
                 &snapshot,
                 &control,
                 &mut state.match_state.auto_play_tasks,
+                &mut state.match_state.auto_play_dispatcher,
             );
             if let Some(plan) = plan {
                 let subject = plan.validated.subject;
                 if sim.issue_local_command(plan.validated.envelope) {
+                    state.match_state.auto_play_dispatcher.note_issued(
+                        subject,
+                        plan.payload,
+                        plan.frame,
+                        plan.expected,
+                    );
                     state
                         .match_state
                         .auto_play_tasks

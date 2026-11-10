@@ -1,5 +1,10 @@
 # AutoPlay v3 交接文档
 
+> **本文是编年史，不是权威源。** 目标、验收源、统一分层与当前进度见
+> [`../DESIGN.md`](../DESIGN.md)；子任务与状态见 [`../tasks/INDEX.md`](../tasks/INDEX.md)。
+> 下文按时间记录，部分描述已被后续提交取代（例如「客户端不依赖 autoplay」在
+> `890539cae` 后已不成立）。接手请先读 `DESIGN.md`。
+
 **生成时间**：2026-11-09
 **分支**：`feature/autoplay-v3`（代码与交接文档同批提交，HEAD 以 `git log -1` 为准）
 **工作树**：`E:\Projects\vera20k-autoplay-v3`，干净，无未提交改动

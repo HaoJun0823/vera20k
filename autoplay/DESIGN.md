@@ -228,12 +228,13 @@ v2 工作树 `E:/Projects/vera20k-autoplay/docs/ai-layers.md` 的 L1 执行 / L2
 
 ## 5. 当前进度（可核验）
 
-**基线**（2026-11-10 实测，HEAD `6558ee2a7`，工作树干净）：
+**基线**（2026-11-10 实测，T01 完成后；上一基线为 `6558ee2a7`）：
 
 | 项 | 值 | 怎么来的 |
 |---|---|---|
-| crate 测试 | **90 passed / 0 failed** | `python -m tools.cargo_run -- test -p vera20k-autoplay --lib` |
-| 真实对局 600 帧 | `assignments=52 attacks=52 guards=0`、`active=13`、`ended={Reassess: 39}` | `autoplay-match.exe`，Arena.mmx seed 0x5EED |
+| crate 测试 | **93 passed / 0 failed** | `python -m tools.cargo_run -- test -p vera20k-autoplay --lib` |
+| 真实对局 600 帧 | `assignments=16 attacks=16 guards=0`（T01 前 52）、`suppressed_still_running=36`、`active=13`、`ended={Reassess: 39}` | `autoplay-match.exe`，Arena.mmx seed 0x5EED |
+| 3000 帧 | `assignments=29`（T01 前 260）、`suppressed_still_running=231`、`ended={Reassess: 247}` | 同上 |
 | 逐段 | frame 150–450 `visible_enemies=1`，frame 600 变 0；`produced=6 destroyed=3 transferred=0` | 同上 |
 | 账本 | `credits=Some(10000) net_flow=0 stock=13`、`houses=5 objects=232` | 同上 |
 | 客户端 | `--profile fast` 编译成功，48 MB exe（上一轮，见 `docs/handoff.md`） | `python -m tools.cargo_run -- build --profile fast -p vera20k --bin vera20k` |
@@ -247,12 +248,15 @@ v2 工作树 `E:/Projects/vera20k-autoplay/docs/ai-layers.md` 的 L1 执行 / L2
 决策追踪；归属判定；只读能力模型；生产/损失/资产/资金四账本；
 `TaskBoard` 任务生命周期（150 帧 `Reassess` 窗口、具名结束）；
 `plan_frame` 每帧决策 API；四个快捷键接进客户端并经 `issue_local_command` 注入玩家命令通道（仅离线）；
-基础攻击（打最近的可见敌人，无可见敌人退回防守）。
+基础攻击（打最近的可见敌人，无可见敌人退回防守）；
+**命令去重**（T01：复用 `Dispatcher`，相同命令且仍在执行时不重发、给任务续期，治 P05）；
+每局状态独立（新对局加载与开关关闭时同步清 `TaskBoard` 与 `Dispatcher`）。
 
 **明确没做**：威胁评估、撤退、集火分配、分弹、小队搭配、卡射程、微操；
 占领/渗透/运输/中立建筑/分基地/跨阵营/超武/围墙；
-「被别的写入者取代」(`Superseded`) 判定；四个键的默认键位；Combat 账本与收支拆分；
-玩家选中状态（app 层，仿真层不可见，故 F08 无法从仿真层回答）。
+「被别的写入者取代」(`Superseded`) 判定；位移超阈值单独重发（T01 只做了
+「相同命令且仍在执行则不重发 + 窗口到期重新评估」）；四个键的默认键位；
+Combat 账本与收支拆分；玩家选中状态（app 层，仿真层不可见，故 F08 无法从仿真层回答）。
 
 **v2 可靠性判定**（`docs/v2-assessment.md`）：可复用的是基础建造链、玩家命令通道、
 不作弊、单位能力解析、账本读数；进攻/绕路/侦察/驻扎/兵种配比调参**全部实测回退，不可照搬**；

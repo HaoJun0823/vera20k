@@ -20,6 +20,7 @@
 use std::path::PathBuf;
 
 use vera20k_autoplay::control::ControlState;
+use vera20k_autoplay::dispatch::Dispatcher;
 use vera20k_autoplay::executor::Executor;
 use vera20k_autoplay::frame::{OrderKind, plan_frame};
 use vera20k_autoplay::idle::TaskBoard;
@@ -75,6 +76,7 @@ fn main() {
     let control = ControlState::enabled(house);
     let mut ledger = Ledger::new();
     let mut tasks = TaskBoard::new();
+    let mut dispatcher = Dispatcher::new();
     let mut assignments = 0usize;
     let mut attacks = 0usize;
     let mut guards = 0usize;
@@ -84,12 +86,19 @@ fn main() {
 
         // One frame's decision, as a value: the order to submit (if any) and the task
         // endings already applied to the board. The client will use the same API.
-        let plan = plan_frame(scenario.sim(), &snapshot, &control, &mut tasks);
+        let plan = plan_frame(
+            scenario.sim(),
+            &snapshot,
+            &control,
+            &mut tasks,
+            &mut dispatcher,
+        );
 
         match plan {
             Some(plan) => {
                 let subject = plan.validated.subject;
                 if Executor::submit(&mut scenario.runtime, &plan.validated).is_committed() {
+                    dispatcher.note_issued(subject, plan.payload, plan.frame, plan.expected);
                     tasks.assign(subject, plan.frame);
                     assignments += 1;
                     match plan.kind {
@@ -117,6 +126,11 @@ fn main() {
         }
     }
     println!("assignments={assignments} attacks={attacks} guards={guards}");
+    println!(
+        "suppressed_still_running={} suppressed_same_frame={}",
+        dispatcher.suppressed_still_running(),
+        dispatcher.suppressed_same_frame()
+    );
 
     println!("observations={}", ledger.observations());
     println!("produced={:?}", ledger.produced());

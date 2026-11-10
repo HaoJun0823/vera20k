@@ -532,6 +532,12 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
             .session
             .retake_mode_from_world(outgoing.simulation.session().game_mode());
     }
+    // A new match starts with AutoPlay off and no memory of the previous one (F06).
+    // The dispatcher in particular must not survive: a stale per-unit order would
+    // suppress a legitimate first command using an id from the last game.
+    state.match_state.auto_play_control = None;
+    state.match_state.auto_play_tasks = Default::default();
+    state.match_state.auto_play_dispatcher = Default::default();
     state.match_state.sim_runtime = incoming.map(|(mut simulation, rules)| {
         simulation.install_fresh_process_main(&state.frontend.frontend_main_rng);
         simulation.publish_scenario_started();

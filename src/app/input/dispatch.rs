@@ -2030,18 +2030,15 @@ fn dispatch_retail_hotkey(state: &mut AppState, command: HotkeyCommand) {
         #[cfg(not(feature = "verax"))]
         HotkeyCommand::AutoLoad => {}
         HotkeyCommand::ToggleAutoPlay => toggle_auto_play(state),
-        HotkeyCommand::ToggleAutoPlayForces => toggle_auto_play_switch(
-            state,
-            vera20k_autoplay::control::Subsystem::Combat,
-        ),
-        HotkeyCommand::AutoPlayBuild => toggle_auto_play_switch(
-            state,
-            vera20k_autoplay::control::Subsystem::Production,
-        ),
-        HotkeyCommand::AutoPlayAbilities => toggle_auto_play_switch(
-            state,
-            vera20k_autoplay::control::Subsystem::Ability,
-        ),
+        HotkeyCommand::ToggleAutoPlayForces => {
+            toggle_auto_play_switch(state, vera20k_autoplay::control::Subsystem::Combat)
+        }
+        HotkeyCommand::AutoPlayBuild => {
+            toggle_auto_play_switch(state, vera20k_autoplay::control::Subsystem::Production)
+        }
+        HotkeyCommand::AutoPlayAbilities => {
+            toggle_auto_play_switch(state, vera20k_autoplay::control::Subsystem::Ability)
+        }
     }
 }
 
@@ -2093,14 +2090,12 @@ fn toggle_auto_play(state: &mut AppState) {
     };
     if state.match_state.auto_play_control.is_none() {
         state.match_state.auto_play_tasks = TaskBoard::new();
+        state.match_state.auto_play_dispatcher = Default::default();
     }
     post_auto_play_state(state);
 }
 
-fn toggle_auto_play_switch(
-    state: &mut AppState,
-    subsystem: vera20k_autoplay::control::Subsystem,
-) {
+fn toggle_auto_play_switch(state: &mut AppState, subsystem: vera20k_autoplay::control::Subsystem) {
     use vera20k_autoplay::control::ControlState;
     use vera20k_autoplay::idle::TaskBoard;
     let Some(house) = auto_play_house(state) else {
@@ -2127,6 +2122,7 @@ fn toggle_auto_play_switch(
     state.match_state.auto_play_control = any.then_some(control);
     if !any {
         state.match_state.auto_play_tasks = TaskBoard::new();
+        state.match_state.auto_play_dispatcher = Default::default();
     }
     post_auto_play_state(state);
 }

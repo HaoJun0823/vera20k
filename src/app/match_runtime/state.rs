@@ -38,6 +38,10 @@ pub(crate) struct MatchState {
     pub(crate) auto_play_control: Option<vera20k_autoplay::control::ControlState>,
     /// AutoPlay's task board for this match, reset with every new match.
     pub(crate) auto_play_tasks: vera20k_autoplay::idle::TaskBoard,
+    /// AutoPlay's record of the last order sent to each unit, reset with every new
+    /// match. A dispatcher carried into a new match would suppress a legitimate first
+    /// order because the previous game happened to ask for the same thing.
+    pub(crate) auto_play_dispatcher: vera20k_autoplay::dispatch::Dispatcher,
     /// Match input owner (F12): camera, zoom, cursor, keys, hotkeys.
     pub(crate) input: crate::app::input::state::MatchInputState,
     /// Match presentation owner (F12), part 1: per-match atlases + cursor.

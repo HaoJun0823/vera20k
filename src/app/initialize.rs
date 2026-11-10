@@ -976,6 +976,7 @@ impl App {
                 sim_runtime: None,
                 auto_play_control: None,
                 auto_play_tasks: Default::default(),
+                auto_play_dispatcher: Default::default(),
                 input: crate::app::input::state::MatchInputState::new(hotkey_bindings),
                 match_presentation: crate::app::presentation::state::MatchPresentationState {
                     interpolation:

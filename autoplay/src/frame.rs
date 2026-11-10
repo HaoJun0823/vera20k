@@ -15,10 +15,12 @@
 //! composition and target priority beyond "nearest" are deliberately not here yet.
 
 use vera20k_core::sim::command::Command;
+use vera20k_core::sim::mission::{MissionId, MissionType};
 use vera20k_core::sim::world::Simulation;
 
 use crate::arbiter::{Admission, Arbiter, Validated};
 use crate::control::{ControlState, Subsystem};
+use crate::dispatch::Dispatcher;
 use crate::idle::{TaskBoard, TaskEnd, lapsed};
 use crate::world::Snapshot;
 
@@ -44,6 +46,12 @@ pub struct FramePlan {
     pub frame: u64,
     /// Whether the order was an attack or a hold, for diagnostics.
     pub kind: OrderKind,
+    /// The command that was admitted. The caller records it as issued only after the
+    /// submit succeeds, so a refused frame does not poison the duplicate filter.
+    pub payload: Command,
+    /// The mission this order should leave the unit in, declared here rather than
+    /// derived from the `Command` (several variants map to the same mission).
+    pub expected: MissionId,
 }
 
 /// The nearest enemy this unit can actually see, by Manhattan cell distance.
@@ -81,15 +89,37 @@ fn combat_order(snapshot: &Snapshot, unit: u64) -> (Command, OrderKind) {
     }
 }
 
+/// The mission an order should leave the unit in.
+///
+/// Declared here, not derived from the `Command`: several variants map to the same
+/// mission, and a wrong guess would silently block a retry. `world_commands.rs:1992`
+/// turns `Attack` into `MissionType::Attack` and `:2036` turns `Guard` into
+/// `MissionType::AreaGuard`.
+fn expected_mission(kind: OrderKind) -> MissionId {
+    match kind {
+        OrderKind::Attack => MissionId::from_known(MissionType::Attack),
+        OrderKind::Guard => MissionId::from_known(MissionType::AreaGuard),
+    }
+}
+
 /// Decide one frame's work, applying any lapsed tasks to `tasks`.
 ///
-/// Returns `None` when AutoPlay is off, no unit needs work, or no order could be
-/// admitted. The caller still has to advance the frame in every case.
+/// `dispatcher` is AutoPlay's record of what it last told each unit. A unit whose task
+/// came up for reassessment but is still carrying out the very same order gets its task
+/// window renewed rather than a second copy of the command - re-sending an unchanged
+/// instruction every 150 frames is the "flood the queue so the unit cannot fire" symptom.
+/// A changed order, a finished mission or a recorded failure all go through as new work.
+///
+/// Returns `None` when AutoPlay is off, no unit needs a *new* order, or no order could be
+/// admitted. The caller still has to advance the frame in every case, and must call
+/// [`Dispatcher::note_issued`] with the returned `payload`/`expected` only after the
+/// submit succeeded.
 pub fn plan_frame(
     sim: &Simulation,
     snapshot: &Snapshot,
     control: &ControlState,
     tasks: &mut TaskBoard,
+    dispatcher: &mut Dispatcher,
 ) -> Option<FramePlan> {
     if !control.is_global_enabled() {
         return None;
@@ -101,20 +131,30 @@ pub fn plan_frame(
         tasks.finish(*unit, *end);
     }
 
-    let (validated, kind) = tasks
-        .unassigned(snapshot, control)
-        .into_iter()
-        .find_map(|unit| {
-            let (order, kind) = combat_order(snapshot, unit);
-            match Arbiter::admit(sim, control, Subsystem::Combat, unit, order) {
-                Admission::Allowed(validated) => Some((validated, kind)),
-                Admission::Refused(_) => None,
-            }
-        })?;
+    let (validated, kind, payload) =
+        tasks
+            .unassigned(snapshot, control)
+            .into_iter()
+            .find_map(|unit| {
+                let (order, kind) = combat_order(snapshot, unit);
+                if let Some(suppression) = dispatcher.repeat_of(sim, unit, &order, frame) {
+                    dispatcher.note_suppressed(suppression);
+                    // Still doing exactly this. Renewing the window keeps the unit owned;
+                    // dropping the task instead would make it look idle on every later frame.
+                    tasks.assign(unit, frame);
+                    return None;
+                }
+                match Arbiter::admit(sim, control, Subsystem::Combat, unit, order.clone()) {
+                    Admission::Allowed(validated) => Some((validated, kind, order)),
+                    Admission::Refused(_) => None,
+                }
+            })?;
     Some(FramePlan {
         validated,
         endings,
         frame,
         kind,
+        payload,
+        expected: expected_mission(kind),
     })
 }
