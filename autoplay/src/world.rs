@@ -49,6 +49,16 @@ pub struct Object {
     /// interface distinguishes "true state" from "visible state", and an automated player
     /// that acts on what it could not see is cheating rather than playing.
     pub visible: bool,
+    /// `Cost=` from the rules, in credits. Zero when the type is unknown to the rules.
+    /// Read, not recomputed: a second cost table would be a second owner.
+    pub cost: i32,
+    /// Primary weapon's maximum range in whole cells (`Range=` converted from leptons).
+    /// `None` for a type with no weapon, or for the native infinite-range sentinel.
+    pub range_cells: Option<u16>,
+    /// Whether the primary weapon's projectile can hit airborne targets (`AA=`).
+    pub can_target_air: bool,
+    /// Whether the primary weapon's projectile can hit ground targets (`AG=`).
+    pub can_target_ground: bool,
 }
 
 impl Object {
@@ -102,9 +112,29 @@ impl Snapshot {
             // `strength` is what makes `health` mean something, and only the rule set
             // knows it. A simulation does not own the rules it runs under, so the caller
             // supplies them - the same rules it built the simulation with.
-            let strength = sim
-                .object_type(entity.type_ref(), rules)
-                .map_or(0, |ty| ty.strength);
+            let rule_type = sim.object_type(entity.type_ref(), rules);
+            let strength = rule_type.map_or(0, |ty| ty.strength);
+            // Rule-derived facts travel with the snapshot so a planner never has to
+            // own a second copy of the rules. The primary weapon is the first entry in
+            // `weapon_list`; `Range=` is stored in leptons and read through the same
+            // conversion the engine uses. An unarmed or infinite-range type answers
+            // `None` rather than a made-up number.
+            let cost = rule_type.map_or(0, |ty| ty.cost);
+            let (range_cells, can_target_air, can_target_ground) = rule_type
+                .and_then(|ty| ty.weapon_list.iter().flatten().next())
+                .and_then(|weapon_id| rules.weapon(weapon_id))
+                .map_or((None, false, false), |weapon| {
+                    let cells = (weapon.range_leptons >= 0).then(|| {
+                        (weapon.range_leptons / vera20k_core::util::lepton::LEPTONS_PER_CELL_I32)
+                            as u16
+                    });
+                    let (aa, ag) = weapon
+                        .projectile
+                        .as_ref()
+                        .and_then(|projectile_id| rules.projectile(projectile_id))
+                        .map_or((false, false), |projectile| (projectile.aa, projectile.ag));
+                    (cells, aa, ag)
+                });
             let cell = (entity.position.rx(), entity.position.ry());
             let visible = viewer.is_some_and(|plane| plane.is_revealed(cell.0, cell.1));
             objects.insert(
@@ -119,6 +149,10 @@ impl Snapshot {
                     strength,
                     in_playfield: entity.in_playfield(),
                     visible,
+                    cost,
+                    range_cells,
+                    can_target_air,
+                    can_target_ground,
                 },
             );
         }

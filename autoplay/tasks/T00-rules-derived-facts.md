@@ -2,11 +2,11 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 待办 |
+| 状态 | **已完成（第一刀：规则派生量）**；「可造类型枚举」仍待办 |
 | 层 | 底座（跨 1/3/4 层的只读投影） |
 | 依赖 | 无 |
-| 负责人 | （谁领谁填） |
-| 完成证据 | 提交号 + 实测数字（完成时填） |
+| 负责人 | 本会话 |
+| 完成证据 | 提交 `autoplay: carry rule-derived facts in the Snapshot (T00)`（2026-11-10）；94 测试通过（+1）；真实对局 600 帧基线**不变**（`assignments=16`、`active=13`、`ended={Reassess: 39}`、`credits=10000`、`stock=13`）；`rule_facts={"AMCV": (3000, None, false, false), "E1": (200, Some(4), false, true), "MTNK": (700, Some(5), false, true)}` |
 
 ## 1 要做什么
 
@@ -30,8 +30,10 @@ T04 的「不再一堆单位叠同一目标」、T05 的「会按需补电厂/�
   由 `Snapshot::take` 从 `&RuleSet` 读出；`autoplay-match` 能打印它们。
 - 每条派生量有一个规则测试固定数值（用生产代码路径读零售或 fixture rules，
   不手写期望值）。
-- 提供一个按房屋/阵营枚举「当前可造类型」的查询，供 T05 使用；
-  该查询不得依赖硬编码的类型名列表。
+- ~~提供一个按房屋/阵营枚举「当前可造类型」的查询~~ **本刀未做，见 §8**：
+  `RuleSet::all_objects()` 是 pub（`ruleset.rs:10903`），但它列的是全部类型，不是
+  「这一方此刻能造什么」，还需按 prerequisite / 工厂 / 阵营过滤。留给 T05 开工时的
+  第一小步，不得用硬编码类型名列表绕过。
 - `plan_frame` 或其下游能拿到这些量；**不新增第二个规则状态所有者**。
 - 全量 `vera20k-autoplay` 测试通过（当前 93），真实对局基线数字不变
   （600 帧 `assignments=16`、`active=13`、`ended={Reassess: 39}`、账本不变）。
@@ -49,10 +51,14 @@ T04 的「不再一堆单位叠同一目标」、T05 的「会按需补电厂/�
   cell / health / strength / in_playfield / visible`，**没有任何规则派生量**。
 - `Snapshot::take(sim, rules, house)` **已经接收 `&RuleSet`**，但目前只用它读
   `entity.type_ref()` 之外的东西（见 `world.rs:90`）；规则数据没进投影。
-- `RuleSet` 有 `type_cost` / `cost_of`（`ruleset.rs:7173` / `:7125`）、
-  `building_dimensions`（`:9097`），但 grep `pub fn .*types` 只找到 particle / voxel /
-  insignia / overlay 等目录，**没有「枚举所有可造单位/建筑类型」的公开接口**。
-  这一项可能需要在 `vera20k-core` 侧加查询，属于跨 crate 改动，动手前先确认 owner。
+- **实测纠正**：`RuleSet` 的接口比写卡时以为的齐全，全部 pub：
+  `object(&str) -> Option<&ObjectType>`（`:6924`）、`all_objects()`（`:10903`）、
+  `weapon(&str)`（`:7212`）、`projectile(&str)`（`:7429`）。
+  `ObjectType` 有 `cost` / `weapon_list`；`WeaponType` 有 `range_leptons`（单位 leptons，
+  `256` 为一格，见 `src/util/lepton.rs`）和 `projectile`；`ProjectileType` 有 `aa` / `ag`。
+  `Snapshot::take` 本来就已用 `sim.object_type(entity.type_ref(), rules)` 取 `strength`，
+  所以四个派生量**不需要改 `vera20k-core`**，只在 `autoplay/src/world.rs` 里补读即可。
+  剩下缺的只是「这一方此刻能造什么」的过滤，那是 T05 的事。
 - `Command::QueueProduction { type_id: InternedId }` 存在（`command.rs:1384`），
   且在 `world_commands.rs:2111` 有执行路径，不是空命令；T05 可走它。
 - `Command::Move { entity_id, target_rx, target_ry }` 可用于 T03 的撤退
@@ -82,8 +88,23 @@ python -m tools.cargo_run -- build --profile fast -p vera20k-autoplay --bin auto
 另建一份规则表或类型清单。
 不许碰：`src/sim/` 的状态写入、引擎的弹药/装填规则、客户端热键、生产命令的语义。
 
-## 8 收尾要写什么
+## 8 收尾记录
 
-做到哪、解锁了哪几张卡（T03/T04/T05）、每条派生量的测试数值、
-「是否需要改 vera20k-core」的结论、真实对局基线是否不变、未决项；
-同步把 `INDEX.md` 状态改成「已完成」并填完成证据。
+- 做到哪：`Snapshot::Object` 新增 `cost` / `range_cells` / `can_target_air` /
+  `can_target_ground`，全部由 `Snapshot::take` 从 `&RuleSet` 读（`world.rs`）。
+  主武器取 `weapon_list` 第一个；射程由 `range_leptons / LEPTONS_PER_CELL_I32` 换算，
+  无限哨兵与无武器记 `None`；对空/对地取主武器 projectile 的 `aa`/`ag`。
+  `autoplay-match` 按类型去重打印 `rule_facts`。
+- 解锁了什么：T03 现在能读射程与对空/对地；T04 能读「能不能伤到它」的一半；
+  T05 能读造价。三张卡不再需要各自重查 rules。
+- 测试：`a_snapshot_carries_rule_derived_facts` 断言 snapshot 里的 `cost` 等于
+  `rules.object("MTNK").cost`（先断言该类型存在且 cost > 0，避免空真），
+  并固定 MTNK 有射程、能对地、不能对空。94 个 crate 测试通过。
+- 真实对局：600 帧所有基线数字**完全不变**——只读投影没有改变任何行为。
+  `rule_facts` 读到零售真实值：AMCV 3000 / E1 200 射程 4 / MTNK 700 射程 5。
+- **是否需要改 `vera20k-core`：不需要**（实测纠正了写卡时的猜测）。
+- 未决项：
+  1. 「这一方此刻能造什么」的过滤查询未做（T05 第一小步）。
+  2. 伤害 / 装甲克制（`warhead Verses × armor`）还没进投影，T04 的对策性选目标仍缺这块。
+  3. 派生量每帧从 `Snapshot` 重建，未缓存；若帧开销变大再评估。
+- 下一张卡：T03 或 T05（两者现在都可开工）。

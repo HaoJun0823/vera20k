@@ -232,7 +232,7 @@ v2 工作树 `E:/Projects/vera20k-autoplay/docs/ai-layers.md` 的 L1 执行 / L2
 
 | 项 | 值 | 怎么来的 |
 |---|---|---|
-| crate 测试 | **93 passed / 0 failed** | `python -m tools.cargo_run -- test -p vera20k-autoplay --lib` |
+| crate 测试 | **94 passed / 0 failed** | `python -m tools.cargo_run -- test -p vera20k-autoplay --lib` |
 | 真实对局 600 帧 | `assignments=16 attacks=16 guards=0`（T01 前 52）、`suppressed_still_running=36`、`active=13`、`ended={Reassess: 39}` | `autoplay-match.exe`，Arena.mmx seed 0x5EED |
 | 3000 帧 | `assignments=29`（T01 前 260）、`suppressed_still_running=231`、`ended={Reassess: 247}` | 同上 |
 | 逐段 | frame 150–450 `visible_enemies=1`，frame 600 变 0；`produced=6 destroyed=3 transferred=0` | 同上 |
@@ -251,6 +251,8 @@ v2 工作树 `E:/Projects/vera20k-autoplay/docs/ai-layers.md` 的 L1 执行 / L2
 基础攻击（打最近的可见敌人，无可见敌人退回防守）；
 **命令去重**（T01：复用 `Dispatcher`，相同命令且仍在执行时不重发、给任务续期，治 P05）；
 四个快捷键的默认键位（T06：`Ctrl+Shift+A/F/B/P`，玩家已有绑定优先）；
+**规则派生量**（T00：`Snapshot` 带造价 / 主武器射程格数 / 对空 / 对地，全部从 `RuleSet` 读，
+不写死单位名；实跑 `AMCV=3000`、`E1=200/射程4`、`MTNK=700/射程5`）；
 每局状态独立（新对局加载与开关关闭时同步清 `TaskBoard` 与 `Dispatcher`）。
 
 **明确没做**：威胁评估、撤退、集火分配、分弹、小队搭配、卡射程、微操；
@@ -258,8 +260,8 @@ v2 工作树 `E:/Projects/vera20k-autoplay/docs/ai-layers.md` 的 L1 执行 / L2
 「被别的写入者取代」(`Superseded`) 判定；位移超阈值单独重发（T01 只做了
 「相同命令且仍在执行则不重发 + 窗口到期重新评估」）；
 **实机验证**（T06 只做了默认键位与编译验证，离线 Skirmish 的屏幕提示与单位接管
-需用户实机确认）；**规则派生量**（射程 / 能否对空 / 造价 / 可造类型清单，T00，
-是 T03/T04/T05 共同前置）；Combat 账本与收支拆分；
+需用户实机确认）；「这一方此刻能造什么」的过滤查询与伤害/装甲克制
+（T00 第一刀只做了造价 / 射程 / 对空 / 对地，见卡 §8）；Combat 账本与收支拆分；
 玩家选中状态（app 层，仿真层不可见，故 F08 无法从仿真层回答）。
 
 **v2 可靠性判定**（`docs/v2-assessment.md`）：可复用的是基础建造链、玩家命令通道、

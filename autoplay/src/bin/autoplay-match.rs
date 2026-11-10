@@ -17,6 +17,7 @@
 //! <resolved>/fast/autoplay-match.exe <ra2-dir> Arena.mmx 600
 //! ```
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use vera20k_autoplay::control::ControlState;
@@ -142,4 +143,18 @@ fn main() {
         ledger.net_flow(house),
         ledger.holding(house).map_or(0, |h| h.total()),
     );
+
+    // Rule-derived facts that T03/T04/T05 will decide on. One row per type, so the
+    // report stays readable and does not second-guess the rules anywhere else.
+    let final_view = Snapshot::take(scenario.sim(), &scenario.runtime.resources.rules, house);
+    let mut facts: BTreeMap<&str, (i32, Option<u16>, bool, bool)> = BTreeMap::new();
+    for object in final_view.own() {
+        facts.entry(&object.type_name).or_insert((
+            object.cost,
+            object.range_cells,
+            object.can_target_air,
+            object.can_target_ground,
+        ));
+    }
+    println!("rule_facts(cost,range_cells,aa,ag)={facts:?}");
 }

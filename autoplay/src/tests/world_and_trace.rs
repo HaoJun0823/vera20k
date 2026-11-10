@@ -33,6 +33,37 @@ fn scene() -> Option<(Simulation, RuleSet, InternedId, u64, u64)> {
     Some((sim, rules, americans, ours, theirs))
 }
 
+/// The rule-derived facts come from the rules, not a second table in this crate.
+/// State the precondition first: a fixture without MTNK would make every assertion
+/// below pass vacuously.
+#[test]
+fn a_snapshot_carries_rule_derived_facts() {
+    let Some((sim, rules, americans, ours, _)) = scene() else {
+        return;
+    };
+    let mtnk = rules.object("MTNK").expect("the fixture has MTNK rules");
+    assert!(mtnk.cost > 0, "precondition: cost is a real rule value");
+
+    let snapshot = Snapshot::take(&sim, &rules, americans);
+    let object = snapshot
+        .objects
+        .get(&ours)
+        .expect("our tank is in the snapshot");
+    assert_eq!(object.cost, mtnk.cost);
+    assert!(
+        object.range_cells.is_some(),
+        "MTNK's primary weapon has a finite range"
+    );
+    assert!(
+        object.can_target_ground,
+        "MTNK's primary weapon can hit ground targets"
+    );
+    assert!(
+        !object.can_target_air,
+        "a Grizzly's cannon is not an anti-air weapon"
+    );
+}
+
 #[test]
 fn a_snapshot_separates_our_objects_from_theirs() {
     let Some((sim, rules, americans, ours, theirs)) = scene() else {
