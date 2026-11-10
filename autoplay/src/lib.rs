@@ -36,6 +36,7 @@ pub mod idle;
 pub mod ledger;
 pub mod observe;
 pub mod replan;
+pub mod threat;
 pub mod trace;
 pub mod world;
 
@@ -55,5 +56,6 @@ pub use idle::{REASSESS_FRAMES, TaskBoard, TaskEnd, lapsed};
 pub use ledger::{Departure, Holding, Ledger, Movement};
 pub use observe::{Cell, Outcome};
 pub use replan::{Attempts, FollowUp, MAX_ATTEMPTS};
+pub use threat::{RETREAT_CELLS, Verdict, assess};
 pub use trace::{Candidate, Decision, Trace};
 pub use world::{Object, Snapshot};

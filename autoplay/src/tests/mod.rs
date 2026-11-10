@@ -14,4 +14,5 @@ mod ledger;
 mod match_run;
 mod observe;
 mod replan;
+mod threat;
 mod world_and_trace;

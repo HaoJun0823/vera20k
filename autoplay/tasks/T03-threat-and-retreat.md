@@ -2,11 +2,11 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 待办 |
+| 状态 | 已完成 |
 | 层 | 3 战术微操 |
-| 依赖 | T01 |
-| 负责人 | （谁领谁填） |
-| 完成证据 | 提交号 + 实测数字（完成时填） |
+| 依赖 | T01（已完成）、T00（已完成） |
+| 负责人 | 本会话 |
+| 完成证据 | 提交 `autoplay: break off when the odds are against a unit (T03)`（2026-11-10）；**100** 个 crate 测试通过（+6）；默认 600 帧基线 `assignments=13 attacks=12 retreats=0 guards=1`、`active=13`、`ended={Reassess: 39}`、账本不变；**1v7 实战** 3000 帧 `retreats=23`、`disadvantage_frames=2601`、`attacks=64` |
 
 ## 1 要做什么
 
@@ -21,9 +21,11 @@
 
 ## 3 合格线（可数）
 
-- 基线：`6558ee2a7` 600 帧 `attacks=52 guards=0`，对同一可见敌人一律攻击。
-- 面对防御塔/火力优势目标时，攻击命令数下降；撤退命令有独立计数并在
-  `autoplay-match` 报告里可见（例如 `retreats=N`）。
+- 基线（T00 后、`75697c959`）：600 帧 `assignments=16 attacks=16 guards=0`，
+  对同一可见敌人一律攻击。
+- 面对火力优势目标时攻击命令数下降、撤退命令有独立计数并在 `autoplay-match`
+  报告里可见（`retreats` / `disadvantage_frames`）。**实测**：默认局 `attacks` 16→12、
+  出现 1 次 `Guard`（`can_hurt` 过滤掉打不动的目标）；1v7 局 `retreats=23`。
 - 三条边界各一个测试：优势→攻击、劣势→撤退、无路可退→仍攻击。
 - 威胁判断走 rules 推导（射程、伤害、能否对空/对地），不写死单位名；
   看不见的敌人不参与评估（不许用 `enemy()`）。
@@ -70,7 +72,39 @@ python -m tools.cargo_run -- build --profile fast -p vera20k-autoplay --bin auto
 不许碰：`vera20k-core` 的伤害/射程计算（只读其规则与 `availability`）、
 `src/sim/` 状态写入、客户端热键。决策只能产出经 `Arbiter::admit` 的命令。
 
-## 8 收尾要写什么
+## 8 收尾记录
 
-做到哪、下一张卡（T04）、`attacks`/`guards`/`retreats` 实测数字、
-哪些老毛病已有实测证据、哪些仍只有单元测试；同步更新 `INDEX.md`。
+- 做到哪：新增 `threat.rs`（`Verdict::{Engage, Retreat, Hold}`、`assess`），
+  `frame.rs` 的 `combat_order` 改为按裁决出命令，`OrderKind` 加 `Retreat`，
+  `expected_mission(Retreat) -> MissionType::Move`（`Command::Move` 在
+  `world_commands.rs:1815` 有真实执行路径）。撤退格子按「远离威胁的主轴」
+  移动 4 格并 clamp 到 `sim.session().map_width/height()`，保证不出战场。
+  `autoplay-match` 加 `retreats` / `disadvantage_frames` 两个读数，
+  并加可选第 4 个参数「对手数」（默认 2，与基线完全一致）用于构造劣势场景。
+- 判断依据（全部来自 T00 的规则派生量，不写死单位名）：主武器射程格数、
+  能否对空/对地、血量 / 满血、可见敌我数量、曼哈顿格距；整数运算。
+  三种劣势：受创且在敌人射程内、被远程压制（它能打我我打不到它）、数量劣势。
+  打不动的目标（含飞机 vs 无对空武器）不进目标池；看不见的敌人一律不参与。
+- 实测数字：
+  - 默认 `Arena.mmx` 600 帧：`assignments=13 attacks=12 retreats=0 guards=1`、
+    `disadvantage_frames=0`、`active=13`、`ended={Reassess: 39}`、
+    `credits=10000` / `stock=13` / `produced=6 destroyed=3` 全部不变。
+    `attacks` 16→12 是 `can_hurt` 过滤的直接效果（治 P09 / P11 的一半）。
+  - 1v4 3000 帧：仍平静，`retreats=0`（不是一律不进攻）。
+  - **1v7 3000 帧**：`houses=10 objects=317`、`visible_enemies=316`、
+    `assignments=88 attacks=64 retreats=23 guards=1`、
+    `disadvantage_frames=2601`、`active=0 ended={ObjectGone: 13, Reassess: 207}`。
+    劣势真实触发撤退，且 `attacks=64` 证明优势帧仍在进攻（P01 未复发）。
+- 哪些仍只有单元测试：三条边界（优势/劣势/无路可退）与「看不见的敌人」、
+  「无对空不追飞机」共 6 个测试；1v7 提供了撤退的真实对局证据。
+- 未决项（如实留白）：
+  1. **伤害 / 装甲克制未进投影**（`warhead Verses × armor`），所以「能不能伤到」
+     目前只看目标类别与能否对空对地；无敌 / 铁幕目标（P11）尚未识别。
+  2. 无限射程哨兵（`range_leptons = -512`）目前记 `None`（当作 0 处理），
+     远程压制判断会低估这类敌人。
+  3. 撤退是直线远离 4 格，**没有绕路 / 可通行性判断**（P03 / P23 / P14 只治了一半：
+     不再正面硬冲，但不会绕开侧面防御塔、也不检查退路是否被围墙堵死）。
+  4. 风筝 / 躲弹 / 卡射程 / 集火分配 / 小队搭配仍是后续卡。
+  5. 1v7 局本方 13 个单位全部损失（`ObjectGone: 13`）——会撤不等于会赢，
+     强度是交付后的迭代。
+- 下一张卡：**T04**（目标分配与集火），或 T05（按战局生产）。

@@ -26,6 +26,7 @@ use vera20k_autoplay::executor::Executor;
 use vera20k_autoplay::frame::{OrderKind, plan_frame};
 use vera20k_autoplay::idle::TaskBoard;
 use vera20k_autoplay::ledger::Ledger;
+use vera20k_autoplay::threat::{Verdict, assess};
 use vera20k_autoplay::world::Snapshot;
 use vera20k_core::headless_scenario;
 use vera20k_core::skirmish_launch::{AiDifficulty, LaunchCountry};
@@ -45,14 +46,25 @@ fn main() {
         .cloned()
         .unwrap_or_else(|| "Arena.mmx".to_string());
     let ticks: u64 = args.get(2).and_then(|raw| raw.parse().ok()).unwrap_or(600);
+    // Optional fourth argument: how many computer opponents. Default 2 reproduces the
+    // pinned baseline exactly; a larger field is how a disadvantage scenario is built
+    // without inventing one inside the simulation.
+    let opponents: usize = args
+        .get(3)
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(2)
+        .max(1);
+    let mut ai_slots = Vec::with_capacity(opponents);
+    for index in 0..opponents {
+        let country = if index == 0 {
+            LaunchCountry::America
+        } else {
+            LaunchCountry::Russia
+        };
+        ai_slots.push((country, AiDifficulty::Easy));
+    }
 
-    let launch = headless_scenario::battle_session(
-        &map,
-        &[
-            (LaunchCountry::America, AiDifficulty::Easy),
-            (LaunchCountry::Russia, AiDifficulty::Easy),
-        ],
-    );
+    let launch = headless_scenario::battle_session(&map, &ai_slots);
     let mut scenario = match headless_scenario::load_session(&retail, &map, 0x5EED, launch) {
         Ok(scenario) => scenario,
         Err(error) => {
@@ -65,7 +77,7 @@ fn main() {
         std::process::exit(1);
     };
 
-    println!("map={map} ticks={ticks} house={house:?}");
+    println!("map={map} ticks={ticks} opponents={opponents} house={house:?}");
     println!(
         "houses={} objects={}",
         scenario.sim().houses().iter().count(),
@@ -81,9 +93,22 @@ fn main() {
     let mut assignments = 0usize;
     let mut attacks = 0usize;
     let mut guards = 0usize;
+    let mut retreats = 0usize;
+    // Diagnostic only: how many unit-frames the threat assessment called a
+    // disadvantage. It does not change any order, so the match baseline stays honest.
+    let mut disadvantage_frames = 0usize;
+    let bounds = (
+        scenario.sim().session().map_width(),
+        scenario.sim().session().map_height(),
+    );
     for frame in 0..ticks {
         let snapshot = Snapshot::take(scenario.sim(), &scenario.runtime.resources.rules, house);
         ledger.observe(&snapshot);
+        disadvantage_frames += snapshot
+            .own()
+            .filter(|object| object.in_playfield && !object.is_building())
+            .filter(|object| matches!(assess(&snapshot, object.id, bounds), Verdict::Retreat(_)))
+            .count();
 
         // One frame's decision, as a value: the order to submit (if any) and the task
         // endings already applied to the board. The client will use the same API.
@@ -104,6 +129,7 @@ fn main() {
                     assignments += 1;
                     match plan.kind {
                         OrderKind::Attack => attacks += 1,
+                        OrderKind::Retreat => retreats += 1,
                         OrderKind::Guard => guards += 1,
                     }
                 }
@@ -126,7 +152,8 @@ fn main() {
             );
         }
     }
-    println!("assignments={assignments} attacks={attacks} guards={guards}");
+    println!("assignments={assignments} attacks={attacks} retreats={retreats} guards={guards}");
+    println!("disadvantage_frames={disadvantage_frames}");
     println!(
         "suppressed_still_running={} suppressed_same_frame={}",
         dispatcher.suppressed_still_running(),

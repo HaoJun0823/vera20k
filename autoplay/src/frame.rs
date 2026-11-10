@@ -8,11 +8,11 @@
 //! At most one order per frame: the engine's local command channel is a batch the caller
 //! already owns, and keeping one decision per frame leaves the frame advance in one place.
 //!
-//! Phase 4's first slice: a unit with no task attacks the nearest enemy it can actually
-//! see, or holds its post when there is none. [`Snapshot::enemy_visible`] is the only
-//! target source - the engine knows every object, but aiming at one the player has not
-//! revealed would be cheating rather than playing. Threat assessment, retreat, squad
-//! composition and target priority beyond "nearest" are deliberately not here yet.
+//! Phase 4: a unit with no task either attacks the nearest visible enemy it can hurt,
+//! breaks off when the odds are against it, or holds its post. [`crate::threat::assess`]
+//! owns the odds; only revealed objects are considered, because aiming at one the player
+//! has not seen would be cheating rather than playing. Squad composition, focus fire and
+//! target priority beyond "nearest" are deliberately not here yet.
 
 use vera20k_core::sim::command::Command;
 use vera20k_core::sim::mission::{MissionId, MissionType};
@@ -22,13 +22,16 @@ use crate::arbiter::{Admission, Arbiter, Validated};
 use crate::control::{ControlState, Subsystem};
 use crate::dispatch::Dispatcher;
 use crate::idle::{TaskBoard, TaskEnd, lapsed};
+use crate::threat::{self, Verdict};
 use crate::world::Snapshot;
 
 /// What the frame's order is for, so a report can say what AutoPlay did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderKind {
-    /// Attack a visible enemy.
+    /// Attack a visible enemy (including fighting on when there is nowhere to run).
     Attack,
+    /// Break off to a safer cell: the odds are against this unit.
+    Retreat,
     /// Hold position: nothing visible to fight.
     Guard,
 }
@@ -54,32 +57,25 @@ pub struct FramePlan {
     pub expected: MissionId,
 }
 
-/// The nearest enemy this unit can actually see, by Manhattan cell distance.
-///
-/// Integers only - a distance used for a decision must be identical on every platform.
-fn nearest_visible_enemy(snapshot: &Snapshot, unit: u64) -> Option<u64> {
-    let own = snapshot.objects.get(&unit)?;
-    snapshot
-        .enemy_visible()
-        .filter(|enemy| enemy.in_playfield)
-        .min_by_key(|enemy| {
-            (own.cell.0 as i32 - enemy.cell.0 as i32).abs()
-                + (own.cell.1 as i32 - enemy.cell.1 as i32).abs()
-        })
-        .map(|enemy| enemy.id)
-}
-
 /// One unit's order for this frame, and what kind of order it was.
-fn combat_order(snapshot: &Snapshot, unit: u64) -> (Command, OrderKind) {
-    match nearest_visible_enemy(snapshot, unit) {
-        Some(target_id) => (
+fn combat_order(snapshot: &Snapshot, unit: u64, bounds: (u16, u16)) -> (Command, OrderKind) {
+    match threat::assess(snapshot, unit, bounds) {
+        Verdict::Engage(target_id) => (
             Command::Attack {
                 attacker_id: unit,
                 target_id,
             },
             OrderKind::Attack,
         ),
-        None => (
+        Verdict::Retreat((target_rx, target_ry)) => (
+            Command::Move {
+                entity_id: unit,
+                target_rx,
+                target_ry,
+            },
+            OrderKind::Retreat,
+        ),
+        Verdict::Hold => (
             Command::Guard {
                 entity_id: unit,
                 target: None,
@@ -93,11 +89,12 @@ fn combat_order(snapshot: &Snapshot, unit: u64) -> (Command, OrderKind) {
 ///
 /// Declared here, not derived from the `Command`: several variants map to the same
 /// mission, and a wrong guess would silently block a retry. `world_commands.rs:1992`
-/// turns `Attack` into `MissionType::Attack` and `:2036` turns `Guard` into
-/// `MissionType::AreaGuard`.
+/// turns `Attack` into `MissionType::Attack`, `:2036` turns `Guard` into
+/// `MissionType::AreaGuard` and `:1815` turns `Move` into `MissionType::Move`.
 fn expected_mission(kind: OrderKind) -> MissionId {
     match kind {
         OrderKind::Attack => MissionId::from_known(MissionType::Attack),
+        OrderKind::Retreat => MissionId::from_known(MissionType::Move),
         OrderKind::Guard => MissionId::from_known(MissionType::AreaGuard),
     }
 }
@@ -126,6 +123,7 @@ pub fn plan_frame(
     }
 
     let frame = sim.session().tick();
+    let bounds = (sim.session().map_width(), sim.session().map_height());
     let endings = lapsed(snapshot, control, tasks, frame);
     for (unit, end) in &endings {
         tasks.finish(*unit, *end);
@@ -136,7 +134,7 @@ pub fn plan_frame(
             .unassigned(snapshot, control)
             .into_iter()
             .find_map(|unit| {
-                let (order, kind) = combat_order(snapshot, unit);
+                let (order, kind) = combat_order(snapshot, unit, bounds);
                 if let Some(suppression) = dispatcher.repeat_of(sim, unit, &order, frame) {
                     dispatcher.note_suppressed(suppression);
                     // Still doing exactly this. Renewing the window keeps the unit owned;
