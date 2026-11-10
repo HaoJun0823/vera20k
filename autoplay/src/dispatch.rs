@@ -156,6 +156,25 @@ impl Dispatcher {
         self.orders.contains_key(&id)
     }
 
+    /// How many units currently hold an in-force attack order on `target`.
+    ///
+    /// Read from the orders this dispatcher already owns, so target allocation does
+    /// not need a second table of "who is attacking what". A failed order is no longer
+    /// in force and does not hold a slot. Used only when more than one enemy is visible;
+    /// a single visible enemy is still engaged by whoever can reach it.
+    pub fn attackers_on(&self, target: u64) -> usize {
+        self.orders
+            .values()
+            .filter(|issued| {
+                issued.in_force
+                    && matches!(
+                        &issued.payload,
+                        Command::Attack { target_id, .. } if *target_id == target
+                    )
+            })
+            .count()
+    }
+
     /// Whether the last order for `id` is still believed to be in force.
     ///
     /// `None` when nothing is remembered. Kept public because it is the fact the duplicate

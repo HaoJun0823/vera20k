@@ -29,16 +29,19 @@
 | 本批 | T06 四个默认键位（Ctrl+Shift+A/F/B/P） | 28 个热键测试通过；实机验证待用户 |
 | 本批 | T00 规则派生量进入 Snapshot（造价/射程/对空对地） | 94 测试通过；600 帧基线不变；`rule_facts` 读到零售值 |
 | 本批 | T03 威胁评估与撤退（第一刀） | 100 测试通过；默认局 `attacks` 16→12；**1v7 实战 `retreats=23`** |
+| 本批 | T04 第一刀：多目标分摊 | 102 测试通过；默认局基线不变；1v7 `attack_targets=13`、`max_attackers_on_one_target=8` |
 
-当前基线（2026-11-10，T03 后）：**100** 个 crate 测试通过；
+当前基线（2026-11-10，T04 第一刀后）：**102** 个 crate 测试通过；
 真实对局 600 帧 `assignments=13 attacks=12 retreats=0 guards=1`
-（`suppressed_still_running=39`、`disadvantage_frames=0`）、`active=13`、
+（`suppressed_still_running=39`、`disadvantage_frames=0`）、
+`attack_targets=1 max_attackers_on_one_target=12`、`active=13`、
 `ended={Reassess: 39}`、`produced=6 destroyed=3`、`credits=10000`、`stock=13`；
 3000 帧 `assignments=25 attacks=12 retreats=0 guards=13`、`active=13`、
 `ended={Reassess: 247}`。
-**劣势场景**（`Arena.mmx 3000 帧 7 个对手`）：`assignments=88 attacks=64
-retreats=23 guards=1`、`disadvantage_frames=2601`、`visible_enemies=316`、
-`active=0 ended={ObjectGone: 13, Reassess: 207}`。
+**劣势场景**（`Arena.mmx 3000 帧 7 个对手`）：`assignments=181 attacks=59
+retreats=121 guards=1`、`attack_targets=13 max_attackers_on_one_target=8`、
+`disadvantage_frames=16828`。注意 T03/T04 两版的 1v7 数字**不可直接比较**：
+命令分布改变了战局走向；回归判据是默认 600 帧基线完全一致。
 
 ---
 
@@ -52,16 +55,16 @@ retreats=23 guards=1`、`disadvantage_frames=2601`、`visible_enemies=316`、
 | [T01](T01-tracked-orders.md) | 单位意图追踪（L4） | 4 | 无 | **已完成** | 单位不再因反复下令而不开火，同一命令不刷屏 | F01 F04 F06 |
 | [T02](T02-superseded.md) | 任务「被取代」判定 | 4 | T01 + 设计决策 | **阻塞**：引擎不记录命令来源，见卡 §5 | 单位被玩家/原生 AI 接管后，AutoPlay 不再重复派活 | F01 F07 |
 | [T03](T03-threat-and-retreat.md) | 威胁评估与撤退 | 3 | T01 + T00 | **已完成** | 不再正面冲防御塔，劣势会撤，无路可退才拼 | F25 F26 |
-| [T04](T04-target-allocation.md) | 目标分配与集火 | 3 | T03 | 待办 | 不再一堆单位叠同一目标，GI 打载具不追飞机 | F27 F28 F30 F31 F34 |
+| [T04](T04-target-allocation.md) | 目标分配与集火（第一刀：多目标分摊） | 3 | T03 | **已完成（第一刀）** | 不再一堆单位叠同一目标；硬上限/对策性留第二刀 | F27 F28 F30 F31 F34 |
 | [T05](T05-production-planning.md) | 战略第一刀：按战局生产 | 1 | T01 | 待办 | 会按需补电厂/矿厂/兵种，不再只守家 | F14 F21 |
 | [T06](T06-hotkey-defaults.md) | 默认键位 + 实机验证 | 4 | 无（可并行） | **已完成**（实机验证待用户） | 编译后直接按键就能开关，不用先去设置里绑 | F04 F07 |
 | [T07](T07-capture-first-slice.md) | 占领第一刀（重中之重） | 3 | T04 | 待办 | 派工程师占领建筑，夺取敌方建造场拿到额外生产线 | F40 F46 F09 |
 
-**建议顺序**：T00、T01、T03、T06 已完成；**T02 阻塞**（引擎不记录命令来源，
-需先拍板方案，见卡 §5）。T04 与 T05 现在都可开工，T04→T07 是一条链。
-T05 的第一小步是「这一方此刻能造什么」的过滤查询；T04 还缺伤害/装甲克制进投影。
-T00 实测**不需要**改 `vera20k-core`。`autoplay-match` 第 4 个参数可指定对手数
-（默认 2），用来构造劣势局。
+**建议顺序**：T00、T01、T03、T04（第一刀）、T06 已完成；**T02 阻塞**
+（引擎不记录命令来源，需先拍板方案，见卡 §5）。T05 可开工，T04 第二刀与
+T04→T07 是一条链。T05 的第一小步是「这一方此刻能造什么」的过滤查询；
+T04 第二刀还缺伤害/装甲克制进投影。T00 实测**不需要**改 `vera20k-core`。
+`autoplay-match` 第 4 个参数可指定对手数（默认 2），用来构造劣势局。
 
 ---
 

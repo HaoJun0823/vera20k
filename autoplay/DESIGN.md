@@ -177,7 +177,7 @@ v2 工作树 `E:/Projects/vera20k-autoplay/docs/ai-layers.md` 的 L1 执行 / L2
 | F25 | 绕开威胁：绕侧面防御塔、遛狗绕圈、避开 | ✕ | 3 |
 | F26 | 打得过就打、打不过就跑、跑了没意义就鱼死网破（T03 保守版：按射程/血量/数量判断，不含伤害克制） | ✅ | 3 |
 | F27 | 对策性：GI 别打不擅长的步兵，去打载具和空军 | ✕ | 3 |
-| F28 | 多个 V3 分弹，避免伤害溢出 | ✕ | 3 |
+| F28 | 多个 V3 分弹，避免伤害溢出（T04 第一刀已做多目标分摊，精确分弹仍缺） | ◐ | 3 |
 | F29 | 射程卡位（三星 EI 卡位打碉堡） | ✕ | 3 |
 | F30 | 保护英雄单位和高价值单位 | ✕ | 3 |
 | F31 | 引诱 / 扛伤 | ✕ | 3 |
@@ -228,14 +228,14 @@ v2 工作树 `E:/Projects/vera20k-autoplay/docs/ai-layers.md` 的 L1 执行 / L2
 
 ## 5. 当前进度（可核验）
 
-**基线**（2026-11-10 实测，T03 完成后；上一基线为 `6558ee2a7`）：
+**基线**（2026-11-10 实测，T04 第一刀后；上一基线为 `6558ee2a7`）：
 
 | 项 | 值 | 怎么来的 |
 |---|---|---|
-| crate 测试 | **100 passed / 0 failed** | `python -m tools.cargo_run -- test -p vera20k-autoplay --lib` |
-| 真实对局 600 帧 | `assignments=13 attacks=12 retreats=0 guards=1`（T01 前 52）、`suppressed_still_running=39`、`disadvantage_frames=0`、`active=13`、`ended={Reassess: 39}` | `autoplay-match.exe`，Arena.mmx seed 0x5EED，默认 2 对手 |
+| crate 测试 | **102 passed / 0 failed** | `python -m tools.cargo_run -- test -p vera20k-autoplay --lib` |
+| 真实对局 600 帧 | `assignments=13 attacks=12 retreats=0 guards=1`（T01 前 52）、`suppressed_still_running=39`、`disadvantage_frames=0`、`attack_targets=1 max_attackers_on_one_target=12`、`active=13`、`ended={Reassess: 39}` | `autoplay-match.exe`，Arena.mmx seed 0x5EED，默认 2 对手 |
 | 3000 帧 | `assignments=25 attacks=12 retreats=0 guards=13`、`active=13`、`ended={Reassess: 247}` | 同上 |
-| **劣势实战** | 7 对手 3000 帧：`assignments=88 attacks=64 retreats=23 guards=1`、`disadvantage_frames=2601`、`visible_enemies=316`、`active=0 ended={ObjectGone: 13, Reassess: 207}` | `autoplay-match.exe <retail> Arena.mmx 3000 7` |
+| **劣势实战** | 7 对手 3000 帧：`assignments=181 attacks=59 retreats=121 guards=1`、`attack_targets=13 max_attackers_on_one_target=8`、`disadvantage_frames=16828` | `autoplay-match.exe <retail> Arena.mmx 3000 7` |
 | 逐段 | frame 150–450 `visible_enemies=1`，frame 600 变 0；`produced=6 destroyed=3 transferred=0` | 同上 |
 | 账本 | `credits=Some(10000) net_flow=0 stock=13`、`houses=5 objects=232` | 同上 |
 | 客户端 | `--profile fast` 编译成功，48 MB exe（上一轮，见 `docs/handoff.md`） | `python -m tools.cargo_run -- build --profile fast -p vera20k --bin vera20k` |
@@ -257,10 +257,18 @@ v2 工作树 `E:/Projects/vera20k-autoplay/docs/ai-layers.md` 的 L1 执行 / L2
 **威胁评估与撤退**（T03：`threat.rs` 按射程 / 对空对地 / 血量 / 可见敌我数量判断，
 劣势发 `Command::Move` 脱离、无路可退仍进攻；打不动与看不见的目标不进目标池；
 1v7 实战 `retreats=23`）；
+**多目标分摊**（T04 第一刀：复用 `Dispatcher::attackers_on` 读「多少单位正打这个目标」，
+可见敌人 ≥2 时优先打最少人打的，单目标时仍进攻；1v7 `attack_targets=13`）；
 每局状态独立（新对局加载与开关关闭时同步清 `TaskBoard` 与 `Dispatcher`）。
 
+**读数比较的规矩**：默认 600 帧基线是每个卡片的回归判据。1v7 的
+`retreats` / `disadvantage_frames` 在 T03 与 T04 两版差别很大，**不可直接比较**——
+命令分布改变了战局走向（单位存活时间、可见敌人数都不同）。别把它当成
+「分摊让撤退变多」的证据，也别当成回归。
+
 **明确没做**：绕路 / 可通行性判断（T03 只会直线远离，不会绕侧面防御塔或破墙）、
-伤害与装甲克制、无限射程哨兵的精确判断、集火分配、分弹、小队搭配、卡射程、微操；
+伤害与装甲克制、无限射程哨兵的精确判断、同一目标的指派硬上限（T04 第二刀）、
+对策性选目标、分弹、小队搭配、卡射程、微操；
 占领/渗透/运输/中立建筑/分基地/跨阵营/超武/围墙；
 「被别的写入者取代」(`Superseded`) 判定；位移超阈值单独重发（T01 只做了
 「相同命令且仍在执行则不重发 + 窗口到期重新评估」）；

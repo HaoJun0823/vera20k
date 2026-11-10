@@ -4,6 +4,8 @@
 //! case is about, so the rule-derived facts come from the production reader rather than
 //! a hand-built second copy of the rules. Distances and ranges are integers.
 
+use std::collections::BTreeMap;
+
 use vera20k_core::map::entities::EntityCategory;
 use vera20k_core::rules::ruleset::RuleSet;
 use vera20k_core::sim::house_state::HouseState;
@@ -62,7 +64,10 @@ fn an_advantaged_unit_attacks() {
         return;
     };
     let snapshot = baseline(&sim, &rules, americans, ours, theirs);
-    assert_eq!(assess(&snapshot, ours, BOUNDS), Verdict::Engage(theirs));
+    assert_eq!(
+        assess(&snapshot, ours, BOUNDS, &BTreeMap::new()),
+        Verdict::Engage(theirs)
+    );
 }
 
 /// A longer-ranged enemy that can reach us while we cannot reach it: break off.
@@ -78,7 +83,7 @@ fn an_out_ranged_unit_retreats() {
         .get_mut(&theirs)
         .expect("enemy exists")
         .range_cells = Some(30);
-    let verdict = assess(&snapshot, ours, BOUNDS);
+    let verdict = assess(&snapshot, ours, BOUNDS, &BTreeMap::new());
     assert!(
         matches!(verdict, Verdict::Retreat(_)),
         "expected a retreat, got {verdict:?}"
@@ -103,7 +108,7 @@ fn a_hurt_unit_in_reach_retreats() {
     enemy.cell = (10, 8);
     enemy.range_cells = Some(10);
     assert!(matches!(
-        assess(&snapshot, ours, BOUNDS),
+        assess(&snapshot, ours, BOUNDS, &BTreeMap::new()),
         Verdict::Retreat(_)
     ));
 }
@@ -122,7 +127,10 @@ fn a_unit_with_nowhere_to_run_still_attacks() {
     enemy.cell = (1, 0);
     enemy.range_cells = Some(10);
     // Falling back along -x clamps to x=0, which is where the unit already stands.
-    assert_eq!(assess(&snapshot, ours, BOUNDS), Verdict::Engage(theirs));
+    assert_eq!(
+        assess(&snapshot, ours, BOUNDS, &BTreeMap::new()),
+        Verdict::Engage(theirs)
+    );
 }
 
 /// An enemy the player cannot see is not a target, and does not cause a retreat.
@@ -137,7 +145,10 @@ fn an_unseen_enemy_never_affects_the_verdict() {
         .get_mut(&theirs)
         .expect("enemy exists")
         .visible = false;
-    assert_eq!(assess(&snapshot, ours, BOUNDS), Verdict::Hold);
+    assert_eq!(
+        assess(&snapshot, ours, BOUNDS, &BTreeMap::new()),
+        Verdict::Hold
+    );
 }
 
 /// A cannon-only unit never chases an aircraft it cannot hit (P09).
@@ -150,5 +161,57 @@ fn a_unit_without_anti_air_does_not_chase_aircraft() {
     let enemy = snapshot.objects.get_mut(&theirs).expect("enemy exists");
     enemy.category = EntityCategory::Aircraft;
     enemy.range_cells = Some(30);
-    assert_eq!(assess(&snapshot, ours, BOUNDS), Verdict::Hold);
+    assert_eq!(
+        assess(&snapshot, ours, BOUNDS, &BTreeMap::new()),
+        Verdict::Hold
+    );
+}
+
+/// Two visible enemies: the unit goes for the one nobody is attacking yet, even
+/// though it is further away. That is the damage-overflow fix (F28).
+#[test]
+fn a_group_spreads_across_targets() {
+    let Some((sim, rules, americans, ours, theirs)) = scene() else {
+        return;
+    };
+    let mut snapshot = baseline(&sim, &rules, americans, ours, theirs);
+    // A second, slightly further enemy, and an ally so the odds are not a retreat.
+    let second = 999_999;
+    let mut far = snapshot.objects.get(&theirs).expect("enemy exists").clone();
+    far.id = second;
+    far.cell = (22, 20);
+    snapshot.objects.insert(second, far);
+    let ally = 888_888;
+    let mut friend = snapshot
+        .objects
+        .get(&ours)
+        .expect("our tank exists")
+        .clone();
+    friend.id = ally;
+    friend.cell = (9, 8);
+    snapshot.objects.insert(ally, friend);
+
+    let mut attackers = BTreeMap::new();
+    attackers.insert(theirs, 2);
+    attackers.insert(second, 0);
+    assert_eq!(
+        assess(&snapshot, ours, BOUNDS, &attackers),
+        Verdict::Engage(second)
+    );
+}
+
+/// A single visible enemy is still engaged however many units already target it:
+/// refusing to fight would recreate the "everyone stands at home" regression.
+#[test]
+fn a_single_target_is_never_refused() {
+    let Some((sim, rules, americans, ours, theirs)) = scene() else {
+        return;
+    };
+    let snapshot = baseline(&sim, &rules, americans, ours, theirs);
+    let mut attackers = BTreeMap::new();
+    attackers.insert(theirs, 10);
+    assert_eq!(
+        assess(&snapshot, ours, BOUNDS, &attackers),
+        Verdict::Engage(theirs)
+    );
 }

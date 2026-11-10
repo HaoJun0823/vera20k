@@ -14,6 +14,8 @@
 //! distance between itself and the threat. When it has no cell to fall back to it keeps
 //! fighting rather than freezing, which is the "fight to the end" case.
 
+use std::collections::BTreeMap;
+
 use vera20k_core::map::entities::EntityCategory;
 
 use crate::world::{Object, Snapshot};
@@ -73,7 +75,19 @@ fn retreat_cell(own: (u16, u16), threat: (u16, u16), bounds: (u16, u16)) -> Opti
 
 /// Decide for one unit. `bounds` is `(map_width, map_height)`; a retreat cell is
 /// always clamped inside it so the order is never addressed outside the playfield.
-pub fn assess(snapshot: &Snapshot, unit: u64, bounds: (u16, u16)) -> Verdict {
+///
+/// `attackers` is how many units already hold an in-force order on each visible
+/// enemy, read from the dispatcher rather than kept as a second table. When more than
+/// one enemy is visible the unit picks the least-attended one (nearest on a tie), so
+/// a group does not pour every shot into the same target (F28 / P08). With only one
+/// visible enemy it still engages that enemy - refusing to fight would be the
+/// "everyone stands at home" regression.
+pub fn assess(
+    snapshot: &Snapshot,
+    unit: u64,
+    bounds: (u16, u16),
+    attackers: &BTreeMap<u64, usize>,
+) -> Verdict {
     let Some(own) = snapshot.objects.get(&unit) else {
         return Verdict::Hold;
     };
@@ -91,6 +105,19 @@ pub fn assess(snapshot: &Snapshot, unit: u64, bounds: (u16, u16)) -> Verdict {
         .iter()
         .min_by_key(|enemy| manhattan(own.cell, enemy.cell))
         .expect("non-empty");
+    let target = if visible.len() >= 2 {
+        *visible
+            .iter()
+            .min_by_key(|enemy| {
+                (
+                    attackers.get(&enemy.id).copied().unwrap_or(0),
+                    manhattan(own.cell, enemy.cell),
+                )
+            })
+            .expect("non-empty")
+    } else {
+        nearest
+    };
     let distance = manhattan(own.cell, nearest.cell);
     let own_range = i32::from(own.range_cells.unwrap_or(0));
     let enemy_range = i32::from(nearest.range_cells.unwrap_or(0));
@@ -108,11 +135,11 @@ pub fn assess(snapshot: &Snapshot, unit: u64, bounds: (u16, u16)) -> Verdict {
     let outnumbered = visible.len() > own_force;
 
     if !(under_fire || out_ranged || outnumbered) {
-        return Verdict::Engage(nearest.id);
+        return Verdict::Engage(target.id);
     }
     match retreat_cell(own.cell, nearest.cell, bounds) {
         Some(cell) => Verdict::Retreat(cell),
         // No cell to fall back to: fighting on is better than freezing in place.
-        None => Verdict::Engage(nearest.id),
+        None => Verdict::Engage(target.id),
     }
 }

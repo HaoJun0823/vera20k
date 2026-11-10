@@ -14,6 +14,8 @@
 //! has not seen would be cheating rather than playing. Squad composition, focus fire and
 //! target priority beyond "nearest" are deliberately not here yet.
 
+use std::collections::BTreeMap;
+
 use vera20k_core::sim::command::Command;
 use vera20k_core::sim::mission::{MissionId, MissionType};
 use vera20k_core::sim::world::Simulation;
@@ -55,17 +57,26 @@ pub struct FramePlan {
     /// The mission this order should leave the unit in, declared here rather than
     /// derived from the `Command` (several variants map to the same mission).
     pub expected: MissionId,
+    /// The enemy this attack order is aimed at, for a report on target spread.
+    /// `None` for a retreat or a hold.
+    pub target: Option<u64>,
 }
 
-/// One unit's order for this frame, and what kind of order it was.
-fn combat_order(snapshot: &Snapshot, unit: u64, bounds: (u16, u16)) -> (Command, OrderKind) {
-    match threat::assess(snapshot, unit, bounds) {
+/// One unit's order for this frame, what kind it was, and the target if any.
+fn combat_order(
+    snapshot: &Snapshot,
+    unit: u64,
+    bounds: (u16, u16),
+    attackers: &BTreeMap<u64, usize>,
+) -> (Command, OrderKind, Option<u64>) {
+    match threat::assess(snapshot, unit, bounds, attackers) {
         Verdict::Engage(target_id) => (
             Command::Attack {
                 attacker_id: unit,
                 target_id,
             },
             OrderKind::Attack,
+            Some(target_id),
         ),
         Verdict::Retreat((target_rx, target_ry)) => (
             Command::Move {
@@ -74,6 +85,7 @@ fn combat_order(snapshot: &Snapshot, unit: u64, bounds: (u16, u16)) -> (Command,
                 target_ry,
             },
             OrderKind::Retreat,
+            None,
         ),
         Verdict::Hold => (
             Command::Guard {
@@ -81,6 +93,7 @@ fn combat_order(snapshot: &Snapshot, unit: u64, bounds: (u16, u16)) -> (Command,
                 target: None,
             },
             OrderKind::Guard,
+            None,
         ),
     }
 }
@@ -129,24 +142,30 @@ pub fn plan_frame(
         tasks.finish(*unit, *end);
     }
 
-    let (validated, kind, payload) =
-        tasks
-            .unassigned(snapshot, control)
-            .into_iter()
-            .find_map(|unit| {
-                let (order, kind) = combat_order(snapshot, unit, bounds);
-                if let Some(suppression) = dispatcher.repeat_of(sim, unit, &order, frame) {
-                    dispatcher.note_suppressed(suppression);
-                    // Still doing exactly this. Renewing the window keeps the unit owned;
-                    // dropping the task instead would make it look idle on every later frame.
-                    tasks.assign(unit, frame);
-                    return None;
-                }
-                match Arbiter::admit(sim, control, Subsystem::Combat, unit, order.clone()) {
-                    Admission::Allowed(validated) => Some((validated, kind, order)),
-                    Admission::Refused(_) => None,
-                }
-            })?;
+    // How many in-force orders already point at each visible enemy. Read from the
+    // dispatcher's own record, so target spread does not create a second owner.
+    let attackers: BTreeMap<u64, usize> = snapshot
+        .enemy_visible()
+        .map(|enemy| (enemy.id, dispatcher.attackers_on(enemy.id)))
+        .collect();
+
+    let (validated, kind, payload, target) = tasks
+        .unassigned(snapshot, control)
+        .into_iter()
+        .find_map(|unit| {
+            let (order, kind, target) = combat_order(snapshot, unit, bounds, &attackers);
+            if let Some(suppression) = dispatcher.repeat_of(sim, unit, &order, frame) {
+                dispatcher.note_suppressed(suppression);
+                // Still doing exactly this. Renewing the window keeps the unit owned;
+                // dropping the task instead would make it look idle on every later frame.
+                tasks.assign(unit, frame);
+                return None;
+            }
+            match Arbiter::admit(sim, control, Subsystem::Combat, unit, order.clone()) {
+                Admission::Allowed(validated) => Some((validated, kind, order, target)),
+                Admission::Refused(_) => None,
+            }
+        })?;
     Some(FramePlan {
         validated,
         endings,
@@ -154,5 +173,6 @@ pub fn plan_frame(
         kind,
         payload,
         expected: expected_mission(kind),
+        target,
     })
 }

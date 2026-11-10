@@ -94,6 +94,9 @@ fn main() {
     let mut attacks = 0usize;
     let mut guards = 0usize;
     let mut retreats = 0usize;
+    // Which enemy each attack order pointed at. A group pouring every shot into one
+    // target is the damage-overflow symptom; this makes the spread countable.
+    let mut target_counts: BTreeMap<u64, usize> = BTreeMap::new();
     // Diagnostic only: how many unit-frames the threat assessment called a
     // disadvantage. It does not change any order, so the match baseline stays honest.
     let mut disadvantage_frames = 0usize;
@@ -107,7 +110,12 @@ fn main() {
         disadvantage_frames += snapshot
             .own()
             .filter(|object| object.in_playfield && !object.is_building())
-            .filter(|object| matches!(assess(&snapshot, object.id, bounds), Verdict::Retreat(_)))
+            .filter(|object| {
+                matches!(
+                    assess(&snapshot, object.id, bounds, &BTreeMap::new()),
+                    Verdict::Retreat(_)
+                )
+            })
             .count();
 
         // One frame's decision, as a value: the order to submit (if any) and the task
@@ -124,6 +132,9 @@ fn main() {
             Some(plan) => {
                 let subject = plan.validated.subject;
                 if Executor::submit(&mut scenario.runtime, &plan.validated).is_committed() {
+                    if let Some(target) = plan.target {
+                        *target_counts.entry(target).or_insert(0) += 1;
+                    }
                     dispatcher.note_issued(subject, plan.payload, plan.frame, plan.expected);
                     tasks.assign(subject, plan.frame);
                     assignments += 1;
@@ -154,6 +165,11 @@ fn main() {
     }
     println!("assignments={assignments} attacks={attacks} retreats={retreats} guards={guards}");
     println!("disadvantage_frames={disadvantage_frames}");
+    println!(
+        "attack_targets={} max_attackers_on_one_target={}",
+        target_counts.len(),
+        target_counts.values().copied().max().unwrap_or(0)
+    );
     println!(
         "suppressed_still_running={} suppressed_same_frame={}",
         dispatcher.suppressed_still_running(),
