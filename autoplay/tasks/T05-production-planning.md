@@ -36,6 +36,24 @@ AutoPlay 接管的房屋会按需补电厂/矿厂、出不止一种兵，不再�
 
 ## 5 依赖与前置事实
 
+**2026-11-10 实测补充（开工前先看，省得重查）**：
+
+- `Command::QueueProduction { type_id: InternedId }`（`command.rs:1384`）在
+  `world_commands.rs:2111` 走 `production::enqueue_by_type(self, rules,
+  command_owner, &type_s, frame_effects, false)`。**payload 不命名 owner**，
+  作用在 event header 的 house 上（源码注释：「Production events act on the
+  event's own house; the payload names no owner」）。
+- 这跟 `Arbiter::admit` 的形状有冲突：`admit_with_source`（`arbiter.rs:113`）必须传
+  `subject: u64`，会 `sim.entities().get(subject)` 检查存在与归属，再用
+  `control.may_command(owner, subsystem)` 判权限。生产命令**没有天然 subject**，
+  接入层 1 时第一个要定的就是「拿哪个本方对象当准入锚点」，或给 Arbiter 加
+  一条 house 级准入路径（不要绕过 Arbiter 直接写 `Command`）。
+- `RuleSet::all_objects()`（`ruleset.rs:10903`）可枚举全部 `ObjectType`，
+  但那是「全部类型」不是「这一方此刻能造什么」；还需按 prerequisite / 工厂 /
+  阵营过滤。`is_build_tech(&str)`（`:10143`）可能是入口，需实测确认。
+- `RuleSet::warhead(&str)`（`:7295`）/`warheads_iter()`（`:10878`）是 pub，
+  `WarheadType::Verses` 是伤害/装甲克制的数据源——这也是 T04 第二刀的前置。
+
 - 依赖 T01：没有去重追踪，每帧重复下建造命令会触发 P05 那一类问题。
 - `ledger.rs` 已有生产/损失/资产/资金四账本，按 **object id** 计流量
   （「造一个、丢一个」仍是生产 1，按类型存量差会漏掉）；`Snapshot` 带房屋现金余额。
