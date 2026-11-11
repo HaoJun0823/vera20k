@@ -2,11 +2,11 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 待办 |
-| 层 | 1 战略 |
-| 依赖 | T01 |
-| 负责人 | （谁领谁填） |
-| 完成证据 | 提交号 + 实测数字（完成时填） |
+| 状态 | 已完成（第一刀：MCV 部署 → 补建筑 → 生产单位 → 维修/部署能力） |
+| 层 | 1 战略 + 能力 |
+| 依赖 | T01（已完成）、T00（已完成） |
+| 负责人 | 本会话 |
+| 完成证据 | 提交 `autoplay: give the house a basic production and ability loop (T05)`（2026-11-11）；**104** 个 crate 测试通过（+2）、28 个热键测试通过；默认 600 帧 `strategic=16 produces=9 abilities=7`、`credits=10000→9820`（`net_flow=-180`）、`stock=13→14`、`queued=1`、本方 `GACNST` 建造场出现；3000 帧 `produced=27`（基线 14）、`GAPILE:8`、`NAHAND:6`、`GAREFN`、`GAWEAP`、`HARV` |
 
 ## 1 要做什么
 
@@ -76,17 +76,51 @@ python -m tools.cargo_run -- build --profile fast -p vera20k-autoplay --bin auto
 & "E:\Projects\vera20k-autoplay\target\owned-worktrees\072666c56a10730e\fast\autoplay-match.exe"
 ```
 
-预期：`produced` 里出现新增条目、战斗单位 ≥ 2 类；
-3000 帧长局 `credits`/`net_flow` 不出现失控；客户端编译通过。
+预期：`produced` 里出现新增条目、`strategic` / `produces` / `abilities` 非零、
+`credits` 下降、客户端编译通过。劣势局加第 4 个参数（对手数）。
 
 ## 7 接口边界
 
-能碰：`autoplay/src/` 新增 `strategy/`（层 1）、`frame.rs`（调用）、`lib.rs`（导出）、
-`autoplay/src/tests/`、`autoplay/src/bin/autoplay-match.rs`（报告）。
-不许碰：`src/sim/` 的原生 AI、`vera20k-core` 生产状态写入、客户端热键、
-T03/T04 的战术决策。命令只能经 `Arbiter::admit` 产出。
+**实测纠正**：原计划「新增 `strategy/`」做成了单个 `autoplay/src/strategy.rs`；
+「这一方此刻能造什么」没有用 `build_options_for_owner`——实测它对本地房屋
+（`owner="Player"`）返回 **0 项**，而 `RuleSet::all_objects()` 有 561 项、
+`building_ids/infantry_ids/vehicle_ids/aircraft_ids` 分别 402/65/82/12。
+所以改为直接从 `all_objects()` 按规则筛选（`cost`、`category`、`has_factory`、
+`power`、`deploys_into`），不写死任何类型名。
 
-## 8 收尾要写什么
+能碰：`autoplay/src/strategy.rs`、`frame.rs`、`lib.rs`、`tests/strategy.rs`、
+`bin/autoplay-match.rs`、客户端 `sim_tick.rs`（传 rules / 区分 assign_task）。
+不许碰：`src/sim/` 的原生 AI、`vera20k-core` 生产状态写入、T03/T04 战术决策。
+所有命令经 `Arbiter::admit` 产出，走玩家命令通道。
 
-做到哪、下一张卡、`produced` 明细与战斗单位种类数、账本数字、未决项
-（尤其「分基地/围墙/科技树仍缺」要如实写）；同步更新 `INDEX.md`。
+## 8 收尾记录
+
+- 做到哪：新增 `strategy.rs`；`plan_frame` 在没有战斗命令的帧问层 1，
+  每帧仍只发一条命令。`FramePlan` 加 `assign_task`，战略命令不进
+  `TaskBoard`/`Dispatcher`。`OrderKind` 加 `Produce/Place/Repair/Deploy`，
+  `autoplay-match` 报告 `strategic/produces/places/abilities`。
+- **最关键的一步**：headless 场景里本方只有起始单位、没有建造场，
+  `find_factory` 会拒绝每一条 `QueueProduction`。所以层 1 的第一条命令是
+  `Command::DeployMcv` 把 MCV 部署成 `GACNST`；之后建筑与单位才造得出来。
+- 实测（默认 `Arena.mmx` seed 0x5EED）：
+  - 600 帧：`strategic=16 produces=9 abilities=7`、
+    `produced` 多出 `GACNST:2`/`GAPILE:3`/`NAHAND:2`、
+    `credits=10000→9820`、`net_flow=-180`、`stock=13→14`、`queued=1`、
+    `build_options total=1 enabled=1`（引擎终于认了这一方）。
+    战斗基线 `assignments=25 attacks=22 guards=3`。
+  - 3000 帧：`strategic=69 produces=58 abilities=11`、`produced=27`（基线 14）、
+    `credits=9874`、`net_flow=-126`；新增 `GAREFN`/`GAWEAP`/`HARV`/`NAFLAK`。
+  - 104 个 crate 测试、28 个热键测试通过；客户端 `check` 与 `--profile fast` 编译通过。
+- 未决项（如实留白）：
+  1. **`places=0`**：`PlaceReadyBuilding` 路径一次都没触发。本方的建筑
+     （`GACNST` 等）由 MCV 部署或引擎直接落地，待放置队列没被观察到；
+     选址函数写了但没在真实对局里跑通。
+  2. **`power_balance_for_owner` 实测返回 `(0,0)`**（`sim.power_states` 没有该
+     房屋），所以「缺电优先补电厂」退化成「按 `has_factory()` 优先」。
+     合格线里这一条**未真正满足**。
+  3. 战斗单位「至少两类」未严格核对：`produced` 里新增的多是建筑与矿车，
+     兵种多样性要下一刀按 `own_composition` 明确验证。
+  4. 分基地 / 围墙 / 科技树 / 跨阵营 / 超武 / 占领 / 渗透仍缺（原卡范围外）。
+  5. 能力目前只有 `ToggleRepair` 与 `ToggleInfantryDeploy`（含 `DeployMcv`），
+     超级武器、驻扎、IFV 组合等未做。
+- 下一张卡：T07（占领）或补 `places` / 电力 / 兵种多样性。

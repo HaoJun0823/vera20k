@@ -48,7 +48,9 @@
   与本分支无关，**不要顺手改**，也不要把它当回归（`DESIGN.md` §5）。
 - **实测查重**：读本机 `KeyboardMD.ini` 的 `[Hotkey]` 段（87 条），`0x300–0x3FF`
   （Ctrl+Shift 组合）完全空闲；已占用的是 Shift+数字、Ctrl+数字、Ctrl+F1..F4、
-  Ctrl+Alt+数字。故选 Ctrl+Shift+A / F / B / P = `833/834/838/848`。
+  Ctrl+Alt+数字。故选 `·`(192) 全局 + Ctrl+Shift+F / B / P = `838/834/848`。
+  **2026-11-11 用户指定**：全局切换改用 `·`（backtick / VK_OEM_3 = 192），
+  单手好按也好测；本机 `KeyboardMD.ini` 本来就有 `AutoPlay=192`，玩家绑定优先保留。
 - **实测发现**：本机 `KeyboardMD.ini` 已有 `AutoPlay=192`、`AutoPlayForces=1216`
   两条手动绑定（v2 时期留下的），所以这两个命令尊重玩家已有绑定、不装默认；
   `AutoPlayBuild` / `AutoPlayAbilities` 用默认键。这解释了「设过键却只有部分有反应」。
@@ -80,8 +82,8 @@ python -m tools.cargo_run -- build --profile fast -p vera20k --bin vera20k
   `reload_from_ini_bytes`（Cancel / Reset All）保持纯 INI 回放，不强制装键——
   这样三个原生绑定回归测试不用改断言，只把一个序列化期望补上四行。
   `catalog.rs` 的「无默认键」注释、`docs/handoff.md` 的说明同步更正。
-- 默认键：`Ctrl+Shift+A` 全局 / `Ctrl+Shift+F` 战斗 /
-  `Ctrl+Shift+B` 生产 / `Ctrl+Shift+P` 能力（`833/834/838/848`）。
+- 默认键：**`·`（192）全局** / `Ctrl+Shift+F` 战斗（838） /
+  `Ctrl+Shift+B` 生产（834） / `Ctrl+Shift+P` 能力（848）。
 - 实测：28 个热键测试通过（新增 3 个：新配置有默认键、玩家绑定优先、
   键被占用时不抢占）；客户端 `check` 与 `--profile fast` 编译通过。
 - **未完成 / 如实留白**：**实机验证没做**——本会话无法运行 GUI。离线 Skirmish 里

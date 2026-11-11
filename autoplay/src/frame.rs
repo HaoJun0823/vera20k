@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 
+use vera20k_core::rules::ruleset::RuleSet;
 use vera20k_core::sim::command::Command;
 use vera20k_core::sim::mission::{MissionId, MissionType};
 use vera20k_core::sim::world::Simulation;
@@ -24,6 +25,7 @@ use crate::arbiter::{Admission, Arbiter, Validated};
 use crate::control::{ControlState, Subsystem};
 use crate::dispatch::Dispatcher;
 use crate::idle::{TaskBoard, TaskEnd, lapsed};
+use crate::strategy::{self, StrategicOrder};
 use crate::threat::{self, Verdict};
 use crate::world::Snapshot;
 
@@ -36,6 +38,14 @@ pub enum OrderKind {
     Retreat,
     /// Hold position: nothing visible to fight.
     Guard,
+    /// Queue a unit or building for production.
+    Produce,
+    /// Place a completed building.
+    Place,
+    /// Start repairing a damaged building.
+    Repair,
+    /// Deploy a deployable infantryman.
+    Deploy,
 }
 
 /// What AutoPlay asks for on one frame.
@@ -58,8 +68,12 @@ pub struct FramePlan {
     /// derived from the `Command` (several variants map to the same mission).
     pub expected: MissionId,
     /// The enemy this attack order is aimed at, for a report on target spread.
-    /// `None` for a retreat or a hold.
+    /// `None` for a retreat, a hold or a strategic order.
     pub target: Option<u64>,
+    /// Whether this order is a unit task. Combat orders are assigned on the board
+    /// and remembered by the dispatcher; strategic orders (production, placement,
+    /// repair, deploy) act on the house and must not create a unit task.
+    pub assign_task: bool,
 }
 
 /// One unit's order for this frame, what kind it was, and the target if any.
@@ -109,6 +123,21 @@ fn expected_mission(kind: OrderKind) -> MissionId {
         OrderKind::Attack => MissionId::from_known(MissionType::Attack),
         OrderKind::Retreat => MissionId::from_known(MissionType::Move),
         OrderKind::Guard => MissionId::from_known(MissionType::AreaGuard),
+        // Strategic orders act on the house, not on a unit's mission queue.
+        OrderKind::Produce | OrderKind::Place | OrderKind::Repair | OrderKind::Deploy => {
+            MissionId::NONE
+        }
+    }
+}
+
+/// The report kind for a strategic order, derived from the command we produced.
+fn support_kind(command: &Command) -> OrderKind {
+    match command {
+        Command::QueueProduction { .. } => OrderKind::Produce,
+        Command::PlaceReadyBuilding { .. } => OrderKind::Place,
+        Command::ToggleRepair { .. } => OrderKind::Repair,
+        Command::ToggleInfantryDeploy { .. } | Command::DeployMcv { .. } => OrderKind::Deploy,
+        _ => OrderKind::Guard,
     }
 }
 
@@ -120,16 +149,21 @@ fn expected_mission(kind: OrderKind) -> MissionId {
 /// instruction every 150 frames is the "flood the queue so the unit cannot fire" symptom.
 /// A changed order, a finished mission or a recorded failure all go through as new work.
 ///
-/// Returns `None` when AutoPlay is off, no unit needs a *new* order, or no order could be
-/// admitted. The caller still has to advance the frame in every case, and must call
+/// When no unit needs a new combat order, layer 1 gets a turn: production, building
+/// placement, repair and deployment are all paced so they cannot flood the queue.
+/// Only one order of any kind is produced per frame.
+///
+/// Returns `None` when AutoPlay is off, no order is due, or no order could be admitted.
+/// The caller still has to advance the frame in every case, and must call
 /// [`Dispatcher::note_issued`] with the returned `payload`/`expected` only after the
-/// submit succeeded.
+/// submit succeeded - and only for a plan whose `assign_task` is true.
 pub fn plan_frame(
     sim: &Simulation,
     snapshot: &Snapshot,
     control: &ControlState,
     tasks: &mut TaskBoard,
     dispatcher: &mut Dispatcher,
+    rules: &RuleSet,
 ) -> Option<FramePlan> {
     if !control.is_global_enabled() {
         return None;
@@ -149,7 +183,7 @@ pub fn plan_frame(
         .map(|enemy| (enemy.id, dispatcher.attackers_on(enemy.id)))
         .collect();
 
-    let (validated, kind, payload, target) = tasks
+    let combat = tasks
         .unassigned(snapshot, control)
         .into_iter()
         .find_map(|unit| {
@@ -165,14 +199,41 @@ pub fn plan_frame(
                 Admission::Allowed(validated) => Some((validated, kind, order, target)),
                 Admission::Refused(_) => None,
             }
-        })?;
+        });
+
+    if let Some((validated, kind, payload, target)) = combat {
+        return Some(FramePlan {
+            validated,
+            endings,
+            frame,
+            kind,
+            payload,
+            expected: expected_mission(kind),
+            target,
+            assign_task: true,
+        });
+    }
+
+    // No combat order this frame. Ask layer 1 for one paced strategic order.
+    let StrategicOrder {
+        command,
+        subsystem,
+        anchor,
+        reason: _,
+    } = strategy::plan(sim, snapshot, control, rules)?;
+    let Admission::Allowed(validated) =
+        Arbiter::admit(sim, control, subsystem, anchor, command.clone())
+    else {
+        return None;
+    };
     Some(FramePlan {
         validated,
         endings,
         frame,
-        kind,
-        payload,
-        expected: expected_mission(kind),
-        target,
+        kind: support_kind(&command),
+        payload: command,
+        expected: MissionId::NONE,
+        target: None,
+        assign_task: false,
     })
 }

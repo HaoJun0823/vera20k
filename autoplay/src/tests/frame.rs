@@ -52,8 +52,15 @@ fn issue_guard(
 ) {
     let control = ControlState::enabled(americans);
     let snapshot = Snapshot::take(&runtime.simulation, rules, americans);
-    let plan = plan_frame(&runtime.simulation, &snapshot, &control, tasks, dispatcher)
-        .expect("an order is planned");
+    let plan = plan_frame(
+        &runtime.simulation,
+        &snapshot,
+        &control,
+        tasks,
+        dispatcher,
+        rules,
+    )
+    .expect("an order is planned");
     assert_eq!(
         plan.kind,
         OrderKind::Guard,
@@ -80,8 +87,15 @@ fn a_unit_with_no_task_gets_one_order() {
     let mut tasks = TaskBoard::new();
     let mut dispatcher = Dispatcher::new();
 
-    let plan = plan_frame(&sim, &snapshot, &control, &mut tasks, &mut dispatcher)
-        .expect("an order is planned");
+    let plan = plan_frame(
+        &sim,
+        &snapshot,
+        &control,
+        &mut tasks,
+        &mut dispatcher,
+        &rules,
+    )
+    .expect("an order is planned");
     assert_eq!(plan.validated.subject, ours);
     assert_eq!(plan.kind, OrderKind::Guard, "nothing is revealed yet");
     assert!(plan.endings.is_empty());
@@ -103,8 +117,15 @@ fn a_visible_enemy_is_attacked() {
     let mut tasks = TaskBoard::new();
     let mut dispatcher = Dispatcher::new();
 
-    let plan = plan_frame(&sim, &snapshot, &control, &mut tasks, &mut dispatcher)
-        .expect("an order is planned");
+    let plan = plan_frame(
+        &sim,
+        &snapshot,
+        &control,
+        &mut tasks,
+        &mut dispatcher,
+        &rules,
+    )
+    .expect("an order is planned");
     assert_eq!(plan.validated.subject, ours);
     assert_eq!(plan.kind, OrderKind::Attack);
 }
@@ -121,8 +142,15 @@ fn an_unseen_enemy_is_not_attacked() {
     let mut tasks = TaskBoard::new();
     let mut dispatcher = Dispatcher::new();
 
-    let plan = plan_frame(&sim, &snapshot, &control, &mut tasks, &mut dispatcher)
-        .expect("an order is planned");
+    let plan = plan_frame(
+        &sim,
+        &snapshot,
+        &control,
+        &mut tasks,
+        &mut dispatcher,
+        &rules,
+    )
+    .expect("an order is planned");
     assert_eq!(plan.kind, OrderKind::Guard);
 }
 
@@ -138,7 +166,17 @@ fn a_unit_that_already_has_a_task_gets_no_second_order() {
     let mut dispatcher = Dispatcher::new();
     tasks.assign(ours, 0);
 
-    assert!(plan_frame(&sim, &snapshot, &control, &mut tasks, &mut dispatcher).is_none());
+    assert!(
+        plan_frame(
+            &sim,
+            &snapshot,
+            &control,
+            &mut tasks,
+            &mut dispatcher,
+            &rules
+        )
+        .is_none()
+    );
 }
 
 /// Switched off: no order, no task endings, no state changed.
@@ -152,7 +190,17 @@ fn with_autoplay_off_no_order_is_planned() {
     let mut tasks = TaskBoard::new();
     let mut dispatcher = Dispatcher::new();
 
-    assert!(plan_frame(&sim, &snapshot, &control, &mut tasks, &mut dispatcher).is_none());
+    assert!(
+        plan_frame(
+            &sim,
+            &snapshot,
+            &control,
+            &mut tasks,
+            &mut dispatcher,
+            &rules
+        )
+        .is_none()
+    );
     assert!(tasks.endings().is_empty());
 }
 
@@ -187,6 +235,7 @@ fn an_unchanged_order_renews_the_task_without_resending() {
         &control,
         &mut tasks,
         &mut dispatcher,
+        &rules,
     );
     assert!(second.is_none(), "the same order must not be sent again");
     assert!(tasks.has(ours), "the task window is renewed, not dropped");
@@ -225,6 +274,7 @@ fn a_changed_order_is_not_suppressed() {
         &control,
         &mut tasks,
         &mut dispatcher,
+        &rules,
     )
     .expect("a changed order goes through");
     assert_eq!(plan.kind, OrderKind::Attack);
@@ -260,6 +310,7 @@ fn a_failed_order_can_be_retried_with_the_same_payload() {
         &control,
         &mut tasks,
         &mut dispatcher,
+        &rules,
     )
     .expect("a failed order is retried");
     assert_eq!(plan.kind, OrderKind::Guard);

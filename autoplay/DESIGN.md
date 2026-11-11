@@ -165,7 +165,7 @@ v2 工作树 `E:/Projects/vera20k-autoplay/docs/ai-layers.md` 的 L1 执行 / L2
 
 | ID | 要什么 | 状态 | 层 |
 |---|---|---|---|
-| F21 | 按战况和单位特点生产各种单位 | ✕ | 1 |
+| F21 | 按战况和单位特点生产各种单位（T05 第一刀已会造建筑/单位，兵种多样性待验证） | ◐ | 1 |
 | F22 | 组合有效的战斗小队发动攻击 | ✕ | 2 |
 
 ### E. 单独作战 · 微操（许愿书正文，第一版必做）
@@ -228,17 +228,22 @@ v2 工作树 `E:/Projects/vera20k-autoplay/docs/ai-layers.md` 的 L1 执行 / L2
 
 ## 5. 当前进度（可核验）
 
-**基线**（2026-11-10 实测，T04 第一刀后；上一基线为 `6558ee2a7`）：
+**基线**（2026-11-11 实测，T05 第一刀后；上一基线为 `6558ee2a7`）：
 
 | 项 | 值 | 怎么来的 |
 |---|---|---|
-| crate 测试 | **102 passed / 0 failed** | `python -m tools.cargo_run -- test -p vera20k-autoplay --lib` |
-| 真实对局 600 帧 | `assignments=13 attacks=12 retreats=0 guards=1`（T01 前 52）、`suppressed_still_running=39`、`disadvantage_frames=0`、`attack_targets=1 max_attackers_on_one_target=12`、`active=13`、`ended={Reassess: 39}` | `autoplay-match.exe`，Arena.mmx seed 0x5EED，默认 2 对手 |
-| 3000 帧 | `assignments=25 attacks=12 retreats=0 guards=13`、`active=13`、`ended={Reassess: 247}` | 同上 |
-| **劣势实战** | 7 对手 3000 帧：`assignments=181 attacks=59 retreats=121 guards=1`、`attack_targets=13 max_attackers_on_one_target=8`、`disadvantage_frames=16828` | `autoplay-match.exe <retail> Arena.mmx 3000 7` |
-| 逐段 | frame 150–450 `visible_enemies=1`，frame 600 变 0；`produced=6 destroyed=3 transferred=0` | 同上 |
-| 账本 | `credits=Some(10000) net_flow=0 stock=13`、`houses=5 objects=232` | 同上 |
-| 客户端 | `--profile fast` 编译成功，48 MB exe（上一轮，见 `docs/handoff.md`） | `python -m tools.cargo_run -- build --profile fast -p vera20k --bin vera20k` |
+| crate 测试 | **104 passed / 0 failed**；热键 **28 passed** | `python -m tools.cargo_run -- test -p vera20k-autoplay --lib` / `-- test -p vera20k --lib -- hotkeys` |
+| 真实对局 600 帧 | `assignments=25 attacks=22 retreats=0 guards=3`、`strategic=16 produces=9 places=0 abilities=7`、`visible_enemies=2`、`produced=10 destroyed=5`、`ended={ObjectGone: 1, Reassess: 39}` | `autoplay-match.exe`，Arena.mmx seed 0x5EED，默认 2 对手 |
+| 3000 帧 | `assignments=50 attacks=33 guards=17`、`strategic=69 produces=58 abilities=11`、`produced=27 destroyed=17` | 同上 |
+| **经济真的动了** | 600 帧 `credits=9820 net_flow=-180 stock=14`、`build_options total=1 enabled=1 queued=1`；3000 帧 `credits=9874 net_flow=-126`。本方 `GACNST`/`GAPILE`/`GAREFN`/`GAWEAP`/`HARV`/`NAHAND` 出现 | `autoplay-match.exe` 结尾诊断 |
+| **劣势实战** | 7 对手 3000 帧（T04 版）：`assignments=181 attacks=59 retreats=121 guards=1`、`attack_targets=13 max_attackers_on_one_target=8` | `autoplay-match.exe <retail> Arena.mmx 3000 7` |
+| 客户端 | `--profile fast` 编译成功，48 MB exe | `python -m tools.cargo_run -- build --profile fast -p vera20k --bin vera20k` |
+
+**T05 之后基线换了口径**：生产/建造开始真的花钱造东西，`assignments` /
+`produced` / `credits` 与 T04 以前的「平静基线」不可直接比较。生产开启前的
+平静基线是 600 帧 `assignments=13 attacks=12 guards=1`、`credits=10000`、
+`produced=6`、`stock=13`。回归判据现在看的是：**战斗基线不退化**、
+**账本不失控**、**`credits` 确实下降且队列有内容**。
 
 **客户端全量 lib 有 7 个既有失败**（3719 通过 / 280 忽略），与本分支无关，v3 的 autoplay 提交没碰过那些文件：
 6 个是本机零售为繁体中文的本地化断言，1 个是上游静态 pin 清单漂移
@@ -251,7 +256,8 @@ v2 工作树 `E:/Projects/vera20k-autoplay/docs/ai-layers.md` 的 L1 执行 / L2
 `plan_frame` 每帧决策 API；四个快捷键接进客户端并经 `issue_local_command` 注入玩家命令通道（仅离线）；
 基础攻击（打最近的可见敌人，无可见敌人退回防守）；
 **命令去重**（T01：复用 `Dispatcher`，相同命令且仍在执行时不重发、给任务续期，治 P05）；
-四个快捷键的默认键位（T06：`Ctrl+Shift+A/F/B/P`，玩家已有绑定优先）；
+四个快捷键的默认键位（T06：全局 `·`=192，战斗/生产/能力 `Ctrl+Shift+F/B/P`，
+玩家已有绑定优先）；
 **规则派生量**（T00：`Snapshot` 带造价 / 主武器射程格数 / 对空 / 对地，全部从 `RuleSet` 读，
 不写死单位名；实跑 `AMCV=3000`、`E1=200/射程4`、`MTNK=700/射程5`）；
 **威胁评估与撤退**（T03：`threat.rs` 按射程 / 对空对地 / 血量 / 可见敌我数量判断，
@@ -259,6 +265,11 @@ v2 工作树 `E:/Projects/vera20k-autoplay/docs/ai-layers.md` 的 L1 执行 / L2
 1v7 实战 `retreats=23`）；
 **多目标分摊**（T04 第一刀：复用 `Dispatcher::attackers_on` 读「多少单位正打这个目标」，
 可见敌人 ≥2 时优先打最少人打的，单目标时仍进攻；1v7 `attack_targets=13`）；
+**基本生产 / 建造 / 能力使用**（T05 第一刀：`strategy.rs` 层 1——先把 MCV 部署成
+建造场 `GACNST`，再按规则补建筑、生产单位，维修受损建筑、部署步兵；
+`QueueProduction` / `PlaceReadyBuilding` / `ToggleRepair` / `ToggleInfantryDeploy` /
+`DeployMcv` 全部经 `Arbiter::admit` 走玩家命令通道；实测 `credits` 从 10000 降到 9820、
+`GAREFN`/`GAWEAP`/`HARV` 被造出）；
 每局状态独立（新对局加载与开关关闭时同步清 `TaskBoard` 与 `Dispatcher`）。
 
 **读数比较的规矩**：默认 600 帧基线是每个卡片的回归判据。1v7 的
@@ -273,7 +284,10 @@ v2 工作树 `E:/Projects/vera20k-autoplay/docs/ai-layers.md` 的 L1 执行 / L2
 「被别的写入者取代」(`Superseded`) 判定；位移超阈值单独重发（T01 只做了
 「相同命令且仍在执行则不重发 + 窗口到期重新评估」）；
 **实机验证**（T06 只做了默认键位与编译验证，离线 Skirmish 的屏幕提示与单位接管
-需用户实机确认）；「这一方此刻能造什么」的过滤查询与伤害/装甲克制
+需用户实机确认）；`PlaceReadyBuilding` 待放置建筑路径（T05 实测 `places=0`，
+选址函数写了但真实对局没触发）、缺电判断（`power_balance_for_owner` 实测返回
+`(0,0)`，退化成按 `has_factory()` 优先）、兵种多样性未严格核对，见 T05 卡 §8；
+「这一方此刻能造什么」的过滤查询与伤害/装甲克制
 （T00 第一刀只做了造价 / 射程 / 对空 / 对地，见卡 §8）；Combat 账本与收支拆分；
 玩家选中状态（app 层，仿真层不可见，故 F08 无法从仿真层回答）。
 

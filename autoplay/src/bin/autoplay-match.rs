@@ -94,6 +94,10 @@ fn main() {
     let mut attacks = 0usize;
     let mut guards = 0usize;
     let mut retreats = 0usize;
+    let mut produces = 0usize;
+    let mut places = 0usize;
+    let mut abilities = 0usize;
+    let mut strategic = 0usize;
     // Which enemy each attack order pointed at. A group pouring every shot into one
     // target is the damage-overflow symptom; this makes the spread countable.
     let mut target_counts: BTreeMap<u64, usize> = BTreeMap::new();
@@ -126,22 +130,30 @@ fn main() {
             &control,
             &mut tasks,
             &mut dispatcher,
+            &scenario.runtime.resources.rules,
         );
 
         match plan {
             Some(plan) => {
                 let subject = plan.validated.subject;
                 if Executor::submit(&mut scenario.runtime, &plan.validated).is_committed() {
-                    if let Some(target) = plan.target {
-                        *target_counts.entry(target).or_insert(0) += 1;
-                    }
-                    dispatcher.note_issued(subject, plan.payload, plan.frame, plan.expected);
-                    tasks.assign(subject, plan.frame);
-                    assignments += 1;
                     match plan.kind {
                         OrderKind::Attack => attacks += 1,
                         OrderKind::Retreat => retreats += 1,
                         OrderKind::Guard => guards += 1,
+                        OrderKind::Produce => produces += 1,
+                        OrderKind::Place => places += 1,
+                        OrderKind::Repair | OrderKind::Deploy => abilities += 1,
+                    }
+                    if plan.assign_task {
+                        if let Some(target) = plan.target {
+                            *target_counts.entry(target).or_insert(0) += 1;
+                        }
+                        dispatcher.note_issued(subject, plan.payload, plan.frame, plan.expected);
+                        tasks.assign(subject, plan.frame);
+                        assignments += 1;
+                    } else {
+                        strategic += 1;
                     }
                 }
             }
@@ -164,6 +176,7 @@ fn main() {
         }
     }
     println!("assignments={assignments} attacks={attacks} retreats={retreats} guards={guards}");
+    println!("strategic={strategic} produces={produces} places={places} abilities={abilities}");
     println!("disadvantage_frames={disadvantage_frames}");
     println!(
         "attack_targets={} max_attackers_on_one_target={}",
@@ -200,4 +213,30 @@ fn main() {
         ));
     }
     println!("rule_facts(cost,range_cells,aa,ag)={facts:?}");
+
+    // Diagnostic: what the engine says this house may build right now.
+    let owner_name = scenario.sim().interner().resolve(house).to_string();
+    let rules = &scenario.runtime.resources.rules;
+    let build_options =
+        vera20k_core::sim::production::build_options_for_owner(scenario.sim(), rules, &owner_name);
+    println!(
+        "build_options total={} enabled={} credits={} power={:?} queued={} owner={:?} all_objects={} type_ids={:?}",
+        build_options.len(),
+        build_options
+            .iter()
+            .filter(|o| o.enabled && !o.at_build_limit)
+            .count(),
+        vera20k_core::sim::production::credits_for_owner(scenario.sim(), &owner_name),
+        vera20k_core::sim::production::power_balance_for_owner(scenario.sim(), rules, &owner_name),
+        vera20k_core::sim::production::queue_view_for_owner(scenario.sim(), rules, &owner_name)
+            .len(),
+        owner_name,
+        rules.all_objects().count(),
+        (
+            rules.building_ids.len(),
+            rules.infantry_ids.len(),
+            rules.vehicle_ids.len(),
+            rules.aircraft_ids.len()
+        ),
+    );
 }

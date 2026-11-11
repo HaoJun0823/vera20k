@@ -26,18 +26,23 @@
 | `a1ed68461` | 基础作战：打最近的可见敌人 | 600 帧 `attacks=52` |
 | `6558ee2a7` | `autoplay-match` 打印 `visible_enemies` | 3000 帧可见敌人 1→0、攻击转防守 |
 | 本批 | T01 单位意图追踪（L4）：相同命令不重发、任务续期 | 600 帧 `assignments` 52→16、3000 帧 260→29；93 测试通过 |
-| 本批 | T06 四个默认键位（Ctrl+Shift+A/F/B/P） | 28 个热键测试通过；实机验证待用户 |
+| 本批 | T06 四个默认键位（全局 `·`=192 + Ctrl+Shift+F/B/P） | 28 个热键测试通过；实机验证待用户 |
 | 本批 | T00 规则派生量进入 Snapshot（造价/射程/对空对地） | 94 测试通过；600 帧基线不变；`rule_facts` 读到零售值 |
 | 本批 | T03 威胁评估与撤退（第一刀） | 100 测试通过；默认局 `attacks` 16→12；**1v7 实战 `retreats=23`** |
 | 本批 | T04 第一刀：多目标分摊 | 102 测试通过；默认局基线不变；1v7 `attack_targets=13`、`max_attackers_on_one_target=8` |
+| 本批 | T05 第一刀：MCV 部署→补建筑→生产单位→维修/部署能力 | 104 测试通过；600 帧 `strategic=16 produces=9 abilities=7`、`credits 10000→9820`、`stock 13→14`、本方 `GACNST` 出现 |
 
-当前基线（2026-11-10，T04 第一刀后）：**102** 个 crate 测试通过；
-真实对局 600 帧 `assignments=13 attacks=12 retreats=0 guards=1`
-（`suppressed_still_running=39`、`disadvantage_frames=0`）、
-`attack_targets=1 max_attackers_on_one_target=12`、`active=13`、
-`ended={Reassess: 39}`、`produced=6 destroyed=3`、`credits=10000`、`stock=13`；
-3000 帧 `assignments=25 attacks=12 retreats=0 guards=13`、`active=13`、
-`ended={Reassess: 247}`。
+当前基线（2026-11-11，T05 第一刀后）：**104** 个 crate 测试通过、28 个热键测试通过；
+真实对局 600 帧 `assignments=25 attacks=22 retreats=0 guards=3`、
+`strategic=16 produces=9 places=0 abilities=7`、`visible_enemies=2`、
+`produced=10 destroyed=5`、`credits=9820 net_flow=-180 stock=14`、
+`build_options total=1 enabled=1 queued=1`；
+3000 帧 `assignments=50 attacks=33 guards=17`、
+`strategic=69 produces=58 abilities=11`、`produced=27 destroyed=17`、
+`credits=9874 net_flow=-126 stock=14`。
+**注意**：T05 之后生产/建造真的开始花钱造东西，所以 `assignments`/`produced`/
+`credits` 与 T04 以前的「平静基线」不可直接比较；生产开启前是
+`assignments=13 attacks=12 guards=1`、`credits=10000`。
 **劣势场景**（`Arena.mmx 3000 帧 7 个对手`）：`assignments=181 attacks=59
 retreats=121 guards=1`、`attack_targets=13 max_attackers_on_one_target=8`、
 `disadvantage_frames=16828`。注意 T03/T04 两版的 1v7 数字**不可直接比较**：
@@ -56,16 +61,17 @@ retreats=121 guards=1`、`attack_targets=13 max_attackers_on_one_target=8`、
 | [T02](T02-superseded.md) | 任务「被取代」判定 | 4 | T01 + 设计决策 | **阻塞**：引擎不记录命令来源，见卡 §5 | 单位被玩家/原生 AI 接管后，AutoPlay 不再重复派活 | F01 F07 |
 | [T03](T03-threat-and-retreat.md) | 威胁评估与撤退 | 3 | T01 + T00 | **已完成** | 不再正面冲防御塔，劣势会撤，无路可退才拼 | F25 F26 |
 | [T04](T04-target-allocation.md) | 目标分配与集火（第一刀：多目标分摊） | 3 | T03 | **已完成（第一刀）** | 不再一堆单位叠同一目标；硬上限/对策性留第二刀 | F27 F28 F30 F31 F34 |
-| [T05](T05-production-planning.md) | 战略第一刀：按战局生产 | 1 | T01 | 待办 | 会按需补电厂/矿厂/兵种，不再只守家 | F14 F21 |
+| [T05](T05-production-planning.md) | 战略第一刀：MCV 部署→补建筑→生产单位→维修/部署 | 1 | T01 + T00 | **已完成（第一刀）** | 会展开 MCV、造兵营/矿厂/车厂、造单位，钱真的花出去 | F14 F21 F40(前置) |
 | [T06](T06-hotkey-defaults.md) | 默认键位 + 实机验证 | 4 | 无（可并行） | **已完成**（实机验证待用户） | 编译后直接按键就能开关，不用先去设置里绑 | F04 F07 |
 | [T07](T07-capture-first-slice.md) | 占领第一刀（重中之重） | 3 | T04 | 待办 | 派工程师占领建筑，夺取敌方建造场拿到额外生产线 | F40 F46 F09 |
 
-**建议顺序**：T00、T01、T03、T04（第一刀）、T06 已完成；**T02 阻塞**
-（引擎不记录命令来源，需先拍板方案，见卡 §5）。T05 可开工，T04 第二刀与
-T04→T07 是一条链。T05 开工前先看卡 §5 的实测补充：生产命令不命名 owner，
-与 `Arbiter::admit` 需要 `subject` 的形状冲突，要先定准入锚点；
-「这一方此刻能造什么」的过滤查询也是第一小步。T04 第二刀还缺伤害/装甲克制
-进投影（`RuleSet::warhead` 已确认是 pub）。T00 实测**不需要**改 `vera20k-core`。
+**建议顺序**：T00、T01、T03、T04（第一刀）、T05（第一刀）、T06 已完成；
+**T02 阻塞**（引擎不记录命令来源，需先拍板方案，见卡 §5）。
+T05 第一刀实测纠正了开工前的两个猜测：生产命令的准入锚点用「本方任一对象」
+即可（`Arbiter` 只用它取 envelope 的 owner house）；「这一方能造什么」用
+`RuleSet::all_objects()` 按规则筛选（`build_options_for_owner` 对本地房屋返回 0）。
+剩下的方向：T04 第二刀（伤害/装甲克制）、T07（占领）、以及 T05 卡 §8 的
+未决项（`places=0`、电力判断、兵种多样性）。T00 实测**不需要**改 `vera20k-core`。
 `autoplay-match` 第 4 个参数可指定对手数（默认 2），用来构造劣势局。
 
 ---

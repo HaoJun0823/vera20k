@@ -224,12 +224,16 @@ pub(crate) fn physical_scroll_key(
     }
 }
 
-/// Default shortcuts for AutoPlay's four switches: Ctrl+Shift+A / F / B / P.
-/// The retail `[Hotkey]` section leaves the whole `0x300` range unused (it binds
-/// Shift+digits, Ctrl+digits, Ctrl+F1..F4 and Ctrl+Alt+digits), so these four
-/// cannot collide with a retail command on a fresh profile.
+/// Default shortcuts for AutoPlay's four switches.
+///
+/// The global switch is the `~` / backtick key (`VK_OEM_3`, 192) - the one a Chinese
+/// IME turns into `·`. It is easy to reach and easy to test with one hand, and the
+/// local KeyboardMD.ini already binds `AutoPlay=192`, so a player who set it up keeps
+/// their binding. The three subsystem switches use Ctrl+Shift+F / B / P; the retail
+/// `[Hotkey]` section leaves the whole `0x300` range unused (it binds Shift+digits,
+/// Ctrl+digits, Ctrl+F1..F4 and Ctrl+Alt+digits), so those cannot collide.
 const AUTOPLAY_DEFAULT_KEYS: [(HotkeyCommand, u16); 4] = [
-    (HotkeyCommand::ToggleAutoPlay, CTRL_BIT | SHIFT_BIT | 0x41),
+    (HotkeyCommand::ToggleAutoPlay, 0xC0),
     (
         HotkeyCommand::ToggleAutoPlayForces,
         CTRL_BIT | SHIFT_BIT | 0x46,
@@ -736,6 +740,11 @@ mod tests {
             assert_eq!(bindings.first_key(command), Some(key));
             assert_eq!(bindings.command_at(key), Some(command));
         }
+        // The global switch is the `·` / backtick key the tester asked for.
+        assert_eq!(
+            bindings.command_at(0xC0),
+            Some(HotkeyCommand::ToggleAutoPlay)
+        );
     }
 
     /// Bindings the player assigned on the Keyboard page are never overwritten.
@@ -754,7 +763,8 @@ mod tests {
     /// The default is skipped when another command already holds that key.
     #[test]
     fn an_occupied_default_key_is_not_stolen() {
-        let key = CTRL_BIT | SHIFT_BIT | 0x41;
+        // Occupy the `·` key (VK_OEM_3, 192), the global switch's default.
+        let key = 0xC0;
         let ini = format!("[Hotkey]\nStopObject={key}\n");
         let bindings = HotkeyBindings::from_ini_bytes(Some(ini.as_bytes()));
         assert_eq!(bindings.command_at(key), Some(HotkeyCommand::StopObject));
@@ -1002,12 +1012,13 @@ mod tests {
         assert_eq!(startup.first_key(HotkeyCommand::Delete), Some(46));
         let serialized = startup.to_ini_string();
         // Startup installs the three native keys plus AutoPlay's four defaults
-        // (833/834/838/848 = Ctrl+Shift+A/B/F/P). VeraX AutoLoad has its own
-        // Ctrl+D default when that feature is on.
+        // AutoPlay=192 is the `·` / backtick key; the three subsystem switches are
+        // 834/838/848 = Ctrl+Shift+B/F/P. VeraX AutoLoad has its own Ctrl+D default
+        // when that feature is on.
         #[cfg(feature = "verax")]
-        let expected = "[Hotkey]\nOptions=27\nCenterOnRadarEvent=32\nDelete=110\nStopObject=83\nAutoLoad=580\nAutoPlay=833\nAutoPlayBuild=834\nAutoPlayForces=838\nAutoPlayAbilities=848\n";
+        let expected = "[Hotkey]\nOptions=27\nCenterOnRadarEvent=32\nDelete=110\nStopObject=83\nAutoLoad=580\nAutoPlay=192\nAutoPlayBuild=834\nAutoPlayForces=838\nAutoPlayAbilities=848\n";
         #[cfg(not(feature = "verax"))]
-        let expected = "[Hotkey]\nOptions=27\nCenterOnRadarEvent=32\nDelete=110\nStopObject=83\nAutoPlay=833\nAutoPlayBuild=834\nAutoPlayForces=838\nAutoPlayAbilities=848\n";
+        let expected = "[Hotkey]\nOptions=27\nCenterOnRadarEvent=32\nDelete=110\nStopObject=83\nAutoPlay=192\nAutoPlayBuild=834\nAutoPlayForces=838\nAutoPlayAbilities=848\n";
         assert_eq!(serialized, expected);
         let mut reloaded = HotkeyBindings::reload_from_ini_bytes(Some(serialized.as_bytes()));
         assert_eq!(reloaded.command_at(46), None);

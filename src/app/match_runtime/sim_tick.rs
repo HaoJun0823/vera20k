@@ -1582,10 +1582,14 @@ fn advance_one_simulation_frame(
                 &control,
                 &mut state.match_state.auto_play_tasks,
                 &mut state.match_state.auto_play_dispatcher,
+                rules,
             );
             if let Some(plan) = plan {
                 let subject = plan.validated.subject;
-                if sim.issue_local_command(plan.validated.envelope) {
+                let assign_task = plan.assign_task;
+                if sim.issue_local_command(plan.validated.envelope) && assign_task {
+                    // Strategic orders (production / placement / repair / deploy)
+                    // act on the house, so they must not become unit tasks.
                     state.match_state.auto_play_dispatcher.note_issued(
                         subject,
                         plan.payload,
