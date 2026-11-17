@@ -2162,22 +2162,23 @@ fn install_auto_play(
     else {
         return false;
     };
-    // Which policy drives the house. The retail port is the default; the
-    // crate outside the engine is selected with an environment variable until
-    // it reaches parity, so one build shows both.
-    let brain: Box<dyn crate::sim::control::brain::Brain> =
-        if std::env::var("VERA20K_BRAIN").is_ok_and(|value| value.eq_ignore_ascii_case("v2")) {
-            match state.match_state.sim_runtime.runtime() {
-                Some(runtime) => Box::new(autoplay::policy::Policy::new(&runtime.resources.rules)),
-                None => Box::new(crate::sim::strategy::retail::RetailBrain::new(
-                    AUTO_PLAY_POLICY_SEED,
-                )),
-            }
-        } else {
-            Box::new(crate::sim::strategy::retail::RetailBrain::new(
+    // Which policy drives the house. The retail port is the default; the crate
+    // outside the engine is selected with an environment variable until it
+    // reaches parity, so one build shows both. `assist` is the thin delegation
+    // layer: reflexes only, no strategy.
+    let selected = std::env::var("VERA20K_BRAIN").unwrap_or_default();
+    let brain: Box<dyn crate::sim::control::brain::Brain> = match selected.to_ascii_lowercase().as_str() {
+        "v2" => match state.match_state.sim_runtime.runtime() {
+            Some(runtime) => Box::new(autoplay::policy::Policy::new(&runtime.resources.rules)),
+            None => Box::new(crate::sim::strategy::retail::RetailBrain::new(
                 AUTO_PLAY_POLICY_SEED,
-            ))
-        };
+            )),
+        },
+        "assist" => Box::new(autoplay::assist::Assist),
+        _ => Box::new(crate::sim::strategy::retail::RetailBrain::new(
+            AUTO_PLAY_POLICY_SEED,
+        )),
+    };
     let mut session = crate::app::match_runtime::autoplay_session::AutoplaySession::new(
         crate::sim::autoplay::AutoPlayHost::new(brain, owner, AUTO_PLAY_COMMANDS_PER_FRAME),
     );

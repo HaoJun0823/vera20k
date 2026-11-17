@@ -60,7 +60,7 @@ autoplay/     引擎之外的策略 crate：policy.rs + manager/*（v2 策略）
 
 依赖方向 L3 → L2 → L1，有 `architecture_guards.rs` 测试守着。**L2 永远不指名具体大脑**：`sim/control/brain.rs` 只声明 `Brain` trait，谁实现都行。
 
-接入：`src/app/input/dispatch.rs:2153` 的 `install_auto_play()` —— 热键装 host，默认 `RetailBrain`，`VERA20K_BRAIN=v2` 切 `autoplay::policy::Policy`。
+接入：`src/app/input/dispatch.rs` 的 `install_auto_play()` —— 热键装 host，默认 `RetailBrain`，`VERA20K_BRAIN=v2` 切 `autoplay::policy::Policy`，`VERA20K_BRAIN=assist` 切 `autoplay::assist::Assist`（薄托管，目前只有一条 reflex：基地受击迎击）。
 
 ## 5. 当前状态
 
