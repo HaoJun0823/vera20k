@@ -1202,6 +1202,39 @@ impl SidebarProjectionState {
         }
     }
 
+    /// The click a player makes when a finished building goes down: the cameo
+    /// arms for placement, and the strip keeps the request until the site is
+    /// placed (ManualPlace4FB840). Auto play places through the same command,
+    /// so it makes the same write; without it the strip shows no request while
+    /// a building is being sited, which is the visible half of "auto play acted
+    /// but the interface did not".
+    ///
+    /// A type the strip does not hold is left alone rather than given a request
+    /// the player's click would not have written.
+    pub(crate) fn record_auto_play_place(
+        &mut self,
+        sim: &crate::sim::world::Simulation,
+        rules: &crate::rules::ruleset::RuleSet,
+        owner: InternedId,
+        type_id: InternedId,
+    ) {
+        use crate::app::input::sidebar_eva::{CameoClick, CameoOrder};
+        if self.cameo_request(type_id).is_some() {
+            return;
+        }
+        self.record_click(
+            sim,
+            rules,
+            owner,
+            type_id,
+            CameoClick {
+                order: Some(CameoOrder::Place),
+                ..CameoClick::default()
+            },
+            true,
+        );
+    }
+
     /// Answer the options auto play asked for before their buttons were drawn,
     /// now that the House pass has run. Called once per frame, after the strip
     /// and the Factory links are reconciled.

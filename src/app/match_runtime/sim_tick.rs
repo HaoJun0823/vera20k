@@ -2019,8 +2019,17 @@ fn advance_one_simulation_frame(
         let owner = host.owner();
         let projection = &mut state.match_state.match_presentation.sidebar_projection;
         for command in &issued {
-            if let Command::QueueProduction { type_id } = *command {
-                projection.record_auto_play_order(&*sim, &rt.resources.rules, owner, type_id);
+            match *command {
+                Command::QueueProduction { type_id } => {
+                    projection.record_auto_play_order(&*sim, &rt.resources.rules, owner, type_id);
+                }
+                // A placed building arms its cameo the way the player's click
+                // does; a mobile placement names a category, not a type, and
+                // has no cameo of its own.
+                Command::PlaceReadyBuilding { type_id, .. } => {
+                    projection.record_auto_play_place(&*sim, &rt.resources.rules, owner, type_id);
+                }
+                _ => {}
             }
         }
     }
