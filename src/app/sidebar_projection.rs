@@ -431,18 +431,6 @@ impl SidebarProjectionState {
     /// applies them, so the tab buttons and the active tab are never
     /// re-derived from the current strip contents. `ares`: whether Ares plays
     /// in the game (`RuleSet::ares`).
-    /// The pre-`seed_additions` reconcile entry, for the tests written before
-    /// the seed list existed: nothing seeds a fixture's strip.
-    #[cfg(all(test, tests_app))]
-    pub(crate) fn reconcile_fixture(
-        &mut self,
-        owner: InternedId,
-        current: &[Cameo],
-        visible_rows: usize,
-        ares: bool,
-    ) -> crate::ui::sidebar::cameo_order::CameoReconcile {
-        self.reconcile_cameos(owner, current, visible_rows, &[], ares)
-    }
 
     pub(crate) fn reconcile_cameos(
         &mut self,

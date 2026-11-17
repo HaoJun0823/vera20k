@@ -445,7 +445,7 @@ fn a_building_the_factory_no_longer_holds_is_not_ready_for_its_tab() {
     let options = all_build_options_for_owner(&sim, &rules, "Americans");
     let candidates = cameo_candidates(&sim, &rules, None, owner, &options, &[]);
     let mut projection = SidebarProjectionState::default();
-    projection.reconcile_fixture(owner, &candidates, 1);
+    projection.reconcile_fixture(owner, &candidates, 1, false);
 
     // A completed power plant is published as the tab's ready building, then
     // placed: the entity lives on the map and no factory holds it.
@@ -458,8 +458,7 @@ fn a_building_the_factory_no_longer_holds_is_not_ready_for_its_tab() {
             category: ProductionCategory::Building,
             stable_id: plant,
         },
-        Some(owner),
-    );
+        Some(owner), false);
     assert!(
         projection
             .ready_building_for_tab(&sim, owner, SidebarTab::Building)
@@ -1945,7 +1944,7 @@ fn an_agent_order_placed_before_the_button_is_drawn_keeps_the_build_clock() {
     let candidates = cameo_candidates(&sim, &rules, None, owner, &options, &[]);
     let mut projection = SidebarProjectionState::default();
     // The scenario's first projection, before any button exists.
-    projection.reconcile_cameos(owner, &[], 3, &[]);
+    projection.reconcile_cameos(owner, &[], 3, &[], false);
     assert!(projection.cameo_request(e1).is_none());
 
     // One frame, in the app's order: the agent's order, the House pass's option,
@@ -1954,17 +1953,16 @@ fn an_agent_order_placed_before_the_button_is_drawn_keeps_the_build_clock() {
     projection.record_auto_play_order(&sim, &rules, owner, e1);
     projection.apply_lifecycle_output(
         &LifecycleOutput::SidebarConstructionOption { owner, type_id: e1 },
-        Some(owner),
-    );
-    projection.apply_lifecycle_output(&LifecycleOutput::SidebarRecalculated { owner }, Some(owner));
-    projection.reconcile_cameos(owner, &candidates, 3, &[]);
+        Some(owner), false);
+    projection.apply_lifecycle_output(&LifecycleOutput::SidebarRecalculated { owner }, Some(owner), false);
+    projection.reconcile_cameos(owner, &candidates, 3, &[], false);
     projection.apply_auto_play_orders(&sim, &rules, owner);
 
     let tab = SidebarTab::for_category(crate::sim::production::category_for_object(
         rules.object("E1").unwrap(),
     ));
     let mut view = view(&sim, &options, &projection, tab, 480.0);
-    projection.apply_cameo_draw_state(&mut view, &sim, &rules, owner, None);
+    projection.apply_cameo_draw_state( &mut view , &sim ,&crate::app::presentation::frame::PresentationFrame::of_test(&sim, &rules), &rules , owner , None );
     let item = view
         .items
         .iter()
@@ -1990,7 +1988,7 @@ fn an_agent_order_without_a_button_waits_for_the_press_path() {
     let options = all_build_options_for_owner(&sim, &rules, "Americans");
     let candidates = cameo_candidates(&sim, &rules, None, owner, &options, &[]);
     let mut projection = SidebarProjectionState::default();
-    projection.reconcile_cameos(owner, &[], 3, &[]);
+    projection.reconcile_cameos(owner, &[], 3, &[], false);
 
     projection.record_auto_play_order(&sim, &rules, owner, e1);
     assert!(
@@ -2001,10 +1999,9 @@ fn an_agent_order_without_a_button_waits_for_the_press_path() {
     // The House pass inserts the button; the projection answers the order.
     projection.apply_lifecycle_output(
         &LifecycleOutput::SidebarConstructionOption { owner, type_id: e1 },
-        Some(owner),
-    );
-    projection.apply_lifecycle_output(&LifecycleOutput::SidebarRecalculated { owner }, Some(owner));
-    projection.reconcile_cameos(owner, &candidates, 3, &[]);
+        Some(owner), false);
+    projection.apply_lifecycle_output(&LifecycleOutput::SidebarRecalculated { owner }, Some(owner), false);
+    projection.reconcile_cameos(owner, &candidates, 3, &[], false);
     projection.apply_auto_play_orders(&sim, &rules, owner);
     assert_eq!(
         projection.cameo_request(e1),
@@ -2026,7 +2023,7 @@ fn an_agent_build_that_begins_before_its_button_is_drawn_shows_the_linked_clock(
     let options = all_build_options_for_owner(&sim, &rules, "Americans");
     let candidates = cameo_candidates(&sim, &rules, None, owner, &options, &[]);
     let mut projection = SidebarProjectionState::default();
-    projection.reconcile_cameos(owner, &[], 3, &[]);
+    projection.reconcile_cameos(owner, &[], 3, &[], false);
 
     // The agent's order executes in this frame; the barracks Begin publishes
     // its link before the House pass has drawn the GI's button.
@@ -2042,7 +2039,7 @@ fn an_agent_build_that_begins_before_its_button_is_drawn_shows_the_linked_clock(
         "the idle barracks admits the GI"
     );
     for output in sim.take_lifecycle_outputs_for_test() {
-        projection.apply_lifecycle_output(&output, Some(owner));
+        projection.apply_lifecycle_output(&output, Some(owner), false);
     }
     assert!(
         projection.cameo_factory(&sim, owner, e1).is_none(),
@@ -2053,10 +2050,9 @@ fn an_agent_build_that_begins_before_its_button_is_drawn_shows_the_linked_clock(
     // inserts the entry and only then can the link be written.
     projection.apply_lifecycle_output(
         &LifecycleOutput::SidebarConstructionOption { owner, type_id: e1 },
-        Some(owner),
-    );
-    projection.apply_lifecycle_output(&LifecycleOutput::SidebarRecalculated { owner }, Some(owner));
-    projection.reconcile_cameos(owner, &candidates, 3, &[]);
+        Some(owner), false);
+    projection.apply_lifecycle_output(&LifecycleOutput::SidebarRecalculated { owner }, Some(owner), false);
+    projection.reconcile_cameos(owner, &candidates, 3, &[], false);
     assert!(projection.cameo_factory(&sim, owner, e1).is_none());
     projection.apply_pending_factory_links(&sim, owner);
     projection.reconcile_factory_links(&sim, owner);
@@ -2069,7 +2065,7 @@ fn an_agent_build_that_begins_before_its_button_is_drawn_shows_the_linked_clock(
         rules.object("E1").unwrap(),
     ));
     let mut view = view(&sim, &options, &projection, tab, 480.0);
-    projection.apply_cameo_draw_state(&mut view, &sim, &rules, owner, None);
+    projection.apply_cameo_draw_state( &mut view , &sim ,&crate::app::presentation::frame::PresentationFrame::of_test(&sim, &rules), &rules , owner , None );
     let item = view
         .items
         .iter()
@@ -2089,7 +2085,7 @@ fn a_press_on_a_cameo_the_strip_has_not_inserted_writes_no_request() {
     let (sim, rules, owner) = agent_clock_world();
     let e1 = sim.interner().get("E1").unwrap();
     let mut projection = SidebarProjectionState::default();
-    projection.reconcile_cameos(owner, &[], 3, &[]);
+    projection.reconcile_cameos(owner, &[], 3, &[], false);
 
     projection.record_cameo_click(
         &sim,

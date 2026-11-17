@@ -121,7 +121,7 @@ pub(crate) mod sidebar_projection;
 // gained an `ares` flag, `apply_cameo_draw_state` gained a `&PresentationFrame`.
 // They are kept (they are a good spec of the cameo strip) and excluded here so
 // the lib test target builds; re-enable when the call sites are updated.
-#[cfg(all(test, tests_app, any()))]
+#[cfg(all(test, tests_app))]
 mod sidebar_projection_tests;
 pub(crate) mod spawn_probe;
 mod state;
