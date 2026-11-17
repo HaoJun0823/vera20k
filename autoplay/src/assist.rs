@@ -97,14 +97,25 @@ pub fn is_worth_selling(health: i32, max_health: i32) -> bool {
 pub struct Assist;
 
 impl Assist {
-    /// The base the reflexes defend: the first structure the house still holds.
-    /// A house with none has nothing to defend yet, and no rule fires.
+    /// The point the reflexes defend: the first structure the house holds, or —
+    /// before the maker is deployed — the first thing it has at all, which is
+    /// the MCV. A house with nothing has nothing to defend, and no rule fires.
+    ///
+    /// The fallback is not cosmetic: a player who has not deployed yet is
+    /// exactly the player who is about to be attacked, and an anchor on
+    /// structures alone leaves them with no reflex at all.
     fn base(obs: &Observation<'_>, rules: &RuleSet) -> Option<(u16, u16)> {
-        obs.own_entities().find_map(|entity| {
-            obs.object_type(rules, entity.type_id)
-                .filter(|ty| ty.category == ObjectCategory::Building)
-                .map(|_| entity.cell)
-        })
+        let mut first: Option<(u16, u16)> = None;
+        for entity in obs.own_entities() {
+            first.get_or_insert(entity.cell);
+            if obs
+                .object_type(rules, entity.type_id)
+                .is_some_and(|ty| ty.category == ObjectCategory::Building)
+            {
+                return Some(entity.cell);
+            }
+        }
+        first
     }
 }
 
