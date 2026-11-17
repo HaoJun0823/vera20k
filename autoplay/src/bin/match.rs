@@ -191,8 +191,8 @@ fn parse_args() -> Result<Args, String> {
             "--dump" => dump = value()?.parse().map_err(|_| "dump is a u64".to_string())?,
             "--brain" => {
                 brain = value()?;
-                if brain != "retail" && brain != "v2" {
-                    return Err(format!("unknown brain {brain}: retail or v2"));
+                if brain != "retail" && brain != "v2" && brain != "assist" {
+                    return Err(format!("unknown brain {brain}: retail, v2 or assist"));
                 }
             }
             "--dump-teams" => {
@@ -816,6 +816,7 @@ fn main() -> Result<(), String> {
         "v2" => Box::new(autoplay::policy::Policy::new(
             &scenario.runtime.resources.rules,
         )),
+        "assist" => Box::new(autoplay::assist::Assist),
         _ => Box::new(RetailBrain::new(u64::from(args.seed))),
     };
     let mut host = AutoPlayHost::new(chosen, local, args.per_frame);
