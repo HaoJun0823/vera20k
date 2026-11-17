@@ -2178,10 +2178,11 @@ fn install_auto_play(
                 AUTO_PLAY_POLICY_SEED,
             ))
         };
-    let mut host =
-        crate::sim::autoplay::AutoPlayHost::new(brain, owner, AUTO_PLAY_COMMANDS_PER_FRAME);
-    host.set_domains(domains);
-    state.match_state.auto_play = Some(host);
+    let mut session = crate::app::match_runtime::autoplay_session::AutoplaySession::new(
+        crate::sim::autoplay::AutoPlayHost::new(brain, owner, AUTO_PLAY_COMMANDS_PER_FRAME),
+    );
+    session.set_domains(domains);
+    state.match_state.auto_play = Some(session);
     true
 }
 
