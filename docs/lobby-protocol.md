@@ -147,7 +147,7 @@ Commands and their payloads:
 | `balance` | `{}` |
 
 HostOptions is `{launch,map_metadata,vacancies,observer_row,cooperative_difficulty,seed}`.
-A slot's `color_index` is 0 to 7 for the original colours, 8 for an observer and 9 to 30
+A slot's `color_index` is 0 to 7 for the original colours, 8 for an observer and 9 to 169
 for the game's [extra lobby colours](skirmish-colors.md); the lobby passes 0 to 255 on
 unchanged.
 Generated maps add `random_map:{start_staging,preview:{source_sha256,byte_length}}`.

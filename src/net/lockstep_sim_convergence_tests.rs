@@ -88,7 +88,7 @@ fn gsi_04_07_wall_sell_raw_lockstep_replay_converges_with_semantic_execution() {
         .map(|(index, owner)| {
             crate::net::lockstep::CommandDispatchHouse::new(
                 owner,
-                index as i8,
+                index as u8,
                 raw.houses[&owner].event_dispatch_eligible(),
             )
         })
@@ -374,7 +374,7 @@ fn two_instance_multiplayer_checksums_match_every_frame_and_catch_a_desync() {
             .map(|(index, owner)| {
                 CommandDispatchHouse::new(
                     *owner,
-                    index as i8,
+                    index as u8,
                     raw.houses[owner].event_dispatch_eligible(),
                 )
             })

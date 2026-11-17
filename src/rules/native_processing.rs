@@ -152,35 +152,49 @@ pub(crate) fn super_weapon_index_of_name<'a>(
 
 /// HouseClass::GetPlayerAtFromString @ 0x00510FB0 and ReadHouseType
 /// @ 0x00475540 use selectors starting at 0x117B. VERA extends their eight
-/// entries to the room capacity, preserving the original A..H identities.
+/// entries to the offline Skirmish row count, preserving the original A..H
+/// identities.
 pub(crate) const HOUSE_TYPE_PLAYER_AT_SELECTORS: std::ops::Range<i32> =
-    0x117B..0x117B + crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT as i32;
+    0x117B..0x117B + crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT as i32;
 
 /// Shared case-sensitive player token reader for Session and TeamType House.
-/// VERA extension: A..Z, AA..AD represent the thirty start slots.
+/// VERA extension: A..Z then AA..ZZ represent the start slots.
 pub(crate) fn house_type_player_at(incoming: &str) -> Option<u8> {
+    // A..Z plus the two-letter blocks A..Z cover 702 selectors; the slot
+    // bound below stops at the last Skirmish row.
+    const _: () = assert!(crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT <= 26 + 26 * 26);
     let letters = incoming.strip_prefix("<Player @ ")?.strip_suffix('>')?;
-    let slot = match letters.as_bytes() {
-        [letter @ b'A'..=b'Z'] => letter - b'A',
-        [b'A', letter @ b'A'..=b'Z'] => 26 + letter - b'A',
+    let slot: usize = match letters.as_bytes() {
+        [letter @ b'A'..=b'Z'] => usize::from(letter - b'A'),
+        // Slots 26..: two letters, the first carrying the block of twenty-six.
+        [first @ b'A'..=b'Z', letter @ b'A'..=b'Z'] => {
+            26 + usize::from(first - b'A') * 26 + usize::from(letter - b'A')
+        }
         _ => return None,
     };
-    (usize::from(slot) < crate::skirmish_launch::NETWORK_PLAYER_SLOT_COUNT).then_some(slot)
+    (slot < crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT)
+        .then(|| u8::try_from(slot).expect("Skirmish rows fit a byte"))
 }
 
 /// INIClass::Put_HouseType @ 0x00475610 player-selector text, extended to
-/// the same thirty slots as the reader. Other HouseType values stay with callers.
+/// the same slots as the reader. Other HouseType values stay with callers.
 pub fn house_type_player_at_text(index: i32) -> Option<String> {
     if !HOUSE_TYPE_PLAYER_AT_SELECTORS.contains(&index) {
         return None;
     }
     let slot = (index - HOUSE_TYPE_PLAYER_AT_SELECTORS.start) as u8;
-    let (prefix, letter) = if slot < 26 {
-        ("", slot)
+    let text = if slot < 26 {
+        char::from(b'A' + slot).to_string()
     } else {
-        ("A", slot - 26)
+        // The same A..Z blocks the reader takes: AA..AZ through ZA..ZZ.
+        let block = (slot - 26) / 26;
+        format!(
+            "{}{}",
+            char::from(b'A' + block),
+            char::from(b'A' + (slot - 26) % 26)
+        )
     };
-    Some(format!("<Player @ {prefix}{}>", char::from(b'A' + letter)))
+    Some(format!("<Player @ {text}>"))
 }
 
 /// One native `RulesClass::Process` source in its runtime position.

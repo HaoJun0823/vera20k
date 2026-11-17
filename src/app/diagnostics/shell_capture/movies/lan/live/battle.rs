@@ -2505,7 +2505,7 @@ fn repair_snapshot(state: &AppState, id: u64, frame: u32) -> Result<RepairSnapsh
     })
 }
 
-fn human_index_for_house(state: &AppState, house: i8) -> Result<usize> {
+fn human_index_for_house(state: &AppState, house: u8) -> Result<usize> {
     let sim = simulation(state)?;
     let owner = *sim
         .houses()
@@ -2687,7 +2687,7 @@ fn battle_human_index(
         .context("command belongs to an unrepresented Battle Human")
 }
 
-fn local_house_id(state: &AppState) -> Result<i8> {
+fn local_house_id(state: &AppState) -> Result<u8> {
     let sim = simulation(state)?;
     let owner = sim
         .interner()
@@ -2696,9 +2696,9 @@ fn local_house_id(state: &AppState) -> Result<i8> {
     house_id_for_owner(state, owner)
 }
 
-fn house_id_for_owner(state: &AppState, owner: crate::sim::intern::InternedId) -> Result<i8> {
+fn house_id_for_owner(state: &AppState, owner: crate::sim::intern::InternedId) -> Result<u8> {
     let sim = simulation(state)?;
-    Ok(i8::try_from(
+    Ok(u8::try_from(
         sim.houses()
             .order()
             .iter()

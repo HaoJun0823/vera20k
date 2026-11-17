@@ -86,7 +86,7 @@ fn body_offset(bytes: &[u8]) -> usize {
 /// carries the probe sequence. The shared send policy supplies event_frame
 /// from current frame + MaxAhead, and delay is MaxAhead's low byte.
 pub fn encode_frame_sync(info: FrameInfo) -> Result<[u8; HEADER_LEN], PacketEncodeError> {
-    if info.house_id < 0 {
+    if info.house_id == crate::sim::command::NO_HOUSE {
         return Err(PacketEncodeError::InvalidHouse);
     }
     let mut bytes: [u8; HEADER_LEN] = info.encode().as_bytes()[..HEADER_LEN]
@@ -102,7 +102,7 @@ pub fn encode_live_frame_sync(
     info: FrameInfo,
     command_frontier: u64,
 ) -> Result<Vec<u8>, PacketEncodeError> {
-    if info.house_id < 0 {
+    if info.house_id == crate::sim::command::NO_HOUSE {
         return Err(PacketEncodeError::InvalidHouse);
     }
     Ok(EventPacketHeader::Vera {
@@ -250,7 +250,7 @@ struct SendCacheSlot {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventPacketCodec {
     send: [SendCacheSlot; CACHE_SLOTS],
-    receive: BTreeMap<i8, [Vec<ActorToken>; CACHE_SLOTS]>,
+    receive: BTreeMap<u8, [Vec<ActorToken>; CACHE_SLOTS]>,
 }
 
 struct OpenRun {
@@ -286,7 +286,7 @@ impl EventPacketCodec {
         if capacity < header_bytes.len() {
             return Err(PacketEncodeError::HeaderCapacity(capacity));
         }
-        if header.house_id < 0 {
+        if header.house_id == crate::sim::command::NO_HOUSE {
             return Err(PacketEncodeError::InvalidHouse);
         }
         if records.len() > MAX_RUN {
@@ -461,8 +461,8 @@ impl EventPacketCodec {
             return Ok(report);
         }
         report.consumed_bytes = header_offset;
-        let source_house = bytes[header_offset + 2] as i8;
-        if source_house < 0 {
+        let source_house = bytes[header_offset + 2];
+        if source_house == crate::sim::command::NO_HOUSE {
             return Err(decode_error(
                 bytes,
                 0,
@@ -525,8 +525,8 @@ impl EventPacketCodec {
                 continue;
             }
             if opcode == FRAME_INFO {
-                house = bytes[start + 2] as i8;
-                if house < 0 {
+                house = bytes[start + 2];
+                if house == crate::sim::command::NO_HOUSE {
                     return Err(decode_error(
                         bytes,
                         start,

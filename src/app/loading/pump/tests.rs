@@ -216,7 +216,7 @@ fn cold_and_warm_rules_share_world_and_agreement_identity(
             .map(|(source, human)| {
                 (
                     human.raw_slot_index.unwrap(),
-                    i8::try_from(
+                    u8::try_from(
                         crate::app::match_runtime::network_match::source_house(
                             &session,
                             scene.sim(),

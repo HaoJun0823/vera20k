@@ -149,7 +149,7 @@ fn player_scatter_constructor_preserves_native_padding_and_house_null_semantics(
         };
         let mut record = decode("before");
         ScatterRecord {
-            house_id: row["args"][0].as_u64().unwrap() as i8,
+            house_id: row["args"][0].as_u64().unwrap() as u8,
             frame: row["frame"].as_u64().unwrap() as i32,
             entity_id: row["args"][2].as_u64().unwrap() as i32,
         }

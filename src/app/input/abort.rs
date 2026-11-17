@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn a_player_whose_teammate_still_plays_their_house_only_leaves() {
         // Senders 0 and 1 share House 0; sender 2 plays House 1.
-        let secondary = |admitted: &[i8]| {
+        let secondary = |admitted: &[u8]| {
             let mut sim = Simulation::new();
             let ids = ["Shared", "Rival"].map(|name| sim.intern(name));
             for (index, id) in ids.iter().enumerate() {

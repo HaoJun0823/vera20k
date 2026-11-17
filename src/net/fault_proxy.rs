@@ -46,7 +46,7 @@ impl Direction {
 pub struct Corruption {
     pub direction: Direction,
     pub scope: String,
-    pub house: i8,
+    pub house: u8,
     pub event_frame: i32,
     pub reported_frame: i32,
     pub delay: u8,
@@ -108,7 +108,10 @@ fn inspect(packet: &[u8]) -> Option<View> {
     }
     let payload = &packet[EVENT_START..];
     let info = decode_frame_info(payload)?;
-    if info.house_id < 0 || packet[4..20] == [0; 16] || packet[20..SCOPE_HEADER] == [0; 8] {
+    if info.house_id == crate::sim::command::NO_HOUSE
+        || packet[4..20] == [0; 16]
+        || packet[20..SCOPE_HEADER] == [0; 8]
+    {
         return None;
     }
     Some(View {

@@ -72,7 +72,7 @@ pub enum LiveCommandError {
     #[error(transparent)]
     Sequenced(#[from] SequencedError),
     #[error("invalid local House {0}")]
-    InvalidLocalHouse(i8),
+    InvalidLocalHouse(u8),
     #[error("invalid remote House {0}")]
     InvalidRemoteHouse(i32),
     #[error("remote House {house_id} has no direct endpoint: {endpoint}")]
@@ -159,7 +159,7 @@ pub struct LiveCommandSession {
     transport: LanUdpTransport,
     exchange: CommandExchange,
     startup: startup::StartupHandshake,
-    local_house: i8,
+    local_house: u8,
     initial_seed: u32,
     policy: NetworkSendPolicy,
     timing: timing::LiveTiming,
@@ -174,19 +174,19 @@ impl LiveCommandSession {
     pub fn new(
         agreement: StartupAgreement,
         transport: LanUdpTransport,
-        local_house: i8,
+        local_house: u8,
         initial_seed: u32,
         frame_send_rate: NonZeroU32,
         mode: LiveCommandMode,
     ) -> Result<Self, LiveCommandError> {
-        if local_house < 0 {
+        if local_house == crate::sim::command::NO_HOUSE {
             return Err(LiveCommandError::InvalidLocalHouse(local_house));
         }
         let mut houses = Vec::new();
         for (id, endpoint) in transport.connections().peers() {
-            let house = i8::try_from(id)
+            let house = u8::try_from(id)
                 .ok()
-                .filter(|&house| house >= 0 && house != local_house)
+                .filter(|&house| house != crate::sim::command::NO_HOUSE && house != local_house)
                 .ok_or(LiveCommandError::InvalidRemoteHouse(id))?;
             if endpoint.port() == 0
                 || endpoint.ip().is_unspecified()
@@ -266,7 +266,7 @@ impl LiveCommandSession {
 
     /// Remote Houses whose connection the relay ended in frames dispatched so
     /// far; their shared EVENT_REMOVEPLAYER already ran in that frame.
-    pub fn take_lost_houses(&mut self) -> Vec<i8> {
+    pub fn take_lost_houses(&mut self) -> Vec<u8> {
         self.sequenced
             .as_mut()
             .map_or_else(Vec::new, |session| session.take_lost())
@@ -583,14 +583,14 @@ impl LiveCommandSession {
         })
     }
 
-    pub fn queued_send_count(&self, house: i8) -> Option<usize> {
+    pub fn queued_send_count(&self, house: u8) -> Option<usize> {
         self.transport
             .connections()
             .queued_send_count(i32::from(house))
     }
 
     /// Existing reliable response history, in16ms wall-clock buckets.
-    pub fn peer_response_time(&self, house: i8) -> Option<u32> {
+    pub fn peer_response_time(&self, house: u8) -> Option<u32> {
         self.transport
             .connections()
             .mean_response_time(i32::from(house))
@@ -646,7 +646,7 @@ impl LiveCommandSession {
     }
 
     /// Keep the private connection and its progress row in the same lifetime.
-    pub fn remove_peer(&mut self, house: i8) -> bool {
+    pub fn remove_peer(&mut self, house: u8) -> bool {
         if !self.exchange.remove_peer(house) {
             return false;
         }
@@ -1162,7 +1162,7 @@ impl LiveCommandSession {
             let Some(message) = self.transport.pop_received() else {
                 break;
             };
-            let source_house = i8::try_from(message.peer_id)
+            let source_house = u8::try_from(message.peer_id)
                 .map_err(|_| LiveCommandError::InvalidRemoteHouse(message.peer_id))?;
             let control = self
                 .startup

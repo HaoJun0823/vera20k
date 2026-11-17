@@ -166,7 +166,10 @@ fn beacon_records_carry_coord_slot_and_house_at_native_offsets() {
     raw[0x3c] = 0xff;
     assert_eq!(
         BeaconMessage::decode(&raw).unwrap().record(),
-        BeaconRecord::Deleted { house: -1, slot: 2 }
+        BeaconRecord::Deleted {
+            house: crate::sim::command::NO_HOUSE,
+            slot: 2
+        }
     );
     assert!(matches!(
         BeaconMessage::decode(&raw[..60]),
@@ -230,8 +233,17 @@ fn beacon_text_carries_slot_house_and_text_at_native_offsets() {
     assert_eq!(fields.text_units(), text);
     // wcsncpy(.., 0x80) copies 128 units at most.
     let long = vec![u16::from(b'a'); 200];
-    let made = LanMessage::beacon_text("Host", -1, -1, &long).unwrap();
+    let made = LanMessage::beacon_text(
+        "Host",
+        crate::sim::command::NO_HOUSE,
+        crate::sim::command::NO_HOUSE,
+        &long,
+    )
+    .unwrap();
     let fields = made.beacon_text_fields().unwrap();
-    assert_eq!((fields.house, fields.slot), (-1, -1));
+    assert_eq!(
+        (fields.house, fields.slot),
+        (crate::sim::command::NO_HOUSE, crate::sim::command::NO_HOUSE)
+    );
     assert_eq!(fields.text_units().len(), 128);
 }

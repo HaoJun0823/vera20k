@@ -616,9 +616,9 @@ mod tests {
     }
 
     /// Retail `[Colors]` leaves out the built-in extra colours; the rules'
-    /// scheme list holds them, so the probe names all thirty.
+    /// scheme list holds them, so the probe names every Skirmish row.
     #[test]
-    fn retail_probe_names_the_thirty_lobby_colours() {
+    fn retail_probe_names_the_skirmish_lobby_colours() {
         let Some(rules) = crate::rules::retail_ini_fixture::retail_rulesmd_rules() else {
             return;
         };
@@ -627,7 +627,12 @@ mod tests {
             rules.skirmish_colors(),
         );
         let listed: Vec<u32> = colors.iter().map(|c| c.index).collect();
-        assert_eq!(listed, (0..8).chain(9..=30).collect::<Vec<u32>>());
+        assert_eq!(
+            listed,
+            (0..8u32)
+                .chain(9..=crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT as u32)
+                .collect::<Vec<u32>>()
+        );
         assert_eq!(colors[8].name, "VeraBurgundy");
     }
 

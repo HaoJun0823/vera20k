@@ -149,7 +149,7 @@ pub(crate) struct PerformanceReport {
 pub(crate) struct PacingReport {
     pub(crate) slowdowns: u32,
     /// The House named by each slowdown marker, in order.
-    pub(crate) slowed_by: Vec<i8>,
+    pub(crate) slowed_by: Vec<u8>,
     pub(crate) slowed_seconds: f64,
 }
 
@@ -197,7 +197,7 @@ pub(crate) struct NetworkQualityStats {
     reconnecting: bool,
     reconnects: u32,
     slowdowns: u32,
-    slowed_by: Vec<i8>,
+    slowed_by: Vec<u8>,
     delivery: DeliveryCounters,
     start_parts: Vec<(&'static str, u64)>,
     tick_ms: MsHistogram,
@@ -244,7 +244,7 @@ impl NetworkQualityStats {
         }
     }
 
-    pub(crate) fn record_slowdown(&mut self, house: i8) {
+    pub(crate) fn record_slowdown(&mut self, house: u8) {
         if !self.active {
             return;
         }

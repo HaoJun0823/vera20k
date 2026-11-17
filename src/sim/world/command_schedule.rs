@@ -217,7 +217,7 @@ impl Simulation {
         self.local_command_slots_for(house, include_control_reserve)
     }
 
-    fn local_command_slots_for(&self, house: i8, include_control_reserve: bool) -> usize {
+    fn local_command_slots_for(&self, house: u8, include_control_reserve: bool) -> usize {
         let reserved = if include_control_reserve {
             0
         } else {
@@ -232,7 +232,7 @@ impl Simulation {
 
     /// This process's command sender: its current House's index, or its own
     /// network source while players share Houses.
-    pub(super) fn local_command_source(&self) -> Option<i8> {
+    pub(super) fn local_command_source(&self) -> Option<u8> {
         if let Some(source) = self.session.local_shared_house_source() {
             return Some(source);
         }
@@ -244,7 +244,7 @@ impl Simulation {
                     .iter()
                     .position(|candidate| *candidate == owner)
             })
-            .and_then(|index| i8::try_from(index).ok())
+            .and_then(|index| u8::try_from(index).ok())
             .or_else(|| {
                 self.local_commands
                     .iter()
@@ -568,7 +568,7 @@ impl Simulation {
     }
 
     /// Drain the remote EXIT senders the executor recorded.
-    pub fn take_departed_senders(&mut self) -> Vec<i8> {
+    pub fn take_departed_senders(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.departed_senders)
     }
 
@@ -1298,7 +1298,11 @@ impl Simulation {
                 if let Some(command) = entry.semantic()
                     && !houses.iter().any(|house| house.owner == command.owner)
                 {
-                    houses.push(CommandDispatchHouse::new(command.owner, -1, true));
+                    houses.push(CommandDispatchHouse::new(
+                        command.owner,
+                        crate::sim::command::NO_HOUSE,
+                        true,
+                    ));
                 }
             }
         }

@@ -311,7 +311,7 @@ impl SimHost {
     /// passes have none, and a write drops the presentation frame, which the
     /// next read captures again. While a job runs, `runtime()` is its frame,
     /// so the world comes back and is asked.
-    pub(crate) fn take_departed_senders(&mut self) -> Vec<i8> {
+    pub(crate) fn take_departed_senders(&mut self) -> Vec<u8> {
         if !self.lent
             && !self
                 .runtime()

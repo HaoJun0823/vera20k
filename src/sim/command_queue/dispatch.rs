@@ -24,29 +24,28 @@ pub enum DoListInsertion {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeCommandOccupancy {
     pub total: usize,
-    by_house: [usize; 128],
+    by_house: [usize; crate::sim::command::NO_HOUSE as usize],
 }
 
 impl Default for NativeCommandOccupancy {
     fn default() -> Self {
         Self {
             total: 0,
-            by_house: [0; 128],
+            by_house: [0; crate::sim::command::NO_HOUSE as usize],
         }
     }
 }
 
 impl NativeCommandOccupancy {
-    pub fn for_house(&self, house: i8) -> usize {
-        usize::try_from(house)
-            .ok()
-            .map_or(0, |index| self.by_house[index])
+    pub fn for_house(&self, house: u8) -> usize {
+        self.by_house.get(usize::from(house)).copied().unwrap_or(0)
     }
 
     fn add<T: DoListEvent>(&mut self, entry: &T) {
         if entry.consumes_native_dolist_slot() {
             self.total += 1;
             if let Some(house) = entry.native_record().map(|record| record.house_id())
+                && house != crate::sim::command::NO_HOUSE
                 && let Ok(index) = usize::try_from(house)
             {
                 self.by_house[index] += 1;
@@ -58,6 +57,7 @@ impl NativeCommandOccupancy {
         if entry.consumes_native_dolist_slot() {
             self.total -= 1;
             if let Some(house) = entry.native_record().map(|record| record.house_id())
+                && house != crate::sim::command::NO_HOUSE
                 && let Ok(index) = usize::try_from(house)
             {
                 self.by_house[index] -= 1;
@@ -112,13 +112,13 @@ pub trait DoListEvent: Clone {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandDispatchHouse {
     pub owner: InternedId,
-    pub house_id: i8,
+    pub house_id: u8,
     pub dispatch_eligible: bool,
     pub current_player: bool,
 }
 
 impl CommandDispatchHouse {
-    pub const fn new(owner: InternedId, house_id: i8, dispatch_eligible: bool) -> Self {
+    pub const fn new(owner: InternedId, house_id: u8, dispatch_eligible: bool) -> Self {
         Self {
             owner,
             house_id,
@@ -368,7 +368,7 @@ impl<T: DoListEvent, const CAPACITY: usize> DoList<T, CAPACITY> {
         })
     }
 
-    pub fn native_house_len(&self, house: i8) -> usize {
+    pub fn native_house_len(&self, house: u8) -> usize {
         if let Some(count) = &self.native_count {
             count.for_house(house)
         } else {

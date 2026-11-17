@@ -2819,6 +2819,14 @@ mod tests {
         assert_eq!(house_type_text(0x1194, &roster), "<Player @ Z>");
         assert_eq!(house_type_text(0x1195, &roster), "<Player @ AA>");
         assert_eq!(house_type_text(0x1198, &roster), "<Player @ AD>");
-        assert_eq!(house_type_text(0x1199, &roster), "<none>");
+        assert_eq!(house_type_text(0x11AF, &roster), "<Player @ BA>");
+        // One past the last Skirmish row is no selector.
+        assert_eq!(
+            house_type_text(
+                0x117B + crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT as i32,
+                &roster
+            ),
+            "<none>"
+        );
     }
 }

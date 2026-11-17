@@ -165,7 +165,7 @@ impl Simulation {
             .order()
             .iter()
             .position(|&registered| registered == owner)?;
-        let index = i8::try_from(index).ok()?;
+        let index = u8::try_from(index).ok()?;
         CommandRecord::encode(
             crate::sim::command::CHEER_OPCODE,
             i32::from(index),
@@ -929,7 +929,7 @@ impl Simulation {
     /// The sender byte this process writes for `command_owner`'s commands:
     /// its own network source for the House it shares (VERA shared
     /// control), otherwise the House's index.
-    pub(crate) fn command_sender(&self, command_owner: InternedId) -> Option<i8> {
+    pub(crate) fn command_sender(&self, command_owner: InternedId) -> Option<u8> {
         if let Some(source) = self.session.local_shared_house_source()
             && self.session.current_house() == Some(command_owner)
         {
@@ -937,13 +937,13 @@ impl Simulation {
         }
         self.houses
             .index_of(command_owner)
-            .and_then(|index| i8::try_from(index).ok())
+            .and_then(|index| u8::try_from(index).ok())
     }
 
     /// The House a command record's sender byte names. VERA shared control:
     /// the sender is a network source, which is its House index unless
     /// players share Houses (`ScenarioSession::network_source_house`).
-    pub(crate) fn command_sender_owner(&self, sender: i8) -> Option<InternedId> {
+    pub(crate) fn command_sender_owner(&self, sender: u8) -> Option<InternedId> {
         let index = self.session.network_source_house(sender)?;
         self.houses.order().get(index).copied()
     }
@@ -951,7 +951,7 @@ impl Simulation {
     /// VERA shared control: whether House `owner` still has an admitted
     /// sender other than `sender`. A House nobody shares has one sender, so
     /// its EXIT, DESTRUCT or loss always ends it, as in gamemd.
-    fn house_keeps_other_sender(&self, owner: InternedId, sender: i8) -> bool {
+    fn house_keeps_other_sender(&self, owner: InternedId, sender: u8) -> bool {
         let (Some(timing), Some(house)) = (
             self.session.network_command_timing(),
             self.houses.index_of(owner),
@@ -967,11 +967,11 @@ impl Simulation {
 
     /// The sender of the executing command: its record's header byte, or a
     /// semantic envelope's House index (offline, where nobody shares).
-    fn executing_sender(&self, owner: InternedId) -> Option<i8> {
+    fn executing_sender(&self, owner: InternedId) -> Option<u8> {
         self.executing_record_sender.or_else(|| {
             self.houses
                 .index_of(owner)
-                .and_then(|index| i8::try_from(index).ok())
+                .and_then(|index| u8::try_from(index).ok())
         })
     }
 
@@ -2555,7 +2555,7 @@ impl Simulation {
                 // human test (0x004C7BBF..0x004C7BCE).
                 // RESIDUAL: mode 4's ladder-stats call (0x004C7BA0..0x004C7BBA)
                 // is backend.
-                let Ok(source) = i8::try_from(*source) else {
+                let Ok(source) = u8::try_from(*source) else {
                     return false;
                 };
                 let Some(owner) = self.command_sender_owner(source) else {

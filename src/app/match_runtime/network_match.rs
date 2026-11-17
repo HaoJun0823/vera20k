@@ -154,7 +154,7 @@ pub(crate) fn destroy_connection(
     let live = match live {
         Some(live) => Some((
             live,
-            i8::try_from(source_house(session, sim, source_index)?).ok()?,
+            u8::try_from(source_house(session, sim, source_index)?).ok()?,
         )),
         None => None,
     };
@@ -401,7 +401,7 @@ pub(crate) fn post_connection_changes(state: &mut AppState) {
 }
 
 /// The name of the player whose House is `house`, when it has one.
-fn house_player_name(state: &AppState, house: i8) -> Option<String> {
+fn house_player_name(state: &AppState, house: u8) -> Option<String> {
     let runtime = state.match_state.sim_runtime.runtime()?;
     house_source(
         &state.match_state.session,
@@ -801,7 +801,7 @@ pub(crate) fn house_source(session: &MatchSession, sim: &Simulation, house: i32)
             .first()
             .copied();
     }
-    let sender = i8::try_from(house).ok()?;
+    let sender = u8::try_from(house).ok()?;
     sim.session().network_source_house(sender)?;
     session.network_sender_source(sender)
 }

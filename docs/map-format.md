@@ -58,11 +58,15 @@ width plus height is near 1000 or more, and only for cells along their far edges
 ## More than eight players
 
 `[Basic] MaxPlayers=` is a key the original game already reads for its map list.
-VERA20k reads it the same way, and a value from 9 to 30 also makes a map for that
+VERA20k reads it the same way, and a value from 9 to 169 also makes a map for that
 many players. VERA20k uses it only when the map has a start waypoint for every
 player, numbered from 0: for `MaxPlayers=12`, waypoints 0 to 11. A waypoint missing
 from that range turns the setting off, and the map is treated as an ordinary map
-with up to eight starts. Values below 9 or above 30 don't add players.
+with up to eight starts. Values below 9 or above 169 don't add players.
+
+169 starts need the largest map the format names: `[Map] Size=0,0,500,500` spans
+1000 by 1000 cells. VERA20k's random maps keep starts 52 cells apart so each base
+has room for its ore field, and only that last step of size fits all 169.
 
 Without `MaxPlayers=`, VERA20k counts waypoints 0 to 7 as starts, as the original
 does.
@@ -74,8 +78,10 @@ VERA20k's own random maps write both spellings, `MinPlayer`/`MaxPlayer` and
 
 A start is an ordinary waypoint that also marks where a player begins. Triggers,
 team scripts and everything else that takes a waypoint can still use it, as they
-can use waypoints 0 to 7 on any map. On a map for 30 players, waypoint 12 is player
-13's start and can also be where a trigger sends reinforcements.
+can use waypoints 0 to 7 on any map. On a map for 169 players, waypoint 40 is
+player 41's start and can also be where a trigger sends reinforcements. Network
+rooms still seat at most thirty players; the larger counts are for offline
+Skirmish.
 
 What a map can't do is put a waypoint below `MaxPlayers` anywhere other than a
 start. On a new map, number other points from `MaxPlayers` up. Keys go to 701,
@@ -85,21 +91,22 @@ everywhere they are used, before it can take more players. Editors should warn
 when a trigger, team or script uses a waypoint that more players would turn into
 a start.
 
-### Houses for players 9 to 30
+### Houses for players 9 to 169
 
 The original names its eight start houses `<Player @ A>` to `<Player @ H>`, with
-the numbers 4475 to 4482. VERA20k carries on to thirty: `<Player @ I>` to
-`<Player @ Z>`, then `<Player @ AA>` to `<Player @ AD>`, with the numbers 4475 to
-4504. A team type's `House=` takes the name, and a trigger event or action that
-takes a house takes the number.
+the numbers 4475 to 4482. VERA20k carries on to a hundred and sixty-nine: the
+one-letter names `<Player @ I>` to `<Player @ Z>`, then the two-letter names
+`<Player @ AA>` to `<Player @ FM>`, with the numbers 4475 to 4643. A team type's
+`House=` takes the name, and a trigger event or action that takes a house takes
+the number.
 
 ### The start markers in the map list
 
 The map list draws numbered start markers from `[Header]`: `StartX`, `StartY`,
 `Width`, `Height`, `NumberStartingPoints` and one `WaypointN=x,y` line for each
-start, from `Waypoint1`. `NumberStartingPoints` may be up to 30. A header with any
+start, from `Waypoint1`. `NumberStartingPoints` may be up to 169. A header with any
 of the five fields missing, a `Width` or `Height` of 0 or less, or a count of 0 or
-less or over 30, is skipped and the map is
+less or over 169, is skipped and the map is
 listed without markers.
 
 ## Playing online
@@ -108,3 +115,8 @@ A big map is sent to players who don't have it like any other map, up to the
 lobby's 8 MiB limit for a map file ([lobby protocol](lobby-protocol.md)).
 Everyone in a match runs the same VERA20k version, so all of them read the map the
 same way.
+
+A map for 169 starts is past that limit: its terrain alone is about 8 MB, and it
+comes to 9 MB with the starts' ore. It plays offline, from the `Maps` folder. A
+room stops at thirty players, and to share a bigger map every player puts the
+file there first.

@@ -85,10 +85,10 @@ impl Simulation {
     ///
     /// The result is a command sender, which is its House's index unless
     /// players share Houses (VERA shared control).
-    pub fn network_timing_host_house(&self) -> Option<i8> {
+    pub fn network_timing_host_house(&self) -> Option<u8> {
         let timing = self.session.network_command_timing()?;
         let wol = self.session.game_mode() == crate::sim::scenario_session::ScenarioGameMode::Wol;
-        let eligible = |sender: i8| {
+        let eligible = |sender: u8| {
             timing.admits_source(sender)
                 && self
                     .session
@@ -153,15 +153,15 @@ impl<'a> NetworkCommandQueues<'a> {
     }
 
     /// The same canonical publisher used when accepting EVENT_TIMING.
-    pub fn timing_host_house(&self) -> Option<i8> {
+    pub fn timing_host_house(&self) -> Option<u8> {
         self.sim.network_timing_host_house()
     }
 
     pub fn install_timing(
         &mut self,
-        host_house: i8,
+        host_house: u8,
         frame_send_rate: std::num::NonZeroU8,
-        houses: impl IntoIterator<Item = i8>,
+        houses: impl IntoIterator<Item = u8>,
     ) {
         self.sim
             .session

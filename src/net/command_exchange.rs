@@ -20,7 +20,7 @@ mod tests;
 /// command path owns. Connection ordering comes from the admitted session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandPeerProgress {
-    house_id: i8,
+    house_id: u8,
     frame: i32,
     advertised_commands: u64,
     received_commands: u64,
@@ -33,7 +33,7 @@ pub struct CommandPeerProgress {
 }
 
 impl CommandPeerProgress {
-    fn new(house_id: i8) -> Self {
+    fn new(house_id: u8) -> Self {
         Self {
             house_id,
             frame: -1,
@@ -46,7 +46,7 @@ impl CommandPeerProgress {
         }
     }
 
-    pub const fn house_id(&self) -> i8 {
+    pub const fn house_id(&self) -> u8 {
         self.house_id
     }
     pub const fn frame(&self) -> i32 {
@@ -80,9 +80,9 @@ impl CommandPeerProgress {
 pub struct FrameWait {
     ready: bool,
     /// First connection whose decoded count trails its advertised frontier.
-    pub missing_commands: Option<i8>,
+    pub missing_commands: Option<u8>,
     /// First minimum-frame connection, only when it actually blocks this frame.
-    pub missing_frame: Option<i8>,
+    pub missing_frame: Option<u8>,
 }
 
 impl FrameWait {
@@ -94,16 +94,16 @@ impl FrameWait {
 #[derive(Debug, thiserror::Error)]
 pub enum CommandExchangeError {
     #[error("invalid or duplicate connection House {0}")]
-    InvalidPeer(i8),
+    InvalidPeer(u8),
     #[error("command packet came from unregistered connection House {0}")]
-    UnknownPeer(i8),
+    UnknownPeer(u8),
     #[error("a command packet requires a complete FRAMEINFO or FRAMESYNC header")]
     InvalidHeader,
     #[error("connection House {source_house} claimed event House {claimed_house}")]
-    SourceMismatch { source_house: i8, claimed_house: i8 },
+    SourceMismatch { source_house: u8, claimed_house: u8 },
     #[error("peer {house_id} initial checksum {received:08x} differs from {expected:08x}")]
     InitialChecksum {
-        house_id: i8,
+        house_id: u8,
         received: u32,
         expected: u32,
     },
@@ -162,10 +162,12 @@ pub struct RetainedSendProgress {
 }
 
 impl CommandExchange {
-    pub fn new(peers: impl IntoIterator<Item = i8>) -> Result<Self, CommandExchangeError> {
+    pub fn new(peers: impl IntoIterator<Item = u8>) -> Result<Self, CommandExchangeError> {
         let mut exchange = Self::default();
         for house in peers {
-            if house < 0 || exchange.peers.iter().any(|peer| peer.house_id == house) {
+            if house == crate::sim::command::NO_HOUSE
+                || exchange.peers.iter().any(|peer| peer.house_id == house)
+            {
                 return Err(CommandExchangeError::InvalidPeer(house));
             }
             exchange.peers.push(CommandPeerProgress::new(house));
@@ -196,7 +198,7 @@ impl CommandExchange {
     /// UpdatePeerFrameLag652187..6521B2: only after a source advances its
     /// authenticated frame. The measured Logic rate belongs to MainThrottle,
     /// and RTT to the existing private connection response history.
-    pub fn record_peer_lag(&mut self, source: i8, frame: u32, logic_rate: u32, response: u32) {
+    pub fn record_peer_lag(&mut self, source: u8, frame: u32, logic_rate: u32, response: u32) {
         if let Some(peer) = self.peers.iter_mut().find(|peer| peer.house_id == source) {
             let transit_frames = logic_rate.wrapping_mul(response >> 1) / 60;
             peer.lag_frames = (frame as i32)
@@ -216,7 +218,7 @@ impl CommandExchange {
         self.sending = None;
     }
 
-    pub fn remove_peer(&mut self, house_id: i8) -> bool {
+    pub fn remove_peer(&mut self, house_id: u8) -> bool {
         let Some(index) = self.peers.iter().position(|peer| peer.house_id == house_id) else {
             return false;
         };
@@ -249,7 +251,7 @@ impl CommandExchange {
     /// low byte for delay and the same independently rounded execute frame.
     pub fn frame_probe(
         &self,
-        house_id: i8,
+        house_id: u8,
         frame: u32,
         max_ahead: u32,
         initial_checksum: u32,
@@ -277,7 +279,7 @@ impl CommandExchange {
     pub fn send_frame(
         &mut self,
         queues: &mut NetworkCommandQueues<'_>,
-        house_id: i8,
+        house_id: u8,
         frame: u32,
         max_ahead: u32,
         checksum: u32,
@@ -362,7 +364,7 @@ impl CommandExchange {
     /// the packet's claimed House. Native decoder still inherits that header.
     pub fn receive(
         &mut self,
-        source_house: i8,
+        source_house: u8,
         packet: &[u8],
         initial_checksum: u32,
         queues: &mut NetworkCommandQueues<'_>,

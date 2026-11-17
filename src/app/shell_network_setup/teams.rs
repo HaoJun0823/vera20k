@@ -596,7 +596,11 @@ mod tests {
             return;
         };
         let listed = listed_hues(&rules);
-        assert_eq!(listed.len(), 30);
+        assert_eq!(
+            listed.len(),
+            crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT,
+            "the list now holds a colour for every Skirmish row"
+        );
         let teams: Vec<u8> = [(0, 8), (1, 8), (2, 8), (3, 6)]
             .into_iter()
             .flat_map(|(team, players)| std::iter::repeat_n(team, players))

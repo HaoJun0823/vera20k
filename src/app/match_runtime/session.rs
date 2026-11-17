@@ -298,8 +298,8 @@ pub(crate) enum NetworkLoadingRequest {
     Beacon(crate::net::lan_messages::ingame::BeaconRecord),
     /// A beacon label `0x22` to every other node (`0x0043165E..0x00431678`).
     BeaconText {
-        house: i8,
-        slot: i8,
+        house: u8,
+        slot: u8,
         text: Vec<u16>,
     },
     /// BC6's `0x26` to every node.
@@ -3392,7 +3392,7 @@ impl MatchSession {
         }
     }
 
-    pub(crate) fn request_beacon_text(&mut self, house: i8, slot: i8, text: Vec<u16>) {
+    pub(crate) fn request_beacon_text(&mut self, house: u8, slot: u8, text: Vec<u16>) {
         if let Some(network) = self.network.as_mut()
             && matches!(network.phase, NetworkPhase::Frozen { .. })
         {
@@ -3441,7 +3441,7 @@ impl MatchSession {
     /// Network participant `source_index`'s command sender: the header byte
     /// of its records and its timing row. That is its House's index unless
     /// players share Houses.
-    pub(crate) fn network_source_sender(&self, source_index: usize) -> Option<i8> {
+    pub(crate) fn network_source_sender(&self, source_index: usize) -> Option<u8> {
         let launch = self.network_setup()?;
         crate::sim::scenario_bootstrap::normalized_launch_slots(launch)
             .iter()
@@ -3451,7 +3451,7 @@ impl MatchSession {
     }
 
     /// The network participant sending as `sender`.
-    pub(crate) fn network_sender_source(&self, sender: i8) -> Option<usize> {
+    pub(crate) fn network_sender_source(&self, sender: u8) -> Option<usize> {
         let launch = self.network_setup()?;
         crate::sim::scenario_bootstrap::normalized_launch_slots(launch)
             .iter()

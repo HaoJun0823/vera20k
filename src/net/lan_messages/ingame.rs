@@ -66,12 +66,12 @@ pub enum BeaconRecord {
     /// Kind `0x20` (`0x00430D9F..0x00430E41`): the leptons coordinate at
     /// `+0x2F`, the slot the placement filled at `+0x3B`, the House at `+0x3C`.
     Placed {
-        house: i8,
-        slot: i8,
+        house: u8,
+        slot: u8,
         coord: [i32; 3],
     },
     /// Kind `0x21` (`0x00431367..0x004313E9`): slot `+0x3B`, House `+0x3C`.
-    Deleted { house: i8, slot: i8 },
+    Deleted { house: u8, slot: u8 },
 }
 
 /// The short beacon view shares the raw record owner of the other LAN
@@ -122,8 +122,8 @@ impl BeaconMessage {
     }
 
     pub fn record(&self) -> BeaconRecord {
-        let house = self.message.bytes[BEACON_HOUSE_OFFSET] as i8;
-        let slot = self.message.bytes[BEACON_SLOT_OFFSET] as i8;
+        let house = self.message.bytes[BEACON_HOUSE_OFFSET];
+        let slot = self.message.bytes[BEACON_SLOT_OFFSET];
         if self.message.u32(0) == BEACON_DELETED_KIND {
             return BeaconRecord::Deleted { house, slot };
         }
@@ -232,8 +232,8 @@ impl InGameChat<'_> {
 /// receiving record keeps at most 127 units of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InGameBeaconText<'a> {
-    pub house: i8,
-    pub slot: i8,
+    pub house: u8,
+    pub slot: u8,
     text_bytes: &'a [u8],
 }
 
@@ -320,8 +320,8 @@ impl LanMessage {
     /// stack bytes after the copied text unspecified; here they are zero.
     pub fn beacon_text(
         name: &str,
-        house: i8,
-        slot: i8,
+        house: u8,
+        slot: u8,
         text: &[u16],
     ) -> Result<Self, LanMessageError> {
         let mut message = Self::with_name(LanMessageKind::Unknown(BEACON_TEXT_KIND), name)?;
@@ -339,8 +339,8 @@ impl LanMessage {
     /// and the text from `+0x31`.
     pub fn beacon_text_fields(&self) -> Option<InGameBeaconText<'_>> {
         (self.u32(0) == BEACON_TEXT_KIND).then(|| InGameBeaconText {
-            house: self.bytes[BEACON_TEXT_HOUSE_OFFSET] as i8,
-            slot: self.bytes[BEACON_TEXT_SLOT_OFFSET] as i8,
+            house: self.bytes[BEACON_TEXT_HOUSE_OFFSET],
+            slot: self.bytes[BEACON_TEXT_SLOT_OFFSET],
             text_bytes: &self.bytes[BEACON_TEXT_OFFSET..],
         })
     }

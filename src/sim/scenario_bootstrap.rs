@@ -1198,7 +1198,7 @@ pub struct LaunchController {
     /// The sender byte of this human's command records: its place in the
     /// color-sorted human order (CreateHouses687F66), which is its House
     /// index unless players share Houses.
-    pub source: i8,
+    pub source: u8,
 }
 
 impl NormalizedSkirmishSlot {
@@ -1876,7 +1876,7 @@ pub fn normalized_launch_slots(session: &SkirmishLaunchSession) -> Vec<Normalize
     for (source, (index, human)) in humans.into_iter().enumerate() {
         let controller = LaunchController {
             human_index: index,
-            source: i8::try_from(source).expect("at most 30 human nodes"),
+            source: u8::try_from(source).expect("at most 169 human nodes"),
         };
         let leader = session.house_leader(index);
         if leader != index {

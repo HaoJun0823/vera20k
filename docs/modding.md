@@ -303,8 +303,9 @@ the map needs the mod. As in the original, a map can change any rule for that ma
 VERA20k adds two things. Open the map in a text editor to set them:
 
 - **Bigger maps:** under `[Map]`, the width and height in `Size=` can add up to 1024.
-- **More players:** under `[Basic]`, add `MaxPlayers=` with a number from 9 to 30. The
-  map needs a start waypoint for every player, numbered from 0.
+- **More players:** under `[Basic]`, add `MaxPlayers=` with a number from 9 to 169. The
+  map needs a start waypoint for every player, numbered from 0. Offline Skirmish seats
+  them; LAN and online rooms stay at thirty.
 
 If you write a map editor or tool, the [map format](map-format.md) has the details.
 

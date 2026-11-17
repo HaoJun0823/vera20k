@@ -106,14 +106,14 @@ fn wol_catchup_pacing_uses_admitted_peer_progress_and_existing_rtt() {
 // The new certificate regressions below exercise real sockets and real hashes.
 fn fixture_agreement(
     wire: &LanUdpTransport,
-    local: i8,
+    local: u8,
     seed: u32,
     rate: NonZeroU32,
 ) -> StartupAgreement {
     let mut houses: Vec<_> = wire
         .connections()
         .peers()
-        .filter_map(|(house, _)| i8::try_from(house).ok())
+        .filter_map(|(house, _)| u8::try_from(house).ok())
         .filter(|house| (0..32).contains(house))
         .collect();
     houses.push(local);
@@ -316,7 +316,7 @@ fn startup_cohort(active: &[u8], hashes: &[u64]) -> Vec<LiveCommandSession> {
             let local = active[index];
             let original = std::iter::once(local).chain((0..3).filter(|&source| source != local));
             let agreement = StartupAgreement::new(
-                original.map(|source| (rows[source as usize], source as i8)),
+                original.map(|source| (rows[source as usize], source as u8)),
                 active.iter().map(|&source| rows[source as usize]),
                 73,
                 10,
@@ -328,7 +328,7 @@ fn startup_cohort(active: &[u8], hashes: &[u64]) -> Vec<LiveCommandSession> {
             LiveCommandSession::new(
                 agreement,
                 wire,
-                active[index] as i8,
+                active[index] as u8,
                 73,
                 rate,
                 if active.len() == 3 {
@@ -555,7 +555,7 @@ fn startup_ready_retries_after_release_and_old_scope_cannot_certify_rematch() {
             LiveCommandSession::new(
                 agreement.clone(),
                 wire,
-                side as i8,
+                side as u8,
                 73,
                 rate,
                 LiveCommandMode::Lan,
@@ -672,7 +672,7 @@ fn startup_ready_retries_after_release_and_old_scope_cannot_certify_rematch() {
             LiveCommandSession::new(
                 agreement.clone(),
                 wire,
-                side as i8,
+                side as u8,
                 73,
                 rate,
                 LiveCommandMode::Lan,
@@ -1465,7 +1465,7 @@ fn invalid_roster_context_and_initial_seed_are_explicit_failures() {
     );
     let mut wire = transport();
     wire.connections_mut()
-        .add_peer(200, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1234))
+        .add_peer(255, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 1234))
         .unwrap();
     assert!(matches!(
         LiveCommandSession::new(
@@ -1476,7 +1476,7 @@ fn invalid_roster_context_and_initial_seed_are_explicit_failures() {
             NonZeroU32::new(5).unwrap(),
             LiveCommandMode::Lan
         ),
-        Err(LiveCommandError::InvalidRemoteHouse(200))
+        Err(LiveCommandError::InvalidRemoteHouse(255))
     ));
     let mut wire = transport();
     wire.connections_mut()
@@ -2241,9 +2241,9 @@ fn three_udp_clients_keep_adaptive_timing_after_the_original_publisher_exits() {
         .enumerate()
         .map(|(index, transport)| {
             let live = LiveCommandSession::new(
-                fixture_agreement(&transport, index as i8, 73, NonZeroU32::new(5).unwrap()),
+                fixture_agreement(&transport, index as u8, 73, NonZeroU32::new(5).unwrap()),
                 transport,
-                index as i8,
+                index as u8,
                 73,
                 NonZeroU32::new(5).unwrap(),
                 LiveCommandMode::Lan,
@@ -2490,9 +2490,9 @@ fn three_udp_clients_recover_a_retained_frontier_across_a_timing_shrink() {
         .enumerate()
         .map(|(index, wire)| {
             let mut live = LiveCommandSession::new(
-                fixture_agreement(&wire, index as i8, 73, NonZeroU32::new(5).unwrap()),
+                fixture_agreement(&wire, index as u8, 73, NonZeroU32::new(5).unwrap()),
                 wire,
-                index as i8,
+                index as u8,
                 73,
                 NonZeroU32::new(5).unwrap(),
                 LiveCommandMode::Wol,
@@ -3149,7 +3149,7 @@ fn sequenced_udp_paused_client_catches_up_without_stalling_healthy_commands() {
                 LiveCommandSession::new(
                     agreement.clone(),
                     wire,
-                    source as i8,
+                    source as u8,
                     73,
                     NonZeroU32::new(1).unwrap(),
                     LiveCommandMode::Wol,
@@ -3852,7 +3852,7 @@ fn sequenced_pair_with_second_hash_offset(offset: u64) -> SequencedPair {
                 LiveCommandSession::new(
                     agreement(source),
                     wire,
-                    source as i8,
+                    source as u8,
                     73,
                     NonZeroU32::new(1).unwrap(),
                     LiveCommandMode::Wol,

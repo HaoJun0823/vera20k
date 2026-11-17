@@ -914,8 +914,8 @@ fn unit_delivery_no_base_normal_building_reserves_no_base_space() {
             i32::from(entity.position.ry()),
         )
     };
-    assert_ne!(reserved(&sim, ordinary), 0);
-    assert_eq!(reserved(&sim, delivered), 0);
+    assert!(!reserved(&sim, ordinary).is_empty());
+    assert!(reserved(&sim, delivered).is_empty());
 }
 
 /// Ares MapClass_CanBuildingTypeBePlacedHere_Ignore (10014890, hook

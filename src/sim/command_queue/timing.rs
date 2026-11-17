@@ -11,12 +11,12 @@ use serde::{Deserialize, Serialize};
 /// existing field; it is not copied into this record.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetworkCommandTiming {
-    host_house: i8,
+    host_house: u8,
     #[serde(deserialize_with = "read_frame_send_rate")]
     frame_send_rate: NonZeroU8,
     frames_per_second: u16,
     max_max_ahead: u16,
-    processing_millis: BTreeMap<i8, Option<u16>>,
+    processing_millis: BTreeMap<u8, Option<u16>>,
 }
 
 fn read_frame_send_rate<'de, D: serde::Deserializer<'de>>(
@@ -33,18 +33,22 @@ fn read_frame_send_rate<'de, D: serde::Deserializer<'de>>(
 
 impl NetworkCommandTiming {
     pub(crate) fn new(
-        host_house: i8,
+        host_house: u8,
         frame_send_rate: NonZeroU8,
         max_ahead: u16,
-        houses: impl IntoIterator<Item = i8>,
+        houses: impl IntoIterator<Item = u8>,
     ) -> Self {
         let processing_millis: BTreeMap<_, _> =
             houses.into_iter().map(|house| (house, None)).collect();
         // The authenticated WOL publisher can already be absent after the
         // loading wait's DestroyConnection684596. Session697E70 then falls
         // back to a remaining source; installation must keep those live rows.
-        assert!(host_house >= 0 && !processing_millis.is_empty());
-        assert!(processing_millis.keys().all(|house| *house >= 0));
+        assert!(host_house != crate::sim::command::NO_HOUSE && !processing_millis.is_empty());
+        assert!(
+            processing_millis
+                .keys()
+                .all(|house| *house != crate::sim::command::NO_HOUSE)
+        );
         Self {
             host_house,
             frame_send_rate,
@@ -57,7 +61,7 @@ impl NetworkCommandTiming {
 
     /// Startup's authenticated publisher preference. Live authority is derived
     /// from the existing admitted rows and House state by Simulation.
-    pub const fn host_house(&self) -> i8 {
+    pub const fn host_house(&self) -> u8 {
         self.host_house
     }
     pub const fn frame_send_rate(&self) -> NonZeroU8 {
@@ -69,23 +73,23 @@ impl NetworkCommandTiming {
 
     /// ProcessNetwork647BF4 waits until every active node has reported. The
     /// caller supplies the existing live roster, excluding disconnected peers.
-    pub fn maximum_processing_millis(&self, houses: impl IntoIterator<Item = i8>) -> Option<u16> {
+    pub fn maximum_processing_millis(&self, houses: impl IntoIterator<Item = u8>) -> Option<u16> {
         houses.into_iter().try_fold(0u16, |maximum, house| {
             Some(maximum.max(self.processing_millis.get(&house).copied().flatten()?))
         })
     }
 
-    pub(crate) fn admits_source(&self, house: i8) -> bool {
+    pub(crate) fn admits_source(&self, house: u8) -> bool {
         self.processing_millis.contains_key(&house)
     }
 
     /// NodeNameTag removal5DAA8A..5DAB38 retires its timing sample too.
     /// EXIT/REMOVEPLAYER call this only at their synchronized command tail.
-    pub(crate) fn retire_source(&mut self, house: i8) {
+    pub(crate) fn retire_source(&mut self, house: u8) {
         self.processing_millis.remove(&house);
     }
 
-    pub(crate) fn record_processing_millis(&mut self, house: i8, milliseconds: u16) -> bool {
+    pub(crate) fn record_processing_millis(&mut self, house: u8, milliseconds: u16) -> bool {
         // EventClass4C80B1 looks up a NodeNameTag by its bound House, so an AI
         // or an unadmitted House cannot create a new process-timing row.
         if let Some(value) = self.processing_millis.get_mut(&house) {

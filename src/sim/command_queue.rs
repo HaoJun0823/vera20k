@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
      history[{history_index}] with delay {delay}"
 )]
 pub struct ChecksumMismatch {
-    pub house_id: i8,
+    pub house_id: u8,
     pub event_frame: i32,
     pub delay: u8,
     pub history_index: u8,

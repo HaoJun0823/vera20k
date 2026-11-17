@@ -51,7 +51,7 @@ impl LiveTiming {
         average as u16
     }
 
-    pub fn take_precalculated(&mut self, house_id: i8, frame: i32) -> Option<TimingRecord> {
+    pub fn take_precalculated(&mut self, house_id: u8, frame: i32) -> Option<TimingRecord> {
         //647E7B..647F30 clears both PreCalc globals after one append attempt.
         let (max_ahead, frames_per_second) = self.precalculated.take()?;
         Some(TimingRecord {
@@ -88,7 +88,7 @@ pub(super) fn periodic_retry(response: u32, latency_fudge: i32) -> RetryTiming {
 /// current game speed and private-channel response history. These are only
 /// proposal inputs; applying the result belongs to EventClass on every peer.
 pub(super) fn adaptive_timing(
-    house_id: i8,
+    house_id: u8,
     frame: i32,
     mode: LiveCommandMode,
     process_milliseconds: u16,

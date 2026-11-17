@@ -15,7 +15,7 @@ const FRAMEINFO_DELAY_PAYLOAD_OFFSET: usize = 6;
 /// Payload carried by the leading FRAMEINFO record of a multiplayer packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameInfo {
-    pub house_id: i8,
+    pub house_id: u8,
     pub event_frame: i32,
     pub checksum: u32,
     pub timing_word: u16,
@@ -25,7 +25,7 @@ pub struct FrameInfo {
 impl FrameInfo {
     pub fn encode(self) -> CommandRecord {
         assert!(
-            self.house_id >= 0,
+            self.house_id != crate::sim::command::NO_HOUSE,
             "outgoing FRAMEINFO requires a registered house id"
         );
         let mut record = CommandRecord::encode(
@@ -43,7 +43,7 @@ impl FrameInfo {
     /// payload byte remain untouched.
     pub fn write_to(self, record: &mut CommandRecord) {
         assert!(
-            self.house_id >= 0,
+            self.house_id != crate::sim::command::NO_HOUSE,
             "outgoing FRAMEINFO requires a registered house id"
         );
         record.set_issue_header(

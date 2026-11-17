@@ -14,8 +14,8 @@ pub(super) struct MassInput {
     pending: Option<Batch>,
     capacity_wait: Option<Value>,
     batches: Vec<Value>,
-    observed_by_house: BTreeMap<i8, [u64; 2]>,
-    executed_by_house: BTreeMap<i8, [u64; 2]>,
+    observed_by_house: BTreeMap<u8, [u64; 2]>,
+    executed_by_house: BTreeMap<u8, [u64; 2]>,
     initialized: bool,
 }
 struct Batch {

@@ -3155,7 +3155,7 @@ WOLTaunts=junk
         directory.write("artmd.ini", b"[Fixture]\n");
         directory.write(
             profile_file::FILENAME,
-            b"[MultiPlayer]\nSide=ABCDEFGHIJKLMNOPQRSTUVWXY\nColor=99\n",
+            b"[MultiPlayer]\nSide=ABCDEFGHIJKLMNOPQRSTUVWXY\nColor=200\n",
         );
         let assets = AssetManager::from_loose_root_for_test(directory.path());
         let mut process = crate::app::process_assets::ProcessAssets::new(
@@ -3191,7 +3191,7 @@ WOLTaunts=junk
         );
         runtime.read_multiplayer_settings(&mut process);
         assert_eq!(runtime.local_preferences.side, 4);
-        assert_eq!(runtime.local_preferences.color_index, 99);
+        assert_eq!(runtime.local_preferences.color_index, 200);
         // Simulate a persistence failure after WriteINI changed process8870C0.
         runtime.ini_path = Some(directory.path().to_owned());
         runtime.persist_local_preferences();
@@ -3206,7 +3206,7 @@ WOLTaunts=junk
             retained
                 .section_or_empty("MultiPlayer")
                 .read_int("Color", 0),
-            99
+            200
         );
         runtime.read_multiplayer_settings(&mut process);
         assert_eq!(
@@ -3268,7 +3268,7 @@ WOLTaunts=junk
     #[test]
     fn persistent_raw_side_and_color_are_not_rewritten_by_typed_projection() {
         let preferences = read_local_multiplayer_preferences(
-            b"[MultiPlayer]\nSide=<random>\nSideEx=-1\nColor=-19\nColorEx=42\n",
+            b"[MultiPlayer]\nSide=<random>\nSideEx=-1\nColor=-19\nColorEx=200\n",
         );
         assert_eq!(preferences.side, -2);
         assert_eq!(preferences.color_index, -19);
@@ -3276,7 +3276,7 @@ WOLTaunts=junk
         let ini = IniFile::from_bytes(&bytes).unwrap();
         let section = ini.section_or_empty("MultiPlayer");
         assert_eq!(section.read_int("Color", 0), -19);
-        assert_eq!(section.read_int("ColorEx", 0), 42);
+        assert_eq!(section.read_int("ColorEx", 0), 200);
         let mut runtime = runtime(
             MultiplayerSetupSnapshot::from_global_defaults(defaults(), SetupProfile::Skirmish),
             7,

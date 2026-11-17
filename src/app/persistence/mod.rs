@@ -1240,12 +1240,12 @@ mod tests {
         assert_eq!(live_dummy.snapshot().coord, (7, 9));
         assert_eq!(
             prepared.simulation.base_reservations().raw_mask(None, 3, 4),
-            1 << 2,
+            crate::sim::cell_rect::HouseMask::of(2),
             "candidate preparation restores real reservation authority verbatim"
         );
         assert_eq!(
             prepared.simulation.base_reservations().dummy_mask(),
-            0,
+            crate::sim::cell_rect::HouseMask::NONE,
             "raw snapshot decode reconstructs the process-global dummy cleared"
         );
         let runtime = &mut state.runtime;
@@ -1276,10 +1276,10 @@ mod tests {
         );
         assert_eq!(
             simulation.base_reservations().raw_mask(None, 3, 4),
-            1 << 2,
+            crate::sim::cell_rect::HouseMask::of(2),
             "the narrow dummy reconstruction leaves real reservation state untouched"
         );
-        assert_eq!(simulation.base_reservations().dummy_mask(), 0);
+        assert!(simulation.base_reservations().dummy_mask().is_empty());
 
         let accepted_hash = simulation.state_hash();
         simulation
@@ -1287,7 +1287,7 @@ mod tests {
             .reserve(None, -1, 0, 6);
         assert_ne!(simulation.state_hash(), accepted_hash);
         simulation.reconstruct_cellclass_dummy_for_map_resize();
-        assert_eq!(simulation.base_reservations().dummy_mask(), 0);
+        assert!(simulation.base_reservations().dummy_mask().is_empty());
         assert_eq!(
             simulation.state_hash(),
             accepted_hash,

@@ -187,5 +187,11 @@ fn tube_hierarchy_restore_prepares_detached_dummy_then_publishes_terminal_fields
     assert_eq!((live.snapshot(), live.overlay_identity_state()), expected);
     assert_eq!(live.raw_tube_index(), -1);
     assert!(!connected(&runtime.simulation));
-    assert_eq!(runtime.simulation.base_reservations().dummy_mask(), 0);
+    assert!(
+        runtime
+            .simulation
+            .base_reservations()
+            .dummy_mask()
+            .is_empty()
+    );
 }

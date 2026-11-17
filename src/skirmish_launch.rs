@@ -17,11 +17,20 @@ use crate::skirmish_modes::SkirmishGameMode;
 pub const BATTLE_MODE_ID: i32 = 1;
 pub const SKIRMISH_PLAYER_SLOT_COUNT: usize = 8;
 pub const SKIRMISH_AI_SLOT_COUNT: usize = SKIRMISH_PLAYER_SLOT_COUNT - 1;
-/// VERA seats up to thirty players: its network rooms page their roster, and
-/// offline Skirmish scrolls its computer rows through the retail eight
-/// resource rows. Its lobbies list a colour for each
+/// VERA seats up to thirty players in a network room: its rooms page their
+/// roster, and its lobbies list a colour for each
 /// ([`crate::rules::skirmish_colors`]).
 pub const NETWORK_PLAYER_SLOT_COUNT: usize = 30;
+/// VERA offline extension: the most player rows a Skirmish map may seat.
+///
+/// With the Neutral and Special Houses a full match holds
+/// `SKIRMISH_MAX_SLOT_COUNT + 2` Houses, which is why the House bitmasks
+/// ([`crate::sim::cell_rect`]'s reservations) take the House id's whole byte:
+/// 256 bits, so no House aliases another's bit. A map at the format's largest,
+/// `Size=0,0,500,500`, holds this many starts 52 cells apart, one base each.
+/// Network rooms keep [`NETWORK_PLAYER_SLOT_COUNT`]: their protocol counts
+/// sources in a `u32` mask.
+pub const SKIRMISH_MAX_SLOT_COUNT: usize = 169;
 /// YR's eight lobby colours, priorities 0..=7. The colours a lobby lists
 /// beyond them are [`SkirmishColorMode::lobby_priorities`].
 pub const HOUSE_COLOR_COUNT: usize = crate::rules::skirmish_colors::RETAIL_COLOR_COUNT;
@@ -876,12 +885,14 @@ impl TryFrom<SkirmishLaunchSessionInput> for SkirmishLaunchSession {
         opponents.sort_by_key(|opponent| opponent.raw_slot_index);
         if opponents
             .iter()
-            .any(|opponent| opponent.raw_slot_index >= NETWORK_PLAYER_SLOT_COUNT as u8)
+            .any(|opponent| opponent.raw_slot_index >= SKIRMISH_MAX_SLOT_COUNT as u8)
             || opponents
                 .windows(2)
                 .any(|pair| pair[0].raw_slot_index == pair[1].raw_slot_index)
         {
-            return Err("launch AI raw slot indices must be distinct and below30".into());
+            return Err(
+                "launch AI raw slot indices must be distinct and inside the Skirmish rows".into(),
+            );
         }
         Ok(Self {
             mode: input.mode,

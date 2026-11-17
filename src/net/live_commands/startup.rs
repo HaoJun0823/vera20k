@@ -30,7 +30,7 @@ pub enum StartupError {
 /// Active rows are fixed at install after the native loading wait.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct StartupAgreement {
-    houses: Vec<(u8, i8)>,
+    houses: Vec<(u8, u8)>,
     active: u32,
     seed: u32,
     max_ahead: i32,
@@ -41,7 +41,7 @@ pub struct StartupAgreement {
 
 impl StartupAgreement {
     pub fn new(
-        houses: impl IntoIterator<Item = (u8, i8)>,
+        houses: impl IntoIterator<Item = (u8, u8)>,
         active_rows: impl IntoIterator<Item = u8>,
         seed: u32,
         max_ahead: i32,
@@ -140,7 +140,7 @@ impl StartupAgreement {
         ]
     }
 
-    fn row_for_house(&self, house: i8) -> Option<u8> {
+    fn row_for_house(&self, house: u8) -> Option<u8> {
         self.houses
             .iter()
             .find(|&&(_, candidate)| candidate == house)
@@ -188,8 +188,8 @@ pub(super) struct StartupHandshake {
 impl StartupHandshake {
     pub(super) fn new(
         agreement: StartupAgreement,
-        local_house: i8,
-        peers: impl IntoIterator<Item = i8>,
+        local_house: u8,
+        peers: impl IntoIterator<Item = u8>,
         seed: u32,
         rate: NonZeroU32,
     ) -> Result<Self, StartupError> {
@@ -272,7 +272,7 @@ impl StartupHandshake {
 
     pub(super) fn receive(
         &mut self,
-        house: i8,
+        house: u8,
         payload: &[u8],
         delivery: Delivery,
     ) -> Result<bool, StartupError> {

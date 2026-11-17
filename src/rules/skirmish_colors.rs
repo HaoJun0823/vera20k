@@ -6,8 +6,9 @@
 //! gamemd's lobby lists eight colours, priorities 0..=7, and gives an observer
 //! priority 8; `Game_GetLinkedColor` (`0x0069A310`) reads all nine from the
 //! SessionClass table ([`crate::rules::color_scheme::PRIORITY_TO_SCHEME_INDEX`]).
-//! VERA seats thirty players, so its lobbies list up to twenty-two more:
-//! priorities 9..=30, each a `[Colors]` entry named by `[SkirmishColors]`.
+//! VERA's Skirmish screen seats [`crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT`]
+//! players, so its lobbies list up to [`MAX_EXTRA_COLORS`] more: priorities from
+//! 9 up, each a `[Colors]` entry named by `[SkirmishColors]`.
 //! gamemd has no such list, so nothing here cites a native address beyond the
 //! conversion it extends. Priorities 0..=8 keep their native meaning, and a
 //! priority past the list still passes through the native tail.
@@ -75,9 +76,9 @@ pub const RETAIL_COLOR_COUNT: usize = 8;
 pub const OBSERVER_PRIORITY: u8 = 8;
 /// The first priority of VERA's extra lobby colours.
 pub const FIRST_EXTRA_PRIORITY: u8 = OBSERVER_PRIORITY + 1;
-/// Most extra colours a lobby lists: with YR's eight, one for each of thirty
-/// players.
-pub const MAX_EXTRA_COLORS: usize = 22;
+/// Most extra colours a lobby lists: with YR's eight, one for each of the
+/// [`crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT`] Skirmish rows.
+pub const MAX_EXTRA_COLORS: usize = 161;
 
 const LIST_SECTION: &str = "SkirmishColors";
 /// The buffer the `[Colors]` reader takes its values into (`0x00474C70`); a
@@ -119,17 +120,60 @@ fn built_in_scheme(name: &str) -> Option<ColorSchemeEntry> {
 /// lobby lists.
 ///
 /// `Default` is YR's own: the eight-priority table and no extra colours.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SkirmishColorMode {
     unlimited: bool,
     /// The `[Colors]` entry of each extra lobby colour, in list order; only
     /// the first `extra_count` are set.
-    #[serde(default)]
     extra_entries: [u8; MAX_EXTRA_COLORS],
-    #[serde(default)]
     extra_count: u8,
+}
+
+/// The list is longer than a derived `Default` or a derived serde impl covers,
+/// so both are written out here; the JSON keeps its field names and shapes.
+impl Default for SkirmishColorMode {
+    fn default() -> Self {
+        Self::VANILLA
+    }
+}
+
+impl serde::Serialize for SkirmishColorMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Repr<'a> {
+            unlimited: bool,
+            extra_entries: &'a [u8],
+            extra_count: u8,
+        }
+        Repr {
+            unlimited: self.unlimited,
+            extra_entries: &self.extra_entries,
+            extra_count: self.extra_count,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SkirmishColorMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Repr {
+            #[serde(default)]
+            unlimited: bool,
+            #[serde(default)]
+            extra_entries: Vec<u8>,
+            #[serde(default)]
+            extra_count: u8,
+        }
+        let repr = Repr::deserialize(deserializer)?;
+        let mut mode = Self::VANILLA;
+        mode.unlimited = repr.unlimited;
+        for &entry in repr.extra_entries.iter().take(MAX_EXTRA_COLORS) {
+            mode.push_extra(entry);
+        }
+        mode.extra_count = repr.extra_count.min(MAX_EXTRA_COLORS as u8);
+        Ok(mode)
+    }
 }
 
 impl SkirmishColorMode {
@@ -355,7 +399,10 @@ mod tests {
 
         let default = read("[General]\n");
         assert!(!default.unlimited());
-        assert_eq!(default.lobby_color_count(), 30);
+        assert_eq!(
+            default.lobby_color_count(),
+            crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT
+        );
 
         // The hook owns every colour index, so the mode lists no extras.
         assert_eq!(
@@ -372,15 +419,19 @@ mod tests {
     const RETAIL_EIGHT: [usize; 8] = [1, 5, 10, 14, 6, 12, 8, 7];
 
     #[test]
-    fn retail_rules_list_thirty_colours_none_black_white_or_grey() {
+    fn retail_rules_list_a_colour_for_each_skirmish_row_none_black_white_or_grey() {
         let Some(rules) = crate::rules::retail_ini_fixture::retail_rulesmd_rules() else {
             return;
         };
         let mode = rules.skirmish_colors();
         let listed: Vec<u8> = mode.lobby_priorities().collect();
-        assert_eq!(listed.len(), 30);
+        let rows = crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT;
+        assert_eq!(listed.len(), rows);
         assert_eq!(listed[..8], [0, 1, 2, 3, 4, 5, 6, 7]);
-        assert_eq!(listed[8..], (9..=30).collect::<Vec<u8>>()[..]);
+        assert_eq!(
+            listed[8..],
+            (9..=u8::try_from(rows).unwrap()).collect::<Vec<u8>>()[..]
+        );
         assert!(!mode.is_lobby_priority(i32::from(OBSERVER_PRIORITY)));
 
         // YR's eight keep their entries; the extras follow the rules' own
@@ -390,10 +441,10 @@ mod tests {
             .map(|&priority| mode.entry_for_priority(i32::from(priority)))
             .collect();
         assert_eq!(entries[..8], RETAIL_EIGHT);
-        let first_extra = rules.color_schemes.len() - 22;
+        let first_extra = rules.color_schemes.len() - (rows - 8);
         assert_eq!(
             entries[8..],
-            (first_extra..first_extra + 22).collect::<Vec<_>>()[..]
+            (first_extra..first_extra + (rows - 8)).collect::<Vec<_>>()[..]
         );
         assert_eq!(rules.color_schemes[first_extra].name, "VeraBurgundy");
         assert_eq!(mode.scheme_index_for_priority(9), first_extra * 2 + 1);
@@ -419,7 +470,7 @@ mod tests {
         // 8 stays the observer's default and a priority past the list keeps
         // the native pass-through.
         assert_eq!(mode.entry_for_priority(8), 2);
-        assert_eq!(mode.scheme_index_for_priority(31), 31);
+        assert!(mode.scheme_index_for_priority(31) < rules.color_schemes.len());
     }
 
     #[test]

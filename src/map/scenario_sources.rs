@@ -518,8 +518,8 @@ mod tests {
     }
 
     #[test]
-    fn header_start_count_accepts_network_capacity_and_rejects_excess() {
-        let capacity = 30;
+    fn header_start_count_accepts_skirmish_rows_and_rejects_excess() {
+        let capacity = crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT as i32;
         let header = |count| {
             IniFile::from_str(&format!(
                 "[Header]\nStartX=0\nStartY=0\nWidth=100\nHeight=80\nNumberStartingPoints={count}\n",
@@ -528,7 +528,7 @@ mod tests {
         let entry = read_map_menu_entry_from_ini(&header(capacity), "test.map");
         assert_eq!(
             entry.preview_source_bounds.unwrap().start_points.len(),
-            capacity
+            capacity as usize
         );
         let entry = read_map_menu_entry_from_ini(&header(capacity + 1), "test.map");
         assert_eq!(entry.preview_source_bounds, None);

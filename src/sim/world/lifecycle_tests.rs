@@ -508,14 +508,13 @@ fn receiver_fatal_limbo_clears_sparse_map_dummy_reservation() {
         sim.try_reveal_entity(41, common_raw_request(10, 10, 0, 128, 128)),
         RevealOutcome::Revealed { .. }
     ));
-    assert_ne!(sim.substrate.base_reservations.dummy_mask(), 0);
+    assert!(!sim.substrate.base_reservations.dummy_mask().is_empty());
 
     commit_receiver_authority_lethal_hit(&mut sim, 41);
 
     assert!(sim.substrate.entities.get(41).unwrap().lifecycle.in_limbo());
-    assert_eq!(
-        sim.substrate.base_reservations.dummy_mask(),
-        0,
+    assert!(
+        sim.substrate.base_reservations.dummy_mask().is_empty(),
         "fatal Limbo must resolve the same sparse-map CellClass identity as Reveal"
     );
 }
@@ -4914,11 +4913,26 @@ fn gsi_04_05_reservation_successful_reveal_marks_expanded_rect_after_lists() {
     ));
     for x in 9..=12 {
         for y in 19..=23 {
-            assert_eq!(sim.substrate.base_reservations.raw_mask(None, x, y), 1);
+            assert!(
+                sim.substrate
+                    .base_reservations
+                    .raw_mask(None, x, y)
+                    .contains(0)
+            );
         }
     }
-    assert_eq!(sim.substrate.base_reservations.raw_mask(None, 8, 20), 0);
-    assert_eq!(sim.substrate.base_reservations.raw_mask(None, 13, 20), 0);
+    assert!(
+        sim.substrate
+            .base_reservations
+            .raw_mask(None, 8, 20)
+            .is_empty()
+    );
+    assert!(
+        sim.substrate
+            .base_reservations
+            .raw_mask(None, 13, 20)
+            .is_empty()
+    );
     let house = sim.houses.get(&owner).expect("reservation owner");
     assert_eq!(house.base_reservation().bounds(), (9, 19, 4, 5));
     assert_eq!(
@@ -5036,7 +5050,7 @@ fn gsi_04_05_reservation_failed_reveal_never_writes() {
         RevealOutcome::Failed(RevealFailure::MarkFailed)
     );
     assert_eq!(sim.substrate.base_reservations.entries().count(), 0);
-    assert_eq!(sim.substrate.base_reservations.dummy_mask(), 0);
+    assert!(sim.substrate.base_reservations.dummy_mask().is_empty());
     assert!(
         !sim.lifecycle_test_events
             .contains(&LifecycleTestEvent::BaseReservationMarked)
@@ -5062,7 +5076,12 @@ fn gsi_04_05_reservation_clear_removes_perimeter_but_retains_bounds() {
     let state = sim.houses.get(&owner).unwrap().base_reservation();
     assert_eq!(state.bounds(), (9, 9, 3, 3));
     assert!(state.perimeter_cells().is_empty());
-    assert_eq!(sim.substrate.base_reservations.raw_mask(None, 10, 10), 0);
+    assert!(
+        sim.substrate
+            .base_reservations
+            .raw_mask(None, 10, 10)
+            .is_empty()
+    );
 }
 
 #[test]
@@ -5083,12 +5102,14 @@ fn gsi_04_05_reservation_limbo_clears_before_unlink_repairs_overlap_and_preserve
 
     assert_eq!(
         sim.substrate.base_reservations.raw_mask(None, 9, 10),
-        1 << 1,
+        crate::sim::cell_rect::HouseMask::of(1),
         "AND-not clears only the leaving owner's bit"
     );
-    assert_eq!(
-        sim.substrate.base_reservations.raw_mask(None, 11, 10) & 1,
-        1,
+    assert!(
+        sim.substrate
+            .base_reservations
+            .raw_mask(None, 11, 10)
+            .contains(0),
         "neighbor repair restores the same-house overlap"
     );
     let cleared = sim
@@ -5122,12 +5143,19 @@ fn gsi_04_05_reservation_repair_scan_reaches_asymmetric_high_edge() {
     insert_reservation_building(&mut sim, 108, "Americans", 16, 20, &"1x1".into(), 2);
     let _ = sim.try_reveal_entity(107, request(10, 20, PlacementEvidence::MarkSucceeded));
     let _ = sim.try_reveal_entity(108, request(16, 20, PlacementEvidence::MarkSucceeded));
-    assert_eq!(sim.substrate.base_reservations.raw_mask(None, 14, 20), 1);
+    assert!(
+        sim.substrate
+            .base_reservations
+            .raw_mask(None, 14, 20)
+            .contains(0)
+    );
 
     assert_eq!(sim.techno_limbo(107), super::ConcealOutcome::Concealed);
-    assert_eq!(
-        sim.substrate.base_reservations.raw_mask(None, 14, 20),
-        1,
+    assert!(
+        sim.substrate
+            .base_reservations
+            .raw_mask(None, 14, 20)
+            .contains(0),
         "the x=16 neighbor, omitted by the old [8,16) scan, re-marks its overlap"
     );
 }
@@ -5212,9 +5240,24 @@ fn gsi_04_05_reservation_processed_foundation_precedes_metadata_and_lifecycle_ma
         sim.try_reveal_entity(106, request(30, 40, PlacementEvidence::MarkSucceeded)),
         RevealOutcome::Revealed { .. }
     ));
-    assert_eq!(sim.substrate.base_reservations.raw_mask(None, 28, 38), 1);
-    assert_eq!(sim.substrate.base_reservations.raw_mask(None, 35, 45), 1);
-    assert_eq!(sim.substrate.base_reservations.raw_mask(None, 36, 45), 0);
+    assert!(
+        sim.substrate
+            .base_reservations
+            .raw_mask(None, 28, 38)
+            .contains(0)
+    );
+    assert!(
+        sim.substrate
+            .base_reservations
+            .raw_mask(None, 35, 45)
+            .contains(0)
+    );
+    assert!(
+        sim.substrate
+            .base_reservations
+            .raw_mask(None, 36, 45)
+            .is_empty()
+    );
 }
 
 #[test]

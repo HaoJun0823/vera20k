@@ -463,7 +463,7 @@ impl SynchronizedCommandQueue {
         &mut self,
         current_frame: u32,
         max_ahead: u32,
-        local_house_id: i8,
+        local_house_id: u8,
         policy: NetworkSendPolicy,
         current_checksum: u32,
         timing_word: u16,
@@ -829,7 +829,7 @@ mod tests {
         SynchronizedCommand::opaque(CommandRecord::encode(opcode, house, frame, payload).unwrap())
     }
 
-    fn eligible(owner: InternedId, house_id: i8) -> CommandDispatchHouse {
+    fn eligible(owner: InternedId, house_id: u8) -> CommandDispatchHouse {
         CommandDispatchHouse::new(owner, house_id, true)
     }
 

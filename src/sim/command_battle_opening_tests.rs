@@ -60,13 +60,13 @@ fn negative_issuer_stops_all_three_constructors_before_payload_writes() {
         let mut record = CommandRecord::decode_exact(&[0xa5; COMMAND_RECORD_LEN]).unwrap();
         match kind {
             0 => DeployRecord {
-                house_id: -1,
+                house_id: NO_HOUSE,
                 frame: 31,
                 entity_id: 42,
             }
             .write_into(&mut record),
             1 => ProductionRecord {
-                house_id: -1,
+                house_id: NO_HOUSE,
                 frame: 31,
                 event: ProductionEvent::Produce,
                 rtti: 7,
@@ -75,7 +75,7 @@ fn negative_issuer_stops_all_three_constructors_before_payload_writes() {
             }
             .write_into(&mut record),
             _ => PlaceRecord {
-                house_id: -1,
+                house_id: NO_HOUSE,
                 frame: 31,
                 rtti: 6,
                 type_index: 42,
@@ -86,7 +86,7 @@ fn negative_issuer_stops_all_three_constructors_before_payload_writes() {
             .write_into(&mut record),
         }
         assert_eq!(record.opcode(), 0);
-        assert_eq!(record.house_id(), -1);
+        assert_eq!(record.house_id(), NO_HOUSE);
         assert_eq!(record.frame_stamp(), 31);
         assert_eq!(record.flags(), 0xa5);
         assert_eq!(record.payload(), &[0xa5; COMMAND_RECORD_PAYLOAD_LEN]);

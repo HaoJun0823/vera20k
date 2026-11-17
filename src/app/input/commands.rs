@@ -1667,7 +1667,7 @@ mod tests {
         assert_eq!(sim.take_executed_exit_owner(), None);
         assert_eq!(
             sim.take_departed_senders(),
-            [sim.houses().index_of(peer).unwrap() as i8]
+            [sim.houses().index_of(peer).unwrap() as u8]
         );
         assert!(sim.houses()[&peer].left_game());
         // 0x005E2BA0: the local human is undefeated, so no Flag_To_Die.

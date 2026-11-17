@@ -118,7 +118,7 @@ pub struct MultiplayerPauseStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchSpeedChange {
     /// This House's PC could not keep up, so the match runs slower.
-    SlowedBy(i8),
+    SlowedBy(u8),
     /// The match runs at its own speed again.
     Normal,
 }
@@ -129,7 +129,7 @@ pub enum MatchSpeedChange {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchPauseChange {
     /// The House of the player who asked.
-    pub house: i8,
+    pub house: u8,
     pub paused: bool,
 }
 
@@ -140,7 +140,7 @@ pub struct MatchPauseChange {
 /// `0x0064800E`); the relay plays on without them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchConnectionChange {
-    pub house: i8,
+    pub house: u8,
     pub responding: bool,
 }
 
@@ -288,7 +288,7 @@ pub enum SequencedError {
     )]
     Desync {
         frame: u32,
-        house: i8,
+        house: u8,
         local: u32,
         remote: u32,
     },
@@ -386,7 +386,7 @@ struct CommittedFrame {
     frame: u32,
     records: Vec<CommandRecord>,
     // Remote Houses whose connection the relay ended in this frame.
-    lost: Vec<i8>,
+    lost: Vec<u8>,
     // A rate marker after the previous frame.
     speed: Option<MatchSpeedChange>,
     // Other players' pause markers the world reaches with this frame: a
@@ -413,7 +413,7 @@ struct Watch {
 #[derive(Debug)]
 pub(super) struct SequencedSession {
     watch: Option<Watch>,
-    houses: [Option<i8>; 30],
+    houses: [Option<u8>; 30],
     local_source: u8,
     agreement: [u8; 32],
     /// The certificate's rate, which the simulation keeps.
@@ -472,7 +472,7 @@ pub(super) struct SequencedSession {
     sent_commands: u64,
     command_traces: VecDeque<CommandDeliveryTrace>,
     // Released when their frame dispatches; the app posts each line.
-    lost: Vec<i8>,
+    lost: Vec<u8>,
     speed_changes: Vec<MatchSpeedChange>,
     pause_changes: Vec<MatchPauseChange>,
     // Other players the relay last said it has not heard from lately, and
@@ -485,7 +485,7 @@ impl SequencedSession {
     pub(super) fn new(
         agreement: &StartupAgreement,
         transport: &LanUdpTransport,
-        local_house: i8,
+        local_house: u8,
     ) -> Result<Self, LiveCommandError> {
         let cert = OrderingCertificate::parse(
             &transport
@@ -510,7 +510,7 @@ impl SequencedSession {
             let source = vera20k_relay_protocol::endpoint_peer(endpoint)
                 .ok_or(StartupError::InvalidAdmission)?;
             houses[usize::from(source)] =
-                Some(i8::try_from(house).map_err(|_| StartupError::InvalidAdmission)?);
+                Some(u8::try_from(house).map_err(|_| StartupError::InvalidAdmission)?);
         }
         let local_source = match player_source {
             Some(source) => source,
@@ -541,7 +541,7 @@ impl SequencedSession {
     }
 
     fn with_roster(
-        houses: [Option<i8>; 30],
+        houses: [Option<u8>; 30],
         local_source: u8,
         agreement: [u8; 32],
         fps: u16,
@@ -675,7 +675,7 @@ impl SequencedSession {
     }
 
     /// Remote Houses whose connection the relay ended in dispatched frames.
-    pub(super) fn take_lost(&mut self) -> Vec<i8> {
+    pub(super) fn take_lost(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.lost)
     }
 
@@ -1882,7 +1882,7 @@ fn watch_turn(fps: u16, delay_seconds: u32) -> u32 {
     released + 2 * (u32::from(fps) * WATCH_PULL_INTERVAL_MS / 1000).max(1)
 }
 
-fn roster_mask(houses: &[Option<i8>; 30]) -> u32 {
+fn roster_mask(houses: &[Option<u8>; 30]) -> u32 {
     houses
         .iter()
         .enumerate()
@@ -1893,7 +1893,7 @@ fn roster_mask(houses: &[Option<i8>; 30]) -> u32 {
 /// A batch's command records (bandwidth-compaction spec §4): the packet
 /// rebuilt with the FRAME_INFO of its source's `house`, its record's
 /// `frame` and zeros, then the unchanged `EventPacketCodec` decode.
-fn decode_batch(bytes: &[u8], house: i8, frame: u32) -> Result<Vec<CommandRecord>, SequencedError> {
+fn decode_batch(bytes: &[u8], house: u8, frame: u32) -> Result<Vec<CommandRecord>, SequencedError> {
     if bytes.is_empty() || bytes.len() > ORDERING_BATCH_CAPACITY {
         return Err(SequencedError::InvalidTimeline);
     }
@@ -2749,7 +2749,7 @@ mod watch_tests {
     use super::*;
     use vera20k_relay_protocol::OrderStatus;
 
-    fn watcher(houses: [Option<i8>; 30]) -> SequencedSession {
+    fn watcher(houses: [Option<u8>; 30]) -> SequencedSession {
         let mut session = SequencedSession::with_roster(houses, 0, [0; 32], 30);
         session.watch = Some(Watch {
             delay_seconds: 120,

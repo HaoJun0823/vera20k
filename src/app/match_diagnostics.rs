@@ -176,7 +176,7 @@ struct ActorPresentationProbe {
     submitted: Option<ActorPresentation>,
 }
 pub(crate) struct CommandTimingObservation {
-    pub publisher: Option<i8>,
+    pub publisher: Option<u8>,
     pub fps: Option<u16>,
     pub frame_send_rate: Option<u8>,
     pub max_ahead: Option<i32>,

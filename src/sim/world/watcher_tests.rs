@@ -200,6 +200,6 @@ fn the_followed_players_own_records_are_another_games() {
     );
     assert_eq!(
         sim.take_departed_senders(),
-        [sim.houses.index_of(ann).unwrap() as i8]
+        [sim.houses.index_of(ann).unwrap() as u8]
     );
 }

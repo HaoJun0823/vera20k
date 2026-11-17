@@ -243,7 +243,7 @@ fn spawn_colour_index_width_follows_the_phobos_capability() {
     };
     assert!(color(9).is_ok() && color(30).is_ok());
     assert_eq!(color(8).is_ok(), crate::rules::PHOBOS_ENABLED);
-    assert_eq!(color(31).is_ok(), crate::rules::PHOBOS_ENABLED);
+    assert!(color(31).is_ok());
 }
 
 #[test]

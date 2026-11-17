@@ -417,8 +417,8 @@ pub(crate) fn place_beacon(
             send(
                 state,
                 BeaconRecord::Placed {
-                    house: house as i8,
-                    slot: slot as i8,
+                    house: u8::try_from(house).unwrap_or(crate::sim::command::NO_HOUSE),
+                    slot: u8::try_from(slot).unwrap_or(crate::sim::command::NO_HOUSE),
                     coord,
                 },
             );
@@ -478,8 +478,8 @@ pub(crate) fn delete_beacon(state: &mut AppState, target: BeaconTarget) {
         send(
             state,
             BeaconRecord::Deleted {
-                house: house as i8,
-                slot: slot as i8,
+                house: u8::try_from(house).unwrap_or(crate::sim::command::NO_HOUSE),
+                slot: u8::try_from(slot).unwrap_or(crate::sim::command::NO_HOUSE),
             },
         );
     }
@@ -516,8 +516,8 @@ pub(crate) fn edit_beacon_message(
         let session = &state.match_state.session;
         if crate::app::match_runtime::network_match::nodes(session).len() > 1 {
             state.match_state.session.request_beacon_text(
-                house as i8,
-                slot as i8,
+                u8::try_from(house).unwrap_or(crate::sim::command::NO_HOUSE),
+                u8::try_from(slot).unwrap_or(crate::sim::command::NO_HOUSE),
                 units.iter().copied().take(BEACON_TEXT_UNITS).collect(),
             );
         }
@@ -530,13 +530,20 @@ pub(crate) fn edit_beacon_message(
 /// packet's sign-extended House and slot, so `(-1, -1)` is the search. VERA
 /// drops other indices outside the House's three slots, which native would
 /// read across rows.
-pub(crate) fn receive_text(state: &mut AppState, house: i8, slot: i8, text: &[u16]) {
+pub(crate) fn receive_text(state: &mut AppState, house: u8, slot: u8, text: &[u16]) {
     let target = match (house, slot) {
-        (-1, -1) => BeaconTarget::Selected,
-        (house, slot) => match (usize::try_from(house), usize::try_from(slot)) {
-            (Ok(house), Ok(slot)) if slot < BEACONS_PER_HOUSE => BeaconTarget::Slot { house, slot },
-            _ => return,
-        },
+        (crate::sim::command::NO_HOUSE, crate::sim::command::NO_HOUSE) => BeaconTarget::Selected,
+        (house, slot)
+            if house != crate::sim::command::NO_HOUSE
+                && slot != crate::sim::command::NO_HOUSE
+                && usize::from(slot) < BEACONS_PER_HOUSE =>
+        {
+            BeaconTarget::Slot {
+                house: usize::from(house),
+                slot: usize::from(slot),
+            }
+        }
+        _ => return,
     };
     edit_beacon_message(state, Some(text), target, false);
 }
@@ -579,16 +586,23 @@ pub(crate) fn local_player_defeated(state: &mut AppState) {
 pub(crate) fn receive(state: &mut AppState, record: BeaconRecord) {
     match record {
         BeaconRecord::Placed { house, slot, coord } => {
-            let (Ok(house), Ok(slot)) = (usize::try_from(house), usize::try_from(slot)) else {
+            if house == crate::sim::command::NO_HOUSE {
                 return;
-            };
+            }
+            let slot = usize::from(slot);
             if slot < BEACONS_PER_HOUSE {
-                place_beacon(state, house, coord, Some(slot));
+                place_beacon(state, usize::from(house), coord, Some(slot));
             }
         }
         BeaconRecord::Deleted { house, slot } => {
-            if let (Ok(house), Ok(slot)) = (usize::try_from(house), usize::try_from(slot)) {
-                delete_beacon(state, BeaconTarget::Slot { house, slot });
+            if house != crate::sim::command::NO_HOUSE {
+                delete_beacon(
+                    state,
+                    BeaconTarget::Slot {
+                        house: usize::from(house),
+                        slot: usize::from(slot),
+                    },
+                );
             }
         }
     }

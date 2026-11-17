@@ -1,8 +1,9 @@
 # Lobby player colours
 
-Yuri's Revenge lists eight player colours. VERA20k seats up to thirty players, so its
-Skirmish screen, LAN and online game rooms and My Information list thirty: the same
-eight first, then twenty-two more. None is black, white or grey.
+Yuri's Revenge lists eight player colours. VERA20k's Skirmish screen seats up to a
+hundred and sixty-nine players, so it lists a hundred and sixty-nine: the same eight
+first, then a hundred and sixty-one more. LAN and online game rooms still seat thirty
+and show the same list. None is black, white or grey.
 
 This is a VERA20k feature. gamemd has no such list, so only the conversion it extends
 has a native address (`Game_GetLinkedColor`, `0x0069A310`).
@@ -34,7 +35,7 @@ MyTeal=123,255,145
 
 - Each line names a `[Colors]` entry. `[Colors]` values are Hue,Saturation,Value, each
   0 to 255, as for every other colour in the game.
-- The list holds at most 22 names. Later ones are ignored.
+- The list holds at most 161 names. Later ones are ignored.
 - A name `[Colors]` does not have is skipped, unless it is one of VERA20k's own (below).
 - `none` is skipped, so `1=none` alone leaves the lobby with the original eight.
 - A colour listed twice, or one of the eight's own `[Colors]` entries, is listed once.
@@ -78,9 +79,9 @@ so the original entries keep their places. A map can use these names in a House'
 ## How a colour is numbered
 
 A player's colour is one number in saved settings, replays and network games: 0 to 7
-for the original eight, 8 for an observer, and 9 to 30 for the list above in order.
+for the original eight, 8 for an observer, and 9 to 169 for the list above in order.
 gamemd passes a number from 9 up straight through as a colour-scheme index; VERA20k
-reads 9 to 30 as its list instead and leaves any higher number as gamemd has it.
+reads 9 to 169 as its list instead and leaves any higher number as gamemd has it.
 
 ## Team Colors in game rooms
 
@@ -121,14 +122,14 @@ list has enough, and anyone can change theirs afterwards.
 - The new colours have no name in the status line under the lobby; the eight keep
   gamemd's (`STT:PlayerColor*`).
 - Quick Match plays in the original eight. A saved new colour goes as Random there.
-- A match started from a `spawn.ini` takes colours 0 to 7 and 9 to 30, as a room
+- A match started from a `spawn.ini` takes colours 0 to 7 and 9 to 169, as a room
   does; 8 is the observer's and is refused. `--probe` lists the extra colours the
-  rules hold. A `phobos` build's `spawn.ini` takes any number, and there 9 to 30 mean
-  this list unless `SkirmishUnlimitedColors` is on. A launcher should send 9 to 30
+  rules hold. A `phobos` build's `spawn.ini` takes any number, and there 9 to 169 mean
+  this list unless `SkirmishUnlimitedColors` is on. A launcher should send 9 to 169
   only to this version or later: an older game refuses the `spawn.ini`.
-- A `spawn.ini` colour from 9 to 30 that the rules' list does not hold (a mod's own
+- A `spawn.ini` colour from 9 to 169 that the rules' list does not hold (a mod's own
   shorter `[SkirmishColors]`) is not refused: it goes through gamemd's conversion and
-  can look like one of the eight another player has. Retail rules list all 22.
+  can look like one of the eight another player has. Retail rules list all 161.
 - The loading screen picks each player's colour with the rules loaded before the map.
   A map or mode INI that adds its own `[Colors]` entries can make a new colour show as
   another one there; in the match it is right.

@@ -1360,7 +1360,7 @@ mod tests {
         assert_eq!(sim.houses()[&computer].tracking().buildings(), 1);
         assert_eq!(
             sim.base_reservations().raw_mask(None, 28, 38),
-            2,
+            crate::sim::cell_rect::HouseMask::of(1),
             "Reveal writes the participant's house-index bit without a repair pass"
         );
     }

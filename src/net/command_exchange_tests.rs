@@ -606,7 +606,7 @@ fn local_prerequisite_loss_publishes_one_raw_cancellation_stream() {
             assert_eq!((message.peer_id, message.delivery), (0, Delivery::Reliable));
             receive
                 .receive(
-                    i8::try_from(message.peer_id).unwrap(),
+                    u8::try_from(message.peer_id).unwrap(),
                     &message.payload,
                     0,
                     &mut receiver.network_command_queues(),

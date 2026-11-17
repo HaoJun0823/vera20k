@@ -3396,7 +3396,7 @@ pub(crate) fn install_gameplay(state: &mut AppState) -> anyhow::Result<()> {
                     .position(|human| human.name.eq_ignore_ascii_case(host_name))
             })
             .ok_or_else(|| anyhow::anyhow!("host is absent from the admitted roster"))?;
-        i8::try_from(
+        u8::try_from(
             super::match_runtime::network_match::source_house(
                 &state.match_state.session,
                 sim,
@@ -3421,7 +3421,7 @@ pub(crate) fn install_gameplay(state: &mut AppState) -> anyhow::Result<()> {
                 source,
             )
             .ok_or_else(|| anyhow::anyhow!("connected source has no constructed House"))?;
-            i8::try_from(house)
+            u8::try_from(house)
                 .map_err(|_| anyhow::anyhow!("connected House index cannot be encoded"))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -3445,7 +3445,7 @@ pub(crate) fn install_gameplay(state: &mut AppState) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("admitted source has no constructed House"))?;
             Ok((
                 row,
-                i8::try_from(house)
+                u8::try_from(house)
                     .map_err(|_| anyhow::anyhow!("original House cannot be encoded"))?,
             ))
         })
@@ -3722,7 +3722,9 @@ fn drain_match_requests(state: &mut AppState) {
                     )
                     && let Some(live) = state.match_state.live_network.as_mut()
                 {
-                    live.remove_peer(house as i8);
+                    if let Ok(peer) = u8::try_from(house) {
+                        live.remove_peer(peer);
+                    }
                 }
             }
             NetworkLoadingRequest::Chat { recipients, text } => {
@@ -4502,7 +4504,7 @@ fn gameplay_connections(
     session: &super::match_runtime::session::MatchSession,
     sim: &crate::sim::world::Simulation,
     timing: RetryTiming,
-) -> anyhow::Result<(i8, u32, LanConnections)> {
+) -> anyhow::Result<(u8, u32, LanConnections)> {
     let launch = session
         .network_setup()
         .ok_or_else(|| anyhow::anyhow!("LAN startup has no admitted roster"))?;
@@ -4547,7 +4549,7 @@ fn gameplay_connections(
     for (house, endpoint) in peers {
         connections.add_peer(house, endpoint)?;
     }
-    Ok((i8::try_from(local_house)?, seed, connections))
+    Ok((u8::try_from(local_house)?, seed, connections))
 }
 
 #[cfg(test)]

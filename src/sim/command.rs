@@ -14,6 +14,23 @@ pub const COMMAND_RECORD_LEN: usize = 0x6f;
 /// Byte width available to opcode-specific command data.
 pub const COMMAND_RECORD_PAYLOAD_LEN: usize = COMMAND_RECORD_LEN - COMMAND_RECORD_PAYLOAD_OFFSET;
 
+/// A House index as the command stream carries it: one unsigned byte.
+///
+/// Native writes a signed byte and reserves the negative half for its
+/// sentinels, so it could never name House 128 and later. VERA's offline
+/// Skirmish seats [`crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT`] players
+/// beside Neutral and Special, which needs the same byte read unsigned:
+/// [`NO_HOUSE`] takes the place of native's `-1` and the record layout is
+/// unchanged, so every command byte ever written still decodes the same way
+/// (a retired `-1` is that same `0xFF`).
+pub const NO_HOUSE: u8 = u8::MAX;
+
+/// The signed projection native hashes and compares against: [`NO_HOUSE`]
+/// reads as `-1`, every House as itself.
+pub const fn house_id_signed(house: u8) -> i32 {
+    if house == NO_HOUSE { -1 } else { house as i32 }
+}
+
 const COMMAND_RECORD_OPCODE_OFFSET: usize = 0;
 const COMMAND_RECORD_FLAGS_OFFSET: usize = 1;
 const COMMAND_RECORD_HOUSE_OFFSET: usize = 2;
@@ -99,7 +116,7 @@ pub const PROCESS_TIME_OPCODE: u8 = 0x21;
 /// ProcessNetwork and would divide by zero in native; reject it on decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimingRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub frames_per_second: u16,
     pub max_ahead: u16,
@@ -114,7 +131,7 @@ impl TimingRecord {
         payload[4] = self.frame_send_rate.get();
         CommandRecord::encode(
             TIMING_OPCODE,
-            i32::from(self.house_id),
+            house_id_signed(self.house_id),
             self.frame,
             &payload,
         )
@@ -134,7 +151,7 @@ impl TimingRecord {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessTimeRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub milliseconds: u16,
 }
@@ -143,7 +160,7 @@ impl ProcessTimeRecord {
     pub fn encode(self) -> Result<CommandRecord, CommandRecordError> {
         CommandRecord::encode(
             PROCESS_TIME_OPCODE,
-            i32::from(self.house_id),
+            house_id_signed(self.house_id),
             self.frame,
             &self.milliseconds.to_le_bytes(),
         )
@@ -163,7 +180,7 @@ impl ProcessTimeRecord {
 /// `0x004C794B`): the setting dword at Event+7; the sender rides the header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameSpeedRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub speed: i32,
 }
@@ -174,7 +191,7 @@ impl GameSpeedRecord {
         payload.copy_from_slice(&self.speed.to_le_bytes());
         CommandRecord::encode(
             GAME_SPEED_OPCODE,
-            i32::from(self.house_id),
+            house_id_signed(self.house_id),
             self.frame,
             &payload,
         )
@@ -204,7 +221,7 @@ pub const BUILDING_OFF_LINE_OPCODE: u8 = 0x02;
 /// Typed view of native opcodes 0x01 / 0x02 (Building On Line / Off Line).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuildingOnLineRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub entity_id: i32,
     /// The opcode's direction: `0x01` On Line, `0x02` Off Line.
@@ -224,7 +241,7 @@ impl BuildingOnLineRecord {
             .expect("an Object token encodes a 0x34 Abstract");
         payload[..4].copy_from_slice(&value.to_le_bytes());
         payload[4] = kind;
-        CommandRecord::encode(opcode, i32::from(self.house_id), self.frame, &payload)
+        CommandRecord::encode(opcode, house_id_signed(self.house_id), self.frame, &payload)
     }
 
     /// Decode either direction. A non-`0x34` kind byte decodes to nothing:
@@ -409,8 +426,8 @@ impl CommandRecord {
     }
 
     #[inline]
-    pub fn house_id(&self) -> i8 {
-        self.bytes[COMMAND_RECORD_HOUSE_OFFSET] as i8
+    pub fn house_id(&self) -> u8 {
+        self.bytes[COMMAND_RECORD_HOUSE_OFFSET]
     }
 
     #[inline]
@@ -447,12 +464,15 @@ impl CommandRecord {
     ///
     /// Flags and payload remain untouched, including for a null event.
     pub fn set_issue_header(&mut self, opcode: u8, house_id: i32, frame_stamp: i32) {
-        if house_id < 0 {
-            self.bytes[COMMAND_RECORD_OPCODE_OFFSET] = 0;
-            self.bytes[COMMAND_RECORD_HOUSE_OFFSET] = u8::MAX;
-        } else {
-            self.bytes[COMMAND_RECORD_OPCODE_OFFSET] = opcode;
-            self.bytes[COMMAND_RECORD_HOUSE_OFFSET] = house_id as u8;
+        match u8::try_from(house_id) {
+            Ok(house) if house != NO_HOUSE => {
+                self.bytes[COMMAND_RECORD_OPCODE_OFFSET] = opcode;
+                self.bytes[COMMAND_RECORD_HOUSE_OFFSET] = house;
+            }
+            _ => {
+                self.bytes[COMMAND_RECORD_OPCODE_OFFSET] = 0;
+                self.bytes[COMMAND_RECORD_HOUSE_OFFSET] = NO_HOUSE;
+            }
         }
         self.set_frame_stamp(frame_stamp);
     }
@@ -464,8 +484,8 @@ impl CommandRecord {
     }
 
     #[inline]
-    pub fn set_house_id(&mut self, house_id: i8) {
-        self.bytes[COMMAND_RECORD_HOUSE_OFFSET] = house_id as u8;
+    pub fn set_house_id(&mut self, house_id: u8) {
+        self.bytes[COMMAND_RECORD_HOUSE_OFFSET] = house_id;
     }
 
     #[inline]
@@ -487,9 +507,9 @@ impl CommandRecord {
     /// Display REPAIR15. Target6E6AB0 supplies the identifier and kind0x34;
     /// the constructor writes only the header and this five-byte token.
     /// Source: original gamemd.exe instructions4C6608..4C663D.
-    fn write_object_target(&mut self, opcode: u8, house_id: i8, frame: i32, entity_id: i32) {
-        self.set_issue_header(opcode, i32::from(house_id), frame);
-        if house_id < 0 {
+    fn write_object_target(&mut self, opcode: u8, house_id: u8, frame: i32, entity_id: i32) {
+        self.set_issue_header(opcode, house_id_signed(house_id), frame);
+        if house_id == NO_HOUSE {
             return;
         }
         let (value, kind) = MegaMissionTarget::Object { id: entity_id }
@@ -538,7 +558,7 @@ impl ObjectAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObjectActionRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub entity_id: i32,
     pub action: ObjectAction,
@@ -574,7 +594,7 @@ impl ObjectActionRecord {
 /// then CellStruct at+B/+D. Execute4C78D6 passes both to House::Fire_SW4FAE50.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpecialPlaceRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub type_index: i32,
     pub cell: (i16, i16),
@@ -586,7 +606,12 @@ impl SpecialPlaceRecord {
         payload[..4].copy_from_slice(&self.type_index.to_le_bytes());
         payload[4..6].copy_from_slice(&self.cell.0.to_le_bytes());
         payload[6..8].copy_from_slice(&self.cell.1.to_le_bytes());
-        CommandRecord::encode(Self::OPCODE, i32::from(self.house_id), self.frame, &payload)
+        CommandRecord::encode(
+            Self::OPCODE,
+            house_id_signed(self.house_id),
+            self.frame,
+            &payload,
+        )
     }
     pub fn decode(record: &CommandRecord) -> Option<Self> {
         (record.opcode() == Self::OPCODE).then(|| Self {
@@ -613,7 +638,7 @@ pub enum PaidSuperAction {
 /// Layout: action:u8, source:i32, destination:i32, sequence:u64, cell:i16x2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaidSuperRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub action: PaidSuperAction,
     pub source: i32,
@@ -623,7 +648,7 @@ pub struct PaidSuperRecord {
 }
 impl PaidSuperRecord {
     fn canonical(self) -> bool {
-        self.house_id >= 0
+        self.house_id != NO_HOUSE
             && self.source >= 0
             && self.destination >= 0
             && self.source != self.destination
@@ -652,7 +677,7 @@ impl PaidSuperRecord {
         payload[19..21].copy_from_slice(&self.cell.1.to_le_bytes());
         CommandRecord::encode(
             VERA_PAID_SUPER_OPCODE,
-            i32::from(self.house_id),
+            house_id_signed(self.house_id),
             self.frame,
             &payload,
         )
@@ -688,7 +713,7 @@ impl PaidSuperRecord {
 /// the order of multiple queued cycles through the existing production owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CycleProducerRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub category: ProductionCategory,
 }
@@ -704,7 +729,7 @@ impl CycleProducerRecord {
         };
         CommandRecord::encode(
             VERA_CYCLE_PRODUCER_OPCODE,
-            i32::from(self.house_id),
+            house_id_signed(self.house_id),
             self.frame,
             &[category],
         )
@@ -742,7 +767,7 @@ pub const ARES_TRENCH_REDIRECT_PAYLOAD_LEN: u8 = 10;
 /// `x + y * 1000`, kind `0x0B` unless the value is 0, which leaves kind 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AresTrenchRedirectRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub target: MegaMissionTarget,
     pub source: MegaMissionTarget,
@@ -752,7 +777,7 @@ impl AresTrenchRedirectRecord {
     /// `cell` is the clicked building's Cell, `source_id` the selected
     /// building's ID.
     pub fn encode_cell(
-        house_id: i8,
+        house_id: u8,
         frame: i32,
         (x, y): (i16, i16),
         source_id: i32,
@@ -799,7 +824,7 @@ impl AresTrenchRedirectRecord {
 /// Typed view of native opcode `0x17`'s fixed record fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SellWallAtCellRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: u32,
     pub x: i16,
     pub y: i16,
@@ -812,7 +837,7 @@ impl SellWallAtCellRecord {
         payload[2..].copy_from_slice(&self.y.to_le_bytes());
         CommandRecord::encode(
             SELL_WALL_AT_CELL_OPCODE,
-            i32::from(self.house_id),
+            house_id_signed(self.house_id),
             self.frame as i32,
             &payload,
         )
@@ -834,7 +859,7 @@ impl SellWallAtCellRecord {
 /// Typed view of native opcode `0x13`'s header-only EXIT event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExitRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: u32,
 }
 
@@ -842,7 +867,7 @@ impl ExitRecord {
     pub fn encode(self) -> Result<CommandRecord, CommandRecordError> {
         CommandRecord::encode(
             EXIT_OPCODE,
-            i32::from(self.house_id),
+            house_id_signed(self.house_id),
             self.frame as i32,
             &[],
         )
@@ -862,7 +887,7 @@ impl ExitRecord {
 /// negative-house/positive-UID and positive-house/negative-UID controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScatterRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub entity_id: i32,
 }
@@ -889,7 +914,7 @@ impl ScatterRecord {
 /// house byte is the bomb's house (`+0x28`), not the clicking player's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DetonateRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub entity_id: i32,
 }
@@ -916,7 +941,7 @@ impl DetonateRecord {
 /// Source: original gamemd.exe instructions, including6FFE0F..6FFE34.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StopRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub entity_id: i32,
 }
@@ -942,7 +967,7 @@ impl StopRecord {
 /// self-click action4 instead sends a MegaMission Unload through4D75ED.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeployRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub entity_id: i32,
 }
@@ -966,7 +991,7 @@ impl DeployRecord {
 /// Source: original gamemd.exe instructions4AC0D3..4AC198.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RepairRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub entity_id: i32,
 }
@@ -990,7 +1015,7 @@ impl RepairRecord {
 /// the network sender's later header rewrite. Source: original gamemd.exe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchiveRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub entity_id: i32,
     pub target: MegaMissionTarget,
@@ -1001,7 +1026,7 @@ impl ArchiveRecord {
         //4C67AC..4C67D4 shares the header/source writes with4C65E0;
         // only the second token is additional. Flags and tail stay untouched.
         record.write_object_target(ARCHIVE_OPCODE, self.house_id, self.frame, self.entity_id);
-        if self.house_id >= 0 {
+        if self.house_id != NO_HOUSE {
             let (value, kind) = self.target.token()?;
             record.payload_mut()[5..9].copy_from_slice(&value.to_le_bytes());
             record.payload_mut()[9] = kind;
@@ -1065,7 +1090,7 @@ impl ProductionEvent {
 /// Naval DWORD+F. Execute4C711B..4C718A alone normalizes Naval to a bool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProductionRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub event: ProductionEvent,
     pub rtti: i32,
@@ -1075,8 +1100,12 @@ pub struct ProductionRecord {
 
 impl ProductionRecord {
     pub fn write_into(self, record: &mut CommandRecord) {
-        record.set_issue_header(self.event.opcode(), i32::from(self.house_id), self.frame);
-        if self.house_id >= 0 {
+        record.set_issue_header(
+            self.event.opcode(),
+            house_id_signed(self.house_id),
+            self.frame,
+        );
+        if self.house_id != NO_HOUSE {
             write_production_fields(record, self.rtti, self.type_index, self.naval);
         }
     }
@@ -1100,7 +1129,7 @@ impl ProductionRecord {
 /// object RTTI6; automatic mobile placement6A8EE8 supplies RTTI1/2/15 and -1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaceRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub rtti: i32,
     pub type_index: i32,
@@ -1111,8 +1140,8 @@ pub struct PlaceRecord {
 
 impl PlaceRecord {
     pub fn write_into(self, record: &mut CommandRecord) {
-        record.set_issue_header(PLACE_OPCODE, i32::from(self.house_id), self.frame);
-        if self.house_id >= 0 {
+        record.set_issue_header(PLACE_OPCODE, house_id_signed(self.house_id), self.frame);
+        if self.house_id != NO_HOUSE {
             write_production_fields(record, self.rtti, self.type_index, self.naval);
             record.payload_mut()[12..14].copy_from_slice(&self.x.to_le_bytes());
             record.payload_mut()[14..16].copy_from_slice(&self.y.to_le_bytes());
@@ -1224,7 +1253,7 @@ impl MegaMissionTarget {
 /// comparisons in `tools/input_oracle/area_guard.json` cover both orders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MegaMissionRecord {
-    pub house_id: i8,
+    pub house_id: u8,
     pub frame: i32,
     pub source_id: i32,
     pub order: MegaMissionOrder,
@@ -1237,8 +1266,12 @@ impl MegaMissionRecord {
     /// The native null-issuer arm writes only opcode zero, house `-1`, and the
     /// frame. It returns before validating or touching any MegaMission payload.
     pub fn write_into(self, record: &mut CommandRecord) -> Result<(), MegaMissionCellTokenError> {
-        record.set_issue_header(MEGAMISSION_OPCODE, i32::from(self.house_id), self.frame);
-        if self.house_id < 0 {
+        record.set_issue_header(
+            MEGAMISSION_OPCODE,
+            house_id_signed(self.house_id),
+            self.frame,
+        );
+        if self.house_id == NO_HOUSE {
             return Ok(());
         }
 
@@ -1299,7 +1332,7 @@ impl MegaMissionRecord {
     /// Decode represented ordinary movement, combat and special mission
     /// forms. Planning flags are dispatched by the PlanMgr owner.
     pub fn decode(record: &CommandRecord) -> Option<Self> {
-        if record.opcode() != MEGAMISSION_OPCODE || record.house_id() < 0 {
+        if record.opcode() != MEGAMISSION_OPCODE || record.house_id() == NO_HOUSE {
             return None;
         }
         let payload = record.payload();
@@ -1819,8 +1852,8 @@ mod tests {
         ABSTRACT_OBJECT_TARGET_KIND, ArchiveRecord, COMMAND_RECORD_LEN, COMMAND_RECORD_PAYLOAD_LEN,
         CommandRecord, CommandRecordError, EXIT_OPCODE, ExitRecord, IDLE_OPCODE, MOVE_ACTION,
         MegaMissionCellTokenError, MegaMissionOrder, MegaMissionRecord, MegaMissionTarget,
-        NULL_TARGET_KIND, REPAIR_OPCODE, RepairRecord, SCATTER_OPCODE, SELL_WALL_AT_CELL_OPCODE,
-        ScatterRecord, SellWallAtCellRecord, StopRecord,
+        NO_HOUSE, NULL_TARGET_KIND, REPAIR_OPCODE, RepairRecord, SCATTER_OPCODE,
+        SELL_WALL_AT_CELL_OPCODE, ScatterRecord, SellWallAtCellRecord, StopRecord,
     };
 
     fn native_record(value: &serde_json::Value) -> CommandRecord {
@@ -1846,7 +1879,7 @@ mod tests {
         let event = &row["constructed_events"][0];
         let cell = &row["nearby"][0]["result"];
         let typed = ArchiveRecord {
-            house_id: event["house"].as_i64().unwrap() as i8,
+            house_id: event["house"].as_i64().unwrap() as u8,
             frame: row["binary_frame"].as_i64().unwrap() as i32,
             entity_id: event["source_id"].as_i64().unwrap() as i32,
             target: MegaMissionTarget::Cell {
@@ -1869,13 +1902,13 @@ mod tests {
         assert_eq!(ArchiveRecord::decode(&record), Some(typed));
         let before = record.clone();
         ArchiveRecord {
-            house_id: -1,
+            house_id: NO_HOUSE,
             ..typed
         }
         .write_into(&mut record)
         .unwrap();
         assert_eq!(record.opcode(), 0);
-        assert_eq!(record.house_id(), -1);
+        assert_eq!(record.house_id(), NO_HOUSE);
         assert_eq!(record.payload(), before.payload());
     }
 
@@ -1884,7 +1917,7 @@ mod tests {
         // Original4C65E0 writes header plus one five-byte token. Negative
         // issuers instead write the null header, leaving the payload intact.
         for opcode in [IDLE_OPCODE, SCATTER_OPCODE, REPAIR_OPCODE] {
-            for house_id in [-1, 3] {
+            for house_id in [NO_HOUSE, 3] {
                 for entity_id in [-17, 0x0102_0304] {
                     let mut actual =
                         CommandRecord::decode_exact(&[0xa5; COMMAND_RECORD_LEN]).unwrap();
@@ -1911,11 +1944,14 @@ mod tests {
                         }
                         .write_into(&mut actual);
                     }
-                    assert_eq!(actual.opcode(), if house_id < 0 { 0 } else { opcode });
+                    assert_eq!(
+                        actual.opcode(),
+                        if house_id == NO_HOUSE { 0 } else { opcode }
+                    );
                     assert_eq!(actual.house_id(), house_id);
                     assert_eq!(actual.frame_stamp(), frame);
                     assert_eq!(actual.flags(), 0xa5);
-                    if house_id < 0 {
+                    if house_id == NO_HOUSE {
                         assert_eq!(actual.payload(), &[0xa5; COMMAND_RECORD_PAYLOAD_LEN]);
                     } else {
                         assert_eq!(&actual.payload()[..4], &entity_id.to_le_bytes());
@@ -2190,7 +2226,14 @@ mod tests {
             };
             let typed = MegaMissionRecord {
                 auxiliary: MegaMissionTarget::Null,
-                house_id: i8::try_from(i32::from_le_bytes(args[0].to_le_bytes())).unwrap(),
+                house_id: (|| {
+                    let raw = i32::from_le_bytes(args[0].to_le_bytes());
+                    if raw == -1 {
+                        NO_HOUSE
+                    } else {
+                        u8::try_from(raw).unwrap()
+                    }
+                })(),
                 frame: i32::try_from(row["frame"].as_i64().unwrap()).unwrap(),
                 source_id: i32::from_le_bytes(args[1].to_le_bytes()),
                 order,
@@ -2202,7 +2245,7 @@ mod tests {
                 native.as_bytes(),
                 "{name}: full native record"
             );
-            if typed.house_id < 0 {
+            if typed.house_id == NO_HOUSE {
                 assert_eq!(native.payload(), before.payload(), "{name}: opaque payload");
                 assert_eq!(MegaMissionRecord::decode(&native), None, "{name}");
                 negative += 1;
@@ -2423,7 +2466,7 @@ mod tests {
         let admitted = CommandRecord::admit_exact(&bytes).unwrap();
         assert_eq!(admitted.opcode(), 0xff);
         assert_eq!(admitted.flags(), 0xa4);
-        assert_eq!(admitted.house_id(), -2);
+        assert_eq!(admitted.house_id(), 0xfe);
         assert_eq!(admitted.frame_stamp(), -2);
         assert_eq!(admitted.payload(), &bytes[7..]);
     }

@@ -531,16 +531,136 @@ pub(crate) fn scan_cell_rect(rect: CellRect, mut visit: impl FnMut(i32, i32) -> 
     true
 }
 
+/// One bit per House id: 256 of them, the whole unsigned byte
+/// ([`crate::sim::command::NO_HOUSE`] excepted).
+///
+/// Native allocates a 32-bit word per cell and the retail game never holds
+/// more than thirty-two Houses. VERA's offline Skirmish seats up to
+/// [`crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT`] players beside Neutral
+/// and Special, so the word grows to the House id's own width: no House can
+/// alias another's bit, whatever the roster size.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HouseMask([u64; 4]);
+
+/// Hashes as the original native `u128` mask did whenever the roster fits in
+/// its low 128 bits, so saves and replay hashes keep their committed values.
+/// Houses 128..255 set an upper word; those are folded in only then.
+impl std::hash::Hash for HouseMask {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let low = u128::from(self.0[0]) | (u128::from(self.0[1]) << 64);
+        low.hash(state);
+        if self.0[2] != 0 || self.0[3] != 0 {
+            self.0[2].hash(state);
+            self.0[3].hash(state);
+        }
+    }
+}
+
+impl HouseMask {
+    /// Every House id the mask can name.
+    pub const BITS: usize = 256;
+    /// No House at all.
+    pub const NONE: Self = Self([0; 4]);
+
+    /// The mask naming one House, for callers that build masks by hand.
+    pub const fn of(house: u8) -> Self {
+        let house = house as usize;
+        let mut words = [0u64; 4];
+        words[house / 64] = 1u64 << (house % 64);
+        Self(words)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0[0] == 0 && self.0[1] == 0 && self.0[2] == 0 && self.0[3] == 0
+    }
+
+    pub const fn contains(self, house: u8) -> bool {
+        !self.intersection(Self::of(house)).is_empty()
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self([
+            self.0[0] | other.0[0],
+            self.0[1] | other.0[1],
+            self.0[2] | other.0[2],
+            self.0[3] | other.0[3],
+        ])
+    }
+
+    pub const fn intersection(self, other: Self) -> Self {
+        Self([
+            self.0[0] & other.0[0],
+            self.0[1] & other.0[1],
+            self.0[2] & other.0[2],
+            self.0[3] & other.0[3],
+        ])
+    }
+
+    pub const fn without(self, other: Self) -> Self {
+        Self([
+            self.0[0] & !other.0[0],
+            self.0[1] & !other.0[1],
+            self.0[2] & !other.0[2],
+            self.0[3] & !other.0[3],
+        ])
+    }
+}
+
+impl std::ops::BitOr for HouseMask {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        self.union(other)
+    }
+}
+
+impl std::ops::BitOrAssign for HouseMask {
+    fn bitor_assign(&mut self, other: Self) {
+        *self = self.union(other);
+    }
+}
+
+impl std::ops::BitAnd for HouseMask {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        self.intersection(other)
+    }
+}
+
+impl std::ops::BitAndAssign for HouseMask {
+    fn bitand_assign(&mut self, other: Self) {
+        *self = self.intersection(other);
+    }
+}
+
+impl std::ops::Not for HouseMask {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self([!self.0[0], !self.0[1], !self.0[2], !self.0[3]])
+    }
+}
+
+impl From<u128> for HouseMask {
+    fn from(bits: u128) -> Self {
+        Self([bits as u64, (bits >> 64) as u64, 0, 0])
+    }
+}
+
+// Serialized as four words. An untagged u128 fallback would need
+// `deserialize_any`, which the snapshot layout describer cannot provide, and a
+// save written before this width already fails the snapshot layout digest.
+
 /// Sparse authority for CellClass `+0xDC`. A fixed-stride coordinate selects a
 /// real entry only when the active terrain has an allocated CellClass pointer;
 /// every invalid or valid-but-unallocated lookup shares `dummy_mask`.
+///
+/// One bit per House id ([`HouseMask`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CellReservationGrid {
-    masks: BTreeMap<(u16, u16), u32>,
+    masks: BTreeMap<(u16, u16), HouseMask>,
     /// Native save iterates allocated CellClass pointers only. The process-global
     /// fallback CellClass is reconstructed cleared during load/Resize.
     #[serde(skip)]
-    dummy_mask: u32,
+    dummy_mask: HouseMask,
 }
 
 #[derive(Debug, Clone)]
@@ -608,7 +728,7 @@ impl CellReservationGrid {
         reservation_arg: i32,
     ) {
         let mask = reservation_mask(reservation_arg);
-        if mask == 0 {
+        if mask.is_empty() {
             return;
         }
         match resolve_reservation_cell(terrain, x, y) {
@@ -628,7 +748,7 @@ impl CellReservationGrid {
         reservation_arg: i32,
     ) {
         let mask = reservation_mask(reservation_arg);
-        if mask == 0 {
+        if mask.is_empty() {
             return;
         }
         match resolve_reservation_cell(terrain, x, y) {
@@ -636,7 +756,7 @@ impl CellReservationGrid {
                 let cell = (rx, ry);
                 if let Some(bits) = self.masks.get_mut(&cell) {
                     *bits &= !mask;
-                    if *bits == 0 {
+                    if bits.is_empty() {
                         self.masks.remove(&cell);
                     }
                 }
@@ -646,23 +766,27 @@ impl CellReservationGrid {
         }
     }
 
-    pub fn raw_mask(&self, terrain: Option<&ResolvedTerrainGrid>, x: i32, y: i32) -> u32 {
+    pub fn raw_mask(&self, terrain: Option<&ResolvedTerrainGrid>, x: i32, y: i32) -> HouseMask {
         self.raw_mask_for_selection(&resolve_reservation_cell(terrain, x, y))
     }
 
-    fn raw_mask_for_selection(&self, cell: &ReservationCellSelection) -> u32 {
+    fn raw_mask_for_selection(&self, cell: &ReservationCellSelection) -> HouseMask {
         match cell {
             ReservationCellSelection::Real(rx, ry) => {
-                self.masks.get(&(*rx, *ry)).copied().unwrap_or(0)
+                self.masks.get(&(*rx, *ry)).copied().unwrap_or_default()
             }
             ReservationCellSelection::SharedDummy(_)
             | ReservationCellSelection::DetachedDummy { .. } => self.dummy_mask,
         }
     }
 
-    pub(crate) fn raw_mask_for_cell_ref(&self, cell: &CellRef<'_>) -> u32 {
+    pub(crate) fn raw_mask_for_cell_ref(&self, cell: &CellRef<'_>) -> HouseMask {
         match cell {
-            CellRef::Real(cell) => self.masks.get(&(cell.rx, cell.ry)).copied().unwrap_or(0),
+            CellRef::Real(cell) => self
+                .masks
+                .get(&(cell.rx, cell.ry))
+                .copied()
+                .unwrap_or_default(),
             CellRef::Dummy { .. } => self.dummy_mask,
         }
     }
@@ -675,7 +799,7 @@ impl CellReservationGrid {
         reservation_arg: i32,
     ) -> bool {
         let mask = reservation_mask(reservation_arg);
-        mask != 0 && self.raw_mask(terrain, x, y) & mask != 0
+        !mask.is_empty() && !(self.raw_mask(terrain, x, y) & mask).is_empty()
     }
 
     pub(crate) fn reserve_rect(
@@ -713,11 +837,11 @@ impl CellReservationGrid {
         reservation_arg: i32,
     ) -> u32 {
         let mask = reservation_mask(reservation_arg);
-        if mask == 0 {
+        if mask.is_empty() {
             return u32::MAX;
         }
         let center = resolve_reservation_cell(terrain, x, y);
-        if self.raw_mask_for_selection(&center) & mask == 0 {
+        if (self.raw_mask_for_selection(&center) & mask).is_empty() {
             return u32::MAX;
         }
         let mut result = 0u32;
@@ -728,18 +852,18 @@ impl CellReservationGrid {
                 origin_x.wrapping_add(dx),
                 origin_y.wrapping_add(dy),
             );
-            if self.raw_mask_for_selection(&neighbor) & mask != 0 {
+            if !(self.raw_mask_for_selection(&neighbor) & mask).is_empty() {
                 result |= 1u32 << index;
             }
         }
         result
     }
 
-    pub(crate) fn entries(&self) -> impl Iterator<Item = (u16, u16, u32)> + '_ {
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (u16, u16, HouseMask)> + '_ {
         self.masks.iter().map(|(&(rx, ry), &mask)| (rx, ry, mask))
     }
 
-    pub fn dummy_mask(&self) -> u32 {
+    pub fn dummy_mask(&self) -> HouseMask {
         self.dummy_mask
     }
 
@@ -750,7 +874,7 @@ impl CellReservationGrid {
     /// `CellClass::Constructor @ 0x0047BBF0`, whose write at `0x0047BC76`
     /// clears `CellClass+0xDC`.
     pub(crate) fn reconstruct_dummy_for_map_resize(&mut self) {
-        self.dummy_mask = 0;
+        self.dummy_mask = HouseMask::NONE;
     }
 }
 
@@ -838,7 +962,7 @@ fn occupancy_blocker_at(
     ctx: &CellRectOccupancyContext<'_>,
     x: i32,
     y: i32,
-    reservation_mask: u32,
+    reservation_mask: HouseMask,
 ) -> Option<OccupancyBlocker> {
     // Native `CellRect::CheckOccupancy @ 0x00586780` resolves the never-null
     // CellClass first. All following columns therefore observe the lookup's
@@ -855,7 +979,7 @@ fn occupancy_blocker_at(
     }) {
         return Some(OccupancyBlocker::TerrainObject);
     }
-    let reserved = reservation_mask != 0
+    let reserved = !reservation_mask.is_empty()
         && ctx.reservations.is_some_and(|reservations| {
             let raw_mask = match &cell {
                 CellRef::Real(_) => reservations.raw_mask_for_cell_ref(&cell),
@@ -867,7 +991,7 @@ fn occupancy_blocker_at(
                 // real-versus-fallback split without inventing dummy state.
                 CellRef::Dummy { .. } => reservations.raw_mask(None, x, y),
             };
-            raw_mask & reservation_mask != 0
+            !(raw_mask & reservation_mask).is_empty()
         });
     if reserved {
         return Some(OccupancyBlocker::Reservation);
@@ -1153,11 +1277,20 @@ pub fn cell_is_in_playfield_leptons(
     cell_is_in_playfield_height_aware(cell, bounds, terrain)
 }
 
-fn reservation_mask(reservation_arg: i32) -> u32 {
-    if reservation_arg == -1 {
-        0
-    } else {
-        1u32 << ((reservation_arg as u32) & 0x1F)
+/// One bit per House id, straight from a non-negative argument, where native
+/// takes the low five of its 32-bit word. `-1` reserves nothing; the other
+/// negative arguments are native's own sentinels and keep the native five-bit
+/// alias (`-2` is bit 30), so they never reach a House's own bit.
+fn reservation_mask(reservation_arg: i32) -> HouseMask {
+    // Every player row plus Neutral and Special fits the House id's byte.
+    const _: () = assert!(
+        crate::skirmish_launch::SKIRMISH_MAX_SLOT_COUNT + 2
+            < crate::sim::command::NO_HOUSE as usize
+    );
+    match reservation_arg {
+        -1 => HouseMask::NONE,
+        arg if arg < 0 => HouseMask::of((arg as u32 & 0x1F) as u8),
+        arg => u8::try_from(arg).map_or(HouseMask::NONE, HouseMask::of),
     }
 }
 
@@ -2184,22 +2317,28 @@ mod tests {
 
     #[test]
     fn gsi_04_05_reservation_masks_aliases_dummy_and_neighbors_are_native_shaped() {
-        assert_eq!(reservation_mask(-1), 0);
-        assert_eq!(reservation_mask(-2), 1 << 30);
-        assert_eq!(reservation_mask(32), 1);
-        assert_eq!(reservation_mask(63), 1 << 31);
+        assert_eq!(reservation_mask(-1), HouseMask::NONE);
+        assert_eq!(reservation_mask(-2), HouseMask::of(30));
+        // VERA: House ids past the native word keep their own bit instead of
+        // aliasing bit 0/31.
+        assert_eq!(reservation_mask(32), HouseMask::of(32));
+        assert_eq!(reservation_mask(63), HouseMask::of(63));
 
         let mut grid = CellReservationGrid::new();
         grid.reserve(None, -1, 1, 32);
-        assert_eq!(grid.raw_mask(None, 511, 0), 1);
+        assert_eq!(grid.raw_mask(None, 511, 0), HouseMask::of(32));
         grid.reserve(None, 512, 0, 1);
-        assert_eq!(grid.raw_mask(None, 0, 1), 2);
+        assert_eq!(grid.raw_mask(None, 0, 1), HouseMask::of(1));
 
         grid.reserve(None, -1, 0, 3);
-        assert_eq!(grid.raw_mask(None, -512, 0), 1 << 3);
-        assert_eq!(grid.dummy_mask(), 1 << 3);
+        assert_eq!(grid.raw_mask(None, -512, 0), HouseMask::of(3));
+        assert_eq!(grid.dummy_mask(), HouseMask::of(3));
         grid.clear(None, -513, 0, 3);
-        assert_eq!(grid.dummy_mask(), 0, "every invalid lookup shares +0xDC");
+        assert_eq!(
+            grid.dummy_mask(),
+            HouseMask::NONE,
+            "every invalid lookup shares +0xDC"
+        );
 
         let mut neighbors = CellReservationGrid::new();
         neighbors.reserve(None, 10, 10, 4);
@@ -2237,16 +2376,16 @@ mod tests {
 
         grid.reserve(Some(&terrain), -2, 0, 3);
         assert_eq!(terrain.dummy_cell_requested_coord(), (-2, 0));
-        assert_eq!(grid.dummy_mask(), 1 << 3);
+        assert_eq!(grid.dummy_mask(), HouseMask::of(3));
 
-        assert_eq!(grid.raw_mask(Some(&terrain), -3, 0), 1 << 3);
+        assert_eq!(grid.raw_mask(Some(&terrain), -3, 0), HouseMask::of(3));
         assert_eq!(terrain.dummy_cell_requested_coord(), (-3, 0));
         grid.clear(Some(&terrain), -4, 0, 3);
         assert_eq!(terrain.dummy_cell_requested_coord(), (-4, 0));
-        assert_eq!(grid.dummy_mask(), 0);
+        assert_eq!(grid.dummy_mask(), HouseMask::NONE);
 
         grid.reserve(Some(&terrain), -1, 1, 4);
-        assert_eq!(grid.raw_mask(Some(&terrain), 511, 0), 1 << 4);
+        assert_eq!(grid.raw_mask(Some(&terrain), 511, 0), HouseMask::of(4));
         assert_eq!(
             terrain.dummy_cell_requested_coord(),
             (-4, 0),
@@ -2294,8 +2433,8 @@ mod tests {
 
         grid.reconstruct_dummy_for_map_resize();
 
-        assert_eq!(grid.raw_mask(None, 3, 4), 1 << 2);
-        assert_eq!(grid.dummy_mask(), 0);
+        assert_eq!(grid.raw_mask(None, 3, 4), HouseMask::of(2));
+        assert_eq!(grid.dummy_mask(), HouseMask::NONE);
     }
 
     #[test]
@@ -2308,7 +2447,7 @@ mod tests {
 
         let mut grid = CellReservationGrid::new();
         grid.reserve(Some(&terrain), 1, 0, 6);
-        assert_eq!(grid.raw_mask(Some(&terrain), 2, 0), 1 << 6);
+        assert_eq!(grid.raw_mask(Some(&terrain), 2, 0), HouseMask::of(6));
         assert!(grid.has_reservation(Some(&terrain), 2, 0, 6));
         assert_eq!(
             grid.house_reservation_neighbor_mask(Some(&terrain), 2, 0, 6),
@@ -2328,17 +2467,20 @@ mod tests {
         }));
 
         grid.reserve(Some(&terrain), 0, 0, 7);
-        assert_eq!(grid.raw_mask(Some(&terrain), 0, 0), 1 << 7);
-        assert_eq!(grid.raw_mask(Some(&terrain), 1, 0), 1 << 6);
+        assert_eq!(grid.raw_mask(Some(&terrain), 0, 0), HouseMask::of(7));
+        assert_eq!(grid.raw_mask(Some(&terrain), 1, 0), HouseMask::of(6));
         grid.clear(Some(&terrain), 2, 0, 6);
-        assert_eq!(grid.raw_mask(Some(&terrain), 1, 0), 0);
-        assert_eq!(grid.raw_mask(Some(&terrain), 0, 0), 1 << 7);
+        assert_eq!(grid.raw_mask(Some(&terrain), 1, 0), HouseMask::NONE);
+        assert_eq!(grid.raw_mask(Some(&terrain), 0, 0), HouseMask::of(7));
 
         let alias_terrain = flat_terrain(512, 1);
         let mut aliases = CellReservationGrid::new();
         aliases.reserve(Some(&alias_terrain), -1, 1, 0);
-        assert_eq!(aliases.raw_mask(Some(&alias_terrain), 511, 0), 1);
-        assert_eq!(aliases.dummy_mask(), 0);
+        assert_eq!(
+            aliases.raw_mask(Some(&alias_terrain), 511, 0),
+            HouseMask::of(0)
+        );
+        assert_eq!(aliases.dummy_mask(), HouseMask::NONE);
     }
 
     #[test]
@@ -2454,7 +2596,7 @@ mod tests {
                     },
                     i32::from(x),
                     0,
-                    0,
+                    HouseMask::NONE,
                 ),
                 None
             );

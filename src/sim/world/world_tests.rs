@@ -518,7 +518,7 @@ fn a_tournament_players_exit_flags_their_house_on_the_remaining_peers() {
     assert!(house.is_to_die() || house.has_lost());
     assert_eq!(
         sim.take_departed_senders(),
-        [sim.houses.index_of(leaver).unwrap() as i8]
+        [sim.houses.index_of(leaver).unwrap() as u8]
     );
 }
 

@@ -191,7 +191,7 @@ fn actual_local_loss_refuses_eligible_cheer_without_consuming_the_input_clock() 
             .order()
             .iter()
             .position(|owner| *owner == owners[index].0)
-            .unwrap() as i8;
+            .unwrap() as u8;
         assert_eq!(
             admitted
                 .iter()

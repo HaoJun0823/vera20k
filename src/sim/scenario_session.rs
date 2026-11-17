@@ -867,7 +867,7 @@ pub struct ScenarioSession {
     /// otherwise, when its sender is its current House's index. Local
     /// identity, like `current_house`.
     #[serde(default)]
-    local_shared_house_source: Option<i8>,
+    local_shared_house_source: Option<u8>,
     /// VERA watching (docs/Networking.md "Watching"): this process watches
     /// the match and sends no command records, so no record's sender is its
     /// own, not even the followed player's. Local identity, like
@@ -1283,7 +1283,7 @@ impl ScenarioSession {
     pub fn install_shared_house_sources_for_test(
         &mut self,
         source_houses: Vec<u8>,
-        local_source: Option<i8>,
+        local_source: Option<u8>,
     ) {
         self.install_shared_house_sources(source_houses, local_source);
     }
@@ -1368,9 +1368,9 @@ impl ScenarioSession {
 
     pub fn install_network_command_timing(
         &mut self,
-        host_house: i8,
+        host_house: u8,
         frame_send_rate: std::num::NonZeroU8,
-        houses: impl IntoIterator<Item = i8>,
+        houses: impl IntoIterator<Item = u8>,
     ) {
         let ahead = self
             .network_max_ahead_frames
@@ -1425,7 +1425,7 @@ impl ScenarioSession {
     pub(crate) fn install_shared_house_sources(
         &mut self,
         source_houses: Vec<u8>,
-        local_source: Option<i8>,
+        local_source: Option<u8>,
     ) {
         self.shared_house_sources = source_houses;
         self.local_shared_house_source = local_source;
@@ -1440,7 +1440,7 @@ impl ScenarioSession {
     /// The House index a command record's sender controls. VERA shared
     /// control: a sender is a network source, which is its House index
     /// unless players share Houses.
-    pub fn network_source_house(&self, source: i8) -> Option<usize> {
+    pub fn network_source_house(&self, source: u8) -> Option<usize> {
         let source = usize::try_from(source).ok()?;
         if self.shared_house_sources.is_empty() {
             return Some(source);
@@ -1452,20 +1452,20 @@ impl ScenarioSession {
 
     /// Every command sender with the House index it controls, in source
     /// order: each of the `house_count` Houses unless players share Houses.
-    pub fn network_sources(&self, house_count: usize) -> impl Iterator<Item = (i8, usize)> + '_ {
+    pub fn network_sources(&self, house_count: usize) -> impl Iterator<Item = (u8, usize)> + '_ {
         let count = if self.shared_house_sources.is_empty() {
             house_count
         } else {
             self.shared_house_sources.len()
         };
         (0..count).filter_map(|source| {
-            let source = i8::try_from(source).ok()?;
+            let source = u8::try_from(source).ok()?;
             Some((source, self.network_source_house(source)?))
         })
     }
 
     /// This process's sender while players share Houses.
-    pub(crate) fn local_shared_house_source(&self) -> Option<i8> {
+    pub(crate) fn local_shared_house_source(&self) -> Option<u8> {
         self.local_shared_house_source
     }
 
@@ -1490,7 +1490,7 @@ impl ScenarioSession {
 
     /// Retire the existing admitted timing row at a shared EXIT/REMOVEPLAYER
     /// tail. Local transport loss alone must not change shared timing state.
-    pub(crate) fn retire_network_command_source(&mut self, house: i8) {
+    pub(crate) fn retire_network_command_source(&mut self, house: u8) {
         if let Some(timing) = self.network_command_timing.as_mut() {
             timing.retire_source(house);
         }
@@ -1505,7 +1505,7 @@ impl ScenarioSession {
         &mut self,
         record: &crate::sim::command::CommandRecord,
         window: &mut crate::sim::command_queue::DoListRetimeWindow,
-        publisher: Option<i8>,
+        publisher: Option<u8>,
     ) -> bool {
         let Some(timing) = self.network_command_timing.as_mut() else {
             return false;

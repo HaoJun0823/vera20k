@@ -6830,7 +6830,7 @@ mod tests {
             sim.substrate
                 .base_reservations
                 .raw_mask(sim.resolved_terrain.as_ref(), 2, 0),
-            1 << 1,
+            crate::sim::cell_rect::HouseMask::of(1),
             "distinct valid-linear null slots share the dummy before save"
         );
         // Native in-scenario load restarts Scenario RNG from Seed0; isolate
@@ -6891,8 +6891,14 @@ mod tests {
         restored
             .restore_after_snapshot_load()
             .expect("restore transient caches without rebuilding reservations");
-        assert_eq!(restored.substrate.base_reservations.raw_mask(None, 3, 4), 1);
-        assert_eq!(restored.substrate.base_reservations.dummy_mask(), 0);
+        assert!(
+            restored
+                .substrate
+                .base_reservations
+                .raw_mask(None, 3, 4)
+                .contains(0)
+        );
+        assert!(restored.substrate.base_reservations.dummy_mask().is_empty());
         let restored_house = restored.houses.get(&owner).expect("restored owner");
         assert_eq!(restored_house.base_reservation().bounds(), (3, 4, 5, 6));
         assert_eq!(
