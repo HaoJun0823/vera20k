@@ -13,6 +13,8 @@ pub mod profile;
 pub mod registry;
 
 #[cfg(test)]
+mod assist_e2e_tests;
+#[cfg(test)]
 mod board_move_tests;
 #[cfg(test)]
 mod fog_tests;

@@ -11,10 +11,11 @@
 //! - an intruder at the door is met by the nearest free soldier.
 
 use vera20k_core::rules::capabilities::{Capabilities, Tag};
-use vera20k_core::rules::object_type::{ObjectCategory, ObjectType};
+use vera20k_core::rules::object_type::{FactoryType, ObjectCategory, ObjectType};
 use vera20k_core::rules::ruleset::RuleSet;
 use vera20k_core::sim::behavior::goal::Goal;
 use vera20k_core::sim::control::brain::{Brain, Outbox};
+use vera20k_core::sim::control::intent::Intent;
 use vera20k_core::sim::control::observation::Observation;
 
 /// How far from the base an intruder still counts as being at the door, in
@@ -79,6 +80,18 @@ fn chebyshev(a: (u16, u16), b: (u16, u16)) -> i32 {
     i32::from(a.0.abs_diff(b.0)).max(i32::from(a.1.abs_diff(b.1)))
 }
 
+/// How far gone a building is before it is cash rather than a defence: below
+/// this share of its own strength, the repair bill approaches the build cost and
+/// a wreck the enemy can take back funds them.
+const SELL_HEALTH_PERMILLE: i32 = 300;
+
+/// Whether a standing building at `health` of `max_health` should be sold.
+///
+/// Pure, so the threshold is a decision rather than a magic number in a loop.
+pub fn is_worth_selling(health: i32, max_health: i32) -> bool {
+    max_health > 0 && health * 1000 < max_health * SELL_HEALTH_PERMILLE
+}
+
 /// The assist brain.
 #[derive(Debug, Default)]
 pub struct Assist;
@@ -101,6 +114,27 @@ impl Brain for Assist {
     }
 
     fn think(&mut self, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
+        // Sell what will not survive the next push. The yard is exempt: a house
+        // that sells its own construction yard has no base, only a delay.
+        for entity in obs.own_entities() {
+            let Some(ty) = obs.object_type(rules, entity.type_id) else {
+                continue;
+            };
+            if ty.category != ObjectCategory::Building
+                || ty.factory_type() == Some(FactoryType::BuildingType)
+            {
+                continue;
+            }
+            let Some(max_health) = obs.max_health(rules, entity.type_id) else {
+                continue;
+            };
+            if is_worth_selling(entity.health, max_health) {
+                out.intent(Intent::SellBuilding {
+                    entity_id: entity.entity_id,
+                });
+            }
+        }
+
         let Some(base) = Self::base(obs, rules) else {
             return;
         };
@@ -144,6 +178,14 @@ mod tests {
 
     fn blip(id: u64, cell: (u16, u16), combat: bool) -> Blip {
         Blip { id, cell, combat }
+    }
+
+    #[test]
+    fn a_bloodied_building_is_sold_but_a_healthy_one_is_not() {
+        assert!(is_worth_selling(29, 100), "29% is below the threshold");
+        assert!(!is_worth_selling(30, 100), "30% still stands");
+        assert!(!is_worth_selling(100, 100));
+        assert!(!is_worth_selling(0, 0), "a type with no strength is not a target");
     }
 
     #[test]
