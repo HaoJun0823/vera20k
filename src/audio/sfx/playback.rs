@@ -736,6 +736,10 @@ impl Iterator for RingSource {
             self.generation = generation;
             self.valid = 0;
             self.position %= channels;
+            // A release/restart begins a different buffer. The old IIR tail
+            // no longer belongs here and would click into the new audio;
+            // the next sample re-primes the filter from its own value.
+            self.air.reset();
         }
         if self.position >= self.valid {
             let mut state = self

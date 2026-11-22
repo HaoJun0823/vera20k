@@ -80,6 +80,28 @@ fn enabled_near_filter_leaves_the_bright_cue_largely_open() {
 }
 
 #[test]
+fn enabling_mid_stream_does_not_click_on_the_first_sample() {
+    // Pull a few unfiltered samples first, then enable a heavy (far) filter
+    // mid-stream. The very next sample must equal the raw alternating cue:
+    // a filter that starts from state 0 would emit alpha*sample instead and
+    // click. This is the click heard when the option is turned on live.
+    let (mut source, control) = bright_ring();
+    // Pull a few samples to get mid-stream (bright_ring pushes each value
+    // twice for stereo, so the sequence is 1,1,-1,-1,...; index 8 is 1.0).
+    for _ in 0..8 {
+        assert!(source.next().is_some());
+    }
+    control.set_air_absorption(Some(0.05));
+    // Both channels prime independently: the first left and first right
+    // samples pass unattenuated, so enabling never clicks on either channel.
+    assert_eq!(source.next(), Some(1.0), "left first sample after enable");
+    assert_eq!(source.next(), Some(1.0), "right first sample after enable");
+    // The third sample (left's second) is legitimately filtered now.
+    let third = source.next().unwrap();
+    assert!(third.abs() < 1.0, "later sample should be damped, got {third}");
+}
+
+#[test]
 fn toggling_off_restores_the_native_spectrum_immediately() {
     let (mut source, control) = bright_ring();
     let _ = peak_after_settle(&mut source, &control, Some(0.05));

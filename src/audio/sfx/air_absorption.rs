@@ -71,6 +71,12 @@ pub(crate) fn cutoff_for_volume(volume: f32, sample_rate: u32) -> f32 {
 pub(crate) struct AirAbsorption {
     alpha: f32,
     state: [f32; 2],
+    /// A one-pole filter must be primed from the first sample it sees.
+    /// Starting from state 0 on enable, on a new buffer or after a disable
+    /// makes the first output `alpha * sample` instead of `sample` — an
+    /// audible click (a sudden jump from full scale toward silence). Priming
+    /// on the first pull removes that discontinuity entirely.
+    primed: [bool; 2],
 }
 
 impl AirAbsorption {
@@ -80,7 +86,16 @@ impl AirAbsorption {
         Self {
             alpha: 0.0,
             state: [0.0; 2],
+            primed: [false, false],
         }
+    }
+
+    /// Drop the filter history without changing the coefficient. Call this
+    /// when the source restarts into a new buffer (`generation` change): the
+    /// old tail no longer belongs to the new audio and leaks in as a click.
+    pub(crate) fn reset(&mut self) {
+        self.state = [0.0; 2];
+        self.primed = [false, false];
     }
 
     /// Enable the filter from a spatial volume and the source's sample rate.
@@ -103,6 +118,13 @@ impl AirAbsorption {
             return sample;
         }
         let slot = channel.min(1);
+        // Prime from the incoming sample: the first filtered output equals
+        // the input, so enabling (or a buffer restart) never jumps.
+        if !self.primed[slot] {
+            self.state[slot] = sample;
+            self.primed[slot] = true;
+            return sample;
+        }
         let filtered = self.state[slot] + self.alpha * (sample - self.state[slot]);
         self.state[slot] = filtered;
         filtered
@@ -190,6 +212,18 @@ mod tests {
             near_peak > far_peak,
             "near {near_peak} should pass more HF than far {far_peak}"
         );
+    }
+
+    #[test]
+    fn first_sample_after_enable_and_reset_is_unattenuated() {
+        let mut filter = AirAbsorption::off();
+        filter.set_volume(0.05, 22_050); // heavy filter: alpha far from 1
+        assert_eq!(filter.process(1.0, 0), 1.0, "enable must not click");
+        // A steady DC signal settles to itself; an opposite sample is damped.
+        assert!(filter.process(-1.0, 0) < 1.0, "later samples are filtered");
+        // A buffer restart drops the tail; the next sample re-primes cleanly.
+        filter.reset();
+        assert_eq!(filter.process(-1.0, 0), -1.0, "restart must not click");
     }
 
     #[test]
