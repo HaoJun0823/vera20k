@@ -259,6 +259,14 @@ impl AppAudioRuntime {
         }
     }
 
+    /// VERA-only distance low-pass. Defaults off so the native path is
+    /// untouched until a profile or INI turns it on.
+    pub(crate) fn set_air_absorption(&mut self, enabled: bool) {
+        if let Some(player) = self.sfx_player.as_mut() {
+            player.set_air_absorption(enabled);
+        }
+    }
+
     /// A rejoining process replays the past at speed: VERA adaptation, its
     /// effects and voices stay silent until the world reaches the present.
     /// The profile's volumes come back unchanged.

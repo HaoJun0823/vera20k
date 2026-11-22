@@ -299,6 +299,7 @@ trait StartupAudioProfileOperations {
     fn set_voice_volume(&mut self, volume: f64);
     fn set_score_volume(&mut self, volume: f32);
     fn set_score_repeat_shuffle(&mut self, repeat: bool, shuffle: bool);
+    fn set_air_absorption(&mut self, enabled: bool);
 }
 
 impl StartupAudioProfileOperations for crate::app::audio_runtime::AppAudioRuntime {
@@ -317,6 +318,10 @@ impl StartupAudioProfileOperations for crate::app::audio_runtime::AppAudioRuntim
     fn set_score_repeat_shuffle(&mut self, repeat: bool, shuffle: bool) {
         self.theme.set_score_options(repeat, shuffle);
     }
+
+    fn set_air_absorption(&mut self, enabled: bool) {
+        crate::app::audio_runtime::AppAudioRuntime::set_air_absorption(self, enabled);
+    }
 }
 
 fn apply_startup_audio_profile(
@@ -331,6 +336,8 @@ fn apply_startup_audio_profile(
     operations.set_voice_volume(f64::from(profile.voice_volume));
     operations.set_score_volume(profile.score_volume);
     operations.set_score_repeat_shuffle(profile.is_score_repeat, profile.is_score_shuffle);
+    // VERA-only: not part of gamemd's ReadFromINI tail. Defaults off.
+    operations.set_air_absorption(profile.air_absorption);
 }
 
 impl App {
@@ -1798,6 +1805,7 @@ mod tests {
         Voice(f64),
         Score(f32),
         RepeatShuffle(bool, bool),
+        AirAbsorption(bool),
     }
 
     #[derive(Default)]
@@ -1822,6 +1830,10 @@ mod tests {
             self.calls
                 .push(StartupAudioCall::RepeatShuffle(repeat, shuffle));
         }
+
+        fn set_air_absorption(&mut self, enabled: bool) {
+            self.calls.push(StartupAudioCall::AirAbsorption(enabled));
+        }
     }
 
     #[test]
@@ -1832,6 +1844,7 @@ mod tests {
             score_volume: 0.875,
             is_score_repeat: true,
             is_score_shuffle: false,
+            air_absorption: true,
             ..Default::default()
         };
         let mut operations = RecordingStartupAudioOperations::default();
@@ -1845,6 +1858,7 @@ mod tests {
                 StartupAudioCall::Voice(0.5),
                 StartupAudioCall::Score(0.875),
                 StartupAudioCall::RepeatShuffle(true, false),
+                StartupAudioCall::AirAbsorption(true),
             ]
         );
     }

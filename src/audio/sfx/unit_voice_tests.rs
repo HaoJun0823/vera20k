@@ -418,6 +418,7 @@ fn shared_pool_admission_and_channel_shifts_match_original_main_draws() {
                         sound.volume_linear,
                         boundary["args"][1].as_i64().unwrap() as i32,
                         SfxChannel::Sound,
+                        1.0,
                     )
                     .unwrap();
                 submitted.push((event, name));

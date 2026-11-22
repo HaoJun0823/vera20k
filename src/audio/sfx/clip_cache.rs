@@ -178,6 +178,7 @@ mod tests {
                 clips: &mut clips,
                 rng: &mut PlaybackDraws::new(|low, _| low),
                 observer: None,
+                air_absorption: false,
             };
             assert!(service.load_samples(event, true));
             pending[&event].loaded.as_ref().unwrap().clips[&0]

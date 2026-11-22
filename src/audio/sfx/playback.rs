@@ -7,6 +7,7 @@
 //! tools/spatial_oracle/ambient_playout.{py,json,meta.json}.
 
 use super::arbiter::{PlayoutEnd, delay_below_floor};
+use super::air_absorption::{self, AirAbsorption};
 use super::{
     DecodedAudio, LoadedPlayback, LoadedSampleIndices, PlayShifts, PlaybackDraws, SampleRng,
 };
@@ -14,7 +15,7 @@ use crate::rules::sound_ini::control;
 use rodio::Source;
 use std::collections::BTreeMap;
 use std::num::NonZero;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -510,6 +511,11 @@ struct SharedOutput {
     cancelled: AtomicBool,
     generation: AtomicU64,
     pan: AtomicI32,
+    /// VERA-only air absorption: the `f32` bits of the source's spatial
+    /// volume, or [`air_absorption::DISABLED`]. Written by the Main thread
+    /// with the pan gain; read per sample by the output thread. Default
+    /// disabled keeps the native path bit-identical.
+    air_volume_bits: AtomicU32,
 }
 
 /// Main-thread controls share the same boundary gate as buffer selection.
@@ -556,6 +562,14 @@ impl PlaybackControl {
         self.0.pan.store(pan, Ordering::Relaxed);
     }
 
+    /// Enable VERA air absorption at this spatial volume (`0..=1`), or
+    /// disable it. Called alongside `set_pan` from the accepted gain update,
+    /// so a moving/looping sound's brightness tracks its distance.
+    pub(super) fn set_air_absorption(&self, spatial_volume: Option<f32>) {
+        let bits = spatial_volume.map_or(air_absorption::DISABLED, f32::to_bits);
+        self.0.air_volume_bits.store(bits, Ordering::Relaxed);
+    }
+
     /// The channel ran dry: OnChannelDone405A00's inputs, and the loaded
     /// buffers and cursor the sample owner keeps for the event's next start
     /// pass. The source is spent; any later pull ends at once.
@@ -582,6 +596,10 @@ pub(super) struct RingSource {
     sample_rate: NonZero<u32>,
     last_pan: i32,
     pan_gain: (f32, f32),
+    /// Output-thread one-pole low-pass state. Its coefficient follows the
+    /// shared spatial volume; off by default (exact pass-through).
+    air: AirAbsorption,
+    last_air_bits: u32,
     observation: Option<Arc<PlaybackTrace>>,
     provenance: Option<Vec<usize>>,
 }
@@ -644,6 +662,7 @@ impl RingSource {
             cancelled: AtomicBool::new(false),
             generation: AtomicU64::new(0),
             pan: AtomicI32::new(pan),
+            air_volume_bits: AtomicU32::new(air_absorption::DISABLED),
         });
         let control = PlaybackControl(Arc::clone(&shared));
         Some((
@@ -657,6 +676,8 @@ impl RingSource {
                 sample_rate,
                 last_pan: pan,
                 pan_gain: super::pan_channel_gains(pan),
+                air: AirAbsorption::off(),
+                last_air_bits: air_absorption::DISABLED,
                 observation: observation.clone(),
                 provenance: observation.map(|_| vec![usize::MAX; quarter]),
             },
@@ -767,7 +788,19 @@ impl Iterator for RingSource {
             self.last_pan = pan;
             self.pan_gain = super::pan_channel_gains(pan);
         }
+        let air_bits = self.shared.air_volume_bits.load(Ordering::Relaxed);
+        if air_bits != self.last_air_bits {
+            self.last_air_bits = air_bits;
+            if air_bits == air_absorption::DISABLED {
+                self.air = AirAbsorption::off();
+            } else {
+                self.air.set_volume(f32::from_bits(air_bits), self.sample_rate.get());
+            }
+        }
         let (left, right) = self.pan_gain;
+        // Filter before the pan gain: air absorption is a property of the
+        // source distance, pan is a property of the listener projection.
+        let value = self.air.process(value, channel);
         Some(value * if channel == 0 { left } else { right })
     }
 }

@@ -115,6 +115,9 @@ pub(crate) struct RetailOptionsProfile {
     pub(crate) is_score_shuffle: bool,
     pub(crate) sound_latency: u16,
     pub(crate) in_game_music: bool,
+    /// `[VERA] AirAbsorption=`: VERA-only distance low-pass on positional
+    /// effects. Off by default so a new profile sounds like gamemd.
+    pub(crate) air_absorption: bool,
 
     // [Network] NetID: campaign movie unlock progress (OptionsClass +0x4C
     // Soviet, +0x50 Allied), -1 when none. The obfuscated key is decoded by
@@ -408,6 +411,7 @@ impl Default for RetailOptionsProfile {
             is_score_shuffle: false,
             sound_latency: 9,
             in_game_music: true,
+            air_absorption: false,
             movie_progress: crate::ui::movies_credits_shell::MovieProgress::default(),
             network_socket: u16::MAX,
             network_card: 0,
@@ -476,7 +480,7 @@ pub(crate) struct FormattedProfileSections {
     pub(crate) audio: [(&'static str, String); 7],
     pub(crate) network: [(&'static str, String); 4],
     /// VERA's own section, written after the native ones.
-    pub(crate) vera: [(&'static str, String); 43],
+    pub(crate) vera: [(&'static str, String); 44],
 }
 
 impl RetailOptionsLoad {
@@ -685,6 +689,7 @@ impl RetailOptionsProfile {
             self.right_click_orders = vera.read_bool("RightClickOrders", self.right_click_orders);
             self.lock_cursor = vera.read_bool("LockCursor", self.lock_cursor);
             self.vera_icon = vera.read_bool("VeraIcon", self.vera_icon);
+            self.air_absorption = vera.read_bool("AirAbsorption", self.air_absorption);
             if let Some(value) = vera.read_name("GraphicsAPI", 32) {
                 self.graphics_api = GraphicsApi::from_ini_value(value);
             }
@@ -901,6 +906,10 @@ impl RetailOptionsProfile {
                 ("Display", self.display.ini_value().to_owned()),
                 ("LockCursor", format_bool(self.lock_cursor).to_string()),
                 ("VeraIcon", format_bool(self.vera_icon).to_string()),
+                (
+                    "AirAbsorption",
+                    format_bool(self.air_absorption).to_string(),
+                ),
                 ("GraphicsAPI", self.graphics_api.ini_value().to_owned()),
                 ("HealthBars", self.health_bars.ini_value().to_string()),
                 ("Ares", self.ares.ini_value().to_string()),
@@ -2692,6 +2701,23 @@ IsScoreRepeat=no\r\nIsScoreShuffle=no\r\nSoundLatency=9\r\nInGameMusic=yes\r\n\
                 .retained_profile
                 .detailed_eva_text
         );
+        assert!(String::from_utf8_lossy(&written).contains("Unowned=keep"));
+    }
+
+    /// The VERA air-absorption switch is off by default and round-trips
+    /// through the `[VERA]` section like the other VERA-only options.
+    #[test]
+    fn air_absorption_defaults_off_and_round_trips_through_the_vera_section() {
+        let startup = RetailStartupOptions::default();
+        let read = |bytes: &[u8]| load_snapshot(&startup, bytes).retained_profile;
+        assert!(!read(b"").air_absorption);
+        let mut profile = read(b"[VERA]\nAirAbsorption=yes\nUnowned=keep\n");
+        assert!(profile.air_absorption);
+        let written = profile.transform_settings(b"[VERA]\nAirAbsorption=yes\nUnowned=keep\n");
+        assert!(read(&written).air_absorption);
+        profile.air_absorption = false;
+        let written = profile.transform_settings(&written);
+        assert!(!read(&written).air_absorption);
         assert!(String::from_utf8_lossy(&written).contains("Unowned=keep"));
     }
 

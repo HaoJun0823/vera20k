@@ -57,6 +57,7 @@ use crate::rules::sound_ini::{
 use crate::sim::snapshot::scenario_resources::SavedStaticSound;
 use crate::util::native_x87::X87Chop53;
 
+mod air_absorption;
 mod clip_cache;
 mod observation;
 mod playback;
@@ -64,6 +65,8 @@ mod sample_queue;
 use clip_cache::ClipCache;
 use playback::{PlaybackControl, PlaylistCursor, RingSource};
 use sample_queue::SampleQueue;
+#[cfg(all(test, tests_audio))]
+mod air_absorption_playback_tests;
 #[cfg(all(test, tests_audio))]
 mod ambient_playout_tests;
 #[cfg(all(test, tests_audio))]
@@ -910,6 +913,10 @@ struct PendingPlayback {
     token: EventToken,
     key: String,
     channel: SfxChannel,
+    /// Spatial volume fraction carried from the admit request to the output
+    /// so air absorption can track this source's distance. 1.0 for centred
+    /// non-positional cues.
+    spatial_volume: f32,
     shifts: Option<PlayShifts>,
     loaded: Option<LoadedPlayback>,
     prepared: Option<ResolvedPlayback>,
@@ -925,6 +932,7 @@ impl PendingPlayback {
             token,
             key,
             channel,
+            spatial_volume: 1.0,
             shifts: None,
             loaded: None,
             prepared: None,
@@ -1109,6 +1117,8 @@ struct PendingSampleService<'a> {
     clips: &'a mut ClipCache,
     rng: &'a mut PlaybackDraws,
     observer: Option<&'a mut PcmObserver>,
+    /// VERA-only air absorption switch; defaults off in the native path.
+    air_absorption: bool,
 }
 
 impl PlaybackService for PendingSampleService<'_> {
@@ -1207,6 +1217,8 @@ impl PlaybackService for PendingSampleService<'_> {
             .filter(|observer| observer.contains(pending.token))
             .and_then(|_| self.registry.get(&pending.key))
             .map(|entry| entry.sounds.as_slice());
+        let spatial_volume = pending.spatial_volume;
+        let air_enabled = self.air_absorption;
         pending.source = RingSource::new(
             loaded,
             cursor,
@@ -1216,6 +1228,9 @@ impl PlaybackService for PendingSampleService<'_> {
             pan,
             observed_names,
         );
+        if let Some((_, control)) = &pending.source {
+            control.set_air_absorption(air_enabled.then_some(spatial_volume));
+        }
         if let Some((source, _)) = &pending.source
             && let Some(observation) = source.observation()
             && let Some(observer) = &mut self.observer
@@ -1287,6 +1302,9 @@ pub struct SfxPlayer {
     sound_volume: f64,
     /// EVA announcement master volume (0.0 to 1.0).
     voice_volume: f64,
+    /// VERA-only: distance-driven low-pass on positional effects. Off by
+    /// default so the native path is untouched; see `air_absorption`.
+    air_absorption: bool,
     /// Current `[0x0087E758]` / `[0x0087E750]` linears; see [`Self::set_master_groups`].
     sound_master_linear: i32,
     eva_master_linear: i32,
@@ -1432,6 +1450,7 @@ impl SfxPlayer {
             // @ 0x005FA350`'s 0.7; the profile is the persisted authority.
             sound_volume: 0.7,
             voice_volume: 0.7,
+            air_absorption: false,
             sound_master_linear: VOLUME_SCALE,
             eva_master_linear: VOLUME_SCALE,
             focus_output_scale: 1.0,
@@ -1492,7 +1511,7 @@ impl SfxPlayer {
     ) -> bool {
         let facts = entry_facts(sound_id, registry);
         let base_linear = combine_linear(gain.volume_linear(), facts.entry_volume_linear);
-        self.submit_request(sound_id, facts, base_linear, gain.pan, SfxChannel::Sound)
+        self.submit_request(sound_id, facts, base_linear, gain.pan, SfxChannel::Sound, gain.volume)
             .is_some()
     }
 
@@ -1512,7 +1531,7 @@ impl SfxPlayer {
         };
         let facts = EntryFacts::from(entry);
         let base_linear = combine_linear(gain.volume_linear(), facts.entry_volume_linear);
-        self.submit_request(sound_id, facts, base_linear, gain.pan, SfxChannel::Sound)
+        self.submit_request(sound_id, facts, base_linear, gain.pan, SfxChannel::Sound, gain.volume)
             .is_some()
     }
 
@@ -1556,7 +1575,14 @@ impl SfxPlayer {
         let facts = EntryFacts::from(entry);
         let base_linear = combine_linear(gain.volume_linear(), facts.entry_volume_linear);
         let Some(event) = event.or_else(|| {
-            self.submit_request(sound_id, facts, base_linear, gain.pan, SfxChannel::Sound)
+            self.submit_request(
+                sound_id,
+                facts,
+                base_linear,
+                gain.pan,
+                SfxChannel::Sound,
+                gain.volume,
+            )
         }) else {
             // Original750AAE/4060F0 keeps the valid Voc even when both pool
             // allocations fail. An uncounted loop can retry on a later visit.
@@ -1614,6 +1640,12 @@ impl SfxPlayer {
             self.arbiter
                 .set_volume(event, gain.volume_linear().min(VOLUME_SCALE), now);
             self.arbiter.set_pan(event, gain.pan, now);
+            if self.air_absorption
+                && let Some(output) = self.live.get(&event)
+                && let Some(control) = &output.control
+            {
+                control.set_air_absorption(Some(gain.volume));
+            }
             return true;
         }
         let (Some(gain), Some(key)) = (gain, self.arbiter.kept_loop_key(owner).map(str::to_owned))
@@ -1959,6 +1991,7 @@ impl SfxPlayer {
                 entry.volume_linear,
                 PAN_CENTRE,
                 SfxChannel::Sound,
+                1.0,
             );
             self.arbiter
                 .set_loop_handle(handle, admitted, &registry_key(&entry.id));
@@ -2343,6 +2376,7 @@ impl SfxPlayer {
         base_linear: i32,
         pan: i32,
         channel: SfxChannel,
+        spatial_volume: f32,
     ) -> Option<EventId> {
         if !self.voc_enabled {
             return None;
@@ -2364,8 +2398,9 @@ impl SfxPlayer {
         if let Some(observer) = &mut self.pcm_observer {
             observer.submitted(token, &key, None, 0, self.now_ms);
         }
-        self.pending
-            .insert(event, PendingPlayback::new(token, key, channel));
+        let mut pending = PendingPlayback::new(token, key, channel);
+        pending.spatial_volume = spatial_volume;
+        self.pending.insert(event, pending);
         Some(event)
     }
 
@@ -2481,6 +2516,7 @@ impl SfxPlayer {
                 clips: &mut self.clips,
                 rng,
                 observer: self.pcm_observer.as_mut(),
+                air_absorption: self.air_absorption,
             },
         );
         let scales = self.output_scales();
@@ -2775,6 +2811,25 @@ impl SfxPlayer {
     pub fn set_voice_volume(&mut self, volume: f64) {
         self.voice_volume = volume.clamp(0.0, 1.0);
         self.apply_live_output_scales();
+    }
+
+    /// Enable or disable VERA's distance-driven air absorption on positional
+    /// effects. Turning it off restores the native spectrum immediately;
+    /// turning it on applies from the next gain refresh on live sources.
+    pub fn set_air_absorption(&mut self, enabled: bool) {
+        self.air_absorption = enabled;
+        if !enabled {
+            for output in self.live.values() {
+                if let Some(control) = &output.control {
+                    control.set_air_absorption(None);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn air_absorption_enabled(&self) -> bool {
+        self.air_absorption
     }
 
     /// The process volume groups only lifecycle code writes: the effects
