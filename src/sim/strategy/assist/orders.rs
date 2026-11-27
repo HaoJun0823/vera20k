@@ -2418,6 +2418,13 @@ pub(super) fn forces(
         {
             continue;
         }
+        // Recon owns an active scout destination even while its queued Move
+        // has not yet become the native mission. The idle Guard fallback
+        // must not overwrite that queue on the following frame.
+        // Preserve the existing convergence response to a threatened base.
+        if threatened.is_none() && brain.recon.destination(unit.entity_id).is_some() {
+            continue;
+        }
         // A unit that is already holding or fighting is doing exactly this, and
         // its mission owns it: a second Guard would cancel the fight.
         if holds_or_fights(unit.mission) {

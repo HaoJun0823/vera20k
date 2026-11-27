@@ -553,6 +553,53 @@ impl Director {
 mod tests {
     use super::*;
 
+    // This tests fallback ownership at the assist ledger level, not
+    // native pathfinding or mission execution. A Guard-visible scout is
+    // still assigned to Recon while its queued Move awaits commencement.
+    #[test]
+    fn v77_idle_guard_does_not_take_an_assigned_scout() {
+        use crate::sim::control::brain::Outbox;
+        use crate::sim::mission::{MissionId,MissionType};
+        use crate::sim::strategy::assist::{AssistBrain,census,orders,tracked::TrackedKind};
+
+        let rules=RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(""))
+            .expect("synthetic rules");
+        let sim=crate::sim::arena_fixture::rival_arena_known(&rules,0xA17);
+        let owner=sim.houses().keys().next().copied().expect("fixture house");
+        let obs=Observation::new(&sim,owner);
+        let mut brain=AssistBrain::new(0xA17);
+        let mut traits=census::Traits::default();
+        traits.combat=true;
+        traits.scout=true;
+        let id=7;
+        brain.census.units.push(census::Unit {
+            entity_id:id,
+            type_id:crate::sim::intern::InternedId::default(),
+            cell:(10,10),
+            health_permille:1000,
+            points:100,
+            mission:MissionId::from_known(MissionType::Guard),
+            orderable:true,
+            hand:false,
+            slot:census::Slot::Infantry,
+            tier:0,
+            traits,
+        });
+        brain.recon.missions.insert(id,Assignment {
+            destination:(20,20),purpose:Purpose::Frontier,
+            last_cell:(10,10),last_progress:obs.tick(),began:obs.tick(),
+        });
+        let mut out=Outbox::default();
+        orders::forces(&mut brain,&rules,&obs,&mut out);
+        assert!(out.orders.is_empty());
+        assert!(!brain.tracked.stands(obs.tick(),id,&[TrackedKind::Guard]));
+        // The existing Recon lifecycle releases a completed/stalled mission.
+        // The same actor must then return to the normal fallback guard path.
+        brain.recon.missions.remove(&id);
+        orders::forces(&mut brain,&rules,&obs,&mut out);
+        assert!(brain.tracked.stands(obs.tick(),id,&[TrackedKind::Guard]));
+    }
+
     #[test]
     fn scouts_must_cover_different_sectors() {
         let mut occupied = BTreeSet::new();
