@@ -29,6 +29,12 @@ password or delete it ([Accounts](lobby-protocol.md#accounts)). Players then cre
 or join a game. A host can select Easy, Normal or Hard AI from an open player slot in
 Battle or Free For All.
 
+In a desktop online room, **Choose Map → Online Maps** lets the host browse the
+same categories as the website. A map may appear in several categories, including
+after the host downloads it. A public, optional [category feed](lobby-protocol.md#map-library)
+only filters the host's picker. Mixed rooms, releases without category support and
+rollbacks use the existing room map selection and transfer messages.
+
 The HTTPS service supplies match-specific relay credentials before the same loading
 and command handoff. Both paths transfer selected authored maps or generated
 seed/preview data and verify build, rules and effective-map agreement before start.
@@ -512,17 +518,18 @@ A lobby that turns on continuous pacing (certificate flags bit 2, below) lets th
 relay seal at any whole rate instead of Game Speed rows, as lockstep LAN play
 follows its slowest player. The relay estimates what each player can run: what
 its tick cost holds and, while frames wait on it, nine tenths of what it ran. It
-holds the low point of that estimate and, after a wait, tries more: a twentieth
-more every five seconds, or nine tenths of the most the player has run since. A
-try the player cannot hold doubles the wait, from 15 seconds up to two minutes;
-one that held a minute starts it over. The clock aims at the smallest estimate
+holds the low point of that estimate until the player has kept up for a wait,
+then raises it once: by a fifth, or to nine tenths of the most the player has run
+since, and by a fifth again after each further wait it keeps up. A raise the
+player cannot hold doubles the wait, from 30 seconds up to two minutes; one that
+held a minute starts it over. The clock aims at the smallest estimate
 less that player's backlog over ten seconds (at most four tenths of the
 estimate), so a backlog always drains. The backlog comes from the sampled
 checksums the games already send: the newest frame when a checksum arrives,
 less the checksum's frame, less the least such gap while the player kept up.
-Every two seconds the clock moves towards that aim: down by at most half, up
-half the way and at most a quarter, and only when that is three percent or
-more; never below 10 frames a second or above the match's own speed. Messages,
+Every five seconds the clock moves towards that aim, and only when it is a
+twentieth or more away: down by at most half, up all the way and at most a
+quarter; never below 10 frames a second or above the match's own speed. Messages,
 replays and saves are as above. These rules live in the relay alone: games of
 any version play under a relay with either set, and rolling the relay back
 brings back the earlier rules for matches it starts.
@@ -714,6 +721,13 @@ digest covers a selected mod's loose rules module, and an embedded module
 travels with the agreed map. Module state participates in the match checksum.
 The source-derived build identity refuses a mixed room before simulation.
 Peers on the same earlier build use its earlier behavior after a rollback.
+
+A client module (`ui.wasm`) can send up to 96 bytes to its simulation module
+through the ordinary player command stream. LAN, the relay and replays carry
+the same record. The simulation checks the sender and message limits on each
+peer. The host's `automation_allowed` launch setting defaults to off and enters the room's
+rules digest when enabled. The build check runs before peers exchange module
+messages, including after a rollback.
 
 In VERA Online game rooms, the lobby sends rank badges as part of the join. The
 newcomer sees the room's badges, and everyone already there sees the newcomer's badge
@@ -1290,7 +1304,8 @@ command stream above is an intentional adaptation.
   which LAN packets and online batches carry alike, are laid out in
   `sim::command`: 0x30 paid superweapon, 0x31 bunker eject (still decoded so older
   recordings play; no input sends it), 0x32 producer cycle, and 0x33 explicit
-  target-House economic order. The 0x33 body is a native House slot byte, an
+  target-House economic order. Record 0x34 carries a client module message with
+  a source byte, a length byte and a 96-byte data field. The 0x33 body is a native House slot byte, an
   inner economic opcode byte, and 21 bytes of inner payload with zero padding.
   The event header still authenticates the issuing source. The simulation
   requires FullControl over the target. Ordinary production, placement and

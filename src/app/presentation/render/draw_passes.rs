@@ -1395,6 +1395,28 @@ pub(super) fn dispatch_draw_passes(
         );
     }
 
+    // VERA: the mod's and the map's status templates over the battlefield
+    // (`ui_modules::field`), after its objects and timers, clipped to the
+    // view and zoomed with it.
+    if match_state.ui_modules.is_some() {
+        let white = match_state
+            .match_presentation
+            .selection_overlay
+            .as_ref()
+            .map(|o| o.white_texture());
+        let pictures = match_state
+            .ui_modules
+            .as_ref()
+            .and_then(|ui| ui.picture_texture());
+        for (texture, key) in [
+            (white, "module_field_fill"),
+            (pictures, "module_field_art"),
+            (Some(renderer.bit_font.atlas()), "module_field_text"),
+        ] {
+            draw_pooled_ui_passthrough(&mut pass, &renderer.batch_renderer, pool, texture, key);
+        }
+    }
+
     // TacticalDraw6D4B25->6D4E20 is its last battlefield draw: centred
     // GRFXTXT frame, or white text if the shape/converter is unavailable.
     // Keep the tactical clip and draw before sidebar copy/Chrono capture.
@@ -1583,13 +1605,43 @@ pub(super) fn dispatch_draw_passes(
         .selection_overlay
         .as_ref()
         .map(|o| o.white_texture());
+    // VERA: the client modules' panels (`ui.wasm`, RFC 0001 section 10)
+    // over the battlefield and the sidebar, where the pointer reaches them
+    // before the chrome (`ui_modules::tree`), under the message rows.
+    crate::app::ui_modules::paint::draw(
+        &mut pass,
+        renderer,
+        match_state,
+        pool,
+        crate::app::ui_modules::paint::ModuleLayer::Panels,
+    );
+    let font = Some(renderer.bit_font.atlas());
+    if text_in_frame {
+        for (texture, key) in [(solid, "message_fill"), (font, "message_text")] {
+            draw_pooled_ui(
+                &mut pass,
+                &renderer.batch_renderer,
+                pool,
+                texture,
+                key,
+            );
+        }
+    }
+    // VERA: the map's overlay (its module's nodes under `MapUI=overlay` and
+    // its `[VeraUI]` parts), above the whole match interface; the tooltip
+    // and the in-match dialogs go over it.
+    crate::app::ui_modules::paint::draw(
+        &mut pass,
+        renderer,
+        match_state,
+        pool,
+        crate::app::ui_modules::paint::ModuleLayer::Overlay,
+    );
     if text_in_frame {
         for (texture, key) in [
-            (solid, "message_fill"),
-            (Some(renderer.bit_font.atlas()), "message_text"),
             (solid, "tooltip_fill"),
             (solid, "tooltip_border"),
-            (Some(renderer.bit_font.atlas()), "tooltip_text"),
+            (font, "tooltip_text"),
         ] {
             draw_pooled_ui(&mut pass, &renderer.batch_renderer, pool, texture, key);
         }
@@ -2155,7 +2207,14 @@ pub(crate) fn draw_bridge_shadows(
 #[cfg(all(test, tests_app_presentation_render))]
 mod tests {
     use super::{CellBodyAtlas, CellBodyDraw, RenderZPolicy, cell_body_runs};
-    const SOURCE: &str = include_str!("draw_passes.rs");
+    // Keep byte offsets and slices in the same source on LF and CRLF checkouts.
+    static PRODUCTION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        include_str!("draw_passes.rs")
+            .split_once("\nmod tests {")
+            .expect("production source before tests")
+            .0
+            .replace("\r\n", "\n")
+    });
 
     #[test]
     fn cell_body_runs_keep_the_sweep_across_atlases_and_policies() {
@@ -2172,10 +2231,7 @@ mod tests {
     }
 
     fn source_offset(needle: &str) -> usize {
-        SOURCE
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source before tests")
+        PRODUCTION
             .find(needle)
             .unwrap_or_else(|| panic!("missing production draw anchor {needle:?}"))
     }
@@ -2280,16 +2336,17 @@ mod tests {
         // The software cursor draws after the retained composition.
         assert!(pre_cursor_capture < cursor);
 
-        let timer_tail = &SOURCE[sparkle..outcome_start];
+        let timer_tail = &PRODUCTION[sparkle..outcome_start];
         assert_eq!(
             timer_tail.matches(".draw").count() + timer_tail.matches("draw_pooled").count(),
-            3,
-            "PixelFX and the two timer submissions precede the native result draw; \
-             the Phobos build description now draws at the RenderFrame_main tail"
+            4,
+            "PixelFX, the two timer submissions and VERA's module battlefield layer \
+             precede the native result draw; the Phobos build description now draws \
+             at the RenderFrame_main tail"
         );
         // Exhaustiveness: the description draws exactly once in the span from
         // tooltips to cursor, pinning it out of the tactical tail.
-        let tail = &SOURCE[tooltip_text..cursor];
+        let tail = &PRODUCTION[tooltip_text..cursor];
         assert_eq!(
             tail.matches("\"build_text_fill\"").count(),
             1,
@@ -2338,7 +2395,7 @@ mod tests {
         // still remain inside g_SidebarSurface. No later retained-sidebar or
         // radar batch may repaint that accepted line before the screen-overlay
         // strata begin.
-        let retained_tail = &SOURCE[boundary..message];
+        let retained_tail = &PRODUCTION[boundary..message];
         for later_retained_batch in [
             "\"sidebar_chrome\"",
             "\"sidebar_cameo\"",
@@ -2381,7 +2438,6 @@ mod tests {
         // no sidebar depth: the tooltips and the cursor show over the radar.
         // The column's text may go over the copy there, without depth
         // (`sidebar_surface::column_text`).
-        let production = SOURCE.split("#[cfg(test)]").next().unwrap();
         for layer in [
             "\"sidebar_chrome\"",
             "\"sidebar_cameo\"",
@@ -2395,7 +2451,7 @@ mod tests {
             "\"command_bar\"",
         ] {
             assert!(source_offset(layer) < frame_pass, "{layer}");
-            assert!(!production[frame_pass..].contains(layer), "{layer}");
+            assert!(!PRODUCTION[frame_pass..].contains(layer), "{layer}");
         }
     }
 
@@ -2408,7 +2464,7 @@ mod tests {
         let fill = source_offset("\"tooltip_fill\"");
         let border = source_offset("\"tooltip_border\"");
         assert!(binding < fill);
-        let slice = &SOURCE[binding..border];
+        let slice = &PRODUCTION[binding..border];
         assert!(
             !slice.contains("darken_texture"),
             "tooltip lanes must not draw with the translucent darken strip"

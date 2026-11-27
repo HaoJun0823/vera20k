@@ -76,6 +76,7 @@ pub(crate) fn fallback_map_load_result() -> init::MapLoadResult {
             opening_view_cell: None,
             camera_anchor_x: 0.0,
             camera_anchor_y: 0.0,
+            ui_modules: Default::default(),
         },
         presentation: init::PresentationLoadAssets {
             tile_atlas: None,
@@ -309,8 +310,11 @@ pub(crate) fn install_world_presentation(
     match_state.match_presentation.overlay_names = assets.overlay_names;
     match_state.match_presentation.overlay_radar_colors = assets.overlay_radar_colors;
     match_state.match_presentation.house_color_map = assets.house_color_map;
-    // VERA relation colours start each scenario off, in the player colours.
+    // VERA relation and team colours start each scenario off, in the player
+    // colours; the launch team cache belongs to the match that just ended.
     match_state.match_presentation.relation_colors = false;
+    match_state.match_presentation.team_colors = false;
+    match_state.match_presentation.team_by_owner = None;
     match_state.match_presentation.relation_color_map = None;
     // VERA's Super Weapon Building Timers start from the saved switch; a
     // match's own hotkey flips it from there.
@@ -564,7 +568,17 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
         &mut state.match_state.match_presentation,
     );
     let wall_ms = crate::app::match_runtime::frame_pacer::wall_clock_ms();
-    crate::app::radar_movie::retire(state, wall_ms);
+    crate::app::radar_movie::retire(
+        &state.platform,
+        &state.renderer,
+        &state.diag,
+        &state.frontend,
+        &mut state.match_state,
+        &state.process_assets,
+        &mut state.audio,
+        &state.persistence,
+        wall_ms,
+    );
     crate::app::chrono_screen::retire(
         &state.frontend.screen,
         &mut state.match_state,
@@ -845,6 +859,10 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
     state.match_state.input.queued_order_mode = render::OrderMode::Move;
     state.match_state.match_audio.reset_for_new_match();
     state.match_state.sandbox_full_visibility = result.scenario.sandbox_full_visibility;
+    // The match's client modules, now that the world, its rules modules and
+    // its chrome exist: loaded and `client_init` run here, `client_on_start`
+    // with the first frame the match draws (`ui_modules::render_frame`).
+    crate::app::ui_modules::install(state, result.scenario.ui_modules);
 
     // `Start_Scenario @ 0x00683AB0` after `Read_Scenario`: `[Basic] Theme`
     // resolves through `From_Name` (`0x004758F0`); -1 -> `Stop(fade=1)` of the
@@ -1015,7 +1033,16 @@ pub(crate) fn apply_map_load_result(state: &mut AppState, result: init::MapLoadR
             log::error!("Scenario installation rejected startup: {err}");
         }
     }
-    crate::app::presentation::sidebar_render::refresh_sidebar_projection(state);
+    crate::app::presentation::sidebar_render::refresh_sidebar_projection(
+        &state.platform,
+        &state.renderer,
+        &state.diag,
+        &state.frontend,
+        &mut state.match_state,
+        &state.process_assets,
+        &mut state.audio,
+        &state.persistence,
+    );
 }
 
 /// VERA watching (docs/Networking.md "Watching"): the live session that

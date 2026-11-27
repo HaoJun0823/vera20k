@@ -50,21 +50,44 @@ const TS_WEBS: u32 = 0xF215_BF3A;
 // claims, and the trigger runtime the triggers they made. Older worlds ran no
 // module: both convert empty.
 const WASM_MODULES: u32 = 0xE18E_A373;
+// The Wasm modules' control points (RFC 0001 0.0.22, 0.0.23): projectile
+// paths and data words (`Launch`, `ProjectileFrame`), running pushes
+// (`Push`), the `ImmunityFlags` and `ROTMultiplier` stats appended to `Stat`
+// and the native body rates the ROT modifier keeps, without the image swap.
+// Older worlds hold no path, no push and no modifier of the new stats.
+const CONTROL_POINTS: u32 = 0x919A_B3CD;
 // Beside them, main's writer from #5205 stores each object image's Phobos
 // ArtImageSwap name (`ObjectImageState::image_swap`). Older worlds swapped no
 // image, as they played when saved.
 const ART_IMAGE_SWAP: u32 = 0x8C73_B1B3;
 // Main's writer once the modules joined it, with both the modules and the
-// image swap.
+// image swap, without the control points.
 const MODULES_AND_IMAGE_SWAP: u32 = 0xB65C_0664;
 // NPatch's branch writer `2e67ebaa8` stored each processed rules layer's NPatch
 // key reads, which decide `RuleSet::npatch` (`rules::npatch_switch`), beside
 // the webs, without the modules or the image swap. Older worlds ran no NPatch
 // switch: their rules keep every NPatch key dormant, as they played when saved.
 const NPATCH_INPUTS: u32 = 0xE527_9FB2;
-// The current writer stores the modules, the image swap and the NPatch key
-// reads.
+// Main's writer stores the modules, the image swap and the NPatch key reads,
+// without the control points.
 const MODULES_SWAP_AND_NPATCH: u32 = 0xBA51_A42C;
+// The control points' writer stores the control points, the image swap and
+// the NPatch key reads, without the client modules' messages.
+const CONTROL_POINTS_SWAP_AND_NPATCH: u32 = 0xC66C_E753;
+// The client modules writer adds their state (RFC 0001 section 10):
+// the client messages waiting for `on_message` with their rate windows, and
+// the room's `AutomationAllowed`. Older worlds hold no message and did not
+// allow automation.
+const CLIENT_MESSAGES: u32 = 0x9909_B4E7;
+// Successive module writers retained animations (#5297), door positions
+// (#5298), then image overrides (#5304). Each new collection starts empty.
+const HELD_ANIMS: u32 = 0xED16_B100;
+const HELD_DOORS: u32 = 0x9593_BB1E;
+const HELD_IMAGES: u32 = 0xAA20_1352;
+// #4576 added four economy fields after the former controller flag.
+// Earlier saves gain their neutral encoding. The loader discards both
+// fields; see snapshot::retired_driver.
+const DRIVER_POLICY: u32 = 0xD5A9_6CCA;
 
 /// The rules digest a converted save carries: the loader takes the rules the
 /// game has instead of proving the digest the old writer computed, whose
@@ -98,7 +121,7 @@ pub fn supports(header: &GameSnapshotHeader) -> bool {
         && previous_layout(header.layout).is_some()
         && header.compatibility().matches_build()
         && SNAPSHOT_ENVELOPE_VERSION == MIGRATION_ENVELOPE_VERSION
-        && snapshot_layout() == MODULES_SWAP_AND_NPATCH
+        && snapshot_layout() == DRIVER_POLICY
 }
 
 fn previous_layout(source: u32) -> Option<save_codec::PreviousLayout> {
@@ -124,12 +147,21 @@ fn previous_layout(source: u32) -> Option<save_codec::PreviousLayout> {
     const STRUGGLE: (&str, &[&str]) = ("InfantrySequenceBank", &["struggle"]);
     const EXT_MODULES: (&str, &[&str]) = ("Simulation", &["ext_modules"]);
     const MODULE_TRIGGERS: (&str, &[&str]) = ("TriggerRuntime", &["module"]);
+    const CONTROL_POINT_STATE: (&str, &[&str]) = ("SavedExtModules", &["projectiles", "motions"]);
+    const NATIVE_ROTS: (&str, &[&str]) = ("ModifierStore", &["native_rots"]);
     const IMAGE_SWAP: (&str, &[&str]) = ("ObjectImageState", &["image_swap"]);
     // Worlds older than the NPatch switch stored no key reads either: their
     // rules kept the switch off, which the all-zero empty read list restores.
     const NPATCH_KEYS: (&str, &[&str]) = ("ProcessedRulesLayers", &["npatch_inputs"]);
+    const MESSAGES: (&str, &[&str]) = ("SavedExtModules", &["messages", "automation_allowed"]);
+    const HELD_VISUALS: (&str, &[&str]) = ("ActionHeld", &["anims", "doors", "images"]);
+    const DOORS_AND_IMAGES: (&str, &[&str]) = ("ActionHeld", &["doors", "images"]);
+    const IMAGES: (&str, &[&str]) = ("ActionHeld", &["images"]);
+    const POLICY: (&str, &[&str]) = ("HouseState", &["driver_policy"]);
     let absent_fields: &'static [_] = match source {
         V0_3_8_AND_0_3_9 | V0_4_0 => &[
+            POLICY,
+            HELD_VISUALS,
             IMAGE_FLAGS,
             ALPHA_LISTENER,
             DECK,
@@ -155,6 +187,8 @@ fn previous_layout(source: u32) -> Option<save_codec::PreviousLayout> {
             NPATCH_KEYS,
         ],
         ALPHA_SHAPE_LISTENER => &[
+            POLICY,
+            HELD_VISUALS,
             IMAGE_FLAGS,
             DECK,
             PENDING_DECK,
@@ -179,6 +213,8 @@ fn previous_layout(source: u32) -> Option<save_codec::PreviousLayout> {
             NPATCH_KEYS,
         ],
         ALTERNATE_THEATER_ART => &[
+            POLICY,
+            HELD_VISUALS,
             DECK,
             PENDING_DECK,
             SPIN,
@@ -202,6 +238,8 @@ fn previous_layout(source: u32) -> Option<save_codec::PreviousLayout> {
             NPATCH_KEYS,
         ],
         BRIDGE_DECK_AND_FLY_SPIN => &[
+            POLICY,
+            HELD_VISUALS,
             DEGRADES,
             ICE_TIMER,
             ICE_CRACKS,
@@ -222,6 +260,8 @@ fn previous_layout(source: u32) -> Option<save_codec::PreviousLayout> {
             NPATCH_KEYS,
         ],
         HOUSE_DEGRADES => &[
+            POLICY,
+            HELD_VISUALS,
             ICE_TIMER,
             ICE_CRACKS,
             ICE_SINK,
@@ -241,6 +281,8 @@ fn previous_layout(source: u32) -> Option<save_codec::PreviousLayout> {
             NPATCH_KEYS,
         ],
         TS_ICE => &[
+            POLICY,
+            HELD_VISUALS,
             DENT,
             LIMPETS,
             LIMPETED,
@@ -257,6 +299,8 @@ fn previous_layout(source: u32) -> Option<save_codec::PreviousLayout> {
             NPATCH_KEYS,
         ],
         TERRAIN_DENT => &[
+            POLICY,
+            HELD_VISUALS,
             LIMPETS,
             LIMPETED,
             ANIM_SOUNDS,
@@ -272,6 +316,8 @@ fn previous_layout(source: u32) -> Option<save_codec::PreviousLayout> {
             NPATCH_KEYS,
         ],
         TS_LIMPETS => &[
+            POLICY,
+            HELD_VISUALS,
             ANIM_SOUNDS,
             KRATOS_INPUTS,
             KRATOS_OFFSETS,
@@ -285,6 +331,8 @@ fn previous_layout(source: u32) -> Option<save_codec::PreviousLayout> {
             NPATCH_KEYS,
         ],
         TS_ANIM_SOUNDS => &[
+            POLICY,
+            HELD_VISUALS,
             KRATOS_INPUTS,
             KRATOS_OFFSETS,
             WEB,
@@ -297,6 +345,8 @@ fn previous_layout(source: u32) -> Option<save_codec::PreviousLayout> {
             NPATCH_KEYS,
         ],
         KRATOS_FLH => &[
+            POLICY,
+            HELD_VISUALS,
             WEB,
             WEB_TIMER,
             WARHEAD_WEB,
@@ -306,11 +356,58 @@ fn previous_layout(source: u32) -> Option<save_codec::PreviousLayout> {
             IMAGE_SWAP,
             NPATCH_KEYS,
         ],
-        TS_WEBS => &[EXT_MODULES, MODULE_TRIGGERS, IMAGE_SWAP, NPATCH_KEYS],
-        WASM_MODULES => &[IMAGE_SWAP, NPATCH_KEYS],
-        ART_IMAGE_SWAP => &[EXT_MODULES, MODULE_TRIGGERS, NPATCH_KEYS],
-        MODULES_AND_IMAGE_SWAP => &[NPATCH_KEYS],
-        NPATCH_INPUTS => &[EXT_MODULES, MODULE_TRIGGERS, IMAGE_SWAP],
+        TS_WEBS => &[
+            POLICY,
+            HELD_VISUALS,
+            EXT_MODULES,
+            MODULE_TRIGGERS,
+            IMAGE_SWAP,
+            NPATCH_KEYS,
+        ],
+        WASM_MODULES => &[
+            POLICY,
+            HELD_VISUALS,
+            CONTROL_POINT_STATE,
+            NATIVE_ROTS,
+            IMAGE_SWAP,
+            NPATCH_KEYS,
+            MESSAGES,
+        ],
+        ART_IMAGE_SWAP => &[
+            POLICY,
+            HELD_VISUALS,
+            EXT_MODULES,
+            MODULE_TRIGGERS,
+            NPATCH_KEYS,
+        ],
+        MODULES_AND_IMAGE_SWAP => &[
+            POLICY,
+            HELD_VISUALS,
+            CONTROL_POINT_STATE,
+            NATIVE_ROTS,
+            NPATCH_KEYS,
+            MESSAGES,
+        ],
+        CONTROL_POINTS => &[POLICY, HELD_VISUALS, IMAGE_SWAP, NPATCH_KEYS, MESSAGES],
+        NPATCH_INPUTS => &[
+            POLICY,
+            HELD_VISUALS,
+            EXT_MODULES,
+            MODULE_TRIGGERS,
+            IMAGE_SWAP,
+        ],
+        MODULES_SWAP_AND_NPATCH => &[
+            POLICY,
+            HELD_VISUALS,
+            CONTROL_POINT_STATE,
+            NATIVE_ROTS,
+            MESSAGES,
+        ],
+        CONTROL_POINTS_SWAP_AND_NPATCH => &[POLICY, HELD_VISUALS, MESSAGES],
+        CLIENT_MESSAGES => &[POLICY, HELD_VISUALS],
+        HELD_ANIMS => &[POLICY, DOORS_AND_IMAGES],
+        HELD_DOORS => &[POLICY, IMAGES],
+        HELD_IMAGES => &[POLICY],
         _ => return None,
     };
     Some(save_codec::PreviousLayout {
@@ -326,8 +423,7 @@ fn previous_layout(source: u32) -> Option<save_codec::PreviousLayout> {
 /// only its stock Arctic setting and latch. Keep both exactly as saved.
 pub fn migrate(bytes: &mut Vec<u8>) -> Result<(), MigrationError> {
     let target = snapshot_layout();
-    if SNAPSHOT_ENVELOPE_VERSION != MIGRATION_ENVELOPE_VERSION || target != MODULES_SWAP_AND_NPATCH
-    {
+    if SNAPSHOT_ENVELOPE_VERSION != MIGRATION_ENVELOPE_VERSION || target != DRIVER_POLICY {
         return Err(MigrationError::UnsupportedTarget(target));
     }
 
@@ -460,7 +556,7 @@ mod tests {
         let error = migrate(&mut bytes).unwrap_err();
         assert_eq!(bytes, original);
         if SNAPSHOT_ENVELOPE_VERSION != MIGRATION_ENVELOPE_VERSION
-            || snapshot_layout() != MODULES_SWAP_AND_NPATCH
+            || snapshot_layout() != DRIVER_POLICY
         {
             assert!(matches!(error, MigrationError::UnsupportedTarget(_)));
             return;
@@ -503,6 +599,55 @@ mod tests {
     }
 
     #[test]
+    fn retired_driver_saves_resume_with_ordinary_computer_control() {
+        use crate::sim::house_state::HouseState;
+
+        let computer = HouseState::new(Default::default(), 0, None, false, 500, 10);
+        let neutral = save_codec::serialize(&computer).unwrap();
+        let mut old =
+            save_codec::serialize_previous(&computer, &previous_layout(HELD_IMAGES).unwrap())
+                .unwrap();
+        let mut added = Vec::new();
+        save_codec::deserialize_previous::<HouseState>(
+            &old,
+            previous_layout(HELD_IMAGES).unwrap(),
+            &mut added,
+        )
+        .unwrap();
+        let &[(policy_offset, 4)] = added.as_slice() else {
+            panic!("the old house lacks only its four neutral policy bytes");
+        };
+        // The preceding byte was the external controller's ownership flag.
+        old[policy_offset - 1] = 1;
+        let (before_policy, rest) = save_codec::deserialize_previous::<HouseState>(
+            &old,
+            previous_layout(HELD_IMAGES).unwrap(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(rest.is_empty());
+
+        // The #4576 writer added the Hard grant, drip, binary32 scale and floor.
+        let policy = save_codec::serialize(&(
+            true,
+            Some((75_i32, 12_u32)),
+            Some(0x3f00_0000_u32),
+            Some(2000_i32),
+        ))
+        .unwrap();
+        old.splice(policy_offset..policy_offset, policy);
+        let (with_policy, rest) =
+            save_codec::deserialize_with_remainder::<HouseState>(&old).unwrap();
+        assert!(rest.is_empty());
+
+        for restored in [before_policy, with_policy] {
+            assert!(!restored.event_dispatch_eligible());
+            assert_eq!(restored.economy().credits(), 500);
+            assert_eq!(save_codec::serialize(&restored).unwrap(), neutral);
+        }
+    }
+
+    #[test]
     fn old_image_keeps_the_arctic_setting_and_applied_latch() {
         use crate::rules::ini_parser::IniFile;
         use crate::rules::object_image::{ImageTheater, ObjectImageKind, ObjectImageState};
@@ -523,6 +668,11 @@ mod tests {
         let after_image = 8 + image.image().len();
         assert_eq!(&bytes[after_image..after_image + 3], &[1, 0, 1]);
         bytes.remove(after_image + 1);
+        // That writer also predates the optional Phobos image name, which
+        // now sits immediately before its retained model slots.
+        let slots_size = save_codec::serialize(&image.model_slots).unwrap().len();
+        let image_swap = bytes.len() - slots_size - 1;
+        assert_eq!(bytes.remove(image_swap), 0); // None
         let mut offsets = Vec::new();
         let (restored, rest) = save_codec::deserialize_previous::<ObjectImageState>(
             &bytes,
@@ -532,7 +682,7 @@ mod tests {
         .unwrap();
         assert_eq!(restored, image);
         assert!(rest.is_empty());
-        assert_eq!(offsets, [(after_image + 1, 1)]);
+        assert_eq!(offsets, [(after_image + 1, 1), (image_swap, 1)]);
     }
 
     #[test]

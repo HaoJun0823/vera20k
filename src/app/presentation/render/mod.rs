@@ -671,7 +671,16 @@ pub(crate) fn render_game(
         &state.persistence,
         &local_owner,
     );
-    let ui = build_instances::build_ui_instances(state, clock_ms as u32, &cursor_targets);
+    let ui = build_instances::build_ui_instances(
+        &state.platform,
+        &state.renderer,
+        &state.frontend,
+        &mut state.match_state,
+        &state.process_assets,
+        &state.persistence,
+        clock_ms as u32,
+        &cursor_targets,
+    );
     let after_ui = render_started.map(|_| Instant::now());
 
     // Phase 5: Build sidebar instances, once the smooth sidebar's copies
@@ -1413,6 +1422,10 @@ fn upload_to_gpu(
         &state.persistence,
     );
     state.renderer.bit_font.set_raster(frame_raster);
+    // The client modules' panels and the map's overlay (`ui.wasm`, map
+    // `[VeraUI]`): laid out and painted at the frame's pixels, as the
+    // sidebar's text is.
+    crate::app::ui_modules::paint::build(state);
     let [
         message_fill,
         tooltip_fill,
@@ -1539,6 +1552,9 @@ fn upload_to_gpu(
 
     // Residual effects keep their existing uploads and pass ownership.
     pool.upload("cell_sparkles", &world.cell_sparkles);
+    pool.upload("module_field_fill", &world.module_field.fills);
+    pool.upload("module_field_art", &world.module_field.pictures);
+    pool.upload("module_field_text", &world.module_field.text);
     // The parts' pictures come from the sidebar's atlas and zoom with the frame.
     pool.upload(
         "layout_field_art",
@@ -1613,6 +1629,9 @@ fn upload_to_gpu(
     pool.upload("tooltip_fill", &tooltip_fill);
     pool.upload("tooltip_border", &tooltip_border);
     pool.upload("tooltip_text", &tooltip_text);
+    if let Some(ui) = state.match_state.ui_modules.as_ref() {
+        crate::app::ui_modules::paint::upload(ui, &mut pool);
+    }
     rendered_verdict
 }
 
