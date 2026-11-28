@@ -518,10 +518,6 @@ pub struct AssistBrain {
     /// Last seen ore density per cell. Updates only on currently visible
     /// cells, so depleted/growing ore behind fog is not omniscient knowledge.
     ore_known: BTreeMap<(u16, u16), u8>,
-    /// Last observed estimated credits per ore cell, for control priorities
-    /// only. Never feeds purchase capacity or grants permission to harvest.
-    ore_control_value: BTreeMap<(u16, u16), usize>,
-    ore_control_buckets: orders::OreControlBuckets,
     /// Surveyed ore accessible from our economy, not raw enemy-base ore.
     pub(super) expansion_ore:BTreeMap<(u16,u16),u8>,
     pub(super) expansion_bank:economy::InvestmentBank,
@@ -744,8 +740,6 @@ impl AssistBrain {
             siege_toggle_after: BTreeMap::new(),
             ore_scan: None,
             ore_known: BTreeMap::new(),
-            ore_control_value: BTreeMap::new(),
-            ore_control_buckets: BTreeMap::new(),
             expansion_ore:BTreeMap::new(),
             expansion_bank:economy::InvestmentBank::default(),
             push_target: None,
@@ -851,21 +845,6 @@ impl AssistBrain {
             self.ore_known.retain(|cell, _| {
                 !obs.is_cell_visible(cell.0, cell.1) || seen.contains_key(cell)
             });
-            // The scan above has already filtered current visibility.
-            // Keep the last known resource value under fog, just as with
-            // density; never look up a hidden cell's current overlay.
-            let known = &self.ore_known;
-            self.ore_control_value.retain(|cell, _| known.contains_key(cell));
-            for (&cell, &stage) in &seen {
-                let unit_value = obs.overlay_id_at(cell.0, cell.1)
-                    .and_then(|id| rules.overlay_registry()
-                        .tiberium_type_for_overlay(&rules.tiberium_types, id).ok().flatten())
-                    .and_then(|id| rules.tiberium_types.live(id))
-                    .map_or(0, |ty| ty.value.max(0) as usize);
-                self.ore_control_value.insert(cell,
-                    unit_value.saturating_mul(usize::from(stage) + 1));
-            }
-            self.ore_control_buckets = orders::ore_control_buckets(&self.ore_control_value);
             self.ore_known.extend(seen);
             // A deployed Enslaves= resource building is an economic anchor,
             // not a walker. Its movement zone cannot stand in for the real
@@ -1019,7 +998,7 @@ impl Brain for AssistBrain {
             // Assets first: a stale sighting may request reconnaissance, but
             // neither the director nor a scout may click an invisible object.
             self.asset_ops.observe(rules, obs, &self.census, &self.tracked);
-            self.recon.prioritize_asset(self.asset_ops.recon_request(rules, obs));
+            self.recon.prioritize_asset(self.asset_ops.recon_request(obs));
             self.recon.observe(rules, obs, &self.census, &self.squads);
         }
         self.mobilization.observe(rules, obs, &self.census);

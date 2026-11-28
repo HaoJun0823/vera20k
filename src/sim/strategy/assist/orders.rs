@@ -763,13 +763,21 @@ pub(super) fn resume_specialist_jobs(
         // destination may therefore be None for the *entire valid mission*.
         // Do not reset a living Capture mission every 75 frames; if the unit
         // truly stops, reissue even when it has reached the building door.
-        if job.kind != JobKind::Crate && unit.in_service() { continue; }
+        if unit.in_service() { continue; }
+        if matches!(job.kind,JobKind::Engineer|JobKind::Spy|JobKind::Garrison)
+            && job.target.is_some_and(|target|obs.observed_object_cell(target).is_some())
+            && obs.own_destination_object(actor)==job.target
+        { continue; }
         let (kind, target, goal) = match job.kind {
             JobKind::Crate => {
                 let Some(cell) = job.cell else { continue };
-                if squared_distance(unit.cell, cell) > 2 * 2
-                    && obs.is_cell_visible(cell.0, cell.1)
-                    && !obs.visible_crate_at(rules, cell) { continue; }
+                if !brain.crate_sightings.get(&cell).is_some_and(|seen|
+                    crate_sighting_fresh(tick,*seen))
+                    || (obs.is_cell_visible(cell.0,cell.1) && !obs.visible_crate_at(rules,cell))
+                { continue; }
+                let visible:Vec<_>=obs.visible_enemy_entities().collect();
+                let guns=super::safety::envelopes(rules,obs,actor,&visible,true);
+                if !super::safety::safe_leg(&guns,unit.cell,cell,false) {continue;}
                 (TrackedKind::Move, None, Goal::Move { cell })
             }
             JobKind::Engineer | JobKind::Spy | JobKind::Garrison => {
@@ -1343,60 +1351,6 @@ fn ore_garrison_score(
     })).sum()
 }
 
-// Value memory is derived during the same visibility-filtered ore survey
-// as the old density table. Spatial buckets keep the coverage lookup local.
-pub(super) type OreControlBuckets = BTreeMap<(u16,u16), Vec<((u16,u16),usize)>>;
-
-pub(super) fn ore_control_buckets(known: &BTreeMap<(u16,u16),usize>) -> OreControlBuckets {
-    let mut buckets = OreControlBuckets::new();
-    for (&cell, &value) in known {
-        if value > 0 {
-            buckets.entry((cell.0 / 8, cell.1 / 8)).or_default().push((cell, value));
-        }
-    }
-    buckets
-}
-
-/// Use the occupying weapon, not the walking rifle or a fixed MOD name.
-/// Cap only the policy's search radius; native weapon range is unchanged.
-fn occupying_cover_reach(rules: &RuleSet, ty: &ObjectType) -> i32 {
-    ty.occupy_weapon.as_deref().and_then(|name| rules.weapon(name))
-        .filter(|w| !w.never_use && w.damage > 0
-            && rules.weapon_projectile(w).is_some_and(|p| p.ag))
-        .map_or(0, |w| super::siege_counter::max_range_cells(w).clamp(0,16))
-}
-
-/// Credit proxy inside the gun's local disk, not every ore tile in nine
-/// neighboring buckets. This is geographic cover value, not a fire receipt.
-pub(super) fn ore_cover_value(buckets: &OreControlBuckets, at: (u16,u16), reach: i32) -> usize {
-    if reach <= 0 { return 0; }
-    let r = reach.min(16) as u16;
-    let mut total = 0usize;
-    for y in at.1.saturating_sub(r)/8..=at.1.saturating_add(r)/8 {
-        for x in at.0.saturating_sub(r)/8..=at.0.saturating_add(r)/8 {
-            if let Some(tiles) = buckets.get(&(x,y)) {
-                for &(cell, value) in tiles {
-                    if squared_distance(cell, at) <= reach.saturating_mul(reach) {
-                        total = total.saturating_add(value);
-                    }
-                }
-            }
-        }
-    }
-    total
-}
-
-/// Fill a useful forward foothold before adding the third body to a house
-/// or marching to an unrelated enemy perimeter. The ordinary ranking is
-/// unchanged outside that first two-seat regional opportunity.
-fn regional_cover_rank(active: bool, forward: bool, ore_cells: usize,
-    credits: usize, public_cover: bool, assigned: usize) -> u8 {
-    if !active || !forward || assigned >= 2 { return 2; }
-    if ore_cells >= ORE_GARRISON_MIN_CELLS && credits > 0 { 0 }
-    else if public_cover { 1 }
-    else { 2 }
-}
-
 /// At least a meaningful ore cluster, not a single isolated tile.
 const ORE_GARRISON_MIN_CELLS: usize = 10;
 const ORE_GARRISON_REACH_CELLS: i32 = 40;
@@ -1409,9 +1363,7 @@ const MAP_GARRISON_REACH_CELLS: i32 = 28;
 /// Reserve the opening's occupiers for forward mineral chokes and discovered
 /// enemy approaches. Filling ten home buildings before scouting a rich seam
 /// permanently strands the only riflemen that could contest it.
-// Restore the V41 policy invariant recorded by the regression test. The
-// existing campaign, solvent and emergency reserve allowances stay intact.
-const HOME_GARRISON_OPENING_CAP: usize = 1;
+const HOME_GARRISON_OPENING_CAP: usize = 3;
 
 fn garrison_priority(enemy_front: bool, ore: usize, forward: bool) -> u8 {
     if enemy_front { 0 }
@@ -1566,13 +1518,6 @@ pub(super) fn garrison_recruitment_site(brain:&AssistBrain,rules:&RuleSet,
         || obs.object_type(rules,o.type_id).is_some_and(strategic_public_asset))
         .map(|o|o.cell).collect();
     let ore=ore_garrison_buckets(&brain.ore_known);
-    let control = &brain.ore_control_buckets;
-    let cover_reach = occupying_cover_reach(rules, soldier);
-    let public_sites: Vec<_> = obs.neutral_structures()
-        .filter(|e| obs.is_cell_visible(e.cell.0,e.cell.1)
-            && obs.object_type(rules,e.type_id).is_some_and(strategic_public_asset))
-        .map(|e| e.cell).chain(assets.iter().copied()).collect();
-    let regional = !obs.is_campaign() && !brain.director.under_attack_now();
     let visible:Vec<_>=obs.visible_enemy_entities().collect();
     let producer=obs.current_producer(rules,soldier)?;
     let home=obs.observed_object_cell(producer)?;
@@ -1589,18 +1534,8 @@ pub(super) fn garrison_recruitment_site(brain:&AssistBrain,rules:&RuleSet,
                 || valuable_cover(brain,rules,obs,b.cell,&visible)
                 || ore_garrison_score(&ore,b.cell)>=ORE_GARRISON_MIN_CELLS)
     ).collect();
-    candidates.sort_unstable_by_key(|b| {
-        let assigned = obs.passengers(b.building_id) as usize
-            + brain.tracked.tasks.pending_at(JobKind::Garrison,b.building_id);
-        let forward = brain.census.base_cell.is_some_and(|base|
-            squared_distance(base,b.cell) >= 18*18);
-        let credits = if regional { ore_cover_value(control,b.cell,cover_reach) } else { 0 };
-        let rank = regional_cover_rank(regional,forward,ore_garrison_score(&ore,b.cell),
-            credits,within(public_sites.iter().copied(),b.cell,8),assigned);
-        (rank, std::cmp::Reverse(if rank == 0 { credits } else { 0 }),
-            !within(assets.iter().copied(),b.cell,10), obs.passengers(b.building_id).min(2),
-            squared_distance(home,b.cell),b.building_id)
-    });
+    candidates.sort_unstable_by_key(|b|(!within(assets.iter().copied(),b.cell,10),
+        obs.passengers(b.building_id).min(2),squared_distance(home,b.cell),b.building_id));
     candidates.truncate(12);
     for billet in candidates {
         for producer in own.iter().filter(|o|o.entity_id==producer)
@@ -1662,16 +1597,6 @@ pub(super) fn garrison(
     let anchors:Vec<_>=home_cells(brain).collect();
     let enemy_cells:Vec<_>=obs.visible_enemy_entities().map(|e|e.cell).collect();
     let ore_buckets = ore_garrison_buckets(&brain.ore_known);
-    let regional = !obs.is_campaign() && !brain.director.under_attack_now()
-        && !brain.director.recovering_under_fire();
-    let control_buckets = &brain.ore_control_buckets;
-    let region_assets: Vec<_> = if regional {
-        obs.neutral_structures().filter(|e|obs.is_cell_visible(e.cell.0,e.cell.1)
-            && obs.object_type(rules,e.type_id).is_some_and(strategic_public_asset))
-            .map(|e| e.cell)
-            .chain(obs.own_entities().filter(|e| obs.object_type(rules,e.type_id)
-                .is_some_and(strategic_public_asset)).map(|e|e.cell)).collect()
-    } else { Vec::new() };
     let asset_cells:Vec<_>=obs.own_entities().filter(|own|
         obs.object_type(rules,own.type_id).is_some_and(strategic_public_asset))
         .map(|own|own.cell).chain(obs.neutral_structures()
@@ -1706,17 +1631,6 @@ pub(super) fn garrison(
         .map(|billet| (billet.building_id,
             ore_garrison_score(&ore_buckets, billet.cell)))
         .filter(|(_, score)| *score >= ORE_GARRISON_MIN_CELLS)
-        .collect();
-    let max_cover_reach = if regional {
-        brain.census.units.iter().filter(|u| u.traits.occupier && u.controllable())
-            .filter_map(|u| obs.object_type(rules,u.type_id))
-            .map(|ty| occupying_cover_reach(rules,ty)).max().unwrap_or(0)
-    } else { 0 };
-    let regional_credits: BTreeMap<u64,usize> = billets.iter()
-        .filter(|b| regional && ore_sites.contains_key(&b.building_id)
-            && brain.census.base_cell.is_some_and(|home|
-                squared_distance(home,b.cell) >= 18*18))
-        .map(|b| (b.building_id, ore_cover_value(control_buckets,b.cell,max_cover_reach)))
         .collect();
     // The count is exact, not a guess from the census: a garrisoned unit is a
     // passenger of the building it walked into (`Observation::inside_transport`),
@@ -1832,28 +1746,6 @@ pub(super) fn garrison(
     // Choose *which soldiers get a turn* by strategic objective, not entity
     // storage order. The nearest home soldier no longer takes the frame's
     // order budget before the soldier beside the contested ore field.
-    let home_reserve = brain.squads.squad(super::squads::Role::Defend)
-        .map(|s| s.members.clone()).unwrap_or_default();
-    let regional_foothold = regional && billets.iter().any(|b| {
-        let assigned = obs.passengers(b.building_id)
-            + pending_by_site.get(&b.building_id).map_or(0,BTreeSet::len);
-        let forward = home.is_some_and(|base| squared_distance(base,b.cell)>=18*18);
-        regional_cover_rank(regional,forward,
-            ore_sites.get(&b.building_id).copied().unwrap_or(0),
-            regional_credits.get(&b.building_id).copied().unwrap_or(0),
-            within(region_assets.iter().copied(),b.cell,8),assigned) < 2
-            && room_left.get(&b.building_id).copied().unwrap_or(0)>0
-            && brain.census.units.iter().any(|u| {
-                u.traits.occupier && brain.census.available(u)
-                    && !home_reserve.contains(&u.entity_id)
-                    && !brain.crate_claims.contains_key(&u.entity_id)
-                    && !brain.crate_returns.contains_key(&u.entity_id)
-                    && squared_distance(u.cell,b.cell)<=ORE_GARRISON_REACH_CELLS.pow(2)
-                    && obs.can_garrison(rules,u.entity_id,b.building_id)
-                    && obs.object_type(rules,u.type_id).is_some_and(|ty|
-                        building_approachable(obs,ty.movement_zone,u.cell,b.cell))
-            })
-    });
     let mut personnel: Vec<_> = brain.census.units.iter().filter(|unit|
         unit.traits.occupier && unit.controllable()).collect();
     personnel.sort_unstable_by_key(|unit| billets.iter().filter_map(|billet| {
@@ -1863,17 +1755,10 @@ pub(super) fn garrison(
             else if front { FRONT_GARRISON_REACH_CELLS }
             else { HOME_REACH_CELLS };
         let distance = squared_distance(unit.cell, billet.cell);
-        let assigned = obs.passengers(billet.building_id) as usize
-            + pending_by_site.get(&billet.building_id).map_or(0,BTreeSet::len);
-        let forward = home.is_some_and(|base| squared_distance(base,billet.cell)>=18*18);
-        let credit = regional_credits.get(&billet.building_id).copied().unwrap_or(0);
-        let rank = regional_cover_rank(regional && !home_reserve.contains(&unit.entity_id),
-            forward,ore,credit,
-            within(region_assets.iter().copied(),billet.cell,8),assigned);
         (distance <= reach * reach).then_some((
-            rank, garrison_priority(enemy_front_ids.contains(&billet.building_id),ore,front),
+            garrison_priority(enemy_front_ids.contains(&billet.building_id),ore,front),
             distance, unit.entity_id))
-    }).min().unwrap_or((3, 4, i32::MAX, unit.entity_id)));
+    }).min().unwrap_or((4, i32::MAX, unit.entity_id)));
     for unit in personnel {
         if issued >= FORCE_ORDERS_PER_FRAME || garrisoned >= limit {
             break;
@@ -1901,8 +1786,6 @@ pub(super) fn garrison(
             || brain.joint_ops.reserves(unit.entity_id)
             || brain.asset_guards.contains_key(&unit.entity_id)
             || brain.outpost_guards.contains_key(&unit.entity_id)
-            || brain.crate_claims.contains_key(&unit.entity_id)
-            || brain.crate_returns.contains_key(&unit.entity_id)
             || (holds_or_fights(unit.mission)
                 && !may_garrison_from_mission(
                     unit.mission, near_front || cover_nearby,
@@ -1914,8 +1797,6 @@ pub(super) fn garrison(
         }
         let visible:Vec<_>=obs.visible_enemy_entities().collect();
         let approach=super::safety::envelopes(rules,obs,unit.entity_id,&visible,true);
-        let actual_cover = if regional { obs.object_type(rules,unit.type_id)
-            .map_or(0, |ty| occupying_cover_reach(rules,ty)) } else { 0 };
         let Some(billet) = billets
             .iter()
             .filter(|billet| brain.specialist_risk_after.get(&(unit.entity_id,billet.building_id))
@@ -1941,8 +1822,7 @@ pub(super) fn garrison(
                     enemy_front_ids.contains(&billet.building_id), ore,
                     front_ids.contains(&billet.building_id)) < 3;
                 important || !is_home(billet.cell)
-                    || home_placed < (if regional_foothold && !solvent
-                        { HOME_GARRISON_OPENING_CAP } else { 3 })
+                    || home_placed < HOME_GARRISON_OPENING_CAP
                         + spare_occupiers.saturating_sub(4).min(8)
                         + if solvent {4}else{0}
             })
@@ -1964,9 +1844,9 @@ pub(super) fn garrison(
                 && obs.entity_type(rules, unit.entity_id).is_some_and(|ty|
                     building_approachable(obs, ty.movement_zone, unit.cell, billet.cell)))
             .min_by_key(|billet| {
-                // A new regional foothold takes precedence over the old
-                // enemy-perimeter preference. Once two seats are committed,
-                // the ordinary front/ore/home ordering takes over again.
+                // Rich central cover first, then other defended approach
+                // lanes, then ordinary home houses. The final distance is a
+                // tie-break, not the whole strategy for a mineral chokepoint.
                 let ore = ore_sites.get(&billet.building_id).copied().unwrap_or(0);
                 let priority = garrison_priority(
                     enemy_front_ids.contains(&billet.building_id), ore,
@@ -1976,18 +1856,7 @@ pub(super) fn garrison(
                     + (billet.room as usize).saturating_sub(
                         pending_by_site.get(&billet.building_id).map_or(0,BTreeSet::len)
                             + room_left.get(&billet.building_id).copied().unwrap_or(0));
-                let forward = home.is_some_and(|base|
-                    squared_distance(base,billet.cell) >= 18*18);
-                let credit = if regional && forward && ore >= ORE_GARRISON_MIN_CELLS {
-                    if actual_cover == max_cover_reach {
-                        regional_credits.get(&billet.building_id).copied().unwrap_or(0)
-                    } else { ore_cover_value(control_buckets,billet.cell,actual_cover) }
-                } else { 0 };
-                let rank = regional_cover_rank(regional && !home_reserve.contains(&unit.entity_id),
-                    forward,ore,credit,
-                    within(region_assets.iter().copied(),billet.cell,8),assigned);
-                (rank, std::cmp::Reverse(if rank == 0 { credit } else { 0 }),
-                    priority, assigned.min(2), usize::MAX - ore,
+                (priority, assigned.min(2), usize::MAX - ore,
                     squared_distance(unit.cell, billet.cell), billet.building_id)
             })
         else {
@@ -2005,10 +1874,8 @@ pub(super) fn garrison(
             brain.tracked.tasks.claim(tick, unit.entity_id,
                 JobKind::Garrison, Some(billet.building_id), Some(billet.cell), unit.cell);
             if super::trace_enabled("AUTOPLAY_V56_TRACE") {
-                log::info!("auto play: v56_garrison_proposal tick={tick} actor={} target={} asset_cover={} regional_ore_credit={} regional_public_cover={}",
-                    unit.entity_id,billet.building_id,within(asset_cells.iter().copied(),billet.cell,8),
-                    ore_cover_value(control_buckets,billet.cell,actual_cover),
-                    within(region_assets.iter().copied(),billet.cell,8));
+                log::info!("auto play: v56_garrison_proposal tick={tick} actor={} target={} asset_cover={}",
+                    unit.entity_id,billet.building_id,within(asset_cells.iter().copied(),billet.cell,8));
             }
             issued += 1;
             garrisoned += 1;
@@ -2350,10 +2217,7 @@ fn engineer_preference(
 pub(super) fn strategic_public_asset(ty: &ObjectType) -> bool {
     ty.capturable && (ty.produce_cash_amount > 0 || ty.hospital
         || ty.unit_repair || ty.refinery || ty.radar
-        || ty.super_weapon.is_some() || ty.super_weapon2.is_some()
-        || (ty.category == ObjectCategory::Building && ty.tech_level < 0
-            && ty.power > 0 && ty.factory_type().is_none()
-            && !(0..ty.weapon_record_count()).any(|slot| ty.weapon_at(slot).is_some())))
+        || ty.super_weapon.is_some() || ty.super_weapon2.is_some())
 }
 
 /// Preserve a visible strategic public building from our own army's fire
@@ -2562,6 +2426,12 @@ pub(super) fn forces(
         {
             continue;
         }
+        // A real native scout journey is not an idle unit. Do not extend
+        // the exemption to merely planned destinations, arrivals or alarms.
+        if threatened.is_none() && brain.recon.destination(unit.entity_id)
+            .is_some_and(|cell|obs.destination(unit.entity_id)==Some(cell)
+                && squared_distance(unit.cell,cell)>2*2)
+        {continue;}
         // A unit that is already holding or fighting is doing exactly this, and
         // its mission owns it: a second Guard would cancel the fight.
         if holds_or_fights(unit.mission) {
@@ -3599,7 +3469,7 @@ const CRATE_SEEK_CELLS: i32 = 8;
 /// Keep the lead briefly, but give currently visible boxes first refusal.
 const CRATE_MEMORY_FRAMES: u64 = 360;
 /// Never lend a fast scout to a vanished box for a whole regeneration cycle.
-const CRATE_CLAIM_FRAMES: u64 = 600;
+const CRATE_CLAIM_FRAMES: u64 = super::tasks::CRATE_MAX_FRAMES;
 
 fn crate_collector_type(ty:&ObjectType)->bool {
     matches!(ty.category,ObjectCategory::Infantry|ObjectCategory::Vehicle)
@@ -6111,41 +5981,5 @@ mod v41_defense_regression_tests {
         assert!(!shield_emergency(400, 500, 0, 12));
         assert!(shield_emergency(80, 500, 40, 2));
         assert!(shield_emergency(80, 500, 80, 1));
-    }
-}
-
-#[cfg(all(test, tests_sim_p_s))]
-mod v80_regional_cover_tests {
-    use super::*;
-
-    #[test]
-    fn cover_value_uses_resource_value_and_actual_weapon_distance() {
-        let known = BTreeMap::from([((40,40), 100usize), ((44,40), 200),
-            ((48,40), 900), ((41,41), 300)]);
-        let buckets = ore_control_buckets(&known);
-        assert_eq!(ore_cover_value(&buckets,(40,40),0),0);
-        assert_eq!(ore_cover_value(&buckets,(40,40),5),600);
-        assert_eq!(ore_cover_value(&buckets,(40,40),8),1500);
-    }
-
-    #[test]
-    fn an_unfilled_forward_ore_or_public_foothold_beats_an_unrelated_front() {
-        assert_eq!(regional_cover_rank(true,true,10,500,false,0),0);
-        assert_eq!(regional_cover_rank(true,true,10,500,false,1),0);
-        assert_eq!(regional_cover_rank(true,true,10,500,false,2),2);
-        assert_eq!(regional_cover_rank(true,true,10,0,false,0),2);
-        assert_eq!(regional_cover_rank(true,true,0,0,true,0),1);
-        assert_eq!(regional_cover_rank(true,false,20,1000,true,0),2);
-        assert_eq!(regional_cover_rank(false,true,20,1000,true,0),2);
-    }
-
-    #[test]
-    fn civilian_tech_power_is_a_public_prize_without_promoting_ordinary_power() {
-        let Some(rules) = crate::rules::retail_ini_fixture::retail_unlayered_rules()
-            else { return; };
-        assert!(strategic_public_asset(rules.object("CAPOWR").expect("tech power")));
-        assert!(strategic_public_asset(rules.object("CAOILD").expect("oil")));
-        assert!(strategic_public_asset(rules.object("CAAIRP").expect("airport")));
-        assert!(!strategic_public_asset(rules.object("GAPOWR").expect("ordinary power")));
     }
 }

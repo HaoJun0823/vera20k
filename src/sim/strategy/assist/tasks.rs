@@ -17,6 +17,8 @@ use super::census::Census;
 use super::tracked::TrackedKind;
 use super::squared_distance;
 
+pub(super) const CRATE_MAX_FRAMES: u64 = 1200;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum JobKind {
     Crate,
@@ -53,12 +55,27 @@ impl Job {
         self.kind == kind && self.target == target && self.cell == cell
     }
 
+    /// An errand's progress means getting closer to its goal. Oscillating
+    /// between two cells must not indefinitely extend a crate appointment.
+    /// Other job kinds retain their existing movement/progress semantics.
+    fn observe_progress(&mut self, now:u64, cell:(u16,u16)) -> bool {
+        if cell == self.last_cell {return false;}
+        if self.kind==JobKind::Crate && !self.cell.is_some_and(|goal|
+            squared_distance(goal,cell)<squared_distance(goal,self.last_cell)) {
+            return false;
+        }
+        self.last_cell=cell;
+        self.last_progress=now;
+        self.phase=Phase::Traveling;
+        true
+    }
+
     fn stale(&self, now: u64) -> bool {
         // A long-distance mission must be allowed to travel for as long as it
         // makes progress, not merely for one tracked Move's 450-frame term.
         let no_progress = now.saturating_sub(self.last_progress);
         match self.kind {
-            JobKind::Crate => no_progress >= 240 || now.saturating_sub(self.assigned_at) >= 600,
+            JobKind::Crate => no_progress >= 240 || now.saturating_sub(self.assigned_at) >= CRATE_MAX_FRAMES,
             JobKind::Garrison => no_progress >= 480,
             JobKind::Engineer | JobKind::Spy => no_progress >= 450
                 || now.saturating_sub(self.assigned_at)>=3600,
@@ -272,12 +289,8 @@ impl TaskLedger {
                 ended.push(actor);
                 continue;
             }
-            if unit.cell != job.last_cell {
-                job.last_cell = unit.cell;
-                job.last_progress = now;
-                job.phase = Phase::Traveling;
-            } else if job.cell.is_some_and(|cell| squared_distance(cell, unit.cell) <= 2)
-                || job.target.is_some_and(|target| obs.attack_target(actor) == Some(target))
+            if !job.observe_progress(now,unit.cell) && (job.cell.is_some_and(|cell| squared_distance(cell, unit.cell) <= 2)
+                || job.target.is_some_and(|target| obs.attack_target(actor) == Some(target)))
             {
                 job.phase = Phase::AwaitingResult;
             }
@@ -297,6 +310,22 @@ impl TaskLedger {
 #[cfg(all(test, tests_sim_p_s))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn v81_crate_progress_is_monotonic_and_bounded() {
+        let mut tasks=TaskLedger::new();
+        tasks.claim(0,8,JobKind::Crate,None,Some((20,20)),(10,20));
+        let job=tasks.jobs.get_mut(&8).unwrap();
+        assert!(job.observe_progress(200,(11,20)));
+        assert!(!job.observe_progress(300,(10,20)));
+        assert!(!job.observe_progress(400,(11,20)));
+        assert!(!job.stale(439));
+        assert!(job.stale(440));
+        assert!(job.observe_progress(590,(12,20)));
+        assert!(!job.stale(600));
+        assert!(job.observe_progress(1199,(19,20)));
+        assert!(job.stale(1200));
+    }
 
     #[test]
     fn v61_a_specialist_cannot_renew_a_wandering_job_forever() {

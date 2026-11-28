@@ -248,7 +248,9 @@ pub(super) fn spend(
         return;
     }
     if invest_second_base(brain,rules,obs,budget,out) {return;}
-    build_next(brain, rules, obs, budget, out, None);
+    if !advantage_investment(brain,rules,obs,budget,out) {
+        build_next(brain, rules, obs, budget, out, None);
+    }
     // An optional research plan which did not hold any money this frame has
     // been completed or displaced, not silently renewed on its next visit.
     if brain.yard_reserve == 0 { brain.research_bank.interrupt(obs.tick()); }
@@ -649,6 +651,153 @@ fn income_investment(brain:&mut AssistBrain,rules:&RuleSet,obs:&Observation<'_>,
         if bought {log::info!("auto play: v57_income_purchase tick={now} type={} price={price} kind=miner",ty.id);}
         bought
     }
+}
+
+
+/// A conservative *local* observed comparison, not a claim of global
+/// dominance. No remembered or hidden enemy positions finance a bank.
+fn advantage_strength(ground:usize,hulls:usize,ours:i32,theirs:i32)->bool {
+    ground>=6 && hulls>=3 && ours>=1800
+        && i64::from(ours)*2>=i64::from(theirs.max(0))*3
+}
+
+fn investment_front_advantage(brain:&AssistBrain,rules:&RuleSet,obs:&Observation<'_>)->bool {
+    let Some((target,_,front))=brain.push_target else{return false;};
+    let Some(team)=brain.squads.squad(super::squads::Role::Attack) else{return false;};
+    let visible:Vec<_>=obs.visible_enemy_entities().collect();
+    if !visible.iter().any(|e|e.entity_id==target
+        && super::advance::cell_distance(e.cell,front)<=8) {return false;}
+    let mut ground=0;
+    let mut hulls=0;
+    let mut ours=0i32;
+    for u in &brain.census.units {
+        if !team.members.contains(&u.entity_id) || !brain.census.main_available(u)
+            || u.health_permille<650 || u.traits.aircraft
+            || !matches!(u.slot,super::census::Slot::Vehicle|super::census::Slot::Infantry)
+            || super::advance::cell_distance(u.cell,front)>20 {continue;}
+        ground+=1;
+        if u.slot==super::census::Slot::Vehicle {hulls+=1;}
+        ours=ours.saturating_add(u.points);
+    }
+    let theirs=visible.iter().filter(|e|super::advance::cell_distance(e.cell,front)<=22)
+        .filter_map(|e| {
+            let ty=obs.object_type(rules,e.type_id)?;
+            if ty.is_base_defense && !obs.visible_enemy_building_operational(rules,e.entity_id)
+            {return None;}
+            Some(super::census::fight_points(ty,1000))
+        }).fold(0i32,i32::saturating_add);
+    advantage_strength(ground,hulls,ours,theirs)
+}
+
+/// Let a healthy, locally stronger army fund one legal technology or capital
+/// purchase before spending every credit on another ordinary hull. Reuse the
+/// research bank, its finite deadline and existing emergency interruption.
+/// No new independent fund, purchase rule or hidden resource observation.
+fn advantage_investment(brain:&mut AssistBrain,rules:&RuleSet,obs:&Observation<'_>,
+    budget:&Budget,out:&mut Outbox)->bool {
+    let now=obs.tick();
+    let continuing=brain.research_bank.advantage_selected();
+    let interrupt=|brain:&mut AssistBrain| {
+        if brain.research_bank.advantage_selected() {
+            brain.research_bank.interrupt(now);
+            brain.yard_reserve=0;
+        }
+        false
+    };
+    if !continuing && (now%30!=0 || brain.research_bank.active(now).is_some()) {return false;}
+    if brain.director.under_attack_now() || brain.director.emergency_spending(obs)
+        || brain.director.recovering_income() || brain.director.rebuilding_force()
+        || brain.mobilization.active() || brain.campaign.economy_resting()
+        || obs.power_blackout_active() || plan::power_short(rules,obs,&brain.census)
+        || plan::needs_power_reserve(rules,obs,&brain.census,budget.free)
+        || brain.census.yards==0 || brain.census.refineries==0 || brain.census.harvesters<2
+        || !brain.census.harvesters_served() || !can_replace_units(rules,obs,&brain.census)
+        || count_in(obs,rules,&brain.census,&rules.build_barracks_types)==0
+        || brain.census.available_fighters()<10
+        || !budget.income.is_some_and(|rate|rate>=1200)
+        || brain.census.line(ProductionCategory::Building).busy()
+        || plan::line_proposed(rules,obs,out,ProductionCategory::Building)
+        || super::composition::local_air_emergency(brain,rules,obs,budget.free)
+        || !investment_front_advantage(brain,rules,obs)
+    {return interrupt(brain);}
+    let free=budget.after_commitment(plan::proposed_cost(rules,obs,out));
+    let active=brain.research_bank.active(now);
+    if continuing && active.is_none() {return interrupt(brain);}
+    let lab_missing=count_in(obs,rules,&brain.census,&rules.build_tech_types)==0;
+    let radar_missing=count_in(obs,rules,&brain.census,&rules.build_radar_types)==0;
+    let strike_missing=obs.super_weapons() && !obs.own_entities().any(|u|
+        obs.object_type(rules,u.type_id).is_some_and(|ty|damages_a_base(rules,ty)));
+    let purifier_worth=brain.census.harvesters>=3 && brain.census.refineries>=2
+        && budget.income.is_some_and(|rate|rate>=1800)
+        && brain.ore_scan.as_ref().is_some_and(|scan|scan.stock>=330)
+        && count_ore_purifiers(rules,obs)==0;
+    let industry_worth=budget.income.is_some_and(|rate|rate>=2400)
+        && super::composition::healthy_ground_hulls(brain,rules,obs)>=6
+        && count_industrial_plants(rules,obs)==0;
+    // The type comes from native CanBuild and the rules. Active appointments
+    // keep the original target, not whichever item became attractive today.
+    let candidate=all_class_types(rules,obs,ObjectCategory::Building)
+        .filter_map(|(ty,id)| {
+            let (rank,item)=if lab_missing && rules.build_tech_types.iter().any(|n|*n==ty.id) {
+                (0,Item::Tech)
+            } else if lab_missing && radar_missing && rules.build_radar_types.iter().any(|n|*n==ty.id) {
+                (1,Item::Radar)
+            } else if purifier_worth && ty.ore_purifier {(2,Item::Purifier)}
+            else if industry_worth && ty.factory_plant {(3,Item::IndustrialPlant)}
+            else if strike_missing && damages_a_base(rules,ty) {(4,Item::Superweapon)}
+            else {return None;};
+            let price=obs.cost_of(rules,ty);
+            if active.is_some_and(|old|old!=id) || !brain.director.permits_build(item)
+                || obs.can_build(rules,ty,true)!=CanBuild::Yes || !obs.has_producer(rules,ty)
+                || crate::sim::production::category_for_object(ty)!=ProductionCategory::Building
+                || obs.in_production(rules,id)
+                || count_building_type(rules,obs,|own|own.id==ty.id)>0
+                || brain.site_preflight_after.get(&id).is_some_and(|end|now<*end)
+                || plan::power_deficit(rules,obs,&brain.census,ty.power.min(0))>0
+                || price<=0 || free.free<price/3
+                || !free.income.is_some_and(|rate|
+                    i64::from(price)-i64::from(free.free)<=i64::from(rate)*2)
+            {return None;}
+            Some((rank,price,id,item,ty))
+        }).min_by_key(|(rank,price,id,_,_)|(*rank,*price,*id));
+    let Some((_,price,id,item,ty))=candidate else{return interrupt(brain);};
+    if free.free<price {
+        let hold=brain.research_bank.hold_advantage(now,id,free.free,price,free.income);
+        if hold==0 {return false;}
+        brain.yard_reserve=hold;
+        brain.quality_bank.interrupt(now);
+        brain.quality_reserve=0;
+        if now%150==0 {
+            log::info!("auto play: v81_advantage_saving tick={now} type={} free={} price={price}",
+                ty.id,free.free);
+        }
+        return true;
+    }
+    // A funded investment can use only real free credits. All normal
+    // CanBuild, placement, native payment and miner-recovery checks still run.
+    let quality=brain.quality_reserve;
+    brain.quality_reserve=0;
+    build_next(brain,rules,obs,&free,out,Some(plan::Chosen{step:None,item,ty,type_id:id}));
+    if plan::line_proposed(rules,obs,out,ProductionCategory::Building) {
+        brain.research_bank.clear();
+        brain.quality_bank.interrupt(now);
+        log::info!("auto play: v81_advantage_purchase tick={now} type={} price={price}",ty.id);
+        true
+    } else {
+        brain.quality_reserve=quality;
+        brain.yard_reserve=0;
+        interrupt(brain)
+    }
+}
+
+#[cfg(all(test, tests_sim_p_s))]
+#[test]
+fn v81_bank_requires_real_local_strength() {
+    assert!(advantage_strength(6,3,3000,2000));
+    assert!(!advantage_strength(6,3,2999,2000));
+    assert!(!advantage_strength(5,3,4000,1000));
+    assert!(!advantage_strength(6,2,4000,1000));
+    assert!(!advantage_strength(6,3,1700,0));
 }
 
 /// Start the one structure the base needs most, while the yard is free.

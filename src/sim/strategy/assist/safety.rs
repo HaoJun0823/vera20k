@@ -338,12 +338,82 @@ pub(super) fn firing_post(rules: &RuleSet, obs: &Observation<'_>, unit: &Unit,
     best.map(|(_,_,cell)| cell)
 }
 
+/// A support gun may safely fire at a diagonal position that a square
+/// movement envelope would reject. For a real, current shot use the native
+/// range result for *return fire*, not just the proposed path's cell box.
+/// Cannot is not proof of being outside range (e.g. transient weapon state).
+fn fixed_return_fire_risk(in_box: bool, answer: Engage) -> bool {
+    answer == Engage::Ready || (in_box && answer != Engage::OutOfRange)
+}
+
+fn support_current_fire_safe(rules: &RuleSet, obs: &Observation<'_>,
+    unit: &Unit, visible: &[EnemyEntity]) -> bool {
+    let id = unit.entity_id;
+    let immune = tactics::psychic_immune(rules,obs,id);
+    !visible.iter().any(|enemy| {
+        let Some(ty) = obs.object_type(rules,enemy.type_id) else {return false;};
+        let fixed = ty.category == ObjectCategory::Building;
+        if fixed && !obs.visible_enemy_building_operational(rules,enemy.entity_id) {
+            return false;
+        }
+        let d = distance(unit.cell,enemy.cell);
+        // Keep a hard, actor-specific psychic margin. Being out of a
+        // conventional weapon's range is not immunity to mind control.
+        if !immune && tactics::actor_control_reach(rules,obs,enemy.entity_id)
+            .is_some_and(|reach| d <= reach.saturating_add(2)) {return true;}
+        let reach = tactics::effective_reach_against(rules,obs,enemy.entity_id,id);
+        if reach <= 0 {return false;}
+        if !fixed {
+            // Do not preserve an exposed artillery shot as a mobile enemy
+            // closes. Its prospective movement remains conservatively gated.
+            return d <= reach.saturating_add(2);
+        }
+        let (w,h) = ty.foundation.dimensions();
+        let footprint = i32::from(w.max(h)).max(1);
+        if d > reach.saturating_add(footprint).saturating_add(2) {return false;}
+        fixed_return_fire_risk(d <= reach.saturating_add(footprint),
+            obs.engage(rules,enemy.entity_id,id))
+    })
+}
+
+/// Only a genuinely ready, observed building shot of a long-range ground
+/// vehicle gets the precise stationary-fire policy. Never use it to admit
+/// a pursuit, a hypothetical future firing cell, or a specialist's route.
+pub(super) fn support_firing_here(rules: &RuleSet, obs: &Observation<'_>,
+    unit: &Unit, target: u64, visible: &[EnemyEntity]) -> bool {
+    unit.health_permille >= 500 && ground_actor(rules,obs,unit)
+        && super::advance::fire_support::support_reach(rules,obs,unit) >= 8
+        && visible.iter().any(|e|e.entity_id==target)
+        && !obs.visible_enemy_invulnerable(target)
+        && obs.entity_type(rules,target).is_some_and(|ty|ty.category==ObjectCategory::Building)
+        && obs.engage(rules,unit.entity_id,target)==Engage::Ready
+        && orders::admits(rules,obs,unit.entity_id,&Goal::Attack{target})
+        && support_current_fire_safe(rules,obs,unit,visible)
+}
+
+/// Continuity of a real native shot, not a new reservation. A moving gun
+/// is not necessarily holding a firing post. Wounded/service/emergency
+/// owners still run before the ordinary support passes.
+pub(super) fn holding_support_fire(rules: &RuleSet, obs: &Observation<'_>,
+    unit: &Unit, visible: &[EnemyEntity]) -> bool {
+    obs.destination(unit.entity_id).is_none()
+        && obs.own_destination_object(unit.entity_id).is_none()
+        && obs.attack_target(unit.entity_id).is_some_and(|target|
+            support_firing_here(rules,obs,unit,target,visible))
+}
+
 /// A native in-range attack does not need to chase. Reject positions inside
 /// another currently observed fixed weapon or psychic-control envelope.
 pub(super) fn firing_here(rules: &RuleSet, obs: &Observation<'_>, unit: &Unit, target: u64) -> bool {
     if obs.engage(rules,unit.entity_id,target) != Engage::Ready
         || !obs.can_hurt(rules,unit.entity_id,target) { return false; }
     let visible: Vec<_> = obs.visible_enemy_entities().collect();
+    if ground_actor(rules,obs,unit)
+        && super::advance::fire_support::support_reach(rules,obs,unit)>=8
+        && obs.entity_type(rules,target).is_some_and(|ty|ty.category==ObjectCategory::Building)
+    {
+        return support_firing_here(rules,obs,unit,target,&visible);
+    }
     !covered(&envelopes(rules,obs,unit.entity_id,&visible,false),unit.cell)
 }
 
@@ -912,6 +982,7 @@ fn review_front(brain: &mut AssistBrain, rules: &RuleSet, obs: &Observation<'_>,
         && !u.in_service() && !obs.own_repair_service(rules,u.entity_id)
         && !super::advance::siege_member(brain,tick,u.entity_id)).copied().collect();
     let mut by_type = BTreeMap::new();
+    let visible: Vec<_> = obs.visible_enemy_entities().collect();
     for unit in &units {
         let id=unit.entity_id;
         let next=proposed.get(&id).copied();
@@ -942,9 +1013,15 @@ fn review_front(brain: &mut AssistBrain, rules: &RuleSet, obs: &Observation<'_>,
             guns
         });
         let released=brain.charge_released.get(&id).copied();
+        let precise = |g: Goal| matches!(g,Goal::Attack{target}
+            if support_firing_here(rules,obs,unit,target,&visible));
+        let native_precise=native.is_some_and(precise);
+        let next_precise=if next==native {native_precise} else {next.is_some_and(precise)};
+        let precise_fire=|g:Goal| (native==Some(g) && native_precise)
+            || (next==Some(g) && next_precise);
         let bad=|g: Goal| {
             let ended=matches!(g,Goal::Attack {target} if Some(target)==released);
-            ended || (!guns.is_empty() && front_bad(rules,obs,unit,guns,g)
+            ended || (!precise_fire(g) && !guns.is_empty() && front_bad(rules,obs,unit,guns,g)
                 && !matches!(g,Goal::Move {cell} if covered(guns,unit.cell)
                     && escape_reduces(guns,unit.cell,cell) && valid_cell(rules,obs,unit,cell))
                 && !supported_ready_fire(brain,rules,obs,unit,g))
@@ -963,12 +1040,14 @@ fn review_front(brain: &mut AssistBrain, rules: &RuleSet, obs: &Observation<'_>,
             && (safe_leg(guns,unit.cell,cell,true)||escape_reduces(guns,unit.cell,cell))
             && valid_cell(rules,obs,unit,cell));
         let native_bad=native.is_some_and(|g| bad(g))
-            || (exposed && !native.is_some_and(|g| mobile_shot(g)||leaving(g)));
+            || (exposed && !native.is_some_and(|g| mobile_shot(g)||leaving(g)
+                || (precise_fire(g) && obs.destination(id).is_none()
+                    && obs.own_destination_object(id).is_none())));
         if !next_bad && !native_bad { continue; }
         // A safe explicit replacement already supersedes the old pursuit;
         // Stop by itself does not get a tank out of a cannon envelope.
         if native_bad && !next_bad && next.is_some_and(|g| if exposed {
-            mobile_shot(g)||leaving(g)
+            mobile_shot(g)||leaving(g)||precise_fire(g)
         } else { matches!(g,Goal::Move {..}|Goal::Attack {..}|Goal::AttackMove {..}|Goal::Stop) }) { continue; }
         if brain.census.main_available(unit) { brain.tracked.cancel_for_safety(id); }
         else { brain.tracked.forget_primary(id); }
@@ -1358,6 +1437,27 @@ mod tests {
         assert!(supported_ready_fire(&brain,&rules,&obs,unit,Goal::Attack {target:tower}));
     }
     #[test]
+    fn v81_stationary_support_distinguishes_diagonal_and_exposed_fire() {
+        let (mut sim,rules)=scene();
+        let owner=sim.interner.intern("Americans");
+        let diagonal=sim.spawn_object("ARTY","Americans",13,14,255,&rules).unwrap();
+        let exposed=sim.spawn_object("ARTY","Americans",16,20,255,&rules).unwrap();
+        let tower=sim.spawn_object("TOWER","Russians",19,20,255,&rules).unwrap();
+        let obs=Observation::new(&sim,owner);
+        let mut brain=AssistBrain::new(0xA436);
+        brain.rebuild_census(&rules,&obs);
+        let visible:Vec<_>=obs.visible_enemy_entities().collect();
+        let a=brain.census.units.iter().find(|u|u.entity_id==diagonal).unwrap();
+        let b=brain.census.units.iter().find(|u|u.entity_id==exposed).unwrap();
+        assert_eq!(obs.engage(&rules,diagonal,tower),Engage::Ready);
+        assert_eq!(obs.engage(&rules,tower,diagonal),Engage::OutOfRange);
+        assert!(covered(&envelopes(&rules,&obs,diagonal,&visible,false),a.cell));
+        assert!(support_firing_here(&rules,&obs,a,tower,&visible));
+        assert_eq!(obs.engage(&rules,tower,exposed),Engage::Ready);
+        assert!(!support_firing_here(&rules,&obs,b,tower,&visible));
+    }
+
+    #[test]
     fn overlapping_escape_must_reduce_exposure_without_new_battery() {
         let guns=[Envelope {at:(20,20),reach:6},Envelope {at:(30,20),reach:6}];
         assert!(escape_reduces(&guns,(25,20),(25,27)));
@@ -1520,4 +1620,14 @@ mod tests {
         assert!(recovery_floor(false)>entry_floor(false));
         assert!(recovery_floor(true)>entry_floor(true));
     }
+}
+
+#[cfg(all(test, tests_sim_p_s))]
+#[test]
+fn v81_current_fire_uses_native_range_without_treating_cannot_as_safety() {
+    assert!(fixed_return_fire_risk(true, Engage::Ready));
+    assert!(fixed_return_fire_risk(false, Engage::Ready));
+    assert!(fixed_return_fire_risk(true, Engage::Cannot));
+    assert!(!fixed_return_fire_risk(true, Engage::OutOfRange));
+    assert!(!fixed_return_fire_risk(false, Engage::OutOfRange));
 }

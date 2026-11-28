@@ -410,7 +410,7 @@ impl Director {
     }
 
     fn choose(&self, now: u64, obs: &Observation<'_>, from: (u16,u16),
-        zone: MovementZone, sight: i32, threats: &[((u16,u16),i32)],
+        zone: MovementZone, threats: &[((u16,u16),i32)],
         occupied: &BTreeSet<(u16,u16)>,
     ) -> Option<Candidate> {
         let mut best = None;
@@ -446,17 +446,8 @@ impl Director {
                 || (site.last_probed != 0
                     && now.saturating_sub(site.last_probed) < REVISIT_COOLDOWN)
             { continue; }
-            // A 12-cell standoff cannot reveal a prize with a 5-cell dog.
-            // Use its actual rules Sight to choose a nearer observation
-            // post only for the urgent nonhostile asset. Ordinary recon is
-            // unchanged. Never route this special scout through seen fire.
-            let r = (sight - 1).clamp(1, 10);
-            let diag = (r * 2 / 3).max(1);
-            let close = [(-r,0),(r,0),(0,-r),(0,r),
-                (-diag,-diag),(-diag,diag),(diag,-diag),(diag,diag)];
-            let far = [(-12,0),(12,0),(0,-12),(0,12),
-                (-9,-9),(-9,9),(9,-9),(9,9)];
-            for (dx,dy) in if urgent { close } else { far } {
+            for (dx,dy) in [(-12,0),(12,0),(0,-12),(0,12),
+                (-9,-9),(-9,9),(9,-9),(9,9)] {
                 let (Ok(x),Ok(y)) = (
                     u16::try_from(i32::from(site.cell.0)+dx),
                     u16::try_from(i32::from(site.cell.1)+dy),
@@ -464,15 +455,13 @@ impl Director {
                 let cell = (x,y);
                 if !eligible(obs,zone,from,cell,threats,
                     &self.blocked,occupied,now)
-                    || (urgent && threats.iter().any(|(at, reach)|
-                        super::tactics::path_enters_control_box(from,cell,*at,*reach)))
                 { continue; }
                 let distance = cell_distance(from,cell);
                 let choice = Candidate {
                     destination: cell, purpose: Purpose::Revisit(*id),
                     utility: 420 + site.interest.priority() * 90
                         + i32::from(!site.hostile) * 60
-                        + (if urgent { 1200 } else { 0 }) - distance * 5,
+                        + (if urgent { 500 } else { 0 }) - distance * 5,
                 };
                 best = better(choice,best);
             }
@@ -542,7 +531,7 @@ impl Director {
             else { continue; };
             if !unit.controllable() || unit.in_service() { continue; }
             let Some(ty) = obs.object_type(rules,unit.type_id) else { continue; };
-            let Some(candidate) = self.choose(now,obs,unit.cell,ty.movement_zone,ty.sight,
+            let Some(candidate) = self.choose(now,obs,unit.cell,ty.movement_zone,
                 &threats,&occupied) else { continue; };
             if let Purpose::Revisit(site_id) = candidate.purpose {
                 if let Some(site) = self.sites.get_mut(&site_id) { site.last_probed = now; }
