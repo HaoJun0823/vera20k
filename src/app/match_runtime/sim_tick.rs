@@ -1783,7 +1783,7 @@ fn after_frame(
         // inserts the button). Without this the sidebar shows nothing
         // while the house builds, which reads as the house doing
         // something it may not.
-        let auto_playing = state.match_state.auto_play.is_some();
+        let auto_playing = match_state.auto_play.is_some();
         if recheck || flashing || auto_playing {
             // The rebuilt view takes the same drawn state.
             crate::app::presentation::sidebar_render::refresh_sidebar_projection(

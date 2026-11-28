@@ -2050,8 +2050,15 @@ const AUTO_PLAY_POLICY_SEED: u64 = 0x5EED_2_1;
 /// it through the command path: deploy the MCV, queue what the plan asks for,
 /// place it, keep the harvesters coming. `docs/autoplay.md` carries the scope
 /// and the residuals.
-fn toggle_auto_play(state: &mut AppState) {
-    if let Some(host) = state.match_state.auto_play.as_mut() {
+fn toggle_auto_play(
+    platform: &PlatformState,
+    renderer: &RendererState,
+    diag: &DiagnosticsState,
+    frontend: &FrontendState,
+    match_state: &mut MatchState,
+    persistence: &PersistenceState,
+) {
+    if let Some(host) = match_state.auto_play.as_mut() {
         let mut domains = host.domains();
         domains.toggle_master();
         // Keep the session, its scope and its task history while paused.
@@ -2059,18 +2066,17 @@ fn toggle_auto_play(state: &mut AppState) {
         // switches when the player presses Global again.
         host.set_domains(domains);
     } else {
-        install_auto_play(state, crate::sim::control::board::AutoPlayDomains::ALL);
+        install_auto_play(match_state, crate::sim::control::board::AutoPlayDomains::ALL);
     }
-    post_auto_play_state(state);
+    post_auto_play_state(platform, renderer, diag, frontend, match_state, persistence);
 }
 
 /// Install a session running `domains`. `false` when there is no house to drive.
 fn install_auto_play(
-    state: &mut AppState,
+    match_state: &mut MatchState,
     domains: crate::sim::control::board::AutoPlayDomains,
 ) -> bool {
-    let Some(owner) = state
-        .match_state
+    let Some(owner) = match_state
         .sim_runtime
         .runtime()
         .and_then(|runtime| runtime.simulation.session().current_house())
@@ -2083,7 +2089,7 @@ fn install_auto_play(
     // outside the engine, which has not reached parity, so one build shows both.
     let brain: Box<dyn crate::sim::control::brain::Brain> =
         if std::env::var("VERA20K_BRAIN").is_ok_and(|value| value.eq_ignore_ascii_case("v2")) {
-            match state.match_state.sim_runtime.runtime() {
+            match match_state.sim_runtime.runtime() {
                 Some(runtime) => Box::new(autoplay::policy::Policy::new(&runtime.resources.rules)),
                 None => Box::new(crate::sim::strategy::assist::AssistBrain::new(
                     AUTO_PLAY_POLICY_SEED,
@@ -2098,7 +2104,7 @@ fn install_auto_play(
         crate::sim::autoplay::AutoPlayHost::new(brain, owner, AUTO_PLAY_COMMANDS_PER_FRAME),
     );
     session.set_domains(domains);
-    state.match_state.auto_play = Some(session);
+    match_state.auto_play = Some(session);
     true
 }
 
@@ -2115,8 +2121,16 @@ enum AutoPlaySwitch {
     GroupScope,
 }
 
-fn toggle_auto_play_switch(state: &mut AppState, switch: AutoPlaySwitch) {
-    if state.match_state.auto_play.is_none() {
+fn toggle_auto_play_switch(
+    platform: &PlatformState,
+    renderer: &RendererState,
+    diag: &DiagnosticsState,
+    frontend: &FrontendState,
+    match_state: &mut MatchState,
+    persistence: &PersistenceState,
+    switch: AutoPlaySwitch,
+) {
+    if match_state.auto_play.is_none() {
         let mut domains = crate::sim::control::board::AutoPlayDomains::NONE;
         match switch {
             AutoPlaySwitch::Production => domains.production = true,
@@ -2124,8 +2138,8 @@ fn toggle_auto_play_switch(state: &mut AppState, switch: AutoPlaySwitch) {
             AutoPlaySwitch::Abilities => domains.abilities = true,
             AutoPlaySwitch::GroupScope => domains.grouped_only = true,
         }
-        install_auto_play(state, domains);
-    } else if let Some(host) = state.match_state.auto_play.as_mut() {
+        install_auto_play(match_state, domains);
+    } else if let Some(host) = match_state.auto_play.as_mut() {
         let mut domains = host.domains();
         match switch {
             AutoPlaySwitch::Production => domains.production = !domains.production,
@@ -2135,13 +2149,20 @@ fn toggle_auto_play_switch(state: &mut AppState, switch: AutoPlaySwitch) {
         }
         host.set_domains(domains);
     }
-    post_auto_play_state(state);
+    post_auto_play_state(platform, renderer, diag, frontend, match_state, persistence);
 }
 
 /// Report which switches are on. A toggle gives no other sign it fired, and
 /// this is the message sink that takes plain text rather than a CSF template.
-fn post_auto_play_state(state: &mut AppState) {
-    let message = match state.match_state.auto_play.as_ref() {
+fn post_auto_play_state(
+    platform: &PlatformState,
+    renderer: &RendererState,
+    diag: &DiagnosticsState,
+    frontend: &FrontendState,
+    match_state: &mut MatchState,
+    persistence: &PersistenceState,
+) {
+    let message = match match_state.auto_play.as_ref() {
         Some(host) => {
             let scope = if host.domains().grouped_only {
                 ", grouped only"
@@ -2158,12 +2179,12 @@ fn post_auto_play_state(state: &mut AppState) {
         None => "Auto play off".to_string(),
     };
     crate::app::input::messages::post_selection_navigation_text(
-        &state.platform,
-        &state.renderer,
-        &state.diag,
-        &state.frontend,
-        &mut state.match_state,
-        &state.persistence,
+        platform,
+        renderer,
+        diag,
+        frontend,
+        match_state,
+        persistence,
         &message,
     );
 }

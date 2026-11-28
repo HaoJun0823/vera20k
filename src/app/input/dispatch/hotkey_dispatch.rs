@@ -785,19 +785,50 @@ fn dispatch_retail_hotkey(
         }
         // VERA's own: auto play is on while a host is installed; the second key
         // flips only the forces half.
-        HotkeyCommand::ToggleAutoPlay => super::toggle_auto_play(state),
-        HotkeyCommand::AutoPlayBuild => {
-            super::toggle_auto_play_switch(state, super::AutoPlaySwitch::Production)
-        }
-        HotkeyCommand::ToggleAutoPlayForces => {
-            super::toggle_auto_play_switch(state, super::AutoPlaySwitch::Forces)
-        }
-        HotkeyCommand::AutoPlayAbilities => {
-            super::toggle_auto_play_switch(state, super::AutoPlaySwitch::Abilities)
-        }
-        HotkeyCommand::ToggleAutoPlaySquads => {
-            super::toggle_auto_play_switch(state, super::AutoPlaySwitch::GroupScope)
-        }
+        HotkeyCommand::ToggleAutoPlay => super::toggle_auto_play(
+            platform,
+            renderer,
+            diag,
+            frontend,
+            match_state,
+            persistence,
+        ),
+        HotkeyCommand::AutoPlayBuild => super::toggle_auto_play_switch(
+            platform,
+            renderer,
+            diag,
+            frontend,
+            match_state,
+            persistence,
+            super::AutoPlaySwitch::Production,
+        ),
+        HotkeyCommand::ToggleAutoPlayForces => super::toggle_auto_play_switch(
+            platform,
+            renderer,
+            diag,
+            frontend,
+            match_state,
+            persistence,
+            super::AutoPlaySwitch::Forces,
+        ),
+        HotkeyCommand::AutoPlayAbilities => super::toggle_auto_play_switch(
+            platform,
+            renderer,
+            diag,
+            frontend,
+            match_state,
+            persistence,
+            super::AutoPlaySwitch::Abilities,
+        ),
+        HotkeyCommand::ToggleAutoPlaySquads => super::toggle_auto_play_switch(
+            platform,
+            renderer,
+            diag,
+            frontend,
+            match_state,
+            persistence,
+            super::AutoPlaySwitch::GroupScope,
+        ),
         HotkeyCommand::ScatterObject => queue_scatter_for_selected(
             platform,
             renderer,
