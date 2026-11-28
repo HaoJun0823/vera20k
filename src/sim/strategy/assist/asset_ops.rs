@@ -116,6 +116,14 @@ fn security_priority(value:Value,income:bool,distance_sq:i32)->Option<i32> {
     } else {None}
 }
 
+/// A remote public prize is not a speculative expedition if the existing
+/// available screen has already reached its neighborhood. This extension
+/// is for a joint operation only, with the original main-fist reserve.
+fn joint_security_priority(value:Value,income:bool,distance_sq:i32,local:usize)->Option<i32> {
+    security_priority(value,income,distance_sq).or_else(||
+        (local>=3).then_some(value.score()+if income{35}else{0}))
+}
+
 pub(super) fn capture_priority(rules:&RuleSet,obs:&Observation<'_>,
     target:&EnemyEntity,from:(u16,u16),short_income:bool)->i32 {
     let Some(ty)=obs.object_type(rules,target.type_id) else {return i32::MIN;};
@@ -205,22 +213,29 @@ impl Director {
     /// Select only *currently visible* valuable unowned sites that actually
     /// need a security operation. Never interrogate hidden enemy ownership.
     pub(super) fn coalition_target(&self,rules:&RuleSet,obs:&Observation<'_>,
-        home:(u16,u16),after:&BTreeMap<u64,u64>,
+        home:(u16,u16),after:&BTreeMap<u64,u64>,front:&[(u16,u16)],
     )->Option<(u64,(u16,u16))> {
         let now=obs.tick();
         self.sites.iter().filter(|(id,site)|
             site.phase==Phase::Secure
-                && (!site.hostile || obs.object_type(rules,site.type_id)
-                    .is_some_and(orders::strategic_public_asset))
                 && now>=site.retry_after
                 && now>=after.get(*id).copied().unwrap_or(0)
                 && obs.is_cell_visible(site.cell.0,site.cell.1)
         ).filter_map(|(id,site)|{
             let ty=obs.object_type(rules,site.type_id)?;
+            let local=front.iter().filter(|at|squared_distance(**at,site.cell)<=24*24)
+                .take(3).count();
+            let public=orders::strategic_public_asset(ty);
+            if site.hostile && !public && !(site.value>=Value::Technology && local>=3) {
+                return None;
+            }
             let distance=squared_distance(home,site.cell);
-            let priority=security_priority(site.value,ty.produce_cash_amount>0
-                || ty.resource_destination,distance)?;
-            Some((priority*200-distance/12,std::cmp::Reverse(*id),site.cell))
+            let priority=joint_security_priority(site.value,ty.produce_cash_amount>0
+                || ty.resource_destination,distance,local)?;
+            let effective_distance=if local>=3 {
+                front.iter().map(|at|squared_distance(*at,site.cell)).min().unwrap_or(distance)
+            }else{distance};
+            Some((priority*200-effective_distance/12,std::cmp::Reverse(*id),site.cell))
         }).max_by_key(|(score,id,_)|(*score,*id))
             .map(|(_,id,cell)|(id.0,cell))
     }
@@ -254,7 +269,8 @@ impl Director {
     }
 
     pub(super) fn recon_request(&self, obs: &Observation<'_>) -> Option<(u16, u16)> {
-        self.sites.values().filter(|site|site.phase==Phase::Recon && !site.hostile
+        self.sites.values().filter(|site|site.phase==Phase::Recon
+            && (!site.hostile || site.value==Value::Public)
             && obs.tick().saturating_sub(site.last_seen)<SIGHTING_TTL)
             .max_by_key(|site| (site.value.score(), std::cmp::Reverse(site.cell)))
             .map(|site| site.cell)
@@ -679,4 +695,12 @@ mod acquisition_tests {
         assert!(prize_ready(false,true,true,false,2));
         assert!(prize_ready(false,true,true,true,0));
     }
+}
+
+#[cfg(all(test, tests_sim_p_s))]
+#[test]
+fn v84_remote_prize_requires_a_real_nearby_screen() {
+    assert!(joint_security_priority(Value::Public,true,28*28,0).is_some());
+    assert!(joint_security_priority(Value::Public,true,56*56,2).is_none());
+    assert!(joint_security_priority(Value::Public,true,56*56,3).is_some());
 }

@@ -239,6 +239,7 @@ pub(super) fn spend(
         return;
     }
     if obs.has_pending_production_commands() { return; }
+    brain.yard_reserve=0;
     // Preserve a previously selected advanced unit against optional building
     // spending. Real power, income and production recovery still outrank it.
     brain.quality_reserve = super::composition::prior_quality_reserve(brain,rules,obs);
@@ -279,6 +280,20 @@ fn scatter_blockers(obs: &Observation<'_>, out: &mut Outbox, blockers: &[u64]) {
             out.want(unit, SITE_CLEAR_RANK, Goal::Scatter);
         }
     }
+}
+
+/// House-wide capital investments belong at the primary operational base,
+/// not at whichever captured civilian structure offers an empty plot.
+/// No type-name whitelist, and no changes to ordinary forward production.
+fn protected_core_structure(rules:&RuleSet,ty:&ObjectType)->bool {
+    ty.ore_purifier || ty.factory_plant || ty.spy_sat || ty.cloning
+        || rules.build_tech_types.iter().any(|name|*name==ty.id)
+        || ((ty.super_weapon.is_some() || ty.super_weapon2.is_some() || ty.nuke_silo)
+            && ty.factory_type().is_none())
+}
+
+fn core_plot(home:Option<(u16,u16)>,cell:(u16,u16))->bool {
+    home.is_none_or(|h|super::advance::cell_distance(h,cell)<=24)
 }
 
 /// A ready building has one long-lived site job, not 64 unrelated guesses.
@@ -334,10 +349,14 @@ fn place_finished(
             brain.outpost_builds.remove(&type_id);
             asset_anchor=None;
         }
+        let core=obs.object_type(rules,type_id).filter(|ty|protected_core_structure(rules,ty))
+            .map(|ty|super::site_risk::YardSurvey::read(rules,obs,ty,None));
         let allowed = |cell| space.as_ref().is_none_or(|space| space.ground_at(cell).buildable())
-            && asset_anchor.is_none_or(|at|super::advance::cell_distance(at,cell)<=8);
+            && (core.is_some() || asset_anchor.is_none_or(|at|super::advance::cell_distance(at,cell)<=8))
+            && core.as_ref().is_none_or(|risk|core_plot(brain.census.base_cell,cell)
+                && risk.settled_site(&brain.census,None,cell,4));
         let mut placement = Placement::new(obs, rules).reserving(reserved.clone());
-        let outpost = brain.outpost_builds.get(&type_id).copied();
+        let outpost = if core.is_some(){None}else{brain.outpost_builds.get(&type_id).copied()};
         if let Some(anchor) = outpost {
             placement = placement.preferring(anchor);
         }
@@ -550,7 +569,7 @@ fn harvester_reserve(rules: &RuleSet, obs: &Observation<'_>, census: &Census) ->
 /// the house was short a harvester, which is how a house reached the end of a
 /// match with no lab and no aircraft it could build.
 pub(super) fn earns_its_keep(rules: &RuleSet, ty: &ObjectType) -> bool {
-    [
+    ty.ore_purifier || ty.factory_plant || ty.cloning || [
         &rules.build_power_types,
         &rules.build_refinery_types,
         &rules.build_weapons_types,
@@ -559,6 +578,123 @@ pub(super) fn earns_its_keep(rules: &RuleSet, ty: &ObjectType) -> bool {
     ]
     .iter()
     .any(|names| names.iter().any(|name| name == &ty.id))
+}
+
+/// Conservative remaining-ore value proxy. Stock comes from the existing
+/// reachable, safety-filtered ore survey (last observed stages). Use the
+/// least valuable live ore type rather than treating a mixed field as gems.
+/// This is an investment heuristic, not the native unloading/payment code.
+fn purifier_stock_worth(stock:u32,ore_value:i32,bonus:f32,price:i32)->bool {
+    if price<=0 || ore_value<=0 || !bonus.is_finite() || bonus<=0.0 {return false;}
+    f64::from(stock)*f64::from(ore_value)*f64::from(bonus)
+        >= f64::from(price)*0.5
+}
+
+/// This is a bounded economic projection, not a guarantee that every
+/// current combat unit will be rebuilt. Count only fielded, controllable
+/// ground units whose type is actually producible by our current tech.
+fn capital_roster_value(brain:&AssistBrain,rules:&RuleSet,obs:&Observation<'_>,
+    capital:&ObjectType,category:ObjectCategory)->i64 {
+    let mut values=std::collections::BTreeMap::new();
+    let mut total=0i64;
+    for u in brain.census.units.iter().filter(|u|brain.census.available(u)
+        && super::census::ground_combatant(rules,obs,u)) {
+        let value=*values.entry(u.type_id).or_insert_with(||{
+            let Some(ty)=obs.object_type(rules,u.type_id) else{return 0i64;};
+            if ty.category!=category || ty.naval
+                || obs.can_build(rules,ty,true)!=CanBuild::Yes
+                || !obs.has_producer(rules,ty) {return 0;}
+            let price=obs.cost_of(rules,ty).max(0);
+            let factor=if capital.factory_plant {
+                let m=f32::from_bits(capital.cost_bonuses[ty.factor_slot()].bits());
+                if !m.is_finite() || !(0.0..1.0).contains(&m) {return 0;}
+                1.0-m
+            } else if capital.cloning && category==ObjectCategory::Infantry {
+                // The simple retail cloning property is supported here.
+                // Ares explicit alternative clone types/sources need a
+                // different projection: don't pretend they are identical.
+                if rules.ares() && (!ty.ares_production().cloneable()
+                    || ty.ares_production().cloned_as().is_some()
+                    || !ty.ares_production().cloned_at().is_empty()) {return 0;}
+                1.0
+            } else {return 0;};
+            (f64::from(price)*f64::from(factor)) as i64
+        });
+        total=total.saturating_add(value);
+    }
+    total
+}
+
+fn capital_projection_worth(benefit:i64,price:i32)->bool {
+    price>0 && benefit.saturating_mul(2)>=i64::from(price)
+}
+
+/// Three native kinds of capital investment share the existing income
+/// bank. Select only a currently legal type, with functioning production
+/// and actual measured income. Never infer tech from a country name.
+fn capital_candidate<'r>(brain:&AssistBrain,rules:&'r RuleSet,obs:&Observation<'_>,
+    raw:&Budget,ready:impl Fn(&ObjectType,InternedId)->bool)
+    ->Option<(Item,&'r ObjectType,InternedId)> {
+    let now=obs.tick();
+    let rate=raw.income.filter(|rate|*rate>=900)?;
+    if brain.census.harvesters==0 || brain.census.refineries==0
+        || brain.census.available_ground_fighters(rules,obs)<6
+        || brain.director.emergency_spending(obs) || brain.director.recovering_under_fire()
+        || brain.director.rebuilding_force() || brain.mobilization.active()
+        || brain.campaign.economy_resting()
+        || count_in(obs,rules,&brain.census,&rules.build_barracks_types)==0
+        || count_in(obs,rules,&brain.census,&rules.build_weapons_types)==0
+    {return None;}
+    let has_ore=count_ore_purifiers(rules,obs)>0;
+    let has_plant=count_industrial_plants(rules,obs)>0;
+    let has_clones=count_cloning_vats(rules,obs)>0;
+    let ore_value=rules.tiberium_types.types().iter().filter(|t|!t.is_inert())
+        .map(|t|t.value.max(0)).filter(|v|*v>0).min().unwrap_or(0);
+    let bonus=f32::from_bits(rules.general.purifier_bonus.bits());
+    let active=brain.income_bank.active(now);
+    all_class_types(rules,obs,ObjectCategory::Building).filter_map(|(ty,id)|{
+        let item=if ty.ore_purifier && !has_ore && brain.census.harvesters>=2 {
+            Item::Purifier
+        } else if ty.factory_plant && !has_plant {Item::IndustrialPlant}
+        else if ty.cloning && !has_clones {Item::CloningVats}
+        else {return None;};
+        let price=obs.cost_of(rules,ty);
+        if !brain.director.permits_build(item) || !ready(ty,id) || price<=0
+            || raw.free<price/3 {return None;}
+        // A useful investment may require a real generator first.
+        // Recognize the actual bank's generator appointment rather than
+        // invalidating it on the very next frame.
+        let power=if plan::power_deficit(rules,obs,&brain.census,ty.power.min(0))>0 {
+            Some(emergency_generator(rules,obs).filter(|(plant,pid)|ready(plant,*pid))?)
+        }else{None};
+        let first_id=power.map_or(id,|(_,pid)|pid);
+        let total_price=price.saturating_add(power.map_or(0,|(plant,_)|obs.cost_of(rules,plant).max(0)));
+        if active.is_some_and(|old|old!=first_id && old!=id)
+            || i64::from(total_price)-i64::from(raw.free)>i64::from(rate)*2
+        {return None;}
+        let benefit=match item {
+            Item::Purifier=>{
+                let stock=brain.ore_scan.as_ref()?.stock;
+                if !purifier_stock_worth(stock,ore_value,bonus,price) {return None;}
+                (f64::from(stock)*f64::from(ore_value)*f64::from(bonus)) as i64
+            }
+            Item::IndustrialPlant=>{
+                let savings=capital_roster_value(brain,rules,obs,ty,ObjectCategory::Vehicle)
+                    .saturating_add(capital_roster_value(brain,rules,obs,ty,ObjectCategory::Infantry));
+                let discount=f32::from_bits(ty.cost_bonuses[0].bits())
+                    .min(f32::from_bits(ty.cost_bonuses[1].bits()));
+                if !discount.is_finite() || !(0.0..1.0).contains(&discount) {return None;}
+                savings.min((f64::from(rate)*4.0*f64::from(1.0-discount)) as i64)
+            }
+            Item::CloningVats=>capital_roster_value(brain,rules,obs,ty,ObjectCategory::Infantry)
+                .min(i64::from(rate)*2),
+            _=>return None,
+        };
+        if !capital_projection_worth(benefit,total_price){return None;}
+        let rank=benefit.saturating_mul(1000)/i64::from(total_price);
+        Some((rank,price,id,item,ty))
+    }).max_by_key(|(rank,price,id,_,_)|(*rank,std::cmp::Reverse(*price),std::cmp::Reverse(*id)))
+        .map(|(_,_,id,item,ty)|(item,ty,id))
 }
 
 /// Fill useful mining capacity before optional research, towers and tanks.
@@ -572,14 +708,13 @@ fn income_investment(brain:&mut AssistBrain,rules:&RuleSet,obs:&Observation<'_>,
         && brain.census.harvesters>0 && !brain.director.under_attack_now()
         && !brain.director.recovering_income()
         && !plan::power_short(rules,obs,&brain.census);
-    let Some(targets)=brain.census.ore_targets.filter(|_|eligible) else {
-        brain.income_bank.interrupt(now); return false;
-    };
-    let miners=brain.census.harvesters;
-    let bays=brain.census.refineries;
-    if miners>=targets.harvesters && bays>=targets.refineries {
+    if !eligible {
         brain.income_bank.interrupt(now); return false;
     }
+    // Industrial/cloning value does not depend on a successful mineral scan.
+    let targets=brain.census.ore_targets;
+    let miners=brain.census.harvesters;
+    let bays=brain.census.refineries;
     let raw=budget.without_reserve(obs.credits())
         .after_commitment(plan::proposed_cost(rules,obs,out));
     if obs.power_blackout_active() || super::composition::local_air_emergency(brain,rules,obs,raw.free) {
@@ -597,10 +732,10 @@ fn income_investment(brain:&mut AssistBrain,rules:&RuleSet,obs:&Observation<'_>,
     // Two trucks per bay is enough to justify the next unloading bay if
     // observed ore supports it. Do not wait for the entire three-truck quota.
     // A second bay also supplies the native free miner when rules grant one.
-    let refinery=(screen && bays<targets.refineries
+    let refinery=(screen && targets.is_some_and(|t|bays<t.refineries)
         && miners>=2*bays).then(||first_buildable(rules,obs,&rules.build_refinery_types))
         .flatten().filter(|(ty,id)|ready(ty,*id));
-    let miner=(miners<targets.harvesters)
+    let miner=targets.is_some_and(|t|miners<t.harvesters)
         .then(||harvester(rules,obs)).flatten().filter(|(ty,id)|ready(ty,*id));
     // The first additional miner may be purchased with the opening wallet
     // even before four combat units, but not by consuming the last screen's
@@ -608,7 +743,13 @@ fn income_investment(brain:&mut AssistBrain,rules:&RuleSet,obs:&Observation<'_>,
     let miner=miner.filter(|(ty,_)|screen || (miners==1
         && raw.free>=obs.cost_of(rules,ty).saturating_add(
             super::economy::line_vehicle_floor(rules,obs).unwrap_or(700))));
-    let choice=refinery.map(|(ty,id)| (Some(Item::Refinery),ty,id))
+    // First recovery capacity remains mandatory. Optional facilities
+    // compete ahead of additional bays/vehicles only on a sound economy.
+    let capital=if miners>=2 || miner.is_none() {
+        capital_candidate(brain,rules,obs,&raw,&ready)
+    } else {None};
+    let choice=capital.map(|(item,ty,id)|(Some(item),ty,id))
+        .or_else(||refinery.map(|(ty,id)|(Some(Item::Refinery),ty,id)))
         .or_else(||miner.map(|(ty,id)|(None,ty,id)));
     let Some((mut item,mut ty,mut id))=choice else {
         // Without a valid investment candidate there is no funded plan.
@@ -617,7 +758,8 @@ fn income_investment(brain:&mut AssistBrain,rules:&RuleSet,obs:&Observation<'_>,
         brain.income_bank.interrupt(now);
         return false;
     };
-    if item==Some(Item::Refinery) && plan::power_deficit(rules,obs,&brain.census,ty.power.min(0))>0 {
+    if matches!(item,Some(Item::Refinery|Item::Purifier|Item::IndustrialPlant|Item::CloningVats))
+        && plan::power_deficit(rules,obs,&brain.census,ty.power.min(0))>0 {
         let Some((power,power_id))=emergency_generator(rules,obs).filter(|(ty,id)|ready(ty,*id))
             else {brain.income_bank.interrupt(now);return false;};
         item=Some(Item::Power);ty=power;id=power_id;
@@ -626,29 +768,42 @@ fn income_investment(brain:&mut AssistBrain,rules:&RuleSet,obs:&Observation<'_>,
     let waiting=if item.is_some() {yard_busy} else {vehicle_busy};
     let hold=brain.income_bank.hold_income(now,id,raw.free,price,raw.income,waiting);
     if (raw.free<price || waiting) && hold==0 {return false;}
-    brain.research_bank.interrupt(now);
-    brain.quality_bank.interrupt(now);
-    brain.quality_reserve=0;
-    brain.yard_reserve=hold;
     if hold>0 {
-        if now%150==0 {log::info!("auto play: v57_income_saving tick={now} type={} price={price} free={} target={}/{}",
-            ty.id,raw.free,targets.harvesters,targets.refineries);}
+        brain.research_bank.interrupt(now);
+        brain.quality_bank.interrupt(now);
+        brain.quality_reserve=0;
+        brain.yard_reserve=hold;
+        if now%150==0 {log::info!("auto play: v84_income_saving tick={now} type={} price={price} free={}",
+            ty.id,raw.free);}
         return true;
     }
-    if let Some(item)=item {
-        // Use actual credits minus real production debt for income only.
-        // The common building admission/placement path still owns the order.
+    // A funded intention is not an accepted proposal. Do not monopolize
+    // the construction pass after a failed preflight, admission or payment.
+    // The existing optional banks survive an unsuccessful attempt.
+    let previous_research=brain.research_bank;
+    let previous_quality=brain.quality_reserve;
+    brain.quality_reserve=0;
+    brain.yard_reserve=0;
+    let bought=if let Some(item)=item {
+        let already=plan::line_proposed(rules,obs,out,ProductionCategory::Building);
         build_next(brain,rules,obs,&raw,out,Some(plan::Chosen{step:None,item,ty,type_id:id}));
-        if plan::line_proposed(rules,obs,out,ProductionCategory::Building) {
-            log::info!("auto play: v57_income_purchase tick={now} type={} price={price} kind=building",ty.id);
-        }
-        true
+        !already && plan::line_proposed(rules,obs,out,ProductionCategory::Building)
     } else {
         let mut funds=raw;
-        let bought=super::composition::queue_unit(rules,obs,&mut funds,out,Some((ty,id)));
-        if bought {log::info!("auto play: v57_income_purchase tick={now} type={} price={price} kind=miner",ty.id);}
-        bought
+        super::composition::queue_unit(rules,obs,&mut funds,out,Some((ty,id)))
+    };
+    if bought {
+        brain.income_bank.clear();
+        brain.research_bank.interrupt(now);
+        brain.quality_bank.interrupt(now);
+        log::info!("auto play: v84_income_proposed tick={now} type={} price={price}",ty.id);
+    } else {
+        brain.research_bank=previous_research;
+        brain.quality_reserve=previous_quality;
+        brain.yard_reserve=0;
+        brain.income_bank.interrupt(now);
     }
+    bought
 }
 
 /// Start the one structure the base needs most, while the yard is free.
@@ -983,7 +1138,12 @@ fn build_next<'r>(
                 rules.general.slave_miner_slave_scan / 256,
             );
         }
-        let site = placement.cell_for_where(type_id, 0, |cell| space.ground_at(cell).buildable());
+        let core=protected_core_structure(rules,ty)
+            .then(||super::site_risk::YardSurvey::read(rules,obs,ty,None));
+        let site=placement.cell_for_where(type_id,0,|cell|
+            space.ground_at(cell).buildable()
+                && core.as_ref().is_none_or(|risk|core_plot(brain.census.base_cell,cell)
+                    && risk.settled_site(&brain.census,None,cell,4)));
         if site.is_none() {
             brain.site_preflight_after.insert(
                 type_id, obs.tick().saturating_add(SITE_PREFLIGHT_RETRY_FRAMES),
@@ -3461,4 +3621,40 @@ mod v30_foreign_tech_tests {
                     if *idx == yard_id)), "{name} must depend on the captured yard");
         }
     }
+}
+
+#[cfg(all(test, tests_sim_p_s))]
+#[test]
+fn v83_capital_buildings_do_not_follow_remote_capture_anchors() {
+    assert!(core_plot(Some((165,128)),(160,139)));
+    assert!(!core_plot(Some((165,128)),(198,108)));
+    assert!(core_plot(Some((165,128)),(141,128)));
+    assert!(!core_plot(Some((165,128)),(140,128)));
+    let Some(rules)=crate::rules::retail_ini_fixture::retail_unlayered_rules()
+        else{return;};
+    for name in ["GAOREP","GACSPH","GAWEAT","GASPYSAT","GATECH"] {
+        assert!(protected_core_structure(&rules,rules.object(name).expect(name)));
+    }
+    assert!(!protected_core_structure(&rules,rules.object("GAREFN").expect("refinery")));
+}
+
+#[cfg(all(test, tests_sim_p_s))]
+#[test]
+fn v83_purifier_value_is_about_ore_not_truck_count() {
+    assert!(purifier_stock_worth(400,25,0.25,2500));
+    assert!(purifier_stock_worth(200,25,0.25,2500));
+    assert!(!purifier_stock_worth(199,25,0.25,2500));
+    assert!(purifier_stock_worth(100,50,0.25,2500));
+    assert!(!purifier_stock_worth(1000,25,0.0,2500));
+    assert!(!purifier_stock_worth(1000,25,f32::NAN,2500));
+}
+
+#[cfg(all(test, tests_sim_p_s))]
+#[test]
+fn v84_capital_uses_a_bounded_positive_return() {
+    assert!(!capital_projection_worth(0,2500));
+    assert!(!capital_projection_worth(1249,2500));
+    assert!(capital_projection_worth(1250,2500));
+    assert!(capital_projection_worth(2500,2500));
+    assert!(!capital_projection_worth(1,0));
 }

@@ -2049,6 +2049,7 @@ pub(super) fn local_contacts(brain:&mut AssistBrain,rules:&RuleSet,
         let id=u.entity_id;
         if super::orders::ordered_this_frame(out,id) || obs.is_deployed(id) {continue;}
         let old=obs.attack_target(id);
+        if fire_support::live_battery_shot(rules,obs,u) {continue;}
         // An actual live shot at a useful local mobile opponent is more
         // valuable than repeatedly re-aiming at another equally close one.
         if old.is_some_and(|target|visible.iter().any(|e|e.entity_id==target
@@ -2145,6 +2146,7 @@ pub(super) fn trailing_siege(brain:&mut AssistBrain,rules:&RuleSet,
         let id=u.entity_id;
         if super::orders::ordered_this_frame(out,id) || obs.is_deployed(id)
             || brain.tracked.held(now,id) {continue;}
+        if fire_support::live_battery_shot(rules,obs,u) {continue;}
         let Some(ty)=obs.object_type(rules,u.type_id) else{continue;};
         let threat=visible.iter().filter(|e|cell_distance(e.cell,u.cell)<=18
             && obs.can_hurt(rules,e.entity_id,id)
@@ -2877,6 +2879,9 @@ pub(super) fn advance(
             || brain.crate_claims.contains_key(&unit.entity_id)
             || brain.crate_returns.contains_key(&unit.entity_id)
         { continue; }
+        if support_holds.contains(&unit.entity_id)
+            && (super::orders::ordered_this_frame(out,unit.entity_id)
+                || fire_support::live_battery_shot(rules,obs,unit)) {continue;}
         if let Some(since) = brain.armour_wave_wait
             && armour_wave_missing(
                 armour.iter().filter(|other| cell_distance(unit.cell, other.cell) <= 12)

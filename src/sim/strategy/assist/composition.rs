@@ -265,19 +265,27 @@ pub(super) fn fill_lines(
     // ordinary composition or a speculative counter. The budget has already
     // protected essential building/last-miner commitments.
     let mut capture_target=None;
+    // A paid, safe strategic capture is a way to acquire capital equipment
+    // and permanent income for much less than building a new one. Once
+    // a mobile force actually exists, allow this bounded specialist choice
+    // to compete for the discretionary quality reserve. Essential
+    // construction/last-miner debt is already removed from budget.free.
+    let capture_free=if !hard_emergency && !brain.director.under_attack_now()
+        && !brain.director.recovering_income() && brain.census.available_fighters()>=8 {
+        budget.free
+    } else {budget.free.saturating_sub(prior_quality_hold)};
     let capture_purchase = if obs.is_campaign()
         && !air_claimed.contains(&ProductionCategory::Infantry)
         && !brain.census.line(ProductionCategory::Infantry).busy()
         && !super::plan::line_proposed(rules,obs,out,ProductionCategory::Infantry)
     {
-        campaign_engineer(brain,rules,obs,budget.free.saturating_sub(prior_quality_hold))
+        campaign_engineer(brain,rules,obs,capture_free)
             .map(|(ty,id,site)|{capture_target=site;(ty,id)})
     } else if !obs.is_campaign() && !hard_emergency
         && !air_claimed.contains(&ProductionCategory::Infantry)
         && !brain.census.line(ProductionCategory::Infantry).busy()
         && !brain.director.under_attack_now() && !brain.director.recovering_income()
     {
-        let capture_free=budget.free.saturating_sub(prior_quality_hold);
         asset_engineer_choice(brain,rules,obs,capture_free)
             .map(|(ty,id,site)|{capture_target=Some(site);(ty,id)})
     } else { None };
@@ -1076,8 +1084,9 @@ fn asset_engineer_choice<'r>(
                 && super::safety::specialist_approach_safe(rules,obs,u.entity_id,target))
             {continue;}
             let risk=super::site_risk::engineer_route_risk(rules,obs,engineer,&visible,from,site.cell);
-            let score=(std::cmp::Reverse(risk),
-                super::asset_ops::capture_priority(rules,obs,&site,from,brain.census.refineries<2),
+            let priority=super::asset_ops::capture_priority(rules,obs,&site,from,brain.census.refineries<2);
+            let score=(priority.saturating_sub(i32::from(risk)*300),
+                std::cmp::Reverse(risk),
                 std::cmp::Reverse(obs.cost_of(rules,engineer)),
                 std::cmp::Reverse(target),std::cmp::Reverse(id));
             if best.as_ref().is_none_or(|(old,_,_,_)|score>*old) {
@@ -2547,6 +2556,27 @@ fn quality_candidate(rules:&RuleSet,ty:&ObjectType,cost:i32,floor:i32,baseline:i
     None
 }
 
+/// The advanced-vehicle budget must not turn a healthy tank screen into
+/// an artillery-heavy force. Keep the first siege gun exempt; later guns
+/// need real usable line hulls, not wounded/limbo/transported units.
+fn siege_screen_sufficient(screen:usize,guns:usize)->bool {
+    guns==0 || screen>=guns.saturating_mul(2)
+}
+
+fn siege_screen_stock(brain:&AssistBrain,rules:&RuleSet,obs:&Observation<'_>)->(usize,usize) {
+    let mut screen=0;
+    let mut guns=0;
+    for u in brain.census.units.iter().filter(|u|!u.hand && u.health_permille>=500) {
+        let Some(ty)=obs.object_type(rules,u.type_id) else{continue;};
+        if ty.category!=ObjectCategory::Vehicle || ty.naval || ty.jumpjet
+            || ty.balloon_hover || ty.spawned || ty.resource_gatherer {continue;}
+        if siege_range(rules,ty)>=8 {guns+=1;}
+        else if ground_hull(rules,ty) && fresh_ground(rules,ty)>0
+            && brain.census.available(u) {screen+=1;}
+    }
+    (screen,guns)
+}
+
 fn quality_due(pool:usize,held:usize,siege:bool)->bool {
     // Four useful hulls can support the first gun. Mature forces aim for
     // roughly a third standoff and a third upgraded line combat, not only
@@ -2599,8 +2629,12 @@ fn quality_vehicle<'r>(brain:&AssistBrain,rules:&'r RuleSet,obs:&Observation<'_>
             if siege {siege_count+=1;}else{upgraded_count+=1;}
         }
     }
+    let (screen,guns)=siege_screen_stock(brain,rules,obs);
+    let can_replace_screen=legal.iter().any(|(ty,_,_)|
+        ground_hull(rules,ty) && fresh_ground(rules,ty)>0 && siege_range(rules,ty)<8);
     let wanted=legal.into_iter().filter_map(|(ty,id,cost)| {
         let (siege,score)=class(ty)?;
+        if siege && can_replace_screen && !siege_screen_sufficient(screen,guns) {return None;}
         if obs.in_production(rules,id) || !(budget.free>=cost
             || budget.income.is_some_and(|rate|rate>0
                 && i64::from(cost)-i64::from(budget.free)<=i64::from(rate))) {return None;}
@@ -2624,6 +2658,14 @@ pub(super) fn prior_quality_reserve(brain:&AssistBrain,rules:&RuleSet,obs:&Obser
     let Some(ty)=obs.object_type(rules,id) else {return 0;};
     if !quality_safe(brain,rules,obs) || brain.census.line(ProductionCategory::Vehicle).busy()
         || obs.can_build(rules,ty,true)!=CanBuild::Yes || !obs.has_producer(rules,ty) {return 0;}
+    if siege_range(rules,ty)>=8 {
+        let (screen,guns)=siege_screen_stock(brain,rules,obs);
+        if !siege_screen_sufficient(screen,guns)
+            && build::all_class_types(rules,obs,ObjectCategory::Vehicle).any(|(kind,_)|
+                ground_hull(rules,kind) && fresh_ground(rules,kind)>0 && siege_range(rules,kind)<8
+                    && obs.can_build(rules,kind,true)==CanBuild::Yes && obs.has_producer(rules,kind)
+                    && super::doctrine::may_produce(brain,rules,obs,kind)) {return 0;}
+    }
     obs.cost_of(rules,ty).max(0)
 }
 
@@ -4133,4 +4175,14 @@ mod v56_mix_tests {
         assert!(siege_range(&rules,rules.object("V3").unwrap())>=8);
         assert!(siege_range(&rules,rules.object("SREF").unwrap())>=8);
     }
+}
+
+#[cfg(all(test, tests_sim_p_s))]
+#[test]
+fn v83_extra_siege_guns_need_a_live_screen() {
+    assert!(siege_screen_sufficient(0,0));
+    assert!(!siege_screen_sufficient(1,1));
+    assert!(siege_screen_sufficient(2,1));
+    assert!(!siege_screen_sufficient(5,3));
+    assert!(siege_screen_sufficient(6,3));
 }

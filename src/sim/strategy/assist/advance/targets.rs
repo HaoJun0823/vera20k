@@ -283,7 +283,29 @@ pub(super) fn choose_focused(
         .min_by_key(|(distance, enemy)| (*distance,
             cell_distance(anchor, enemy.cell), enemy.entity_id))
         .map(|(_, enemy)| enemy);
-    let focused = if local_raider.is_none() && !mopping_up && !rotated {
+    // In any operating base, secure mining/production districts
+    // before walking to a deeper objective. The main army's moving
+    // centroid alone must not make an un-cleared side base irrelevant.
+    // No map names, hidden waypoints, or permanent target lock.
+    let perimeter = if !mopping_up {
+        structures.iter()
+            .filter(|(_,e)|!rotated || super::super::convergence::outside_deferred(e,deferred))
+            .filter(|(_,e)|!obs.visible_enemy_invulnerable(e.entity_id))
+            .filter_map(|(ty,e)| {
+                let d=census.yard_cells.iter().chain(census.refinery_cells.iter())
+                    .map(|at|cell_distance(*at,e.cell))
+                    .chain(census.base_cell.into_iter().map(|at|cell_distance(at,e.cell)))
+                    .min()?;
+                let battery=super::super::siege_counter::dangerous_battery(rules,ty)
+                    && super::super::siege_counter::battery_reach(rules,ty)>0;
+                let strategic=ty.resource_destination || ty.factory_type().is_some()
+                    || ty.build_const_eligible() || ty.power>0;
+                let rank=perimeter_rank(d,battery,strategic)?;
+                target_reachable(e,fighters,rules,obs)
+                    .then_some((rank,cell_distance(anchor,e.cell),e.entity_id,*e))
+            }).min_by_key(|(rank,d,id,_)|(*rank,*d,*id)).map(|(_,_,_,e)|e)
+    } else {None};
+    let focused = if !obs.is_campaign() && local_raider.is_none() && !mopping_up && !rotated {
         let home = census.base_cell.unwrap_or(anchor);
         let mut owners: BTreeMap<InternedId, i32> = BTreeMap::new();
         for (_, enemy) in &structures {
@@ -306,7 +328,7 @@ pub(super) fn choose_focused(
             })
         } else { None }
     } else { None };
-    let nearest = local_raider.or(focused).unwrap_or(nearest);
+    let nearest = perimeter.or(local_raider).or(focused).unwrap_or(nearest);
     // The enemy's defenses before its economy while they cover the target: a
     // tesla coil or a pillbox in range of the structure the fist walks at is
     // what kills the fist before it fires a shot, and a spy's blackout only
@@ -394,6 +416,24 @@ pub(super) fn choose_focused(
         progress,
     )
 }
+/// Clear guns threatening the operation's next construction/mining area,
+/// then other nearby production. A distant battery is not by itself a
+/// reason to divert across the map. Existing deferred-target rotation
+/// remains authoritative when a lane proves unworkable.
+fn perimeter_rank(distance:i32,battery:bool,strategic:bool)->Option<(u8,i32)> {
+    if battery && distance<=36 {Some((0,distance))}
+    else if strategic && distance<=28 {Some((1,distance))}
+    else {None}
+}
+
+#[cfg(all(test, tests_sim_p_s))]
+#[test]
+fn v83_campaign_perimeter_has_a_bounded_priority() {
+    assert!(perimeter_rank(24,true,false)<perimeter_rank(8,false,true));
+    assert_eq!(perimeter_rank(37,true,true),None);
+    assert_eq!(perimeter_rank(8,false,false),None);
+}
+
 /// In native power assessment only `Powered=yes` with positive power drain
 /// loses its operation when power goes short. A zero-drain pillbox or an
 /// unpowered mod building must not trigger a false "grid blackout" campaign.

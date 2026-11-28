@@ -409,6 +409,14 @@ impl Traits {
     }
 }
 
+/// Only actual land-capable combat units contribute to an infantry screen.
+pub(super) fn ground_combatant(rules:&RuleSet,obs:&Observation<'_>,u:&Unit)->bool {
+    matches!(u.slot,Slot::Infantry|Slot::Vehicle) && !u.traits.aircraft
+        && obs.object_type(rules,u.type_id).is_some_and(|ty|
+            !ty.naval && !ty.jumpjet && !ty.balloon_hover
+                && ty.movement_zone!=crate::rules::locomotor_type::MovementZone::Fly)
+}
+
 /// One object of the house, as the decisions see it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Unit {
@@ -1073,6 +1081,13 @@ impl Census {
 
     pub(super) fn available_fighters(&self) -> usize {
         self.units.iter().filter(|u| self.available(u)).count()
+    }
+
+    /// A ship or an aircraft is not a mobile ground screen for an
+    /// infantry commitment or a discretionary land-economy purchase.
+    pub(super) fn available_ground_fighters(&self,rules:&RuleSet,obs:&Observation<'_>)->usize {
+        self.units.iter().filter(|u|self.available(u)
+            && ground_combatant(rules,obs,u)).count()
     }
 
     pub(super) fn available_points(&self) -> i32 {

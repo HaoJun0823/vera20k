@@ -140,9 +140,16 @@ fn pick_visible_target(
                 rules, obs, unit.entity_id, enemy.entity_id) >= MIN_REAR_REACH
             && super::super::orders::admits(rules, obs,
                 unit.entity_id, &Goal::Attack { target: enemy.entity_id })
-            && (cell_distance(unit.cell, enemy.cell) <= reach
-                || super::super::tactics::lethal_approach(
-                    rules, obs, unit.entity_id, unit.cell, enemy.cell).is_none())
+            && if obs.entity_type(rules,enemy.entity_id).is_some_and(|ty|
+                super::super::siege_counter::dangerous_battery(rules,ty)) {
+                // A range advantage is not a safe approach order. The
+                // breach planner or rear-post search must get us there.
+                super::super::safety::firing_here(rules,obs,unit,enemy.entity_id)
+            } else {
+                cell_distance(unit.cell,enemy.cell)<=reach
+                    || super::super::tactics::lethal_approach(
+                        rules,obs,unit.entity_id,unit.cell,enemy.cell).is_none()
+            }
     }).min_by_key(|enemy| {
         let ty = obs.entity_type(rules, enemy.entity_id);
         let threat = ty.is_some_and(|ty| ty.is_base_defense)
@@ -174,6 +181,28 @@ pub(in crate::sim::strategy::assist) fn push_coordinated(
     push_impl(brain,rules,obs,out,fighters,objective,true)
 }
 
+/// Preserve an already legal, currently safe shot at a live battery.
+/// This is not a new immunity from the final safety arbiter or a retreat
+/// lock: damaged guns and emergency withdrawals remain interruptible.
+pub(in crate::sim::strategy::assist) fn live_battery_shot(
+    rules:&RuleSet,obs:&Observation<'_>,unit:&Unit
+)->bool {
+    unit.health_permille>=650 && support_reach(rules,obs,unit)>=8
+        && unit.mission.known()==Some(crate::sim::mission::MissionType::Attack)
+        && obs.destination(unit.entity_id).is_none()
+        && obs.attack_target(unit.entity_id).is_some_and(|target|
+            obs.own_destination_object(unit.entity_id).is_none_or(|dest|dest==target)
+                && obs.is_hostile(target) && !obs.visible_enemy_invulnerable(target)
+                && super::super::tactics::actual_threat_reach(
+                    rules,obs,unit.entity_id,target)>=8
+                && obs.observed_object_cell(target).is_some_and(|at|
+                    obs.is_cell_visible(at.0,at.1))
+                && obs.entity_type(rules,target).is_some_and(|ty|
+                    super::super::siege_counter::dangerous_battery(rules,ty))
+                && super::super::orders::admits(rules,obs,unit.entity_id,&Goal::Attack{target})
+                && super::super::safety::firing_here(rules,obs,unit,target))
+}
+
 fn push_impl(
     brain: &mut AssistBrain, rules: &RuleSet, obs: &Observation<'_>,
     out: &mut Outbox, fighters: &[&Unit], objective: (u16,u16),
@@ -203,6 +232,10 @@ fn push_impl(
             || super::super::orders::committed_garrison_entry(
                 &brain.tracked, rules, obs, unit.entity_id)
         { continue; }
+        if live_battery_shot(rules,obs,unit) {
+            held.insert(unit.entity_id);
+            continue;
+        }
         let Some(screen) = forward_screen(unit, objective, &frontliners)
         else { continue; };
         held.insert(unit.entity_id);

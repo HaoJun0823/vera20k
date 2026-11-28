@@ -267,7 +267,7 @@ impl Director {
             // The build plan's StrategicStrike gate, not the name of the
             // stage, determines when an affordable strike can be mounted.
             Objective::ExpandOre => !matches!(item,
-                Item::SpySatellite | Item::CloningVats | Item::RobotControl),
+                Item::SpySatellite | Item::RobotControl),
             Objective::RebuildArmy | Objective::Muster | Objective::PressAttack => true,
         }
     }

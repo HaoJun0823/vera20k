@@ -17,6 +17,15 @@ use super::census::Census;
 use super::tracked::TrackedKind;
 use super::squared_distance;
 
+pub(super) const CRATE_MAX_TRIP_FRAMES:u64=1800;
+
+/// Same duration for the collector claim and task ledger.
+pub(super) fn crate_trip_frames(from:(u16,u16),to:(u16,u16))->u64 {
+    let d=from.0.abs_diff(to.0).max(from.1.abs_diff(to.1));
+    600u64.saturating_add(u64::from(d).saturating_mul(12))
+        .min(CRATE_MAX_TRIP_FRAMES)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum JobKind {
     Crate,
@@ -46,6 +55,7 @@ pub(super) struct Job {
     pub last_requested: u64,
     pub refusals: u8,
     pub expected_building: Option<InternedId>,
+    crate_until:Option<u64>,
 }
 
 impl Job {
@@ -53,12 +63,24 @@ impl Job {
         self.kind == kind && self.target == target && self.cell == cell
     }
 
+    fn observe_progress(&mut self,now:u64,cell:(u16,u16))->bool {
+        if cell==self.last_cell {return false;}
+        // A crate's last_cell is the closest reached cell. Oscillation is
+        // not progress; a detour may use the existing no-progress allowance.
+        if self.kind==JobKind::Crate && !self.cell.is_some_and(|at|
+            squared_distance(cell,at)<squared_distance(self.last_cell,at)) {return false;}
+        self.last_cell=cell;
+        self.last_progress=now;
+        self.phase=Phase::Traveling;
+        true
+    }
+
     fn stale(&self, now: u64) -> bool {
         // A long-distance mission must be allowed to travel for as long as it
         // makes progress, not merely for one tracked Move's 450-frame term.
         let no_progress = now.saturating_sub(self.last_progress);
         match self.kind {
-            JobKind::Crate => no_progress >= 240 || now.saturating_sub(self.assigned_at) >= 600,
+            JobKind::Crate => no_progress>=240 || self.crate_until.is_none_or(|until|now>=until),
             JobKind::Garrison => no_progress >= 480,
             JobKind::Engineer | JobKind::Spy => no_progress >= 450
                 || now.saturating_sub(self.assigned_at)>=3600,
@@ -111,6 +133,9 @@ impl TaskLedger {
             kind, target, cell, phase: Phase::Traveling,
             assigned_at: now, last_progress: now, last_cell: from,
             last_requested: now, refusals: 0, expected_building: None,
+            crate_until:if kind==JobKind::Crate {
+                cell.map(|at|now.saturating_add(crate_trip_frames(from,at)))
+            }else{None},
         });
     }
 
@@ -272,12 +297,9 @@ impl TaskLedger {
                 ended.push(actor);
                 continue;
             }
-            if unit.cell != job.last_cell {
-                job.last_cell = unit.cell;
-                job.last_progress = now;
-                job.phase = Phase::Traveling;
-            } else if job.cell.is_some_and(|cell| squared_distance(cell, unit.cell) <= 2)
-                || job.target.is_some_and(|target| obs.attack_target(actor) == Some(target))
+            if !job.observe_progress(now,unit.cell) && (
+                job.cell.is_some_and(|cell| squared_distance(cell,unit.cell)<=2)
+                || job.target.is_some_and(|target|obs.attack_target(actor)==Some(target)))
             {
                 job.phase = Phase::AwaitingResult;
             }
@@ -306,6 +328,22 @@ mod tests {
         job.last_progress=3609;
         assert!(!job.stale(3609));
         assert!(job.stale(3610));
+    }
+
+    #[test]
+    fn v84_crate_trip_does_not_expire_at_six_hundred_or_renew_on_oscillation() {
+        let mut tasks=TaskLedger::new();
+        tasks.claim(0,8,JobKind::Crate,None,Some((100,20)),(10,20));
+        let job=tasks.jobs.get_mut(&8).unwrap();
+        assert_eq!(job.crate_until,Some(crate_trip_frames((10,20),(100,20))));
+        assert!(job.observe_progress(500,(30,20)));
+        assert!(!job.observe_progress(590,(29,20)));
+        assert!(!job.observe_progress(600,(30,20)));
+        assert!(!job.stale(600));
+        assert!(job.stale(740));
+        assert!(job.observe_progress(1679,(99,20)));
+        assert!(job.stale(1680));
+        assert_eq!(crate_trip_frames((0,0),(200,200)),CRATE_MAX_TRIP_FRAMES);
     }
 
     #[test]

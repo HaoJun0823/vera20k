@@ -159,11 +159,15 @@ impl Director {
         let main_available = super::readiness::attack_members(brain);
         if main_available < MAIN_FIST_RESERVE + MIN_FRONT { return None; }
         let home = brain.census.base_cell?;
-        let (prize, cell) = brain.asset_ops.coalition_target(rules,obs,home,retry)?;
         let mut eligible: Vec<Unit> = brain.census.units.iter().copied()
             .filter(|unit| Self::candidate(brain, obs, unit, &attack.members))
             .collect();
         if eligible.len() < MAIN_FIST_RESERVE + MIN_FRONT { return None; }
+        let screen_cells:Vec<_>=eligible.iter().filter(|u|u.health_permille>=600
+            && super::census::ground_combatant(rules,obs,u)
+            && advance::fire_support::support_reach(rules,obs,u)<7)
+            .map(|u|u.cell).collect();
+        let (prize,cell)=brain.asset_ops.coalition_target(rules,obs,home,retry,&screen_cells)?;
         // Far-away reserve bodies must not make the search quadratic on
         // twenty-thousand-object / 120-house scenarios. Sort once, evaluate
         // weapons and zone queries for only the nearest eligible detachment.
@@ -173,8 +177,17 @@ impl Director {
         let front: Vec<Unit> = eligible.iter().copied().filter(|unit|
             advance::fire_support::support_reach(rules, obs, unit) < 7).collect();
         if front.len() < MIN_FRONT { return None; }
-        let post = choose_rally(rules, obs, home, cell, &front)?;
-        eligible.retain(|unit| orders::reachable(rules, obs, unit.entity_id, post));
+        let local=front.iter().filter(|u|squared_distance(u.cell,cell)<=24*24)
+            .take(MIN_FRONT).count()>=MIN_FRONT;
+        let approach=if local {
+            front.iter().min_by_key(|u|(squared_distance(u.cell,cell),u.entity_id))
+                .map_or(home,|u|u.cell)
+        }else{home};
+        let post=choose_rally(rules,obs,approach,cell,&front)
+            .or_else(||choose_rally(rules,obs,home,cell,&front))?;
+        eligible.retain(|unit|orders::reachable(rules,obs,unit.entity_id,post)
+            && !tactics::unsafe_post(rules,obs,unit.entity_id,post)
+            && tactics::lethal_approach(rules,obs,unit.entity_id,unit.cell,post).is_none());
         let mut screen: Vec<Unit> = eligible.iter().copied().filter(|unit|
             advance::fire_support::support_reach(rules, obs, unit) < 7).collect();
         let mut guns: Vec<Unit> = eligible.iter().copied().filter(|unit|

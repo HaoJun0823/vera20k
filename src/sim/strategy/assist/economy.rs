@@ -163,7 +163,7 @@ pub(super) fn can_save_for(free: i32, price: i32, income: Option<i32>) -> bool {
 /// A selected investment can protect real cash for at most one minute.
 /// A failed or displaced bank gives ordinary production another 30 seconds;
 /// choosing the same item again cannot renew its original deadline.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub(super) struct InvestmentBank {
     target: Option<(crate::sim::intern::InternedId, u64)>,
     retry_after: u64,

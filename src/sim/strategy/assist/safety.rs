@@ -158,7 +158,7 @@ pub(super) fn safe_leg(guns: &[Envelope], from: Cell, to: Cell, escape: bool) ->
 /// weapons do not cover every corner of their square bounding box.
 /// Use integer arithmetic and clamp the closest point to the segment.
 /// This is not a native route planner or an exact prediction of moving fire.
-fn crosses_mobile_range(from:Cell,to:Cell,at:Cell,reach:i32)->bool {
+pub(super) fn crosses_mobile_range(from:Cell,to:Cell,at:Cell,reach:i32)->bool {
     let dx=i128::from(to.0)-i128::from(from.0);
     let dy=i128::from(to.1)-i128::from(from.1);
     let ax=i128::from(at.0)-i128::from(from.0);

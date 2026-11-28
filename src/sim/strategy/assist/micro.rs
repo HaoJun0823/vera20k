@@ -282,6 +282,15 @@ pub(super) fn run(
             }
             continue;
         }
+        // Emergency extraction and psychic avoidance above retain first
+        // refusal. Ordinary target ranking must not discard a real safe
+        // stationary siege shot merely because another building is nearer.
+        if !rebuilding_squad && !brain.director.under_attack_now()
+            && !aimed_at.iter().any(|(enemy,target)| *target==item.entity_id
+                && obs.engage(rules,*enemy,item.entity_id)==Engage::Ready
+                && obs.can_hurt(rules,*enemy,item.entity_id))
+            && super::advance::fire_support::live_battery_shot(rules,obs,&item.unit)
+        {continue;}
         // What is in reach now outranks where the unit was going: this is the
         // whole reason the layer exists. "In reach" is reach and weapon
         // together, so a dog walks on past the tank to the infantry behind it

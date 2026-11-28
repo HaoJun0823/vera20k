@@ -32,15 +32,27 @@ fn reach_against(rules:&RuleSet, obs:&Observation<'_>, e:&EnemyEntity, victim:&O
 /// its rule-defined armour, never a hidden enemy or an invented future unit.
 pub(super) fn prospective_ground_leg(rules:&RuleSet,obs:&Observation<'_>,
     victim:&ObjectType,visible:&[EnemyEntity],from:Cell,to:Cell)->bool {
-    let guns:Vec<_>=visible.iter().filter_map(|e| {
-        let ty=obs.object_type(rules,e.type_id)?;
-        if ty.category==ObjectCategory::Building && !obs.visible_enemy_building_operational(rules,e.entity_id) {return None;}
-        let control=if victim.immune_to_psionics {0}
-            else {tactics::mind_control_reach(rules,ty).unwrap_or(0)};
-        let reach=reach_against(rules,obs,e,victim).max(control);
-        let margin=if victim.engineer && ty.category!=ObjectCategory::Building {3} else {1};
-        (reach>0).then_some(Envelope {at:e.cell,reach:reach.saturating_add(margin)})
-    }).collect();
+    // V82's actual engineer entry uses a one-cell ordinary mobile
+    // circular margin. The pre-purchase test must not silently reintroduce
+    // the older three-cell square. No actual actor exists yet, so native
+    // present-fire and current legal Capture remain checks on dispatch.
+    let mut guns=Vec::new();
+    for e in visible {
+        let Some(ty)=obs.object_type(rules,e.type_id) else{continue;};
+        let fixed=ty.category==ObjectCategory::Building;
+        if fixed && !obs.visible_enemy_building_operational(rules,e.entity_id){continue;}
+        let control=if victim.immune_to_psionics {0}else{
+            tactics::mind_control_reach(rules,ty).unwrap_or(0)
+        };
+        if control>0 {guns.push(Envelope{at:e.cell,reach:control.saturating_add(1)});}
+        let reach=reach_against(rules,obs,e,victim);
+        if reach<=0 {continue;}
+        if victim.engineer && !fixed {
+            if safety::crosses_mobile_range(from,to,e.cell,reach.saturating_add(1)) {
+                return false;
+            }
+        } else {guns.push(Envelope{at:e.cell,reach:reach.saturating_add(1)});}
+    }
     safety::safe_leg(&guns,from,to,false)
 }
 
@@ -105,12 +117,26 @@ fn supports(census:&Census,cell:Cell)->usize {
         && cell_distance(u.cell,cell)<=10).count()
 }
 
-pub(super) struct YardSurvey { guns:Vec<Envelope>, threats:Vec<Threat> }
+pub(super) struct YardSurvey {
+    guns:Vec<Envelope>, threats:Vec<Threat>,
+    // A temporarily powerless ground battery can regain power after the
+    // yard arrives. Keep its rule-defined reach for settlement planning,
+    // not for current combat/engineer danger.
+    settlement_guns:Vec<Envelope>,
+}
 impl YardSurvey {
     pub(super) fn read(rules:&RuleSet,obs:&Observation<'_>,yard:&ObjectType,maker:Option<u64>)->Self {
         let visible:Vec<_>=obs.visible_enemy_entities().collect();
         let guns=maker.map_or_else(Vec::new,|id|safety::envelopes(rules,obs,id,&visible,true));
-        Self {guns,threats:threats(rules,obs,yard,None,&visible)}
+        let (w,h)=yard.foundation.dimensions();
+        let footprint=i32::from(w.max(h)).clamp(1,8);
+        let settlement_guns=visible.iter().filter_map(|e|{
+            let ty=obs.object_type(rules,e.type_id)?;
+            if !siege_counter::dangerous_battery(rules,ty){return None;}
+            let reach=siege_counter::battery_reach(rules,ty);
+            (reach>0).then_some(Envelope{at:e.cell,reach:reach.saturating_add(footprint)})
+        }).collect();
+        Self {guns,threats:threats(rules,obs,yard,None,&visible),settlement_guns}
     }
     pub(super) fn route(&self,from:Cell,to:Cell)->bool {
         safety::safe_leg(&self.guns,from,to,true)
@@ -121,11 +147,19 @@ impl YardSurvey {
         !direct && from.is_none_or(|p|self.route(p,cell))
             && (soft==0 || acceptable(false,soft,supports(census,cell)))
     }
+    /// A legal yard footprint alone is not a usable mining settlement.
+    /// Leave room for a refinery, lanes and workers outside seen tower
+    /// coverage. This is deliberately stricter only for new construction;
+    /// the combat and capture safety gates are unchanged.
+    pub(super) fn settled_site(&self,census:&Census,from:Option<Cell>,cell:Cell,margin:i32)->bool {
+        self.site(census,from,cell) && self.settlement_guns.iter().all(|g|
+            cell_distance(g.at,cell)>g.reach.saturating_add(margin.max(0)))
+    }
     fn exposure(&self,cell:Cell)->usize {
         self.guns.iter().filter(|g|cell_distance(g.at,cell)<=g.reach).count()
     }
     #[cfg(all(test, tests_sim_p_s))]
-    pub(super) fn terrain_only_for_test()->Self {Self {guns:Vec::new(),threats:Vec::new()}}
+    pub(super) fn terrain_only_for_test()->Self {Self {guns:Vec::new(),threats:Vec::new(),settlement_guns:Vec::new()}}
 }
 
 // Direct checks apply to all capture entrances, including bridge repairs and

@@ -860,7 +860,7 @@ fn deploy_second_yard(
         let progress = if cell != last_cell { obs.tick() } else { progress };
         let reachable = obs.entity_type(rules, entity_id).is_some_and(|ty|
             obs.can_reach(ty.movement_zone, cell, site));
-        if !risk.site(&brain.census,Some(cell),site)
+        if !risk.settled_site(&brain.census,Some(cell),site,8)
             || super::orders::hostile_mining_ground(brain,site)
             || brain.blocked_expansion_sites.contains_key(&site)
             || !reachable || maker_trip_stalled(obs.tick(), progress)
@@ -910,7 +910,7 @@ fn deploy_second_yard(
             dest == cell || selected == Some(dest))
         && cell_distance(cell, home) >= EXPAND_MIN_CELLS
         && space.ground_at(cell) != super::terrain::Ground::Enemy
-        && risk.site(&brain.census,Some(cell),cell)
+        && risk.settled_site(&brain.census,Some(cell),cell,8)
         && obs.deploy_site_admits(rules, entity_id, yard)
     {
         if (!yard_committed(brain, obs.tick(), entity_id)
@@ -936,13 +936,15 @@ fn deploy_second_yard(
         // *beside* the base rather than inside it. The maker is not spent: the
         // next frame asks the search again, and a house that finds ground later
         // still deploys.
-        if obs.destination(entity_id).is_some() {
+        if obs.destination(entity_id).is_some_and(|dest|
+            risk.settled_site(&brain.census,Some(cell),dest,8)) {
             return;
         }
         let Some(home) = brain.census.base_cell else {
             return;
         };
-        let Some(rally) = super::census::rally_near(obs, home, &brain.census.home_cells) else {
+        let Some(rally) = super::census::rally_near(obs, home, &brain.census.home_cells)
+            .filter(|rally|risk.site(&brain.census,Some(cell),*rally)) else {
             return;
         };
         if cell_distance(rally, cell) <= 2 {
@@ -964,7 +966,8 @@ fn deploy_second_yard(
     // walk is over the map's ground and costs a foundation test per cell, so
     // it is asked when the unit stands still and not once a frame while it
     // drives.
-    if obs.destination(entity_id).is_some() {
+    if obs.destination(entity_id).is_some_and(|dest|dest==target
+        || risk.settled_site(&brain.census,Some(cell),dest,8)) {
         return;
     }
     if cell != target {
@@ -1090,7 +1093,9 @@ pub(super) fn expansion_site(
             !super::tactics::path_enters_control_box(from,cell,*at,*radius)));
     let admits = |cell: (u16, u16)| {
         if rejected.contains(&cell) || super::orders::hostile_mining_ground(brain,cell)
-            || !risk.site(&brain.census,maker_position.map(|p|p.0),cell) {return false;}
+            || !obs.is_cell_visible(cell.0,cell.1)
+            || !risk.settled_site(&brain.census,maker_position.map(|p|p.0),cell,8)
+        {return false;}
         route_safe(cell) && match maker {
             Some(id) => obs.deploy_admits_at(rules, id, yard, cell),
             None => obs.clear_for_deploy(rules, yard, cell),
@@ -1112,7 +1117,7 @@ pub(super) fn expansion_site(
             && (!brain.director.initialized() || brain.expansion_ore.keys().any(|ore|
                 cell_distance(*ore,site)<=EXPAND_ORE_RING
                 && !super::orders::hostile_mining_ground(brain,*ore)))
-            && risk.site(&brain.census,maker_position.map(|p|p.0),site)
+            && risk.settled_site(&brain.census,maker_position.map(|p|p.0),site,8)
             && reachable
             && (travelling_to_site
                 || keep_expansion_appointment(tick, selected_at, reachable, admits(site)))
