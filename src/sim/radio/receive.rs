@@ -3409,8 +3409,6 @@ mod tests {
         );
     }
 
-    }
-
     #[test]
     fn lifecycle_authority_limbo_break_uses_sparse_slot_order() {
         let mut sim = Simulation::new();
