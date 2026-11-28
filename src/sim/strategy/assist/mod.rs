@@ -835,6 +835,20 @@ impl AssistBrain {
             scan.at.saturating_add(ore::SCAN_TERM) <= obs.tick() || scan.anchors != anchors
         });
         if stale {
+            // Only the first survey imports the immutable map receipt.
+            // Later scans may update visible cells only: a mined-out hidden
+            // seam must never be silently resurrected by the opening map.
+            if self.ore_scan.is_none() {
+                if let Some(intel)=obs.initial_map_intel() {
+                    for (&cell,&stage) in &intel.ore {
+                        if obs.is_cell_in_playfield(cell.0,cell.1) {
+                            self.ore_known.entry(cell).or_insert(stage);
+                        }
+                    }
+                    log::info!("auto play: v89_map_prior_seed tick={} known_ore={} authored_buildings={}",
+                        obs.tick(),self.ore_known.len(),intel.buildings.len());
+                }
+            }
             // The native overlay grid is omniscient. Update last-seen data
             // only for visible ore, removing a depleted field only when this
             // house actually sees its cell empty.

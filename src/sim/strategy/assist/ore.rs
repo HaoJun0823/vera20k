@@ -157,8 +157,13 @@ impl Survey {
             // OverlayData=0 is a valid ore tile, not absence of ore.
             let amount = u32::from(stage) + 1;
             fields.push(cell);
-            stock = stock.saturating_add(amount);
-            haul = haul.saturating_add(u64::from(amount) * u64::try_from(distance).unwrap_or(0));
+            // A mapped mineral seam is not an operational refinery's
+            // throughput. Do not buy nine trucks for distant territory
+            // simply because the opening map knows it exists.
+            if distance<=24 {
+                stock = stock.saturating_add(amount);
+                haul = haul.saturating_add(u64::from(amount) * u64::try_from(distance).unwrap_or(0));
+            }
         }
         let mean_distance = if stock == 0 { 0 } else { (haul / u64::from(stock)) as u32 };
         let targets = targets(stock, mean_distance, census.refineries);

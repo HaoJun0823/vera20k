@@ -1562,6 +1562,14 @@ pub fn finalize_constructed_scenario(
             map_data.smudges.len(),
         );
     }
+    // Record authored geography once, before the post-map tail creates
+    // starting forces or executes startup effects. No RNG/fog mutation.
+    let intel=crate::sim::control::observation::InitialMapIntel::from_loaded_map(
+        sim,rules,map_data);
+    log::info!("auto play: v89_map_prior_loaded ore_cells={} buildings={} passive={}",
+        intel.ore.len(),intel.buildings.len(),
+        intel.buildings.iter().filter(|b|b.initially_passive).count());
+    *sim.initial_map_intel=Some(std::sync::Arc::new(intel));
     // The caller submits one immutable initialization command; Simulation owns
     // every match-affecting write and Scenario RNG draw in the post-map tail.
     let campaign_map = sim.session.campaign_mission_counter().map(|_| map_data);

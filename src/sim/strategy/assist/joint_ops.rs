@@ -30,7 +30,7 @@ const PLAN_INTERVAL: u64 = 90;
 // gate; detaching below it would "preserve" a fist that can never attack.
 const MAIN_FIST_RESERVE: usize = super::squads::ARMY_TO_ATTACK;
 const MIN_FRONT: usize = 3;
-const MAX_FRONT: usize = 4;
+const MAX_FRONT: usize = 8;
 const MAX_REAR: usize = 2;
 const ASSEMBLE_LIMIT: u64 = 840;
 const CLEAR_LIMIT: u64 = 1_200;
@@ -195,13 +195,34 @@ impl Director {
         screen.sort_by_key(|unit| (squared_distance(unit.cell, post), unit.entity_id));
         guns.sort_by_key(|unit| (squared_distance(unit.cell, post), unit.entity_id));
         if screen.len() < MIN_FRONT { return None; }
-        let assigned_front: BTreeSet<_> = screen.iter().take(MAX_FRONT)
-            .map(|unit| unit.entity_id).collect();
-        let assigned_rear: BTreeSet<_> = guns.iter().take(MAX_REAR)
-            .map(|unit| unit.entity_id).collect();
-        if !reserve_permits(main_available, assigned_front.len() + assigned_rear.len()) {
-            return None;
+        // Use the same forecast BEFORE borrowing units that Clear uses
+        // AFTER arrival. Never create a four-man operation already known
+        // to lose. If possible, use a modest larger coherent detachment.
+        let threats=operation_threats(rules,obs,cell);
+        let theirs=brain.census.enemy_points(rules,obs,cell,16);
+        let available=main_available.saturating_sub(MAIN_FIST_RESERVE);
+        let rear_count=guns.len().min(MAX_REAR).min(available.saturating_sub(MIN_FRONT));
+        let assigned_rear:BTreeSet<_>=guns.iter().take(rear_count).map(|u|u.entity_id).collect();
+        let rear_points=guns.iter().take(rear_count).map(|u|u.points)
+            .fold(0i32,i32::saturating_add);
+        let front_cap=screen.len().min(MAX_FRONT).min(available.saturating_sub(rear_count));
+        let mut chosen=None;
+        for count in MIN_FRONT.max(4.min(front_cap))..=front_cap {
+            let ours=screen.iter().take(count).map(|u|u.points)
+                .fold(rear_points,i32::saturating_add);
+            if reserve_permits(main_available,count+rear_count)
+                && viable_local_fight(ours,theirs,threats.len()) {
+                chosen=Some(count);break;
+            }
         }
+        let Some(count)=chosen else {
+            if obs.tick()%450==0 {
+                log::info!("auto play: v89_joint_preflight_refused tick={} target={} front_cap={front_cap} enemy_points={theirs} threats={}",
+                    obs.tick(),prize,threats.len());
+            }
+            return None;
+        };
+        let assigned_front:BTreeSet<_>=screen.iter().take(count).map(|u|u.entity_id).collect();
         log::info!("auto play: joint operation assembles prize={} cell={:?} rally={:?} front={} guns={}",
             prize, cell, post, assigned_front.len(), assigned_rear.len());
         Some(Operation {
@@ -298,14 +319,7 @@ impl Director {
         }
         // Only currently *visible* and operational defences count. Unarmed
         // enemy buildings are not enemies to destroy before Capture.
-        let threats: Vec<EnemyEntity> = obs.visible_enemy_entities()
-            .filter(|enemy| advance::cell_distance(enemy.cell, op.cell) <= 16)
-            .filter(|enemy| obs.object_type(rules, enemy.type_id).is_some_and(|ty|
-                super::convergence::mobile_threat(rules,obs,enemy)
-                    || super::siege_counter::dangerous_battery(rules, ty)
-                        && obs.visible_enemy_building_operational(
-                        rules, enemy.entity_id)))
-            .take(128).collect();
+        let threats=operation_threats(rules,obs,op.cell);
         if op.stage == Stage::Clear {
             let elapsed = now.saturating_sub(op.changed);
             if threats.is_empty() && matches!(status,
@@ -498,6 +512,16 @@ fn reserve_permits(total_attack: usize, assigned: usize) -> bool {
         && total_attack.saturating_sub(assigned) >= MAIN_FIST_RESERVE
 }
 
+fn operation_threats(rules:&RuleSet,obs:&Observation<'_>,cell:(u16,u16))->Vec<EnemyEntity> {
+    obs.visible_enemy_entities()
+        .filter(|enemy|advance::cell_distance(enemy.cell,cell)<=16)
+        .filter(|enemy|obs.object_type(rules,enemy.type_id).is_some_and(|ty|
+            super::convergence::mobile_threat(rules,obs,enemy)
+                || super::siege_counter::dangerous_battery(rules,ty)
+                    && obs.visible_enemy_building_operational(rules,enemy.entity_id)))
+        .take(128).collect()
+}
+
 fn viable_local_fight(ours: i32, theirs: i32, threats: usize) -> bool {
     threats == 0 || ours >= 1_200
         && ours.saturating_mul(1_000) >= theirs.max(1).saturating_mul(1_150)
@@ -571,7 +595,8 @@ mod tests {
         assert!(reserve_permits(13,3));
         assert!(reserve_permits(15,4));
         assert!(reserve_permits(16,6));
-        assert!(!reserve_permits(30,7));
+        assert!(reserve_permits(30,7));
+        assert!(!reserve_permits(30,11));
         assert!(!reserve_permits(30,2));
     }
 

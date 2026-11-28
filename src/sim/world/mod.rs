@@ -727,6 +727,10 @@ pub struct Simulation {
     /// generated loads leave it `None`.
     #[serde(skip, default)]
     authored_tiberium_value_total: Forked<Option<i32>>,
+    /// Immutable, pre-game map knowledge for planning only. Not combat
+    /// visibility, not a live hidden entity query, and not native save state.
+    #[serde(skip, default)]
+    pub(crate) initial_map_intel: Forked<Option<std::sync::Arc<crate::sim::control::observation::InitialMapIntel>>>,
     #[serde(skip, default)]
     pub(crate) post_load_particle_system_constructed:
         Forked<crate::sim::ore_twinkle::PostLoadGasCloud>,

@@ -134,6 +134,62 @@ pub struct EnemyEntity {
     pub cell: (u16, u16),
 }
 
+/// A building recorded before the native post-map startup tail. The
+/// passive flag describes its INITIAL owner only; it is never refreshed
+/// from a hidden live entity. The stable ID identifies this historical row.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InitialMapBuilding {
+    pub(crate) site: EnemyEntity,
+    pub(crate) initially_passive: bool,
+}
+
+/// A frozen map-loading receipt, separate from live Observation.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct InitialMapIntel {
+    pub(crate) ore: std::collections::BTreeMap<(u16,u16),u8>,
+    pub(crate) buildings: Vec<InitialMapBuilding>,
+}
+
+impl InitialMapIntel {
+    pub(crate) fn from_loaded_map(sim:&Simulation,rules:&RuleSet,
+        map:&crate::map::map_file::MapFile)->Self {
+        let mut result=Self::default();
+        let registry=rules.overlay_registry();
+        if let Some(grid)=sim.overlay_grid.as_ref() {
+            for y in 0..grid.height() {
+                for x in 0..grid.width() {
+                    let cell=grid.cell(x,y);
+                    if cell.overlay_id.is_some_and(|id|registry.flags(id)
+                        .is_some_and(|flags|flags.tiberium))
+                    {
+                        result.ore.insert((x,y),cell.overlay_data);
+                    }
+                }
+            }
+        }
+        // A map-file authored type/cell key prevents dynamically constructed
+        // starting units or later AI bases becoming a map prior.
+        let authored:BTreeSet<_>=map.entities.iter()
+            .filter(|e|e.category==EntityCategory::Structure)
+            .map(|e|((e.cell_x,e.cell_y),e.type_id.to_ascii_uppercase()))
+            .collect();
+        for entity in sim.entities().values() {
+            if entity.category()!=EntityCategory::Structure
+                || entity.lifecycle.in_limbo() || entity.health.current()<=0 {continue;}
+            let cell=(entity.position.rx(),entity.position.ry());
+            let Some(ty)=sim.object_type(entity.type_ref(),rules) else{continue;};
+            if !authored.contains(&(cell,ty.id.to_ascii_uppercase())) {continue;}
+            result.buildings.push(InitialMapBuilding{
+                site:EnemyEntity{entity_id:entity.stable_id(),type_id:entity.type_ref(),cell},
+                initially_passive:sim.houses().get(&entity.owner())
+                    .is_some_and(|h|h.multiplay_passive()),
+            });
+        }
+        result.buildings.sort_by_key(|b|(b.site.cell,b.site.entity_id));
+        result
+    }
+}
+
 /// One shot in the air that names an object, as that object reads it.
 ///
 /// The three facts that decide whether a step aside is worth anything: where
@@ -2472,6 +2528,12 @@ impl<'a> Observation<'a> {
             .and_then(|grid| grid.cell(rx, ry).overlay_id)
     }
 
+    /// Frozen map-layout prior. A loaded save without a fresh map receipt
+    /// deliberately returns None; NEVER reconstruct this from its live fog.
+    pub(crate) fn initial_map_intel(&self)->Option<&InitialMapIntel> {
+        self.sim.initial_map_intel.as_ref().map(|intel|intel.as_ref())
+    }
+
     /// The native OverlayData byte for an existing overlay, if any.
     ///
     /// For a tiberium overlay this is the remaining growth/density stage
@@ -2665,6 +2727,24 @@ fn isqrt(value: i32) -> i32 {
 mod vision_tests {
     use super::*;
     use crate::sim::intern::InternedId;
+
+    #[test]
+    fn v89_initial_receipt_does_not_learn_later_construction() {
+        let Some((mut sim,rules))=arena() else{return;};
+        let map=crate::map::map_file::MapFile::from_bytes(
+            b"[Map]\nTheater=TEMPERATE\nSize=0,0,8,8\nLocalSize=0,0,8,8\n[IsoMapPack5]\n1=CAAEABUAAAAAEQAA\n"
+        ).unwrap();
+        let intel=InitialMapIntel::from_loaded_map(&sim,&rules,&map);
+        assert!(intel.buildings.is_empty());
+        let known_ore=intel.ore.clone();
+        *sim.initial_map_intel=Some(std::sync::Arc::new(intel));
+        sim.spawn_object("CAOILD","Russians",20,20,255,&rules).unwrap();
+        let owner=sim.intern("Americans");
+        let obs=Observation::new(&sim,owner);
+        let frozen=obs.initial_map_intel().unwrap();
+        assert!(frozen.buildings.is_empty());
+        assert_eq!(frozen.ore,known_ore);
+    }
 
     /// The ore field is read off the rules' own `Tiberium=yes`, not a name list.
     #[test]

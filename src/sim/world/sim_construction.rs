@@ -208,6 +208,7 @@ impl Simulation {
             mapgen_rng: Forked::new(SimRng::new(0)),
             native_unique_ids: Forked::new(None),
             authored_tiberium_value_total: Forked::new(None),
+            initial_map_intel: Forked::new(None),
             post_load_particle_system_constructed: Default::default(),
             native_map_tubes: Forked::new(crate::map::tubes::NativeMapTubes::default()),
             load_objects: Forked::new(LoadObjectLifecycle::default()),

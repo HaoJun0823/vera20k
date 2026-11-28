@@ -244,10 +244,13 @@ pub(super) fn spend(
     // spending. Real power, income and production recovery still outrank it.
     brain.quality_reserve = super::composition::prior_quality_reserve(brain,rules,obs);
     if brain.quality_reserve == 0 { brain.quality_bank.interrupt(obs.tick()); }
+    if brain.research_bank.active(obs.tick()).is_some()
+        && v89_development(brain,rules,obs,budget,out) {return;}
     if income_investment(brain,rules,obs,budget,out) {
         brain.expansion_bank.interrupt(obs.tick());
         return;
     }
+    if v89_development(brain,rules,obs,budget,out) {return;}
     if invest_second_base(brain,rules,obs,budget,out) {return;}
     build_next(brain, rules, obs, budget, out, None);
     // An optional research plan which did not hold any money this frame has
@@ -266,6 +269,60 @@ pub(super) fn spend(
     queue_defense_in_parallel(brain, rules, obs, budget, out);
     // Expansion has its own bounded appointment before optional spending.
     // Do not reserve a second, conflicting amount after the build pass.
+}
+
+/// With a genuinely usable ground force and serviced economy, reserve
+/// for one missing native tech/first strike facility before another
+/// optional expansion or high-quality unit. Use the existing finite
+/// research appointment; no additional wallet or phantom order.
+fn v89_development(brain:&mut AssistBrain,rules:&RuleSet,obs:&Observation<'_>,
+    budget:&Budget,out:&mut Outbox)->bool {
+    if brain.director.under_attack_now() || brain.director.recovering_income()
+        || brain.director.recovering_under_fire() || brain.director.rebuilding_force()
+        || brain.mobilization.active() || brain.campaign.economy_resting()
+        || obs.power_blackout_active() || plan::power_short(rules,obs,&brain.census)
+        || brain.census.refineries==0 || brain.census.harvesters<2
+        || !brain.census.harvesters_served()
+        || brain.census.available_ground_fighters(rules,obs)<12
+        || super::composition::healthy_ground_hulls(brain,rules,obs)<4
+        || !budget.income.is_some_and(|rate|rate>=1200)
+        || brain.census.line(ProductionCategory::Building).busy()
+        || plan::line_proposed(rules,obs,out,ProductionCategory::Building)
+        || brain.income_bank.active(obs.tick()).is_some()
+        || super::composition::local_air_emergency(brain,rules,obs,budget.free)
+    {return false;}
+    let quality=brain.quality_reserve;
+    brain.quality_reserve=0;
+    let choice=proactive_tech_step(brain,rules,obs,budget)
+        .or_else(||proactive_strike_step(brain,rules,obs,budget)
+            .filter(|p|p.item==Item::Superweapon));
+    let Some(chosen)=choice else {
+        brain.quality_reserve=quality;return false;
+    };
+    let price=obs.cost_of(rules,chosen.ty);
+    if budget.free<price/3 || brain.research_bank.active(obs.tick())
+        .is_some_and(|id|id!=chosen.type_id)
+        || !budget.income.is_some_and(|rate|
+            i64::from(price)-i64::from(budget.free)<=i64::from(rate)*2)
+    {
+        brain.quality_reserve=quality;return false;
+    }
+    let kind=chosen.ty.id.clone();
+    build_next(brain,rules,obs,budget,out,Some(chosen));
+    let proposed=plan::line_proposed(rules,obs,out,ProductionCategory::Building);
+    let saving=brain.yard_reserve>0;
+    if proposed || saving {
+        brain.expansion_bank.interrupt(obs.tick());
+        brain.quality_bank.interrupt(obs.tick());
+        if proposed || obs.tick()%150==0 {
+            log::info!("auto play: v89_development tick={} type={kind} proposed={proposed} reserve={}",
+                obs.tick(),brain.yard_reserve);
+        }
+        true
+    } else {
+        brain.quality_reserve=quality;
+        false
+    }
 }
 
 /// Send a building-clear request through the same ranked order arbiter as the
@@ -1076,6 +1133,15 @@ fn build_next<'r>(
         Item::Aircraft | Item::Radar | Item::Tech
             if !brain.director.under_attack_now() => {
             brain.research_bank.hold(tick,type_id,budget.free,price,budget.income)
+        }
+        Item::Superweapon if brain.quality_reserve==0
+            && brain.census.available_ground_fighters(rules,obs)>=12
+            && !brain.director.under_attack_now()
+            && !brain.director.recovering_under_fire()
+            && brain.census.harvesters_served()
+            && budget.income.is_some_and(|rate|rate>=1200
+                && i64::from(price)-i64::from(budget.free)<=i64::from(rate)*2) => {
+            brain.research_bank.hold_income(tick,type_id,budget.free,price,budget.income,false)
         }
         Item::Superweapon | Item::SupportSuperweapon
             if brain.quality_reserve==0 && optional_tech_admissible(budget,price,true,None,obs.tick()) => {

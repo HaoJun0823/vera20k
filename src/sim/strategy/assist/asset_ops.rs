@@ -176,6 +176,49 @@ pub(super) fn capture_opportunity(brain: &AssistBrain, rules: &RuleSet,
     prize_ready(false,restricted,remote,income,guards)
 }
 
+/// A map prior licenses navigation to a coordinate, NOT a hidden native
+/// click or live ownership/HP lookup. Once revealed, the normal observation
+/// and capture director owns this site.
+pub(super) fn initial_public_post(
+    rules:&RuleSet,obs:&Observation<'_>,from:(u16,u16),
+    zone:crate::rules::locomotor_type::MovementZone,max_trip:i32,
+    mut accepts:impl FnMut(&EnemyEntity,(u16,u16))->bool,
+)->Option<(EnemyEntity,(u16,u16))> {
+    let intel=obs.initial_map_intel()?;
+    let mut best=None;
+    for entry in &intel.buildings {
+        let site=entry.site;
+        if !entry.initially_passive || obs.is_cell_revealed(site.cell.0,site.cell.1)
+            || super::advance::cell_distance(from,site.cell)>max_trip {continue;}
+        let Some(ty)=obs.object_type(rules,site.type_id) else{continue;};
+        if !orders::strategic_public_asset(ty) || ty.can_be_occupied {continue;}
+        let (w,h)=ty.foundation.dimensions();
+        let w=i32::from(w.max(1));
+        let h=i32::from(h.max(1));
+        let value=if ty.super_weapon.is_some() || ty.super_weapon2.is_some(){12}
+            else if ty.produce_cash_amount>0 {9}else{4};
+        // A real perimeter, not the blocked building anchor.
+        for dy in -1..=h {
+            for dx in -1..=w {
+                if dx>=0 && dx<w && dy>=0 && dy<h {continue;}
+                let (Ok(x),Ok(y))=(u16::try_from(i32::from(site.cell.0)+dx),
+                    u16::try_from(i32::from(site.cell.1)+dy)) else{continue;};
+                let post=(x,y);
+                if !obs.is_cell_in_playfield(x,y)
+                    || !obs.is_ground_walkable(x,y)
+                    || !obs.can_reach(zone,from,post)
+                    || !accepts(&site,post) {continue;}
+                let d=super::advance::cell_distance(from,post);
+                let rank=(d-value,d,site.entity_id,post);
+                if best.as_ref().is_none_or(|(old,_,_)|rank<*old) {
+                    best=Some((rank,site,post));
+                }
+            }
+        }
+    }
+    best.map(|(_,site,post)|(site,post))
+}
+
 fn muster_capacity(defenders: usize) -> usize {
     defenders.saturating_sub(GUARD_RESERVE).min(2)
 }

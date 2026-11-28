@@ -120,6 +120,7 @@ fork_helpers! {
     mapgen_rng,
     native_unique_ids,
     authored_tiberium_value_total,
+    initial_map_intel,
     post_load_particle_system_constructed,
     native_map_tubes,
     load_objects,

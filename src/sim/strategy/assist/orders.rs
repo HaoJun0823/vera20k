@@ -548,6 +548,29 @@ pub(super) fn captures(
             // refinery. Last sighting is not authority to click an invisible
             // building: walk towards that remembered site, then ask the native
             // Capture admission once it comes into real sight again.
+            if ty.engineer && tick<=12_000 && tick%30==0
+                && !unit.in_service() && obs.destination(unit.entity_id).is_none()
+                && brain.tracked.tasks.get(unit.entity_id).is_none()
+                && !brain.director.under_attack_now() {
+                let guns=super::safety::envelopes(rules,obs,unit.entity_id,&site_threats,true);
+                let occupied:Vec<_>=brain.census.units.iter()
+                    .filter(|u|u.entity_id!=unit.entity_id && u.traits.engineer && u.controllable())
+                    .filter_map(|u|obs.destination(u.entity_id))
+                    .collect();
+                if let Some((site,post))=super::asset_ops::initial_public_post(
+                    rules,obs,unit.cell,ty.movement_zone,56,|site,post|
+                        !occupied.iter().any(|at|squared_distance(*at,site.cell)<=8*8)
+                        && super::safety::safe_leg(&guns,unit.cell,post,false))
+                {
+                    if issue_tracked(&mut brain.tracked,brain.trace,out,rules,obs,
+                        unit.entity_id,TrackedKind::Move,None,Some(post),Goal::Move{cell:post})
+                    {
+                        issued+=1;
+                        log::info!("auto play: v89_prior_engineer_move tick={tick} actor={} site={:?} post={post:?}",
+                            unit.entity_id,site.cell);
+                    }
+                }
+            }
             if ty.agent {
                 if let Some(post) = spy_recon_post(brain, rules, obs, unit.cell, ty.movement_zone) {
                     let _ = issue_tracked(
@@ -3175,6 +3198,23 @@ pub(super) fn slave_miners(
 /// and the machine never starts. Every harvester this brain owns that is not
 /// already harvesting is given the click the player would give it; the field
 /// search is the mission's job, so the cell is the unit's own.
+fn mineral_bucket(cell:(u16,u16))->(u16,u16) {(cell.0/8,cell.1/8)}
+
+fn patch_capacity(stock:u32)->usize {
+    stock.div_ceil(55).clamp(1,3) as usize
+}
+
+#[cfg(all(test, tests_sim_p_s))]
+#[test]
+fn v89_miner_patch_capacity_is_bounded() {
+    assert_eq!(mineral_bucket((31,32)),(3,4));
+    assert_eq!(patch_capacity(1),1);
+    assert_eq!(patch_capacity(55),1);
+    assert_eq!(patch_capacity(56),2);
+    assert_eq!(patch_capacity(110),2);
+    assert_eq!(patch_capacity(500),3);
+}
+
 pub(super) fn harvesters(
     brain: &mut AssistBrain,
     rules: &RuleSet,
@@ -3225,6 +3265,22 @@ pub(super) fn harvesters(
     // wishlist's "the harvester walks into the enemy base to mine": the field is
     // real and the trip is a donation.
     let space = super::terrain::Space::read(obs, rules, &brain.census.home_cells, anchor);
+    // The current native destination and our real issued journeys are
+    // evidence of work allocation. A returning loaded truck is not a
+    // new request for an idle miner. Keep the estimate local to this pass.
+    let mut assigned=BTreeMap::new();
+    let mut loads:BTreeMap<(u16,u16),usize>=BTreeMap::new();
+    let patch_keys:BTreeSet<_>=patches.iter().map(|p|mineral_bucket(p.cell)).collect();
+    for u in brain.census.units.iter().filter(|u|u.traits.harvester && u.controllable()) {
+        let at=brain.miner_journeys.get(&u.entity_id).map(|(at,_,_)|*at)
+            .or_else(||obs.destination(u.entity_id).filter(|at|brain.ore_known.contains_key(at)))
+            .or_else(||(u.mission==harvest && brain.ore_known.contains_key(&u.cell)).then_some(u.cell));
+        if let Some(key)=at.map(mineral_bucket).filter(|key|patch_keys.contains(key)) {
+            assigned.insert(u.entity_id,key);
+            *loads.entry(key).or_default()+=1;
+        }
+    }
+    let mobile=brain.census.available_ground_fighters(rules,obs);
     for (id, cell, type_id, mission) in idle {
         if ordered_this_frame(out, id)
             || brain.miner_avoid_until.get(&id).is_some_and(|until| *until > tick)
@@ -3241,14 +3297,36 @@ pub(super) fn harvesters(
             && (!obs.is_cell_visible(field.0,field.1) || super::ore::at(rules,obs,field));
         let bay_distance=|field:(u16,u16)|brain.census.refinery_cells.iter()
             .map(|bay|cell_distance(*bay,field)).min().unwrap_or(i32::MAX/4);
-        let local=patches.iter().filter(|patch|bay_distance(patch.cell)<=24
-            && safe(patch.cell))
-            .min_by_key(|patch|(bay_distance(patch.cell)+cell_distance(cell,patch.cell),
-                std::cmp::Reverse(patch.stock),patch.cell)).map(|p|p.cell);
+        let load=|field| {
+            let key=mineral_bucket(field);
+            loads.get(&key).copied().unwrap_or(0)
+                .saturating_sub(if assigned.get(&id)==Some(&key){1}else{0})
+        };
+        let full=|p:&super::ore::Patch|load(p.cell)>=patch_capacity(p.stock);
+        let rank=|p:&super::ore::Patch|(
+            full(p),bay_distance(p.cell)+cell_distance(cell,p.cell)
+                + 12*(load(p.cell).min(8) as i32),
+            std::cmp::Reverse(p.stock),p.cell);
+        let local=patches.iter().filter(|p|bay_distance(p.cell)<=24 && safe(p.cell))
+            .min_by_key(|p|rank(p));
+        // Use an unsaturated, known rich neighboring district when the
+        // serviced local district is full. Never make the opening miner
+        // explore across the whole map just because the map prior has ore.
+        let remote=if local.is_none_or(|p|full(p)) {
+            patches.iter().filter(|p|bay_distance(p.cell)>24
+                && bay_distance(p.cell)<=64 && p.stock>=55 && !full(p)
+                && cell_distance(cell,p.cell)<=super::ore::REMOTE_WORK_CELLS
+                && (bay_distance(p.cell)<=36 || (mobile>=4
+                    && obs.is_cell_revealed(p.cell.0,p.cell.1)))
+                && safe(p.cell)).min_by_key(|p|rank(p))
+        }else{None};
         let target=if obs.is_cell_visible(cell.0,cell.1) && super::ore::at(rules,obs,cell)
             && safe(cell) && (bay_distance(cell)<=24 || local.is_none()) {Some(cell)}
-            else {local.or_else(||super::ore::best_patch(cell,&patches,
-                super::ore::REMOTE_WORK_CELLS,safe))};
+            else {remote.or(local).map(|p|p.cell)
+                .or_else(||super::ore::best_patch(cell,&patches,64,|at|
+                    bay_distance(at)<=64
+                    && (bay_distance(at)<=36 || (mobile>=4 && obs.is_cell_revealed(at.0,at.1)))
+                    && safe(at)))};
         // A loaded truck returning to its own bay is not searching for ore.
         // Preserve native unloading; never replace it with another expedition.
         let returning=obs.miner_cargo_bales(id).is_some_and(|bales|bales>0)
@@ -3260,10 +3338,15 @@ pub(super) fn harvesters(
                         && super::safety::safe_leg(&guns,cell,at,true)));
         if returning {brain.miner_standby.remove(&id);continue;}
         let destination=obs.destination(id);
-        let unsafe_native=destination.is_some_and(|dest|
+        let unsafe_native=destination.is_some_and(|dest|{
+            let deliberate=brain.miner_journeys.get(&id).is_some_and(|(at,_,_)|*at==dest);
+            let known_seam=brain.ore_known.contains_key(&dest)
+                && (!obs.is_cell_visible(dest.0,dest.1) || super::ore::at(rules,obs,dest))
+                && bay_distance(dest)<=64;
             !mining_leg_safe(brain,obs,zone,cell,dest,&guns)
-            || (local.is_some() && bay_distance(dest)>32
-                && !obs.miner_cargo_bales(id).is_some_and(|bales|bales>0)));
+                || (local.is_some() && bay_distance(dest)>32 && !deliberate && !known_seam
+                    && !obs.miner_cargo_bales(id).is_some_and(|bales|bales>0))
+        });
         let unsafe_trip=brain.miner_journeys.get(&id).is_some_and(|(dest,_,_)|
             !mining_leg_safe(brain,obs,zone,cell,*dest,&guns)
             || (obs.is_cell_visible(dest.0,dest.1) && !super::ore::at(rules,obs,*dest)));
@@ -3345,11 +3428,17 @@ pub(super) fn harvesters(
         // Commit the remote trip as an ordinary, real Move. A 100-cell ore
         // field cannot be harvested by repeatedly clicking Harvest from home.
         let native_scan = (rules.general.tiberium_long_scan / 256).max(1);
-        if cell_distance(cell, target) > native_scan / 2 {
+        let haul_distance=bay_distance(target);
+        if cell_distance(cell, target) > (native_scan / 2).min(12) {
             if issue(brain, out, rules, obs, id, Goal::Move { cell: target }) {
                 brain.miner_journeys.insert(id, (target, cell, tick));
                 brain.tracked.record(tick, id, TrackedKind::Move, None, Some(target));
-                log::debug!("auto play: miner {id} dispatched to known ore seam {target:?}");
+                let key=mineral_bucket(target);
+                if let Some(old)=assigned.insert(id,key) {
+                    if let Some(n)=loads.get_mut(&old){*n=n.saturating_sub(1);}
+                }
+                *loads.entry(key).or_default()+=1;
+                log::info!("auto play: v89_miner_trip tick={tick} actor={id} field={target:?} bay_distance={haul_distance}");
             }
             continue;
         }
@@ -3358,6 +3447,11 @@ pub(super) fn harvesters(
         }
         if issue(brain, out, rules, obs, id, Goal::Harvest { cell: target }) {
             brain.tracked.record(tick, id, TrackedKind::Harvest, None, None);
+            let key=mineral_bucket(target);
+            if let Some(old)=assigned.insert(id,key) {
+                if let Some(n)=loads.get_mut(&old){*n=n.saturating_sub(1);}
+            }
+            *loads.entry(key).or_default()+=1;
         }
     }
 }

@@ -81,6 +81,7 @@ fn interest(ty: &ObjectType) -> Option<Interest> {
 enum Purpose {
     Frontier,
     Revisit(u64),
+    MapAsset((u16,u16)),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -409,10 +410,20 @@ impl Director {
         }
     }
 
-    fn choose(&self, now: u64, obs: &Observation<'_>, from: (u16,u16),
+    fn choose(&self, now: u64, rules:&RuleSet, obs: &Observation<'_>, from: (u16,u16),
         zone: MovementZone, threats: &[((u16,u16),i32)],
         occupied: &BTreeSet<(u16,u16)>,
     ) -> Option<Candidate> {
+        // Strategic map knowledge precedes generic reveal-gain roaming.
+        // Still honor the scout's normal safe posts, cooldown and separation.
+        if let Some((site,post))=super::asset_ops::initial_public_post(
+            rules,obs,from,zone,64,|_,post|
+                eligible(obs,zone,from,post,threats,&self.blocked,occupied,now)
+                && !threats.iter().any(|(at,reach)|
+                    super::tactics::path_enters_control_box(from,post,*at,*reach)))
+        {
+            return Some(Candidate{destination:post,purpose:Purpose::MapAsset(site.cell),utility:3000});
+        }
         let mut best = None;
         // There is no full-map scan per scout every tick. This survey runs
         // only on mission assignment, at most once per 120 frames, and uses
@@ -494,6 +505,7 @@ impl Director {
             let reached = cell_distance(unit.cell, mission.destination) <= 3;
             let observed = match mission.purpose {
                 Purpose::Frontier => unknown_gain(obs,mission.destination)==0,
+                Purpose::MapAsset(cell) => obs.is_cell_revealed(cell.0,cell.1),
                 Purpose::Revisit(site_id) => self.sites.get(&site_id)
                     .is_none_or(|site| obs.is_cell_visible(site.cell.0,site.cell.1)),
             };
@@ -531,7 +543,7 @@ impl Director {
             else { continue; };
             if !unit.controllable() || unit.in_service() { continue; }
             let Some(ty) = obs.object_type(rules,unit.type_id) else { continue; };
-            let Some(candidate) = self.choose(now,obs,unit.cell,ty.movement_zone,
+            let Some(candidate) = self.choose(now,rules,obs,unit.cell,ty.movement_zone,
                 &threats,&occupied) else { continue; };
             if let Purpose::Revisit(site_id) = candidate.purpose {
                 if let Some(site) = self.sites.get_mut(&site_id) { site.last_probed = now; }

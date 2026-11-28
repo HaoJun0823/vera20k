@@ -291,6 +291,9 @@ pub(super) fn fill_lines(
                 .map(|(ty,id,site)|{capture_target=site;(ty,id)})
         }else{None}
     });
+    let capture_purchase=capture_purchase.or_else(||
+        (capture_line_open && !hard_emergency)
+            .then(||initial_map_engineer(brain,rules,obs,capture_free)).flatten());
     let capture_claimed = queue_unit(rules,obs,&mut budget,out,capture_purchase);
     if capture_claimed {
         brain.engineers.note_bought(obs.tick());
@@ -1088,6 +1091,33 @@ fn asset_engineer_choice<'r>(
         }
     }
     best.map(|(_,ty,id,site)|(ty,id,site))
+}
+
+/// One spare opening survey engineer may be purchased for a map-file
+/// asset, but no target-ID purchase claim or fire-protection is created
+/// before real visibility. Existing capture/repair purchases remain first.
+fn initial_map_engineer<'r>(
+    brain:&AssistBrain,rules:&'r RuleSet,obs:&Observation<'_>,free:i32,
+)->Option<(&'r ObjectType,InternedId)> {
+    if obs.tick()>12_000 || brain.director.under_attack_now()
+        || brain.director.recovering_income()
+        || brain.census.refineries==0 || brain.census.harvesters==0
+        || !brain.engineers.may_buy(obs.tick()) {return None;}
+    let (field,idle)=capture_engineer_stock(brain,obs);
+    if field>=2 || idle>0 {return None;}
+    let visible:Vec<_>=obs.visible_enemy_entities().collect();
+    build::all_class_types(rules,obs,ObjectCategory::Infantry)
+        .filter(|(ty,_)|ty.engineer && obs.can_build(rules,ty,true)==CanBuild::Yes
+            && obs.has_producer(rules,ty) && obs.cost_of(rules,ty)>0
+            && free>=obs.cost_of(rules,ty).saturating_add(900))
+        .filter(|(ty,_)|{
+            let Some(from)=obs.current_producer(rules,ty)
+                .and_then(|id|obs.observed_object_cell(id))
+                .and_then(|at|super::census::rally_near(obs,at,&brain.census.home_cells))
+                else{return false;};
+            super::asset_ops::initial_public_post(rules,obs,from,ty.movement_zone,56,
+                |_,post|super::site_risk::prospective_ground_leg(rules,obs,ty,&visible,from,post)).is_some()
+        }).min_by_key(|(ty,id)|(obs.cost_of(rules,ty),*id))
 }
 
 fn neutral_asset_engineer<'r>(
