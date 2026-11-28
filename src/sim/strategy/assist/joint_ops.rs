@@ -30,6 +30,9 @@ const PLAN_INTERVAL: u64 = 90;
 // gate; detaching below it would "preserve" a fist that can never attack.
 const MAIN_FIST_RESERVE: usize = super::squads::ARMY_TO_ATTACK;
 const MIN_FRONT: usize = 3;
+const OPENING_REGION_END: u64 = 12_000;
+const OPENING_OPERATION_LIMIT: u64 = 1_800;
+const OPENING_RESERVE: usize = 2;
 const MAX_FRONT: usize = 4;
 const MAX_REAR: usize = 2;
 const ASSEMBLE_LIMIT: u64 = 840;
@@ -56,6 +59,7 @@ struct Operation {
     started: u64,
     changed: u64,
     stage: Stage,
+    opening: bool,
     front: BTreeSet<u64>,
     rear: BTreeSet<u64>,
     /// Only orders issued *by this director*. On release we must not erase
@@ -146,7 +150,7 @@ impl Director {
     }
 
     fn create(brain: &AssistBrain, rules: &RuleSet,
-        obs: &Observation<'_>, retry: &BTreeMap<u64,u64>,
+        obs: &Observation<'_>, out: &Outbox, retry: &BTreeMap<u64,u64>,
     ) -> Option<Operation> {
         if brain.director.under_attack_now() || brain.director.recovering_under_fire()
             || brain.mobilization.active() || brain.campaign.economy_resting()
@@ -157,13 +161,38 @@ impl Director {
         // Never impair the committed main fist. A wealthy house with a large
         // stockpile may run a limited side operation; a small house may not.
         let main_available = super::readiness::attack_members(brain);
-        if main_available < MAIN_FIST_RESERVE + MIN_FRONT { return None; }
         let home = brain.census.base_cell?;
-        let (prize, cell) = brain.asset_ops.coalition_target(rules,obs,home,retry)?;
+        // A full-size side operation still needs its independent ten-unit
+        // main fist. Before that fist exists, let three genuinely spare
+        // ground fighters contest one *visible neutral public asset*, if
+        // the local fight is favourable. Never divert an already-ready fist.
+        let opening = !obs.is_campaign() && obs.tick() <= OPENING_REGION_END
+            && opening_reserve_permits(main_available, MIN_FRONT)
+            && brain.census.refineries > 0 && brain.census.harvesters > 0
+            && !brain.director.recovering_income()
+            && brain.squads.squad(Role::Defend).is_some_and(|team|
+                brain.census.units.iter().filter(|u| team.members.contains(&u.entity_id)
+                    && brain.census.available(u) && !u.traits.aircraft
+                    && matches!(u.slot, Slot::Infantry | Slot::Vehicle)
+                    && advance::cell_distance(u.cell, home) <= 18).take(3).count() >= 3);
+        if !opening && main_available < MAIN_FIST_RESERVE + MIN_FRONT { return None; }
+        let (prize, cell) = if opening {
+            brain.asset_ops.opening_coalition_target(rules,obs,home,retry)?
+        } else {
+            brain.asset_ops.coalition_target(rules,obs,home,retry)?
+        };
+        let required = if opening { MIN_FRONT + OPENING_RESERVE }
+            else { MAIN_FIST_RESERVE + MIN_FRONT };
         let mut eligible: Vec<Unit> = brain.census.units.iter().copied()
             .filter(|unit| Self::candidate(brain, obs, unit, &attack.members))
+            .filter(|unit| !opening || (!unit.traits.scout
+                && !brain.census.mobile_aa.contains(&unit.entity_id)
+                && !out.ordered_this_frame(unit.entity_id)
+                && !obs.attack_target(unit.entity_id).is_some_and(|target|
+                    obs.engage(rules, unit.entity_id, target)
+                        == crate::sim::control::observation::Engage::Ready)))
             .collect();
-        if eligible.len() < MAIN_FIST_RESERVE + MIN_FRONT { return None; }
+        if eligible.len() < required { return None; }
         // Far-away reserve bodies must not make the search quadratic on
         // twenty-thousand-object / 120-house scenarios. Sort once, evaluate
         // weapons and zone queries for only the nearest eligible detachment.
@@ -174,7 +203,10 @@ impl Director {
             advance::fire_support::support_reach(rules, obs, unit) < 7).collect();
         if front.len() < MIN_FRONT { return None; }
         let post = choose_rally(rules, obs, home, cell, &front)?;
-        eligible.retain(|unit| orders::reachable(rules, obs, unit.entity_id, post));
+        eligible.retain(|unit| orders::reachable(rules, obs, unit.entity_id, post)
+            && (!opening || (!tactics::unsafe_post(rules, obs, unit.entity_id, post)
+                && tactics::lethal_approach(rules, obs, unit.entity_id,
+                    unit.cell, post).is_none())));
         let mut screen: Vec<Unit> = eligible.iter().copied().filter(|unit|
             advance::fire_support::support_reach(rules, obs, unit) < 7).collect();
         let mut guns: Vec<Unit> = eligible.iter().copied().filter(|unit|
@@ -182,18 +214,37 @@ impl Director {
         screen.sort_by_key(|unit| (squared_distance(unit.cell, post), unit.entity_id));
         guns.sort_by_key(|unit| (squared_distance(unit.cell, post), unit.entity_id));
         if screen.len() < MIN_FRONT { return None; }
-        let assigned_front: BTreeSet<_> = screen.iter().take(MAX_FRONT)
+        let assigned_front: BTreeSet<_> = screen.iter()
+            .take(if opening { MIN_FRONT } else { MAX_FRONT })
             .map(|unit| unit.entity_id).collect();
-        let assigned_rear: BTreeSet<_> = guns.iter().take(MAX_REAR)
+        let assigned_rear: BTreeSet<_> = guns.iter().take(if opening { 0 } else { MAX_REAR })
             .map(|unit| unit.entity_id).collect();
-        if !reserve_permits(main_available, assigned_front.len() + assigned_rear.len()) {
+        let assigned = assigned_front.len() + assigned_rear.len();
+        if opening {
+            if !opening_reserve_permits(main_available, assigned) { return None; }
+            let threats: Vec<_> = obs.visible_enemy_entities()
+                .filter(|enemy| advance::cell_distance(enemy.cell, cell) <= 16)
+                .collect();
+            // Do not turn early map control into an under-equipped siege.
+            // A visible mind controller or operational advanced battery
+            // needs the existing regular siege/counter owners instead.
+            if threats.iter().any(|enemy| obs.object_type(rules, enemy.type_id)
+                .is_some_and(|ty| tactics::mind_control_reach(rules,ty).is_some()
+                    || (super::siege_counter::dangerous_battery(rules,ty)
+                        && obs.visible_enemy_building_operational(rules,enemy.entity_id))))
+            { return None; }
+            let ours = screen.iter().filter(|u| assigned_front.contains(&u.entity_id))
+                .map(|u| u.points).fold(0i32, i32::saturating_add);
+            let theirs = brain.census.enemy_points(rules, obs, cell, 16);
+            if !viable_local_fight(ours, theirs, threats.len()) { return None; }
+        } else if !reserve_permits(main_available, assigned) {
             return None;
         }
-        log::info!("auto play: joint operation assembles prize={} cell={:?} rally={:?} front={} guns={}",
-            prize, cell, post, assigned_front.len(), assigned_rear.len());
+        log::info!("auto play: joint operation assembles prize={} cell={:?} rally={:?} front={} guns={} opening={}",
+            prize, cell, post, assigned_front.len(), assigned_rear.len(), opening);
         Some(Operation {
             prize, cell, rally: post, started: obs.tick(), changed: obs.tick(),
-            stage: Stage::Assemble, front: assigned_front, rear: assigned_rear,
+            stage: Stage::Assemble, opening, front: assigned_front, rear: assigned_rear,
             own_orders: BTreeMap::new(),
         })
     }
@@ -206,7 +257,7 @@ impl Director {
         director.retry_after.retain(|_, until| *until > now);
         if director.active.is_none() && now >= director.next_plan {
             director.next_plan = now.saturating_add(PLAN_INTERVAL);
-            director.active = Self::create(brain, rules, obs, &director.retry_after);
+            director.active = Self::create(brain, rules, obs, out, &director.retry_after);
         }
         let Some(mut op) = director.active.take() else {
             brain.joint_ops = director;
@@ -251,7 +302,8 @@ impl Director {
             || brain.director.recovering_under_fire()
             || brain.mobilization.active() || brain.campaign.economy_resting()
             || !obs.forces_enabled()
-            || now.saturating_sub(op.started) > OPERATION_LIMIT
+            || now.saturating_sub(op.started) > (if op.opening { OPENING_OPERATION_LIMIT }
+                else { OPERATION_LIMIT })
             || remaining_front < MIN_FRONT
             || matches!(status, CoalitionStatus::Unseen | CoalitionStatus::Unavailable)
             || brain.siege_charge.is_some()
@@ -268,7 +320,10 @@ impl Director {
             brain.joint_ops = director;
             return;
         }
-        if revoked { op.move_to(Stage::Withdraw, now); }
+        let ready_main = op.opening && op.stage == Stage::Assemble
+            && super::readiness::attack_members(brain)
+                .saturating_add(remaining_front) >= MAIN_FIST_RESERVE;
+        if revoked || ready_main { op.move_to(Stage::Withdraw, now); }
         if op.stage == Stage::Assemble {
             let elapsed = now.saturating_sub(op.changed);
             let fronts_here = roster.iter().filter(|unit|
@@ -293,6 +348,14 @@ impl Director {
                         && obs.visible_enemy_building_operational(
                         rules, enemy.entity_id)))
             .take(128).collect();
+        // Recheck new high-risk contacts during the early operation too.
+        // The ordinary mature coalition retains its own siege support rules.
+        if op.opening && threats.iter().any(|e| obs.object_type(rules,e.type_id)
+            .is_some_and(|ty| tactics::mind_control_reach(rules,ty).is_some()
+                || super::siege_counter::dangerous_battery(rules,ty)
+                    && obs.visible_enemy_building_operational(rules,e.entity_id))) {
+            op.move_to(Stage::Withdraw, now);
+        }
         if op.stage == Stage::Clear {
             let elapsed = now.saturating_sub(op.changed);
             if threats.is_empty() && matches!(status,
@@ -480,6 +543,11 @@ impl Director {
 }
 
 /// Keep an independent viable main fist after borrowing up to six fighters.
+fn opening_reserve_permits(total_attack: usize, assigned: usize) -> bool {
+    total_attack < MAIN_FIST_RESERVE && assigned == MIN_FRONT
+        && total_attack.saturating_sub(assigned) >= OPENING_RESERVE
+}
+
 fn reserve_permits(total_attack: usize, assigned: usize) -> bool {
     assigned >= MIN_FRONT && assigned <= MAX_FRONT + MAX_REAR
         && total_attack.saturating_sub(assigned) >= MAIN_FIST_RESERVE
@@ -563,6 +631,16 @@ mod tests {
     }
 
     #[test]
+    fn opening_region_uses_three_spares_only_before_the_main_fist_exists() {
+        assert!(!opening_reserve_permits(4,3));
+        assert!(opening_reserve_permits(5,3));
+        assert!(opening_reserve_permits(9,3));
+        assert!(!opening_reserve_permits(9,4));
+        assert!(!opening_reserve_permits(10,3));
+        assert!(!opening_reserve_permits(15,3));
+    }
+
+    #[test]
     fn local_superiority_is_required_before_clearance() {
         assert!(viable_local_fight(2_500,2_000,3));
         assert!(!viable_local_fight(1_400,2_500,3));
@@ -574,7 +652,7 @@ mod tests {
     fn a_goal_is_locked_to_one_prize_until_release() {
         let mut op = Operation {
             prize: 21, cell: (40,40), rally: (22,40), started: 10,
-            changed: 10, stage: Stage::Assemble,
+            changed: 10, stage: Stage::Assemble, opening: false,
             front: [1,2,3].into_iter().collect(),
             rear: [4].into_iter().collect(), own_orders: BTreeMap::new(),
         };

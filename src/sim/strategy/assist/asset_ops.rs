@@ -116,6 +116,18 @@ fn security_priority(value:Value,income:bool,distance_sq:i32)->Option<i32> {
     } else {None}
 }
 
+// The old nearby gate still governs ordinary military prizes. A discovered
+// public asset outside the base is an actual map-control opportunity, not a
+// speculative enemy yard. Selection only: no engineer safety gate is relaxed.
+const PUBLIC_REGION_REACH: i32 = 56;
+
+fn regional_security_priority(value: Value, income: bool, public: bool,
+    distance_sq: i32) -> Option<i32> {
+    security_priority(value, income, distance_sq).or_else(||
+        (public && distance_sq <= PUBLIC_REGION_REACH * PUBLIC_REGION_REACH)
+            .then_some(value.score() + if income { 35 } else { 0 }))
+}
+
 pub(super) fn capture_priority(rules:&RuleSet,obs:&Observation<'_>,
     target:&EnemyEntity,from:(u16,u16),short_income:bool)->i32 {
     let Some(ty)=obs.object_type(rules,target.type_id) else {return i32::MIN;};
@@ -218,11 +230,36 @@ impl Director {
         ).filter_map(|(id,site)|{
             let ty=obs.object_type(rules,site.type_id)?;
             let distance=squared_distance(home,site.cell);
-            let priority=security_priority(site.value,ty.produce_cash_amount>0
-                || ty.resource_destination,distance)?;
+            let priority=regional_security_priority(site.value,ty.produce_cash_amount>0
+                || ty.resource_destination,
+                orders::strategic_public_asset(ty) && (!site.hostile || ty.tech_level < 0),distance)?;
             Some((priority*200-distance/12,std::cmp::Reverse(*id),site.cell))
         }).max_by_key(|(score,id,_)|(*score,*id))
             .map(|(_,id,cell)|(id.0,cell))
+    }
+
+    /// Early operations have a deliberately narrower objective set. No
+    /// enemy yard, no hidden building, no unguarded engineer detour.
+    pub(super) fn opening_coalition_target(&self, rules: &RuleSet,
+        obs: &Observation<'_>, home: (u16, u16), after: &BTreeMap<u64, u64>,
+    ) -> Option<(u64, (u16, u16))> {
+        let now = obs.tick();
+        self.sites.iter().filter(|(id, site)|
+            !site.hostile && site.phase == Phase::Secure
+                && now >= site.retry_after
+                && now >= after.get(*id).copied().unwrap_or(0)
+                && obs.is_cell_visible(site.cell.0, site.cell.1))
+            .filter_map(|(id, site)| {
+                let ty = obs.object_type(rules, site.type_id)?;
+                if !orders::strategic_public_asset(ty) { return None; }
+                let d = squared_distance(home, site.cell);
+                if d > PUBLIC_REGION_REACH * PUBLIC_REGION_REACH { return None; }
+                let income = ty.produce_cash_amount > 0 || ty.resource_destination;
+                let score = regional_security_priority(site.value, income, true, d)?;
+                Some((score * 200 - d / 12, std::cmp::Reverse(*id), site.cell))
+            })
+            .max_by_key(|(score, id, _)| (*score, *id))
+            .map(|(_, id, cell)| (id.0, cell))
     }
 
     pub(super) fn coalition_status(&self, obs: &Observation<'_>,
@@ -253,10 +290,18 @@ impl Director {
         self.sites.get(&target).is_none_or(|site|site.phase==Phase::Ready)
     }
 
-    pub(super) fn recon_request(&self, obs: &Observation<'_>) -> Option<(u16, u16)> {
+    pub(super) fn recon_request(&self, rules: &RuleSet, obs: &Observation<'_>) -> Option<(u16, u16)> {
+        // Recon's urgent channel is for nonhostile sites. A remembered
+        // enemy yard must not monopolize that channel and starve public tech.
         self.sites.values().filter(|site| site.phase == Phase::Recon
+            && !site.hostile
             && obs.tick().saturating_sub(site.last_seen) < SIGHTING_TTL)
-            .max_by_key(|site| (site.value.score(), std::cmp::Reverse(site.cell)))
+            .max_by_key(|site| {
+                let ty = obs.object_type(rules, site.type_id);
+                let income = ty.is_some_and(|t| t.produce_cash_amount > 0);
+                let public = ty.is_some_and(orders::strategic_public_asset);
+                (income, public, site.value.score(), std::cmp::Reverse(site.cell))
+            })
             .map(|site| site.cell)
     }
 
@@ -483,14 +528,18 @@ impl Director {
         let Some((target,cell))=brain.asset_ops.sites.iter()
             .filter(|(_,site)|site.phase==Phase::Secure && !site.hostile
                 && now>=site.retry_after && obs.is_cell_visible(site.cell.0,site.cell.1))
+            .filter(|(id,_)| brain.joint_ops.prize() != Some(**id))
             .filter_map(|(id,site)|{
                 let ty=obs.object_type(rules,site.type_id)?;
                 let distance=squared_distance(home,site.cell);
-                let priority=security_priority(site.value,ty.produce_cash_amount>0
-                    || ty.resource_destination,distance)?;
+                let priority=regional_security_priority(site.value,ty.produce_cash_amount>0
+                    || ty.resource_destination,orders::strategic_public_asset(ty),distance)?;
                 Some((priority*200-distance/12,std::cmp::Reverse(*id),site.cell))
             }).max_by_key(|(score,id,_)|(*score,*id))
             .map(|(_,id,cell)|(id.0,cell)) else {return;};
+        let public = brain.asset_ops.sites.get(&target).and_then(|site|
+            obs.object_type(rules, site.type_id)).is_some_and(orders::strategic_public_asset);
+        let reach = if public { PUBLIC_REGION_REACH } else { 28 };
         let Some(guard) = brain.census.units.iter()
             .filter(|unit| defenders.contains(&unit.entity_id)
                 && brain.census.available(unit) && unit.traits.armed
@@ -502,9 +551,12 @@ impl Director {
                 && !brain.escorts.values().any(|esc| esc.guard == unit.entity_id)
                 && !brain.asset_guards.contains_key(&unit.entity_id)
                 && !brain.asset_ops.musters.contains_key(&unit.entity_id)
+                && !brain.crate_claims.contains_key(&unit.entity_id)
+                && !brain.crate_returns.contains_key(&unit.entity_id)
+                && !brain.census.mobile_aa.contains(&unit.entity_id)
                 && matches!(brain.tracked.live_kind(now, unit.entity_id),
                     None | Some(TrackedKind::Guard)))
-            .filter(|unit| squared_distance(unit.cell, cell) <= 28*28)
+            .filter(|unit| squared_distance(unit.cell, cell) <= reach * reach)
             .min_by_key(|unit| (squared_distance(unit.cell, cell), unit.entity_id)) else { return };
         let Some(ty) = obs.object_type(rules, guard.type_id) else { return };
         let dx = (i32::from(guard.cell.0) - i32::from(cell.0)).signum();
@@ -519,6 +571,8 @@ impl Director {
             if obs.is_cell_in_playfield(x,y) && obs.is_ground_walkable(x,y)
                 && obs.can_reach(ty.movement_zone, guard.cell, post)
                 && !super::tactics::unsafe_post(rules, obs, guard.entity_id, post)
+                && super::tactics::lethal_approach(rules, obs, guard.entity_id,
+                    guard.cell, post).is_none()
             { rally = Some(post); break; }
         }
         let Some(post) = rally else { return };
@@ -594,6 +648,34 @@ mod tests {
     }
 
     #[test]
+    fn neutral_oil_recon_does_not_lose_its_urgent_channel_to_an_enemy_yard() {
+        let rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
+            "[BuildingTypes]\n0=OIL\n1=YARD\n\
+             [OIL]\nStrength=500\nCapturable=yes\nProduceCashAmount=20\n\
+             [YARD]\nStrength=1000\nCapturable=yes\nFactory=BuildingType\n",
+        )).expect("asset rules");
+        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xA80);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let owner = sim.interner.intern("Americans");
+        let oil = sim.interner.intern("OIL");
+        let yard = sim.interner.intern("YARD");
+        let obs = Observation::new(&sim, owner);
+        let mut op = Director::default();
+        for (id, type_id, value, hostile, cell) in [
+            (11, oil, Value::Public, false, (20,20)),
+            (12, yard, Value::Yard, true, (25,25)),
+        ] {
+            op.sites.insert(id, Site { cell, type_id, value, hostile,
+                last_seen: 0, phase: Phase::Recon, claimant: None,
+                submitted_at: 0, retry_after: 0, failures: 0 });
+        }
+        assert_eq!(op.recon_request(&rules,&obs),Some((20,20)));
+        op.sites.remove(&11);
+        assert_eq!(op.recon_request(&rules,&obs),None);
+    }
+
+    #[test]
     fn security_muster_keeps_three_defenders_at_home() {
         assert_eq!(muster_capacity(0), 0);
         assert_eq!(muster_capacity(3), 0);
@@ -620,6 +702,14 @@ mod acquisition_tests {
         assert!(security_priority(Value::Public,true,29*29).is_none());
         assert!(security_priority(Value::Public,false,21*21).is_none());
         assert!(security_priority(Value::Factory,false,60*60).is_some());
+    }
+    #[test]
+    fn distant_public_assets_can_request_clearance_without_opening_all_remote_prizes() {
+        assert!(regional_security_priority(Value::Public, true, true, 40*40).is_some());
+        assert!(regional_security_priority(Value::Public, false, true, 56*56).is_some());
+        assert!(regional_security_priority(Value::Public, false, true, 57*57).is_none());
+        assert!(regional_security_priority(Value::Technology, false, false, 40*40).is_none());
+        assert!(regional_security_priority(Value::Factory, false, false, 60*60).is_some());
     }
     #[test]
     fn contested_prize_is_not_made_safe_by_a_large_escort() {

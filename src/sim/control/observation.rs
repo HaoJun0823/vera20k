@@ -104,11 +104,8 @@ pub struct OwnEntity {
     pub type_id: InternedId,
     pub cell: (u16, u16),
     pub health: i32,
-    /// Native `effective()`: current when present, otherwise queued.
+    /// `effective()`: the mission the object is on, or is queued onto, now.
     pub mission: MissionId,
-    /// Native queue, even while a different current mission still exists.
-    /// Read-only evidence; never promotes or rewrites the native mission.
-    pub queued_mission: MissionId,
     /// Whether an order may be issued to it now: alive, above zero strength,
     /// out of limbo. The same predicate the order gate applies
     /// (`Simulation::order_actor_admits`), so a caller can skip a doomed
@@ -563,7 +560,6 @@ impl<'a> Observation<'a> {
                 cell: (entity.position.rx(), entity.position.ry()),
                 health: entity.health.current(),
                 mission: entity.mission.effective(),
-                queued_mission: entity.mission.queued(),
                 // Bound miner slaves are a parent-driven lifecycle, not player
                 // infantry. A slave becomes independent once the master is
                 // destroyed; only then may the assistant command it.

@@ -518,6 +518,10 @@ pub struct AssistBrain {
     /// Last seen ore density per cell. Updates only on currently visible
     /// cells, so depleted/growing ore behind fog is not omniscient knowledge.
     ore_known: BTreeMap<(u16, u16), u8>,
+    /// Last observed estimated credits per ore cell, for control priorities
+    /// only. Never feeds purchase capacity or grants permission to harvest.
+    ore_control_value: BTreeMap<(u16, u16), usize>,
+    ore_control_buckets: orders::OreControlBuckets,
     /// Surveyed ore accessible from our economy, not raw enemy-base ore.
     pub(super) expansion_ore:BTreeMap<(u16,u16),u8>,
     pub(super) expansion_bank:economy::InvestmentBank,
@@ -740,6 +744,8 @@ impl AssistBrain {
             siege_toggle_after: BTreeMap::new(),
             ore_scan: None,
             ore_known: BTreeMap::new(),
+            ore_control_value: BTreeMap::new(),
+            ore_control_buckets: BTreeMap::new(),
             expansion_ore:BTreeMap::new(),
             expansion_bank:economy::InvestmentBank::default(),
             push_target: None,
@@ -845,6 +851,21 @@ impl AssistBrain {
             self.ore_known.retain(|cell, _| {
                 !obs.is_cell_visible(cell.0, cell.1) || seen.contains_key(cell)
             });
+            // The scan above has already filtered current visibility.
+            // Keep the last known resource value under fog, just as with
+            // density; never look up a hidden cell's current overlay.
+            let known = &self.ore_known;
+            self.ore_control_value.retain(|cell, _| known.contains_key(cell));
+            for (&cell, &stage) in &seen {
+                let unit_value = obs.overlay_id_at(cell.0, cell.1)
+                    .and_then(|id| rules.overlay_registry()
+                        .tiberium_type_for_overlay(&rules.tiberium_types, id).ok().flatten())
+                    .and_then(|id| rules.tiberium_types.live(id))
+                    .map_or(0, |ty| ty.value.max(0) as usize);
+                self.ore_control_value.insert(cell,
+                    unit_value.saturating_mul(usize::from(stage) + 1));
+            }
+            self.ore_control_buckets = orders::ore_control_buckets(&self.ore_control_value);
             self.ore_known.extend(seen);
             // A deployed Enslaves= resource building is an economic anchor,
             // not a walker. Its movement zone cannot stand in for the real
@@ -886,12 +907,9 @@ impl AssistBrain {
     /// all. The mission is the world's answer to whether the order took, so the
     /// two are compared once, here, before any layer reads the record.
     ///
-    /// Native `effective()` returns current if present, otherwise queued.
-    /// A new MEGAMISSION can be queued behind a different current mission
-    /// (Queue_Mission at 0x004C73B9). Both selectors are evidence here: do
-    /// not erase a live intent just because native promotion has not happened.
-    /// No timer is extended by a queued selector; normal expiry, refusals,
-    /// safety overrides and stronger intents keep their existing authority.
+    /// [`MissionId::effective`] is the mission the object is on *or is queued
+    /// onto*: a walk that has an Attack queued behind it is already the attack's
+    /// and is not voided out from under itself.
     ///
     /// Capture and Enter are deliberately not here. Both have a receiver that
     /// can break the visit off (a full depot, a building that stopped being
@@ -903,8 +921,6 @@ impl AssistBrain {
     fn void_orders_the_world_does_not_show(&mut self) {
         use crate::sim::mission::{MissionId, MissionType};
 
-        let trace = self.trace;
-        let tick = self.last_tick;
         let Self {
             census, tracked, ..
         } = self;
@@ -912,36 +928,15 @@ impl AssistBrain {
         let move_mission = MissionId::from_known(MissionType::Move);
         for unit in &census.units {
             let mission = unit.mission;
-            let queued = unit.queued_mission;
-            let shows_attack = mission == attack || queued == attack;
-            let shows_march = shows_attack || mission == move_mission
-                || queued == move_mission;
-            // Trace only the explicitly requested actor. In particular, show
-            // when a native queued order contradicts the old current-only
-            // test. This is evidence, not a new ownership rule.
-            if trace == Some(unit.entity_id) {
-                if let Some(kind) = tracked.live_kind(tick, unit.entity_id) {
-                    use tracked::TrackedKind::*;
-                    let decision = match kind {
-                        Attack | Engage if mission != attack =>
-                            Some(if shows_attack { "keep_queued" } else { "void" }),
-                        Move | AttackMove if mission != attack && mission != move_mission =>
-                            Some(if shows_march { "keep_queued" } else { "void" }),
-                        _ => None,
-                    };
-                    if let Some(decision) = decision {
-                        log::info!(
-                            "trace {}: reconcile tick={} kind={:?} effective={:?} queued={:?} decision={}",
-                            unit.entity_id, tick, kind, mission, queued, decision,
-                        );
-                    }
-                }
-            }
-            if !shows_attack {
+            // The fight is over: whoever sent it, a unit no longer on Attack
+            // is free to be aimed again.
+            if mission != attack {
                 tracked.void(unit.entity_id, tracked::TrackedKind::Attack);
                 tracked.void(unit.entity_id, tracked::TrackedKind::Engage);
             }
-            if !shows_march {
+            // The march is over. An attack-move is a march with its gun up, so
+            // both are held by the same two missions.
+            if mission != attack && mission != move_mission {
                 tracked.void(unit.entity_id, tracked::TrackedKind::Move);
                 tracked.void(unit.entity_id, tracked::TrackedKind::AttackMove);
             }
@@ -1024,7 +1019,7 @@ impl Brain for AssistBrain {
             // Assets first: a stale sighting may request reconnaissance, but
             // neither the director nor a scout may click an invisible object.
             self.asset_ops.observe(rules, obs, &self.census, &self.tracked);
-            self.recon.prioritize_asset(self.asset_ops.recon_request(obs));
+            self.recon.prioritize_asset(self.asset_ops.recon_request(rules, obs));
             self.recon.observe(rules, obs, &self.census, &self.squads);
         }
         self.mobilization.observe(rules, obs, &self.census);
@@ -1664,74 +1659,6 @@ mod tests {
         );
     }
 
-    /// A real native deferred Move behind AreaGuard must survive the census
-    /// and the intent reconciliation. A Guard fallback cannot own it while
-    /// the Move's normal term is live; a Dodge still can. Clearing the native
-    /// queue releases the intent immediately, without inventing a new lease.
-    #[test]
-    fn a_native_queued_move_is_not_voided_before_commencement() {
-        use crate::sim::mission::MissionId;
-        let rules = RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
-            "[Countries]\n0=Americans\n[VehicleTypes]\n0=MTNK\n\
-             [MTNK]\nStrength=200\nSpeed=5\nSpeedType=Track\nMovementZone=Normal\n\
-             Armor=none\nLocomotor={4A582741-9839-11d1-B709-00A024DDAFD1}\n",
-        ))
-        .expect("tank rules");
-        let mut sim = crate::sim::arena_fixture::rival_arena(&rules, 0xA17);
-        sim.intern_rule_type_ids(&rules);
-        sim.resolve_type_handles(&rules);
-        let owner = sim.intern("Americans");
-        let actor = sim
-            .spawn_object("MTNK", "Americans", 16, 16, 64, &rules)
-            .expect("owned tank");
-        let guard = MissionId::from_known(MissionType::AreaGuard);
-        let march = MissionId::from_known(MissionType::Move);
-        let now = sim.session().binary_frame();
-        sim.substrate.mission_assign_exact(actor, guard, now)
-            .expect("current AreaGuard");
-        sim.queue_order_mission(actor, MissionType::Move, &rules);
-
-        let mut brain = AssistBrain::new(0xA17);
-        brain.tracked.record(0, actor, TrackedKind::Move, None, Some((20, 16)));
-        brain.rebuild_census(&rules, &Observation::new(&sim, owner));
-        let row = brain.census.units.iter().find(|unit| unit.entity_id == actor)
-            .expect("census contains tank");
-        assert_eq!(row.mission, guard, "native current still owns effective()");
-        assert_eq!(row.queued_mission, march, "Move is already queued");
-        brain.void_orders_the_world_does_not_show();
-        assert!(!brain.tracked.admits(1, actor, TrackedKind::Guard, None, None));
-        assert!(brain.tracked.admits(1, actor, TrackedKind::Dodge, None, Some((17, 16))));
-        assert!(brain.tracked.admits(450, actor, TrackedKind::Guard, None, None),
-            "a queued selector does not extend the existing term");
-
-        // A real transition discards the queued order, even if current is
-        // still AreaGuard. The old Move must not survive that loss.
-        sim.substrate.mission_assign_exact(actor,
-            MissionId::from_known(MissionType::Guard), now)
-            .expect("queue replaced");
-        brain.rebuild_census(&rules, &Observation::new(&sim, owner));
-        brain.void_orders_the_world_does_not_show();
-        assert!(brain.tracked.admits(2, actor, TrackedKind::Guard, None, None));
-    }
-
-    /// The attack behind a currently moving unit is equally real. An unrelated
-    /// queued order is not evidence for a finished attack.
-    #[test]
-    fn a_queued_attack_preserves_only_matching_combat_intents() {
-        use crate::sim::mission::MissionId;
-        let mut brain = AssistBrain::new(0xA17);
-        for actor in [7, 8] {
-            brain.tracked.record(0, actor, TrackedKind::Attack, Some(9), Some((20, 20)));
-            let mut unit = census_unit(actor, MissionType::Move);
-            unit.queued_mission = MissionId::from_known(
-                if actor == 7 { MissionType::Attack } else { MissionType::Guard });
-            brain.census.units.push(unit);
-        }
-        brain.void_orders_the_world_does_not_show();
-        assert!(!brain.tracked.admits(1, 7, TrackedKind::Attack, Some(9), Some((20, 20))));
-        assert!(brain.tracked.admits(1, 8, TrackedKind::Attack, Some(9), Some((20, 20))));
-    }
-
     /// One ledger row for the intent tests: no type, no traits, just the
     /// mission the comparison is about.
     fn census_unit(entity_id: u64, mission: MissionType) -> census::Unit {
@@ -1742,7 +1669,6 @@ mod tests {
             health_permille: 1000,
             points: 0,
             mission: crate::sim::mission::MissionId::from_known(mission),
-            queued_mission: crate::sim::mission::MissionId::NONE,
             orderable: true,
             hand: false,
             slot: census::Slot::Vehicle,

@@ -1187,13 +1187,6 @@ fn a_unit_that_is_not_ready_still_takes_the_commands_that_queue() {
         }),
         "the march queues and is taken"
     );
-    // IDLE has separate receiver admission. This proves submission, not
-    // successful execution of Stop on an actor protected by native IDLE.
-    assert_eq!(
-        funnel.prepare(tank, Goal::Stop),
-        Ok(Command::Stop { entity_id: tank }),
-        "Stop must not wait for mission commencement readiness"
-    );
     assert_eq!(
         funnel.prepare(tank, Goal::Deploy),
         Err(Refusal::NotReady),

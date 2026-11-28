@@ -1126,6 +1126,13 @@ fn safe_mining_raid_leg(
 /// a costly frontal siege. Target only *currently visible* harvesters or their
 /// unloading bays, and require more than a single fighter to have a safe
 /// native attack route. The target is shared across the squad.
+// Existing idle harassment can also deny a discovered, valuable forward
+// field before the main army commits. Not a new raid owner or a mining
+// safety incident: a harmless enemy truck must not shut down our own ore.
+fn regional_miner_pressure_reach(credit_proxy: usize, forward: bool, enemy_ground: bool) -> i32 {
+    if forward && !enemy_ground && credit_proxy >= 1200 { 18 } else { 12 }
+}
+
 pub(super) fn idle_miner_pressure(brain:&mut AssistBrain,rules:&RuleSet,
     obs:&Observation<'_>,out:&mut Outbox) {
     let now=obs.tick();
@@ -1142,14 +1149,30 @@ pub(super) fn idle_miner_pressure(brain:&mut AssistBrain,rules:&RuleSet,
         && obs.destination(u.entity_id).is_none() && obs.attack_target(u.entity_id).is_none())
         .collect();
     let mut issued=0;
-    for enemy in obs.visible_enemy_entities() {
+    // Only visible hostile miners, and only legitimately observed ore
+    // memory. Prefer contests in the field, not a walk into an enemy base.
+    let mut targets: Vec<_> = obs.visible_enemy_entities().filter_map(|enemy| {
+        let ty = obs.object_type(rules,enemy.type_id)?;
+        if ty.category != ObjectCategory::Vehicle || !ty.resource_gatherer
+            || obs.visible_enemy_invulnerable(enemy.entity_id) { return None; }
+        let forward = !obs.is_campaign() && brain.census.base_cell.is_some_and(|home|
+            super::advance::cell_distance(home,enemy.cell)>=18);
+        let credit = if forward { super::orders::ore_cover_value(
+            &brain.ore_control_buckets,enemy.cell,8) } else { 0 };
+        let reach = regional_miner_pressure_reach(credit,forward,
+            super::orders::hostile_mining_ground(brain,enemy.cell));
+        Some((enemy,reach,if reach>12 {credit} else {0}))
+    }).collect();
+    // Stable sort keeps the original observation order for ordinary raids.
+    targets.sort_by_key(|(_,_,credit)| std::cmp::Reverse(*credit));
+    for (enemy,reach,credit) in targets {
         if issued>=2 {break;}
         let Some(ty)=obs.object_type(rules,enemy.type_id) else {continue;};
-        if ty.category!=ObjectCategory::Vehicle || !ty.resource_gatherer
-            || obs.visible_enemy_invulnerable(enemy.entity_id) {continue;}
         let local:Vec<_>=candidates.iter().filter(|u|
             !out.ordered_this_frame(u.entity_id)
-            && super::advance::cell_distance(u.cell,enemy.cell)<=12
+            && !brain.crate_claims.contains_key(&u.entity_id)
+            && !brain.crate_returns.contains_key(&u.entity_id)
+            && super::advance::cell_distance(u.cell,enemy.cell)<=reach
             && obs.can_hurt(rules,u.entity_id,enemy.entity_id)
             && raid_target_reachable(rules,obs,u.entity_id,ty,enemy.cell)
             && safe_mining_raid_leg(rules,obs,u.entity_id,u.cell,enemy.cell))
@@ -1169,7 +1192,12 @@ pub(super) fn idle_miner_pressure(brain:&mut AssistBrain,rules:&RuleSet,
                 u.entity_id,TrackedKind::Attack,Some(enemy.entity_id),Some(enemy.cell),
                 Goal::Attack{target:enemy.entity_id}) {
                 issued+=1;
-                log::debug!("auto play: v60_miner_pressure tick={now} actor={} target={}",u.entity_id,enemy.entity_id);
+                if credit>0 {
+                    log::info!("auto play: v80_regional_miner_pressure tick={now} actor={} target={} field_credit={credit}",
+                        u.entity_id,enemy.entity_id);
+                } else {
+                    log::debug!("auto play: v60_miner_pressure tick={now} actor={} target={}",u.entity_id,enemy.entity_id);
+                }
             }
         }
     }
@@ -1747,4 +1775,13 @@ mod v41_slaveminer_raid_tests {
         let refinery = rules.object("GAREFN").expect("normal refinery");
         assert_eq!(mining_objective_rank(refinery, false, true), Some(3));
     }
+}
+
+#[cfg(all(test, tests_sim_p_s))]
+#[test]
+fn v80_regional_miner_pressure_is_local_and_not_an_enemy_base_charge() {
+    assert_eq!(regional_miner_pressure_reach(1199,true,false),12);
+    assert_eq!(regional_miner_pressure_reach(1200,true,false),18);
+    assert_eq!(regional_miner_pressure_reach(9000,false,false),12);
+    assert_eq!(regional_miner_pressure_reach(9000,true,true),12);
 }

@@ -10,8 +10,7 @@
 //!   `0x005B362D`'s answer as the per-tick promotion asks it). The MEGAMISSION
 //!   family is exempt: it queues at `0x004C73B9` rather than commencing, so a
 //!   walking object takes it and promotes it when it is ready — see
-//!   [`queues_natively`]. IDLE (`Command::Stop`) has independent native
-//!   admission and does not require commencement readiness;
+//!   [`queues_natively`];
 //! - [`Refusal::NotReady`], when the object is mid-transition and the command
 //!   would write the mission directly. The order is *retryable*: nothing was
 //!   written, and asking again a frame later is correct. A caller that records
@@ -111,16 +110,7 @@ impl<'a> Funnel<'a> {
         // `0x007360C0`), so the brain could neither pull it out of the walk nor
         // give it the fight in front of it, and asked again every frame for the
         // whole walk. A queued mission is the native answer to exactly this.
-        // Event IDLE (0x004C74CB..0x004C76BB) owns its own active/limbo,
-        // tether, protected-mission and terrain gates. It clears navigation
-        // and target rather than commencing a new mission. Waiting for
-        // Ready_To_Commence here can prevent a walking engineer on Capture
-        // from being stopped until the very walk we want to cancel is over.
-        // Keep the receiver, ownership, domain and command-budget gates.
-        if !matches!(&command, Command::Stop { .. })
-            && !queues_natively(&command)
-            && !self.sim.mission_ready_to_commence(actor, self.rules)
-        {
+        if !queues_natively(&command) && !self.sim.mission_ready_to_commence(actor, self.rules) {
             return Err(Refusal::NotReady);
         }
         Ok(command)
