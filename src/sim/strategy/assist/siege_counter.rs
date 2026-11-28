@@ -14,7 +14,7 @@ use crate::rules::object_type::{ObjectCategory, ObjectType};
 use crate::rules::ruleset::RuleSet;
 use crate::sim::control::Goal;
 use crate::sim::control::brain::Outbox;
-use crate::sim::control::observation::Observation;
+use crate::sim::control::observation::{EnemyEntity, Observation};
 use crate::sim::intern::InternedId;
 use crate::sim::production::{CanBuild, ProductionCategory};
 

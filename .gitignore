@@ -224,3 +224,6 @@ tools/vendor-eval/
 
 # Working notes kept on disk, not part of the engine
 /autoplay/docs/history/
+
+# Patch-installer rollback backups (local only, never committed)
+/.vera-*-original-source.zip
