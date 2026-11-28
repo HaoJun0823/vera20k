@@ -185,17 +185,7 @@ pub(super) fn focus(brain: &AssistBrain, rules: &RuleSet,
 /// An enemy AA weapon is relevant only if it has a real AA projectile and a
 /// warhead that can affect this *candidate aircraft's* armour. Unpowered
 /// defenses are not counted as operational firing positions.
-fn anti_air_reach(rules: &RuleSet, gun: &ObjectType, plane: &ObjectType) -> i32 {
-    (0..gun.weapon_record_count()).filter_map(|slot| {
-        let weapon = gun.weapon_at(slot).and_then(|name| rules.weapon(name))?;
-        if weapon.never_use || !rules.weapon_projectile(weapon).is_some_and(|shot| shot.aa)
-            || !weapon.warhead.as_deref().and_then(|name| rules.warhead(name))
-                .is_some_and(|head| f64::from_bits(
-                    head.interaction(plane.armor_id()).multiplier().bits()) > 0.0)
-        { return None; }
-        Some(max_range_cells(weapon))
-    }).max().unwrap_or(0)
-}
+// Static and observed AA share aa_weapon_reach below.
 
 fn air_corridor_known(obs: &Observation<'_>, at: (u16,u16)) -> bool {
     // Visible tower != proved absence of AA outside the scout's view.
@@ -222,54 +212,130 @@ pub(super) fn combat_air_actor(rules:&RuleSet,obs:&Observation<'_>,actor:u64)->b
 /// Rule/actor-specific AA, including a gunner's current weapon and mobile
 /// AA. Only visible operational enemies contribute. A fixed-wing sortie
 /// must reach the target area, not just be nominally within weapon range.
+fn aa_weapon_reach(rules:&RuleSet,gun:&ObjectType,weapon:&crate::rules::weapon_type::WeaponType,
+    plane:&ObjectType)->i32 {
+    if weapon.never_use || !rules.weapon_projectile(weapon).is_some_and(|p|p.aa)
+    {return 0;}
+    let control=weapon.warhead.as_deref().and_then(|n|rules.warhead(n))
+        .is_some_and(|head|head.mind_control);
+    if (control && !plane.immune_to_psionics)
+        || ((weapon.damage>0 || weapon.spawner)
+            && effective_ground_warhead(rules,gun,weapon,plane)) {
+        max_range_cells(weapon)
+    }else{0}
+}
+
+/// Fixed batteries remain a no-sortie area even if momentarily without
+/// power. Their real type and location are known, not their future power.
+/// A moving or elite gun uses its current observed weapon.
 fn live_aa_reach(rules:&RuleSet,obs:&Observation<'_>,gun:u64,actor:u64)->i32 {
-    let ordinary=super::tactics::effective_reach_against(rules,obs,gun,actor);
-    if super::tactics::psychic_immune(rules,obs,actor) {return ordinary;}
-    let Some(ty)=obs.entity_type(rules,gun) else{return ordinary;};
-    if ty.category==ObjectCategory::Building
-        && !obs.visible_enemy_building_operational(rules,gun) {return ordinary;}
-    let control=(0..ty.weapon_record_count()).filter_map(|slot|
+    let (Some(ty),Some(plane))=(obs.entity_type(rules,gun),obs.entity_type(rules,actor))
+        else{return 0;};
+    let actual=(0..ty.weapon_record_count()).filter_map(|slot|
         obs.observed_actor_weapon(rules,gun,slot))
-        .filter(|w|!w.never_use && rules.weapon_projectile(w).is_some_and(|p|p.aa)
-            && w.warhead.as_deref().and_then(|n|rules.warhead(n))
-                .is_some_and(|head|head.mind_control))
-        .map(max_range_cells).max().unwrap_or(0);
-    ordinary.max(control)
+        .map(|w|aa_weapon_reach(rules,ty,w,plane)).max().unwrap_or(0);
+    if ty.category==ObjectCategory::Building {
+        actual.max(static_aa_reach(rules,ty,plane))
+    }else{actual}
+}
+
+fn static_aa_reach(rules:&RuleSet,ty:&ObjectType,plane:&ObjectType)->i32 {
+    (0..ty.weapon_record_count()).filter_map(|slot|
+        ty.weapon_at(slot).and_then(|name|rules.weapon(name)))
+        .map(|w|aa_weapon_reach(rules,ty,w,plane)).max().unwrap_or(0)
+}
+
+pub(super) fn fixed_aa_type(rules:&RuleSet,ty:&ObjectType)->bool {
+    ty.category==ObjectCategory::Building && (0..ty.weapon_record_count())
+        .filter_map(|slot|ty.weapon_at(slot).and_then(|name|rules.weapon(name)))
+        .any(|w|!w.never_use && rules.weapon_projectile(w).is_some_and(|p|p.aa)
+            && (w.damage>0 || w.spawner || w.warhead.as_deref()
+                .and_then(|n|rules.warhead(n)).is_some_and(|head|head.mind_control)))
+}
+
+fn aa_margin(ty:&ObjectType)->i32 {
+    if ty.category==ObjectCategory::Building {
+        let (w,h)=ty.foundation.dimensions();
+        2+i32::from(w.max(h).max(1))
+    }else{2}
+}
+
+/// Only the recorded type/cell is read for remembered hostile AA. A
+/// concealed real entity or its current operational state is never read.
+pub(super) fn remembered_air_envelopes(rules:&RuleSet,obs:&Observation<'_>,actor:u64,
+    known:impl Iterator<Item=EnemyEntity>)->Vec<super::safety::Envelope> {
+    let Some(plane)=obs.entity_type(rules,actor) else{return Vec::new();};
+    known.filter(|e|!obs.is_cell_visible(e.cell.0,e.cell.1)).filter_map(|e|{
+        let ty=obs.object_type(rules,e.type_id)?;
+        let reach=static_aa_reach(rules,ty,plane);
+        (reach>0).then_some(super::safety::Envelope{at:e.cell,reach:reach+aa_margin(ty)})
+    }).collect()
 }
 
 pub(super) fn air_envelopes(rules:&RuleSet,obs:&Observation<'_>,actor:u64)
     ->Vec<super::safety::Envelope> {
     obs.visible_enemy_entities().filter_map(|e|{
+        let ty=obs.object_type(rules,e.type_id)?;
         let reach=live_aa_reach(rules,obs,e.entity_id,actor);
-        (reach>0).then_some(super::safety::Envelope{at:e.cell,reach:reach+1})
+        (reach>0).then_some(super::safety::Envelope{at:e.cell,reach:reach+aa_margin(ty)})
     }).collect()
 }
 
-pub(super) fn air_leg_clear(rules:&RuleSet,obs:&Observation<'_>,actor:u64,
+#[cfg(all(test, tests_sim_p_s))]
+fn air_leg_clear(rules:&RuleSet,obs:&Observation<'_>,actor:u64,
     from:(u16,u16),to:(u16,u16))->bool {
-    !obs.visible_enemy_entities().any(|e|{
-        let reach=live_aa_reach(rules,obs,e.entity_id,actor);
-        reach>0 && super::tactics::path_enters_control_box(from,to,e.cell,reach+1)
+    super::safety::safe_leg(&air_envelopes(rules,obs,actor),from,to,false)
+}
+
+/// Sample the already explored corridor, not hidden enemy occupancy.
+/// Unknown territory is not evidence of an AA-free sortie.
+fn surveyed_air_leg(obs:&Observation<'_>,from:(u16,u16),to:(u16,u16))->bool {
+    let dx=i32::from(to.0)-i32::from(from.0);
+    let dy=i32::from(to.1)-i32::from(from.1);
+    let n=(dx.abs().max(dy.abs())+3)/4;
+    let n=n.max(1);
+    (0..=n).all(|i|{
+        let x=(i32::from(from.0)+dx*i/n) as u16;
+        let y=(i32::from(from.1)+dy*i/n) as u16;
+        obs.is_cell_in_playfield(x,y) && obs.is_cell_revealed(x,y)
     })
+}
+
+fn surveyed_air_target(obs:&Observation<'_>,to:(u16,u16))->bool {
+    obs.is_cell_visible(to.0,to.1)
+        && [(8i32,0),(-8,0),(0,8),(0,-8)].into_iter().filter_map(|(dx,dy)|{
+            let x=u16::try_from(i32::from(to.0)+dx).ok()?;
+            let y=u16::try_from(i32::from(to.1)+dy).ok()?;
+            obs.is_cell_in_playfield(x,y).then_some(obs.is_cell_revealed(x,y))
+        }).filter(|seen|*seen).take(2).count()>=2
+}
+
+/// Destination, outbound flight, and return leg all need clearance.
+/// Unlike a ground standoff weapon, a fixed-wing aircraft must pass the
+/// target region and then return to a native compatible pad.
+pub(super) fn air_sortie_safe(rules:&RuleSet,obs:&Observation<'_>,actor:u64,
+    from:(u16,u16),to:(u16,u16),guns:&[super::safety::Envelope])->bool {
+    if obs.out_of_ammo(actor) || !surveyed_air_target(obs,to)
+        || !surveyed_air_leg(obs,from,to)
+        || !super::safety::safe_leg(guns,from,to,false) {return false;}
+    let Some(ty)=obs.entity_type(rules,actor) else{return false;};
+    if ty.category==ObjectCategory::Aircraft && ty.airport_bound {
+        let Some((_,dock))=obs.own_air_sortie_dock(rules,actor) else{return false;};
+        surveyed_air_leg(obs,to,dock) && super::safety::safe_leg(guns,to,dock,false)
+    }else{true}
 }
 
 pub(super) fn air_attack_safe(rules:&RuleSet,obs:&Observation<'_>,actor:u64,target:u64)->bool {
     if !combat_air_actor(rules,obs,actor){return true;}
-    if obs.out_of_ammo(actor){return false;}
     let (Some(from),Some(to))=(obs.observed_object_cell(actor),obs.observed_object_cell(target))
         else{return false;};
-    let continuous=obs.entity_type(rules,actor)
-        .is_some_and(|ty|ty.category!=ObjectCategory::Aircraft);
-    let firing=continuous && obs.engage(rules,actor,target)
-        ==crate::sim::control::observation::Engage::Ready;
-    air_leg_clear(rules,obs,actor,from,if firing{from}else{to})
+    air_sortie_safe(rules,obs,actor,from,to,&air_envelopes(rules,obs,actor))
 }
 
 pub(super) fn air_attack_move_safe(rules:&RuleSet,obs:&Observation<'_>,actor:u64,
     to:(u16,u16))->bool {
-    !combat_air_actor(rules,obs,actor) || (!obs.out_of_ammo(actor)
-        && obs.observed_object_cell(actor).is_some_and(|from|
-            air_leg_clear(rules,obs,actor,from,to)))
+    !combat_air_actor(rules,obs,actor) || obs.observed_object_cell(actor).is_some_and(|from|
+        air_sortie_safe(rules,obs,actor,from,to,&air_envelopes(rules,obs,actor)))
 }
 
 /// `from`: actual air unit's position when issuing Attack, or None when
@@ -279,13 +345,11 @@ fn air_approach_clear(rules: &RuleSet, obs: &Observation<'_>, battery: Battery,
     if !air_corridor_known(obs, battery.cell) { return false; }
     !obs.visible_enemy_entities().any(|enemy| {
         let Some(ty) = obs.entity_type(rules, enemy.entity_id) else { return false; };
-        if ty.is_base_defense && !obs.visible_enemy_building_operational(rules, enemy.entity_id) {
-            return false;
-        }
-        let reach = anti_air_reach(rules, ty, plane);
-        reach > 0 && (cell_distance(enemy.cell, battery.cell) <= reach + 2
-            || from.is_some_and(|start| orders::path_crosses(
-                &[enemy.cell], start, battery.cell, reach + 2)))
+        let reach = static_aa_reach(rules,ty,plane);
+        let margin=aa_margin(ty);
+        reach>0 && (cell_distance(enemy.cell,battery.cell)<=reach+margin
+            || from.is_some_and(|start|orders::path_crosses(
+                &[enemy.cell],start,battery.cell,reach+margin)))
     })
 }
 
@@ -637,6 +701,10 @@ mod tests {
         sim.spawn_object("LAND","Russians",20,8,255,&rules).unwrap();
         let obs=Observation::new(&sim,owner);
         assert!(combat_air_actor(&rules,&obs,plane));
+        assert!(fixed_aa_type(&rules,rules.object("AA").unwrap()));
+        assert!(!fixed_aa_type(&rules,rules.object("LAND").unwrap()));
+        assert!(static_aa_reach(&rules,rules.object("AA").unwrap(),
+            rules.object("PLANE").unwrap())>0);
         assert!(live_aa_reach(&rules,&obs,aa,plane)>0);
         assert!(!air_leg_clear(&rules,&obs,plane,(10,20),(30,20)));
         assert!(!air_leg_clear(&rules,&obs,plane,(10,20),(20,20)));
@@ -656,6 +724,6 @@ mod tests {
             Some(Counter::Air));
         assert_eq!(viable(&rules,apoc,tower,reach,false).map(|(k,_)| k),
             Some(Counter::Heavy));
-        assert!(anti_air_reach(&rules, rules.object("NASAM").expect("patriot"),harrier)>0);
+        assert!(static_aa_reach(&rules,rules.object("NASAM").expect("patriot"),harrier)>0);
     }
 }

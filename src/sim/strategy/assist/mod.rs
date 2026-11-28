@@ -554,6 +554,9 @@ pub struct AssistBrain {
     /// Conventional miners on an explicit journey to a *known* remote ore
     /// seam: (destination, last observed position, last progress tick).
     pub(super) miner_journeys: BTreeMap<u64, ((u16,u16), (u16,u16), u64)>,
+    /// Last assigned ore cell (district membership is recomputed from
+    /// remembered ore). Survives native unloading; never a hidden live query.
+    pub(super) miner_fields: BTreeMap<u64,(u16,u16)>,
     /// Harvest mission can remain assigned with no reachable local ore.
     /// Record a cargo-empty, stationary observation before re-dispatching.
     pub(super) miner_idle_since: BTreeMap<u64, ((u16,u16), u64)>,
@@ -755,6 +758,7 @@ impl AssistBrain {
             liberation_window: BTreeMap::new(),
             liberation_retry: BTreeMap::new(),
             miner_journeys: BTreeMap::new(),
+            miner_fields: BTreeMap::new(),
             miner_idle_since: BTreeMap::new(),
             miner_rejected: BTreeMap::new(),
             slave_sites: BTreeMap::new(),

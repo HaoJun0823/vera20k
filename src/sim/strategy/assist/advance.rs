@@ -441,8 +441,8 @@ pub(super) fn prepare_siege_charge(
     }
     // Stockpiling is advice, not a second, stricter assault forecast.
     // Genuine force recovery and immediate home danger still interrupt.
+    let preparing=brain.campaign.preparation().is_some();
     let permit = obs.forces_enabled() && !brain.campaign.holding_fist()
-        && brain.campaign.preparation().is_none()
         && !brain.campaign.economy_resting() && brain.blackout.is_none()
         && !brain.director.recovering_under_fire() && !brain.mobilization.active()
         && !brain.director.under_attack_now();
@@ -525,10 +525,45 @@ pub(super) fn prepare_siege_charge(
     }
     if tick%45==0 { brain.charge_retry.retain(|_,retry| tick<retry.forget_at); }
     if !permit || tick % 15 != 0 || brain.blackout.is_some() { return; }
-    let Some((lane, _, campaign_cell)) = brain.push_target else { return; };
     let Some(squad) = brain.squads.squad(super::squads::Role::Attack) else { return; };
     let main: Vec<_> = brain.census.units.iter().filter(|u|
         squad.members.contains(&u.entity_id) && brain.census.main_available(u)).collect();
+    if main.iter().filter(|u|u.slot==super::census::Slot::Vehicle
+        && u.health_permille>=700).take(assault::MIN_COLUMN).count()<assault::MIN_COLUMN {return;}
+    // A live local battery can interrupt a deep objective's preparation.
+    // The strategic lane is advisory; it is not proof of what is shooting
+    // the physical front. No new whole-army or detachment ownership.
+    let local_contact=if tick%45==0 {
+        let mut candidates:Vec<_>=obs.visible_enemy_entities().filter_map(|e|{
+            let ty=obs.entity_type(rules,e.entity_id)?;
+            let reach=super::siege_counter::battery_reach(rules,ty);
+            if reach<=0 || !super::siege_counter::dangerous_battery(rules,ty)
+                || !obs.visible_enemy_building_operational(rules,e.entity_id)
+                || obs.visible_enemy_invulnerable(e.entity_id) {return None;}
+            let mut near=0usize;
+            let mut exposed=0usize;
+            let mut d=i32::MAX;
+            for u in main.iter().filter(|u|u.slot==super::census::Slot::Vehicle
+                && u.health_permille>=700) {
+                let distance=cell_distance(u.cell,e.cell);
+                if distance>reach+10 {continue;}
+                near+=1;
+                d=d.min(distance);
+                let effective=super::tactics::effective_reach_against(rules,obs,e.entity_id,u.entity_id);
+                if (effective>0 && distance<=effective+3)
+                    || obs.attack_target(u.entity_id)==Some(e.entity_id) {exposed+=1;}
+            }
+            let lane=brain.push_target.is_some_and(|(_,_,at)|
+                cell_distance(at,e.cell)<=14);
+            (near>=assault::MIN_COLUMN && (exposed>0 || lane))
+                .then_some((std::cmp::Reverse(exposed),std::cmp::Reverse(near),d,e.entity_id,e,reach))
+        }).collect();
+        candidates.sort_by_key(|(exposed,near,d,id,_,_)|(*exposed,*near,*d,*id));
+        candidates.into_iter().take(4).map(|(_,_,_,_,e,reach)|(e,reach)).collect::<Vec<_>>()
+    }else{Vec::new()};
+    let Some((lane,campaign_cell))=brain.push_target.map(|(id,_,at)|(id,at))
+        .or_else(||local_contact.first().map(|(e,_)|(e.entity_id,e.cell)))
+        else{return;};
     let contact=obs.visible_enemy_entities().filter_map(|e| {
         let ty=obs.entity_type(rules,e.entity_id)?;
         if !super::siege_counter::dangerous_battery(rules,ty)
@@ -538,44 +573,32 @@ pub(super) fn prepare_siege_charge(
             && assault::eligible(rules,obs,u,e)).count();
         (n>=assault::MIN_COLUMN).then_some((n,e,super::siege_counter::battery_reach(rules,ty)))
     }).max_by_key(|(n,e,_)|(*n,std::cmp::Reverse(e.entity_id))).map(|(_,e,reach)|(e,reach));
-    let light_contact=if tick%45==0 {
-        obs.visible_enemy_entities().filter_map(|e|{
-            let ty=obs.entity_type(rules,e.entity_id)?;
-            let reach=super::siege_counter::battery_reach(rules,ty);
-            if !super::siege_counter::dangerous_battery(rules,ty)
-                || !(1..7).contains(&reach)
-                || super::tactics::actor_control_reach(rules,obs,e.entity_id).is_some()
-                || !obs.visible_enemy_building_operational(rules,e.entity_id)
-                || obs.visible_enemy_invulnerable(e.entity_id)
-            {return None;}
-            let local:Vec<_>=main.iter().copied().filter(|u|
-                cell_distance(u.cell,e.cell)<=reach+8
-                    && assault::eligible(rules,obs,u,e)).take(assault::MAX_COHORT_SEARCH).collect();
-            let blocking=cell_distance(e.cell,campaign_cell)<=14
-                || local.iter().any(|u|super::tactics::path_enters_control_box(
-                    u.cell,campaign_cell,e.cell,reach));
-            let threatens=local.iter().any(|u|
-                super::tactics::actual_threat_reach(rules,obs,e.entity_id,u.entity_id)>0);
-            (blocking && threatens && local.len()>=assault::MIN_COLUMN)
-                .then_some((e,reach,local.len()))
-        }).max_by_key(|(e,_,count)|(*count,std::cmp::Reverse(cell_distance(e.cell,campaign_cell)),
-            std::cmp::Reverse(e.entity_id))).map(|(e,reach,_)|(e,reach))
-    }else{None};
+    // Nearby batteries were already ranked by physical contact above.
     let heavy=if tick%45==0 {
         super::tactics::siege_barrier(rules,obs,campaign_cell,&main)
     }else{None};
     let mut picked=None;
     let mut evaluated=BTreeSet::new();
-    for (battery,tower_reach) in [contact,heavy,light_contact].into_iter().flatten() {
+    for (battery,tower_reach) in contact.into_iter().chain(local_contact.into_iter()).chain(heavy) {
         if !evaluated.insert(battery.entity_id){continue;}
-        // Preserve an already working safe standoff shot. Otherwise the
-        // exact healthy cohort must actually pass the existing forecast.
-        if brain.front_review.deferred(tick).is_none_or(|(_,cell)|cell_distance(cell,battery.cell)>12)
+        let threatened=main.iter().any(|u|u.slot==super::census::Slot::Vehicle
+            && u.health_permille>=700 && {
+                let reach=super::tactics::effective_reach_against(rules,obs,battery.entity_id,u.entity_id);
+                reach>0 && cell_distance(u.cell,battery.cell)<=reach+2
+            });
+        // A preparation window still holds distant units. A physically
+        // present group under a gun is eligible for the same forecast,
+        // rather than being told to leave and approach on alternate scans.
+        if preparing && !threatened {continue;}
+        // Keep a genuine working standoff lane, unless ordinary armor
+        // is already exposed and a viable complete cohort can resolve it.
+        if !threatened
+            && brain.front_review.deferred(tick).is_none_or(|(_,cell)|cell_distance(cell,battery.cell)>12)
             && main.iter().any(|u|super::safety::firing_here(rules,obs,u,battery.entity_id)
                 && obs.attack_target(u.entity_id)==Some(battery.entity_id))
         {continue;}
         let mut candidates:Vec<_>=main.iter().copied().filter(|u|
-            cell_distance(u.cell,battery.cell)<=tower_reach+8
+            cell_distance(u.cell,battery.cell)<=tower_reach+10
                 && assault::eligible(rules,obs,u,battery)).collect();
         candidates.sort_by_key(|u|(cell_distance(u.cell,battery.cell),u.entity_id));
         candidates.truncate(assault::MAX_COHORT_SEARCH);
@@ -583,7 +606,13 @@ pub(super) fn prepare_siege_charge(
         let Some(leader)=assault::cohesive_leader(&cells) else{continue;};
         let ready:Vec<_>=candidates.into_iter().filter(|u|cell_distance(u.cell,leader)<=8)
             .take(assault::MAX_COLUMN).collect();
-        let Some(forecast)=assault::estimate(rules,obs,battery,&ready) else{continue;};
+        let Some(forecast)=assault::estimate(rules,obs,battery,&ready) else{
+            if threatened && tick%450==0 {
+                log::info!("auto play: v90_battery_forecast_unavailable tick={tick} target={} cohort={}",
+                    battery.entity_id,ready.len());
+            }
+            continue;
+        };
         if !forecast.allowed || !retry_allowed(brain.charge_retry.get(&battery.entity_id).copied(),
             battery.entity_id,tick,forecast.hp,forecast.target_hp) {
             if tick%450==0 && tower_reach<7 {
@@ -655,7 +684,9 @@ fn execute_siege_charge(
     for id in active.iter().copied() {
         if brain.census.units.iter().find(|u|u.entity_id==id)
             .is_some_and(|u|live_sidestep(wave,rules,obs,u,out).is_some()) {continue;}
-        if obs.attack_target(id) == Some(target) { continue; }
+        if obs.attack_target(id)==Some(target)
+            && brain.census.units.iter().any(|u|u.entity_id==id
+                && u.mission.known()==Some(MissionType::Attack)) {continue;}
         let goal = Goal::Attack { target };
         if !super::orders::admits(rules,obs,id,&goal)
             || !brain.tracked.admits(obs.tick(),id,super::tracked::TrackedKind::Attack,
@@ -738,7 +769,10 @@ pub(super) fn finish_charge(brain: &mut AssistBrain, rules: &RuleSet,
     // members, never for a native service or a newly detached actor.
     for &id in &active {
         if steps.contains_key(&id) {continue;}
-        if kept.contains(&id) || obs.attack_target(id)==Some(target) {
+        let native_attack=obs.attack_target(id)==Some(target)
+            && brain.census.units.iter().any(|u|u.entity_id==id
+                && u.mission.known()==Some(MissionType::Attack));
+        if kept.contains(&id) || native_attack {
             if brain.tracked.primary_goal(id)!=Some(goal) {
                 brain.tracked.record_goal(obs.tick(),id,super::tracked::TrackedKind::Attack,
                     Some(target),Some(cell),goal);
@@ -1445,6 +1479,13 @@ fn stage_siege(
         // Do not drag a gun off a lawful, effective shot merely because
         // another battery became the front's current objective. Recovery
         // staging retains its narrower mobile-contact permission.
+        if unit.health_permille>=650
+            && unit.mission.known()==Some(MissionType::Attack)
+            && obs.destination(unit.entity_id).is_none()
+            && obs.attack_target(unit.entity_id).is_some_and(|target|
+                gunline.iter().any(|(id,_,_)|*id==target)
+                    && super::safety::firing_here(rules,obs,unit,target))
+        {continue;}
         if unit.health_permille >= 600 && obs.attack_target(unit.entity_id).is_some_and(|target|
             (mobile_contacts.contains(&target) && super::safety::firing_here(rules,obs,unit,target))
                 || (allow_contact && visible.iter().any(|e|e.entity_id==target)
@@ -1486,6 +1527,15 @@ fn stage_siege(
         // A new safe firing-post proposal in this frame is already owned by
         // the battery commander; do not replace it with generic staging.
         if super::orders::ordered_this_frame(out,unit.entity_id) { continue; }
+        // Preserve an actual outward/assembly move whose destination
+        // remains outside the live gunline. Only the existing temporary
+        // Avoid order is covered; an old offensive march is not protected.
+        if tracker.live_kind(obs.tick(),unit.entity_id)==Some(super::tracked::TrackedKind::Avoid)
+            && obs.destination(unit.entity_id).is_some_and(|post|
+                cell_distance(post,gun)>reach+1 && cell_distance(post,gun)<=reach+14
+                && super::orders::reachable(rules,obs,unit.entity_id,post)
+                && super::safety::safe_attack_leg(rules,obs,unit,post,&visible))
+        {continue;}
         let approach=assembly.filter(|(battery,_)|*battery==id
                 && armoured_fighter(unit,rules,obs))
             .map_or(unit.cell,|(_,cell)|cell);

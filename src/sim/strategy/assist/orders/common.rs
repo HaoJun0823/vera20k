@@ -105,7 +105,7 @@ pub(in crate::sim::strategy::assist) fn admits(
             if super::super::doctrine::actor_duty(rules,obs,unit).is_some_and(|duty| matches!(
                 duty, super::super::doctrine::Duty::Disposable |
                     super::super::doctrine::Duty::BombPlanter)) => false,
-        Goal::AttackMove {cell} =>
+        Goal::AttackMove {cell} | Goal::AttackCell {cell} | Goal::GuardAt {cell} =>
             super::super::siege_counter::air_attack_move_safe(rules,obs,unit,cell),
         Goal::Capture { target } => {
             // Ownership or current visibility is required for every fresh

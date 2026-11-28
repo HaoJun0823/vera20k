@@ -267,23 +267,10 @@ pub(super) fn captures(
                 && obs.visible_enemy_building_operational(rules, entity.entity_id)
         }))
         .map(|entity| entity.cell).collect();
-    // What can see a spy coming. The retail rules mark no `Detector=` key on any
-    // type, and the dog's own section (`[DOG] NotHuman=yes`, `Natural=yes`)
-    // carries nothing about spies either: the reveal is engine behaviour, and the
-    // only retail-marked pair for it is the dog's. A unit whose weapon warhead
-    // mind-controls is on the list for the worse reason — a spy that is taken is
-    // a spy the enemy now owns.
-    let watchers: Vec<(u16, u16)> = obs
-        .visible_enemy_entities()
-        .filter(|entity| {
-            obs.object_type(rules, entity.type_id).is_some_and(|ty| {
-                super::census::Traits::of(rules, ty).scout
-                    || mind_controls(rules, ty)
-                    || super::kite::carries_parasite(rules, ty)
-            })
-        })
-        .map(|entity| entity.cell)
-        .collect();
+    // A scout role is NOT disguise detection. The native target scan reads
+    // DetectDisguise; control and parasites are independent real hazards.
+    let watchers:Vec<_>=site_threats.iter().filter(|e|
+        spy_watcher_reach(rules,obs,e.entity_id)>0).map(|e|e.cell).collect();
     // The *disguise* specimen is decided before the infiltration-route veto.
     // A dog beside a refinery makes the infiltration unsafe, but that must
     // not prevent a remote MakeupKit shot at a Conscript elsewhere on the map.
@@ -304,7 +291,10 @@ pub(super) fn captures(
         })
         .collect();
     let spy_targets: Vec<(EnemyEntity, u8)> = disguise_sites.iter().copied()
-        .filter(|(target, _)| !spy_route_blocked(obs, rules, target.cell, &watchers))
+        .filter(|(target,_)|!site_threats.iter().any(|e|{
+            let reach=spy_watcher_reach(rules,obs,e.entity_id);
+            reach>0 && cell_distance(e.cell,target.cell)<=reach
+        }))
         // An engineer already claiming this prize should take ownership,
         // rather than have a spy enter it at the same moment.
         .filter(|(target, _)| !engineer_claimed(
@@ -415,7 +405,7 @@ pub(super) fn captures(
                     .is_some_and(|inf| inf.category == ObjectCategory::Infantry
                         && !inf.agent && !mind_controls(rules, inf)
                         && !super::kite::carries_parasite(rules, inf)
-                        && !super::census::Traits::of(rules, inf).scout))
+                        && !inf.detect_disguise))
                 .filter(|enemy| !obs.disguised_to_visible_enemy(
                     unit.entity_id, enemy.entity_id))
                 .filter(|enemy| remote
@@ -474,20 +464,11 @@ pub(super) fn captures(
                 .filter(|(target, _)| !brain.specialist_risk_after
                     .get(&(unit.entity_id, target.entity_id))
                     .is_some_and(|until| *until > tick))
-                // A safe target cell is not enough if the shortest approach
-                // runs through a dog or a mind-controller. Keep the spy for
-                // another opportunity instead of consuming it for nothing.
-                .filter(|(target, _)| !path_crosses(
-                    &watchers, unit.cell, target.cell, SPY_WATCH_CELLS))
-                // The engine seeds PermaDisguise wearing our own house, not
-                // necessarily a uniform that fools *this* enemy. Until the
-                // native command path can change uniform, treat unmasked spies
-                // like fragile infantry: a turret-covered approach waits.
-                .filter(|(target, _)| {
-                    obs.disguised_to_visible_enemy(unit.entity_id, target.entity_id)
-                        || !spy_gun_crossfire(rules, obs, unit.entity_id,
-                            unit.cell, target.cell)
-                })
+                // Each actual observer is checked separately. A uniform
+                // appropriate for one house does not fool all other houses.
+                // Ordinary guns that really accept it are not hazards.
+                .filter(|(target,_)|!spy_gun_crossfire(rules,obs,unit.entity_id,
+                    unit.cell,target.cell))
                 .max_by_key(|(target, value)| (spy_target_score(
                     brain, rules, obs, target, *value, tick),
                     -squared_distance(unit.cell, target.cell)))
@@ -572,7 +553,8 @@ pub(super) fn captures(
                 }
             }
             if ty.agent {
-                if let Some(post) = spy_recon_post(brain, rules, obs, unit.cell, ty.movement_zone) {
+                if let Some(post) = spy_recon_post(brain, rules, obs, unit.entity_id,
+                    unit.cell, ty.movement_zone) {
                     let _ = issue_tracked(
                         &mut brain.tracked, brain.trace, out, rules, obs,
                         unit.entity_id, TrackedKind::Move, None, Some(post),
@@ -602,22 +584,18 @@ pub(super) fn captures(
         // avoid every hostile rifle; spies avoid the actual detector/psychic
         // watchers only. Applying the engineer's guard list here aborted every
         // cash theft as soon as a refinery came into a normal garrison's view.
-        let wearing_enemy_uniform = ty.agent
-            && obs.disguised_to_visible_enemy(unit.entity_id, target.entity_id);
-        let route_threats = capture_route_threats(wearing_enemy_uniform, &guards, &watchers);
-        // The aim is not 'ignore towers' but 'ignore towers that truly regard
-        // this spy as friendly'. A native disguise rejected by the observer
-        // makes all regular weapons dangerous along the route.
-        let guns_unsafe = if ty.engineer {
+        let guns_unsafe=if ty.engineer {
             !super::safety::specialist_approach_safe(rules,obs,unit.entity_id,target.entity_id)
-        } else { (!ty.agent || !wearing_enemy_uniform)
-            && spy_gun_crossfire(rules, obs, unit.entity_id, unit.cell, target.cell) };
-        let close = route_threats.iter().any(|cell| {
-            squared_distance(*cell, unit.cell) <= CAPTURE_CLEAR_CELLS * CAPTURE_CLEAR_CELLS
-        });
-        let crossed = tick % CAPTURE_RECHECK_FRAMES == 0
-            && path_crosses(route_threats, unit.cell, target.cell, PATH_CLEAR_CELLS);
-        if (!ty.engineer && (close || crossed)) || guns_unsafe {
+        }else if ty.agent {
+            spy_gun_crossfire(rules,obs,unit.entity_id,unit.cell,target.cell)
+        }else{
+            let close=guards.iter().any(|cell|
+                squared_distance(*cell,unit.cell)<=CAPTURE_CLEAR_CELLS*CAPTURE_CLEAR_CELLS);
+            let crossed=tick%CAPTURE_RECHECK_FRAMES==0
+                && path_crosses(&guards,unit.cell,target.cell,PATH_CLEAR_CELLS);
+            close || crossed || spy_gun_crossfire(rules,obs,unit.entity_id,unit.cell,target.cell)
+        };
+        if guns_unsafe {
             brain.tracked.tasks.release(unit.entity_id);
             brain.specialist_risk_after.insert((unit.entity_id, target.entity_id),
                 tick.saturating_add(240));
@@ -692,22 +670,9 @@ pub(super) fn supervise_specialists(
         let Some(unit) = brain.census.units.iter()
             .find(|unit| unit.entity_id == actor && unit.controllable()) else { continue };
         let Some(to) = job.cell else { continue };
-        let disguised = job.kind == JobKind::Spy
-            && job.target.is_some_and(|id| obs.disguised_to_visible_enemy(actor, id));
-        // Engineer and garrison cancellation belongs to safety::review,
-        // which sees the final proposals AND actual native Capture pointers.
-        // Keep this earlier supervisor only for the distinct disguise policy.
-        let watched=obs.visible_enemy_entities().any(|enemy| {
-            let Some(ty)=obs.entity_type(rules,enemy.entity_id) else{return false;};
-            let watcher=super::census::Traits::of(rules,ty).scout
-                || mind_controls(rules,ty) || super::kite::carries_parasite(rules,ty);
-            if disguised {watcher && path_crosses(&[enemy.cell],unit.cell,to,SPY_WATCH_CELLS)}
-            else {(watcher && path_crosses(&[enemy.cell],unit.cell,to,SPY_WATCH_CELLS))
-                || (obs.can_hurt(rules,enemy.entity_id,actor)
-                    && super::tactics::effective_reach_against(rules,obs,enemy.entity_id,actor)>0
-                    && path_crosses(&[enemy.cell],unit.cell,to,
-                        super::tactics::effective_reach_against(rules,obs,enemy.entity_id,actor).saturating_add(1)))}
-        });
+        // Same actor-specific predicate as new infiltration and final
+        // safety. A fogged prize is not evidence that the disguise failed.
+        let watched=spy_gun_crossfire(rules,obs,actor,unit.cell,to);
         if !watched { continue; }
         brain.tracked.tasks.release(actor);
         brain.tracked.void(actor, TrackedKind::Capture);
@@ -799,6 +764,9 @@ pub(super) fn resume_specialist_jobs(
                     || !super::safety::specialist_approach_safe(rules,obs,actor,target)) {continue;}
                 if job.kind==JobKind::Garrison
                     && !super::safety::garrison_approach_safe(rules,obs,actor,target) {continue;}
+                if job.kind==JobKind::Spy && (!obs.can_take_building(rules,actor,target)
+                    || job.cell.is_none_or(|at|spy_gun_crossfire(rules,obs,actor,unit.cell,at)))
+                {continue;}
                 (TrackedKind::Capture, Some(target), Goal::Capture { target })
             }
             JobKind::Recycle => {
@@ -965,14 +933,35 @@ pub(super) fn review_capture_prizes(brain:&mut AssistBrain,rules:&RuleSet,
     }
 }
 
-/// Only a spy *effectively disguised to that enemy* may ignore ordinary
-/// guards. Both an unmasked spy and an engineer avoid visible hostiles.
-/// Detector, parasite, and control coverage is handled separately.
-fn capture_route_threats<'a>(
-    spy: bool, general_guards: &'a [(u16, u16)],
-    spy_watchers: &'a [(u16, u16)],
-) -> &'a [(u16, u16)] {
-    if spy { spy_watchers } else { general_guards }
+/// Native DetectDisguise, an actual parasite weapon, or live psychic
+/// control. Do not equate "scout" or "mobile" with recognition.
+pub(super) fn spy_watcher_reach(rules:&RuleSet,obs:&Observation<'_>,actor:u64)->i32 {
+    let Some(ty)=obs.entity_type(rules,actor) else{return 0;};
+    if ty.category==ObjectCategory::Building
+        && !obs.visible_enemy_building_operational(rules,actor) {return 0;}
+    let weapon=super::advance::weapon_range_cells(rules,ty,obs.is_deployed(actor));
+    let detector=if ty.detect_disguise {
+        i32::from(ty.detect_disguise_range).max(weapon).max(2)+1
+    }else{0};
+    let parasite=if super::kite::carries_parasite(rules,ty) {weapon.max(2)+1}else{0};
+    let control=super::tactics::actor_control_reach(rules,obs,actor).map_or(0,|r|r+1);
+    detector.max(parasite).max(control)
+}
+
+fn spy_ordinary_reach(disguised:bool,aimed:bool,reach:i32)->i32 {
+    if disguised && !aimed {0}else{reach.max(0)}
+}
+
+/// The native disguise query includes the observer's house and its current
+/// detector fog. An actual locked target stays dangerous even if the
+/// uniform has just changed. No other ordinary gun becomes a watcher.
+pub(super) fn spy_threat_reach(rules:&RuleSet,obs:&Observation<'_>,spy:u64,
+    enemy:u64)->i32 {
+    let watcher=spy_watcher_reach(rules,obs,enemy);
+    let ordinary=super::tactics::effective_reach_against(rules,obs,enemy,spy);
+    let aimed=obs.attack_target(enemy)==Some(spy);
+    let ordinary=spy_ordinary_reach(obs.disguised_to_visible_enemy(spy,enemy),aimed,ordinary);
+    watcher.max(if ordinary>0 {ordinary+1}else{0})
 }
 
 /// Does the straight-line approach to an enemy spy target cross an active
@@ -994,15 +983,8 @@ fn spy_gun_crossfire_except(
     from: (u16, u16), to: (u16, u16), spared: Option<u64>,
 ) -> bool {
     obs.visible_enemy_entities().filter(|enemy| Some(enemy.entity_id) != spared).any(|enemy| {
-        let Some(ty) = obs.object_type(rules, enemy.type_id) else {
-            return false;
-        };
-        if !obs.can_hurt(rules, enemy.entity_id, spy) {
-            return false;
-        }
-        let reach = super::advance::weapon_range_cells(
-            rules, ty, obs.is_deployed(enemy.entity_id));
-        reach > 0 && path_crosses(&[enemy.cell], from, to, reach.saturating_add(1))
+        let reach=spy_threat_reach(rules,obs,spy,enemy.entity_id);
+        reach>0 && super::tactics::path_enters_control_box(from,to,enemy.cell,reach)
     })
 }
 
@@ -1011,7 +993,7 @@ fn spy_gun_crossfire_except(
 /// visibility-gated Capture logic gets another chance. The fog may still be
 /// stale: never issue an object-target command here.
 fn spy_recon_post(
-    brain: &AssistBrain, rules: &RuleSet, obs: &Observation<'_>,
+    brain: &AssistBrain, rules: &RuleSet, obs: &Observation<'_>,actor:u64,
     from: (u16, u16), zone: MovementZone,
 ) -> Option<(u16, u16)> {
     let sites: Vec<(u16, u16)> = brain.spy_sites.keys().copied()
@@ -1027,12 +1009,7 @@ fn spy_recon_post(
     .filter(|cell| obs.is_cell_in_playfield(cell.0, cell.1)
         && obs.is_ground_walkable(cell.0, cell.1)
         && (!obs.has_zone_grid() || obs.can_reach(zone, from, *cell)))
-    .filter(|cell| !obs.visible_enemy_entities().any(|enemy| {
-        obs.entity_type(rules, enemy.entity_id)
-            .is_some_and(|ty| super::census::Traits::of(rules, ty).scout
-                || mind_controls(rules, ty) || super::kite::carries_parasite(rules, ty))
-            && squared_distance(enemy.cell, *cell) <= SPY_WATCH_CELLS * SPY_WATCH_CELLS
-    }))
+    .filter(|cell|!spy_gun_crossfire(rules,obs,actor,from,*cell))
     .min_by_key(|cell| (squared_distance(from, *cell), *cell))
 }
 
@@ -2921,6 +2898,7 @@ fn stand_miner_down(brain:&mut AssistBrain,rules:&RuleSet,obs:&Observation<'_>,
     guns:&[super::safety::Envelope]) {
     let now=obs.tick();
     brain.miner_journeys.remove(&id);
+    brain.miner_fields.remove(&id);
     brain.miner_idle_since.remove(&id);
     brain.tracked.cancel_for_safety(id);
     let post=miner_standby_post(brain,rules,obs,id,cell,zone,guns);
@@ -3200,6 +3178,59 @@ pub(super) fn slave_miners(
 /// search is the mission's job, so the cell is the unit's own.
 fn mineral_bucket(cell:(u16,u16))->(u16,u16) {(cell.0/8,cell.1/8)}
 
+/// Adjacent eight-cell buckets are parts of one working district, not
+/// competing mineral fields. Deterministic flood fill of the existing
+/// ore survey (no map or enemy reads). The lowest bucket is its key.
+fn mining_districts(patches:&[super::ore::Patch])
+    ->(BTreeMap<(u16,u16),(u16,u16)>,BTreeMap<(u16,u16),u32>) {
+    let stocks:BTreeMap<_,_>=patches.iter()
+        .map(|p|(mineral_bucket(p.cell),p.stock)).collect();
+    let mut pending:BTreeSet<_>=stocks.keys().copied().collect();
+    let mut membership=BTreeMap::new();
+    let mut totals=BTreeMap::new();
+    while let Some(seed)=pending.iter().next().copied() {
+        pending.remove(&seed);
+        let mut stack=vec![seed];
+        let mut total=0u32;
+        while let Some(at)=stack.pop() {
+            membership.insert(at,seed);
+            total=total.saturating_add(stocks[&at]);
+            for (dx,dy) in [(-1i32,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)] {
+                let (Ok(x),Ok(y))=(u16::try_from(i32::from(at.0)+dx),
+                    u16::try_from(i32::from(at.1)+dy)) else{continue;};
+                if pending.remove(&(x,y)){stack.push((x,y));}
+            }
+        }
+        totals.insert(seed,total);
+    }
+    (membership,totals)
+}
+
+/// Prefer a meaningful uncovered district to a second/third truck at
+/// the same seam, while retaining the last worker of a productive field.
+fn coverage_transfer(old_workers:usize,new_workers:usize,new_stock:u32)->bool {
+    old_workers>=2 && new_workers==0 && new_stock>=55
+}
+
+#[cfg(all(test, tests_sim_p_s))]
+#[test]
+fn v90_mine_districts_merge_neighboring_buckets_but_not_separate_fields() {
+    let patches=[
+        super::ore::Patch{cell:(11,11),stock:30},
+        super::ore::Patch{cell:(17,14),stock:30},
+        super::ore::Patch{cell:(60,60),stock:85},
+        super::ore::Patch{cell:(100,52),stock:65},
+    ];
+    let (membership,stock)=mining_districts(&patches);
+    assert_eq!(stock.len(),3);
+    assert_eq!(membership[&(1,1)],membership[&(2,1)]);
+    assert_eq!(stock[&(1,1)],60);
+    assert!(coverage_transfer(2,0,60));
+    assert!(!coverage_transfer(1,0,60));
+    assert!(!coverage_transfer(3,1,60));
+    assert!(!coverage_transfer(3,0,54));
+}
+
 fn patch_capacity(stock:u32)->usize {
     stock.div_ceil(55).clamp(1,3) as usize
 }
@@ -3230,6 +3261,7 @@ pub(super) fn harvesters(
             .filter(|unit| unit.traits.harvester && unit.controllable())
             .map(|unit| unit.entity_id).collect();
         brain.miner_journeys.retain(|id, _| miners.contains(id));
+        brain.miner_fields.retain(|id, _| miners.contains(id));
         brain.miner_idle_since.retain(|id, _| miners.contains(id));
         brain.miner_standby.retain(|id,_|miners.contains(id));
     }
@@ -3268,19 +3300,32 @@ pub(super) fn harvesters(
     // The current native destination and our real issued journeys are
     // evidence of work allocation. A returning loaded truck is not a
     // new request for an idle miner. Keep the estimate local to this pass.
+    let (districts,district_stock)=mining_districts(&patches);
+    let district=|at|districts.get(&mineral_bucket(at)).copied();
     let mut assigned=BTreeMap::new();
     let mut loads:BTreeMap<(u16,u16),usize>=BTreeMap::new();
-    let patch_keys:BTreeSet<_>=patches.iter().map(|p|mineral_bucket(p.cell)).collect();
-    for u in brain.census.units.iter().filter(|u|u.traits.harvester && u.controllable()) {
-        let at=brain.miner_journeys.get(&u.entity_id).map(|(at,_,_)|*at)
-            .or_else(||obs.destination(u.entity_id).filter(|at|brain.ore_known.contains_key(at)))
+    let mut observed_assignments=Vec::new();
+    for u in brain.census.units.iter().filter(|u|u.traits.harvester && u.controllable()
+        && obs.object_type(rules,u.type_id).is_some_and(|ty|ty.enslaves.is_none()
+            && ty.category==ObjectCategory::Vehicle)) {
+        let id=u.entity_id;
+        let at=brain.miner_journeys.get(&id).map(|(at,_,_)|*at)
+            .or_else(||brain.miner_fields.get(&id).copied())
+            .filter(|at|district(*at).is_some())
+            .or_else(||obs.destination(id).filter(|at|brain.ore_known.contains_key(at)))
             .or_else(||(u.mission==harvest && brain.ore_known.contains_key(&u.cell)).then_some(u.cell));
-        if let Some(key)=at.map(mineral_bucket).filter(|key|patch_keys.contains(key)) {
-            assigned.insert(u.entity_id,key);
+        if let Some((at,key))=at.and_then(|at|district(at).map(|key|(at,key))) {
+            assigned.insert(id,key);
             *loads.entry(key).or_default()+=1;
+            observed_assignments.push((id,at));
         }
     }
+    // Returning trucks have no ore destination during Enter/Unload, but
+    // they still service their old district. Never count those seats as free.
+    brain.miner_fields.retain(|_,at|district(*at).is_some());
+    brain.miner_fields.extend(observed_assignments);
     let mobile=brain.census.available_ground_fighters(rules,obs);
+    let mut transferred=false;
     for (id, cell, type_id, mission) in idle {
         if ordered_this_frame(out, id)
             || brain.miner_avoid_until.get(&id).is_some_and(|until| *until > tick)
@@ -3297,36 +3342,55 @@ pub(super) fn harvesters(
             && (!obs.is_cell_visible(field.0,field.1) || super::ore::at(rules,obs,field));
         let bay_distance=|field:(u16,u16)|brain.census.refinery_cells.iter()
             .map(|bay|cell_distance(*bay,field)).min().unwrap_or(i32::MAX/4);
-        let load=|field| {
-            let key=mineral_bucket(field);
-            loads.get(&key).copied().unwrap_or(0)
-                .saturating_sub(if assigned.get(&id)==Some(&key){1}else{0})
-        };
-        let full=|p:&super::ore::Patch|load(p.cell)>=patch_capacity(p.stock);
+        let own_district=assigned.get(&id).copied();
+        let total_load=|field|district(field).and_then(|key|loads.get(&key).copied()).unwrap_or(0);
+        let load=|field|total_load(field).saturating_sub(
+            if district(field).is_some() && district(field)==own_district {1}else{0});
+        let stock=|field|district(field).and_then(|key|district_stock.get(&key).copied()).unwrap_or(0);
+        let full=|p:&super::ore::Patch|load(p.cell)>=patch_capacity(stock(p.cell));
         let rank=|p:&super::ore::Patch|(
             full(p),bay_distance(p.cell)+cell_distance(cell,p.cell)
-                + 12*(load(p.cell).min(8) as i32),
-            std::cmp::Reverse(p.stock),p.cell);
-        let local=patches.iter().filter(|p|bay_distance(p.cell)<=24 && safe(p.cell))
+                +12*(load(p.cell).min(8) as i32),
+            std::cmp::Reverse(stock(p.cell)),p.cell);
+        let allowed=|p:&super::ore::Patch|bay_distance(p.cell)<=64
+            && (bay_distance(p.cell)<=24 || stock(p.cell)>=55)
+            && cell_distance(cell,p.cell)<=super::ore::REMOTE_WORK_CELLS
+            && (bay_distance(p.cell)<=36 || (mobile>=4
+                && obs.is_cell_revealed(p.cell.0,p.cell.1))) && safe(p.cell);
+        let local=patches.iter().filter(|p|bay_distance(p.cell)<=24 && allowed(p))
             .min_by_key(|p|rank(p));
-        // Use an unsaturated, known rich neighboring district when the
-        // serviced local district is full. Never make the opening miner
-        // explore across the whole map just because the map prior has ore.
-        let remote=if local.is_none_or(|p|full(p)) {
-            patches.iter().filter(|p|bay_distance(p.cell)>24
-                && bay_distance(p.cell)<=64 && p.stock>=55 && !full(p)
-                && cell_distance(cell,p.cell)<=super::ore::REMOTE_WORK_CELLS
-                && (bay_distance(p.cell)<=36 || (mobile>=4
-                    && obs.is_cell_revealed(p.cell.0,p.cell.1)))
-                && safe(p.cell)).min_by_key(|p|rank(p))
-        }else{None};
-        let target=if obs.is_cell_visible(cell.0,cell.1) && super::ore::at(rules,obs,cell)
-            && safe(cell) && (bay_distance(cell)<=24 || local.is_none()) {Some(cell)}
-            else {remote.or(local).map(|p|p.cell)
-                .or_else(||super::ore::best_patch(cell,&patches,64,|at|
-                    bay_distance(at)<=64
-                    && (bay_distance(at)<=36 || (mobile>=4 && obs.is_cell_revealed(at.0,at.1)))
-                    && safe(at)))};
+        let retained=patches.iter().filter(|p|own_district.is_some()
+            && district(p.cell)==own_district && allowed(p)).min_by_key(|p|rank(p));
+        let uncovered=patches.iter().filter(|p|allowed(p)
+            && district(p.cell)!=own_district && stock(p.cell)>=55 && total_load(p.cell)==0)
+            .min_by_key(|p|rank(p));
+        let old_workers=own_district.and_then(|key|loads.get(&key).copied()).unwrap_or(0);
+        let redistribute=!transferred && retained.is_some()
+            && uncovered.is_some_and(|p|coverage_transfer(old_workers,total_load(p.cell),stock(p.cell)))
+            && !brain.miner_journeys.contains_key(&id)
+            && obs.miner_cargo_bales(id)==Some(0)
+            && !(obs.is_cell_visible(cell.0,cell.1) && super::ore::at(rules,obs,cell));
+        let remote=patches.iter().filter(|p|allowed(p)).min_by_key(|p|rank(p));
+        // The first truck still uses the nearest useful field. Additional
+        // idle trucks open uncovered safe districts; an existing assignment
+        // survives the return to a bay, rather than being forgotten there.
+        let choice=if redistribute {uncovered}
+            else if retained.is_some(){retained}
+            else if !assigned.is_empty(){uncovered.or(remote).or(local)}
+            else {local.or(remote)};
+        let target=if !redistribute && obs.is_cell_visible(cell.0,cell.1)
+            && super::ore::at(rules,obs,cell) && safe(cell)
+            && (own_district.is_none() || district(cell)==own_district)
+        {Some(cell)}else{choice.map(|p|p.cell)};
+        let switch_district=target.is_some_and(|at|district(at)!=own_district)
+            && (redistribute || retained.is_none());
+        let planned_district=target.and_then(district);
+        let native_mismatch=obs.destination(id).is_some_and(|at|
+            brain.ore_known.contains_key(&at) && district(at).is_some()
+                && district(at)!=planned_district);
+        let redirect_empty=target.is_some() && mission==harvest
+            && obs.miner_cargo_bales(id)==Some(0) && native_mismatch
+            && !brain.miner_journeys.contains_key(&id);
         // A loaded truck returning to its own bay is not searching for ore.
         // Preserve native unloading; never replace it with another expedition.
         let returning=obs.miner_cargo_bales(id).is_some_and(|bales|bales>0)
@@ -3338,6 +3402,21 @@ pub(super) fn harvesters(
                         && super::safety::safe_leg(&guns,cell,at,true)));
         if returning {brain.miner_standby.remove(&id);continue;}
         let destination=obs.destination(id);
+        if switch_district && mission==harvest && obs.miner_cargo_bales(id)==Some(0)
+            && !brain.miner_journeys.contains_key(&id) {
+            if let Some(at)=destination.filter(|at|brain.ore_known.contains_key(at)
+                && district(*at)==planned_district
+                && mining_leg_safe(brain,obs,zone,cell,*at,&guns)) {
+                if let Some(key)=district(at) {
+                    brain.miner_fields.insert(id,at);
+                    if let Some(old)=assigned.insert(id,key) {
+                        if let Some(n)=loads.get_mut(&old){*n=n.saturating_sub(1);}
+                    }
+                    *loads.entry(key).or_default()+=1;
+                    transferred=true;
+                }
+            }
+        }
         let unsafe_native=destination.is_some_and(|dest|{
             let deliberate=brain.miner_journeys.get(&id).is_some_and(|(at,_,_)|*at==dest);
             let known_seam=brain.ore_known.contains_key(&dest)
@@ -3363,6 +3442,27 @@ pub(super) fn harvesters(
                 continue;
             }
         }
+        if redirect_empty {
+            if let Some(at)=target {
+                // A native outbound ore destination in the wrong district
+                // is a genuine opportunity to redirect an EMPTY truck.
+                // The ordinary order gate still owns acceptance.
+                if issue(brain,out,rules,obs,id,Goal::Move{cell:at}) {
+                    brain.miner_journeys.insert(id,(at,cell,tick));
+                    brain.miner_fields.insert(id,at);
+                    brain.tracked.record(tick,id,TrackedKind::Move,None,Some(at));
+                    if let Some(key)=district(at) {
+                        if let Some(old)=assigned.insert(id,key) {
+                            if let Some(n)=loads.get_mut(&old){*n=n.saturating_sub(1);}
+                        }
+                        *loads.entry(key).or_default()+=1;
+                    }
+                    transferred|=switch_district;
+                    log::info!("auto play: v90_mine_district tick={tick} actor={id} field={at:?} district={planned_district:?} rebalance={switch_district}");
+                    continue;
+                }
+            }
+        }
         if mission == harvest && !brain.miner_journeys.contains_key(&id) {
             // Native Harvest is already doing useful work if it is walking,
             // carrying ore or has known ore nearby. Do not disrupt it simply
@@ -3371,7 +3471,8 @@ pub(super) fn harvesters(
             // field for 300 frames, it needs a deliberate new expedition.
             let native_scan = (rules.general.tiberium_long_scan / 256).max(1);
             let nearby_ore = patches.iter().any(|patch|
-                super::advance::cell_distance(cell, patch.cell) <= native_scan / 2
+                district(patch.cell)==planned_district
+                    && super::advance::cell_distance(cell, patch.cell) <= native_scan / 2
                     && mining_leg_safe(brain,obs,zone,cell,patch.cell,&guns));
             if obs.destination(id).is_some()
                 || obs.miner_cargo_bales(id).is_some_and(|bales| bales > 0)
@@ -3394,8 +3495,13 @@ pub(super) fn harvesters(
         // Maintain that trip across frames and only then start native Harvest.
         if let Some((target, last_cell, last_progress)) = brain.miner_journeys.get(&id).copied() {
             if cell_distance(cell, target) <= 3 {
-                brain.miner_journeys.remove(&id);
-                if issue(brain, out, rules, obs, id, Goal::Harvest { cell: target }) {
+                // Keep the trip until the native Harvest request is admitted;
+                // a temporarily unready object must not lose the assignment.
+                let already=mission==harvest && obs.destination(id).is_none_or(|at|
+                    district(at)==district(target));
+                if already || issue(brain, out, rules, obs, id, Goal::Harvest { cell: target }) {
+                    brain.miner_journeys.remove(&id);
+                    brain.miner_fields.insert(id,target);
                     brain.tracked.record(tick, id, TrackedKind::Harvest, None, None);
                 }
                 continue;
@@ -3406,6 +3512,7 @@ pub(super) fn harvesters(
                 || !brain.ore_known.contains_key(&target)
             {
                 brain.miner_journeys.remove(&id);
+                brain.miner_fields.remove(&id);
                 brain.miner_rejected.insert(id, (target, tick.saturating_add(900)));
                 log::debug!("auto play: miner {id} abandons stalled ore journey to {target:?}");
             } else {
@@ -3433,12 +3540,16 @@ pub(super) fn harvesters(
             if issue(brain, out, rules, obs, id, Goal::Move { cell: target }) {
                 brain.miner_journeys.insert(id, (target, cell, tick));
                 brain.tracked.record(tick, id, TrackedKind::Move, None, Some(target));
-                let key=mineral_bucket(target);
-                if let Some(old)=assigned.insert(id,key) {
-                    if let Some(n)=loads.get_mut(&old){*n=n.saturating_sub(1);}
+                brain.miner_fields.insert(id,target);
+                if let Some(key)=district(target) {
+                    if let Some(old)=assigned.insert(id,key) {
+                        if let Some(n)=loads.get_mut(&old){*n=n.saturating_sub(1);}
+                    }
+                    *loads.entry(key).or_default()+=1;
                 }
-                *loads.entry(key).or_default()+=1;
+                transferred|=switch_district;
                 log::info!("auto play: v89_miner_trip tick={tick} actor={id} field={target:?} bay_distance={haul_distance}");
+                log::info!("auto play: v90_mine_district tick={tick} actor={id} field={target:?} district={planned_district:?} rebalance={switch_district}");
             }
             continue;
         }
@@ -3447,11 +3558,14 @@ pub(super) fn harvesters(
         }
         if issue(brain, out, rules, obs, id, Goal::Harvest { cell: target }) {
             brain.tracked.record(tick, id, TrackedKind::Harvest, None, None);
-            let key=mineral_bucket(target);
-            if let Some(old)=assigned.insert(id,key) {
-                if let Some(n)=loads.get_mut(&old){*n=n.saturating_sub(1);}
+            brain.miner_fields.insert(id,target);
+            if let Some(key)=district(target) {
+                if let Some(old)=assigned.insert(id,key) {
+                    if let Some(n)=loads.get_mut(&old){*n=n.saturating_sub(1);}
+                }
+                *loads.entry(key).or_default()+=1;
             }
-            *loads.entry(key).or_default()+=1;
+            transferred|=switch_district;
         }
     }
 }
@@ -3671,7 +3785,7 @@ fn has_disguise_weapon(rules: &RuleSet, ty: &ObjectType) -> bool {
 
 /// A negative range is the original MakeupKit's special fire-from-anywhere
 /// convention. This is an *attack* through L2, not a move toward the specimen.
-fn disguise_shot_is_remote(rules: &RuleSet, ty: &ObjectType) -> bool {
+pub(super) fn disguise_shot_is_remote(rules: &RuleSet, ty: &ObjectType) -> bool {
     (0..ty.weapon_record_count()).any(|slot| {
         ty.weapon_at(slot).and_then(|name| rules.weapon(name))
             .filter(|weapon| !weapon.never_use && weapon.range_leptons < 0)
@@ -3681,16 +3795,7 @@ fn disguise_shot_is_remote(rules: &RuleSet, ty: &ObjectType) -> bool {
     })
 }
 
-fn spy_route_blocked(
-    obs: &Observation<'_>,
-    rules: &RuleSet,
-    cell: (u16, u16),
-    watchers: &[(u16, u16)],
-) -> bool {
-    watchers
-        .iter()
-        .any(|watcher| squared_distance(*watcher, cell) <= SPY_WATCH_CELLS * SPY_WATCH_CELLS)
-}
+// Spy endpoint and approach safety now share spy_watcher_reach/spy_threat_reach.
 
 /// How near a spy's target a watcher may stand before the walk is refused, in
 /// cells: the reveal range plus a step, since the spy is seen on approach.
@@ -6020,14 +6125,10 @@ mod v18_execution_tests {
 
     #[test]
     fn only_a_truly_disguised_spy_ignores_ordinary_soldiers() {
-        let guards = [(10, 10), (15, 15)];
-        let watchers = [(15, 15)];
-        assert_eq!(capture_route_threats(false, &guards, &watchers), &guards);
-        assert_eq!(capture_route_threats(true, &guards, &watchers), &watchers);
-        assert!(!path_crosses(capture_route_threats(true, &guards, &watchers),
-            (0, 10), (20, 10), 2));
-        assert!(path_crosses(capture_route_threats(false, &guards, &watchers),
-            (0, 10), (20, 10), 2));
+        assert_eq!(spy_ordinary_reach(true,false,8),0);
+        assert_eq!(spy_ordinary_reach(false,false,8),8);
+        assert_eq!(spy_ordinary_reach(true,true,8),8);
+        assert_eq!(spy_ordinary_reach(false,false,0),0);
     }
 
     #[test]

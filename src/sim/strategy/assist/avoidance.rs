@@ -552,16 +552,11 @@ pub(super) fn run(
         if ty.category == ObjectCategory::Aircraft {
             continue;
         }
-        // A spy whose *enemy-facing* disguise is valid need not weave around
-        // every ordinary tower: those detours caused an endless perimeter
-        // dance. Capture's watcher recheck still aborts on dogs, parasites,
-        // psychic weapons or a disguise which ceases to fool this enemy.
-        if ty.agent
-            && let Some(Goal::Capture { target }) = brain.tracked.primary_goal(unit.entity_id)
-            && obs.disguised_to_visible_enemy(unit.entity_id, target)
-        {
-            continue;
-        }
+        // The specialist route owner and final actor-specific safety
+        // review cover every spy, including native Move to a remembered
+        // site and a lost/changed uniform. Do not add this generic combat
+        // envelope again; it cannot know which house the disguise fools.
+        if ty.agent {continue;}
         let Some(objective) = objective(brain, obs, unit.entity_id, unit.cell, &squad_targets)
         else {
             continue;

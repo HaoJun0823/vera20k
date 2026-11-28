@@ -1376,6 +1376,33 @@ impl<'a> Observation<'a> {
         }
     }
 
+    /// Compatible OWN airfield for a fixed-wing sortie. Prefer the native
+    /// aircraft's current dock, then a live own compatible pad. This is an
+    /// observation, not a radio handshake or promise of a free landing slot.
+    pub(crate) fn own_air_sortie_dock(&self,rules:&RuleSet,actor:u64)
+        ->Option<(u64,(u16,u16))> {
+        let plane=self.sim.entities().get(actor)?;
+        if plane.owner()!=self.house || plane.lifecycle.in_limbo() {return None;}
+        let ty=self.sim.object_type(plane.type_ref(),rules)?;
+        if ty.category!=ObjectCategory::Aircraft || ty.dock.is_empty(){return None;}
+        let usable=|dock:u64|{
+            let e=self.sim.entities().get(dock)?;
+            let kind=self.sim.object_type(e.type_ref(),rules)?;
+            if e.owner()!=self.house || e.lifecycle.in_limbo() || e.health.current()<=0
+                || kind.category!=ObjectCategory::Building || e.in_construction_bstate()
+                || e.mission.effective().known()==Some(crate::sim::mission::MissionType::Selling)
+                || !ty.dock.iter().any(|id|id.eq_ignore_ascii_case(&kind.id))
+            {return None;}
+            Some((dock,(e.position.rx(),e.position.ry())))
+        };
+        if let Some(dock)=plane.ammo().and_then(|ammo|ammo.dock()).and_then(|id|usable(id)) {
+            return Some(dock);
+        }
+        let from=(plane.position.rx(),plane.position.ry());
+        self.own_entities().filter_map(|e|usable(e.entity_id))
+            .min_by_key(|(id,at)|(from.0.abs_diff(at.0).max(from.1.abs_diff(at.1)),*id))
+    }
+
     /// Current object position only if owned or presently visible. In
     /// particular a retained native target pointer is not a scout report.
     pub fn observed_object_cell(&self, actor: u64) -> Option<(u16,u16)> {
