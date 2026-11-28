@@ -626,6 +626,7 @@ mod tests {
             mission: crate::sim::mission::MissionId::from_known(
                 crate::sim::mission::MissionType::Guard,
             ),
+            queued_mission: crate::sim::mission::MissionId::NONE,
             orderable: true,
             hand: false,
             slot: crate::sim::strategy::assist::census::Slot::Infantry,
@@ -731,6 +732,7 @@ mod tests {
                 mission: crate::sim::mission::MissionId::from_known(
                     crate::sim::mission::MissionType::Guard,
                 ),
+                queued_mission: crate::sim::mission::MissionId::NONE,
                 orderable: true,
                 hand: false,
                 slot: crate::sim::strategy::assist::census::Slot::Infantry,
@@ -778,6 +780,7 @@ mod tests {
                 mission: crate::sim::mission::MissionId::from_known(
                     crate::sim::mission::MissionType::Guard,
                 ),
+                queued_mission: crate::sim::mission::MissionId::NONE,
                 orderable: true,
                 hand: false,
                 slot: crate::sim::strategy::assist::census::Slot::Infantry,

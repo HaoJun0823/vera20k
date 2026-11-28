@@ -308,6 +308,7 @@ mod tests {
             health_permille: 1_000,
             points: 100,
             mission: MissionId::from_known(MissionType::Guard),
+            queued_mission: MissionId::NONE,
             orderable: true,
             hand: false,
             slot: Slot::Infantry,

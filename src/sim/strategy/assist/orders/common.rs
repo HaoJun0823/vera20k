@@ -129,6 +129,7 @@ pub(in crate::sim::strategy::assist) fn admits(
 /// it; otherwise a scout can wait out a 450-frame Move for a walk that never
 /// left the brain. This is also why rank is supplied by the proposed kind:
 /// reading the old record would give the new request the wrong priority.
+#[track_caller]
 fn issue_at_rank(
     trace: Option<u64>,
     rank: u8,
@@ -233,10 +234,10 @@ fn issue_at_rank(
     }
     let taken = out.want(unit, rank, goal);
     if trace == Some(unit) {
+        let caller = std::panic::Location::caller();
         log::info!(
-            "trace {unit}: {} {} (rank {rank}, taken {taken})",
-            format!("{goal:?}"),
-            if taken { "issued" } else { "replaced" }
+            "trace {unit}: proposal tick={} source={}:{} goal={goal:?} rank={rank} accepted_by_outbox={taken}",
+            obs.tick(), caller.file(), caller.line(),
         );
     }
     taken
@@ -244,6 +245,7 @@ fn issue_at_rank(
 
 /// Issue an order whose caller already recorded its intent. Kept for the
 /// older steps while they migrate to [`issue_tracked`].
+#[track_caller]
 pub(in crate::sim::strategy::assist) fn issue(
     brain: &AssistBrain,
     out: &mut Outbox,
@@ -281,6 +283,7 @@ pub(in crate::sim::strategy::assist) fn committed_garrison_entry(
 /// replace a standing intent, and cannot claim a unit for an order the engine
 /// will never see. The frame may still reject the accepted ask later; in that
 /// case L2 calls `Brain::orders_refused` to release it with a short cooldown.
+#[track_caller]
 pub(in crate::sim::strategy::assist) fn issue_tracked(
     tracker: &mut super::super::tracked::Tracker,
     trace: Option<u64>,

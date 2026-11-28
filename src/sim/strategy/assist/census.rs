@@ -423,6 +423,7 @@ pub(super) struct Unit {
     /// only pass that has the type open.
     pub(super) points: i32,
     pub(super) mission: MissionId,
+    pub(super) queued_mission: MissionId,
     pub(super) orderable: bool,
     /// A team's script or one of the player's control groups owns it
     /// ([`Observation::owned_by_hand`]).
@@ -914,6 +915,7 @@ impl Census {
                 health_permille,
                 points,
                 mission: entity.mission,
+                queued_mission: entity.queued_mission,
                 orderable,
                 hand: obs.owned_by_hand(entity.entity_id),
                 slot,
@@ -1535,6 +1537,7 @@ mod tests {
             health_permille: 1_000,
             points: 0,
             mission: MissionId::from_known(crate::sim::mission::MissionType::Move),
+            queued_mission: MissionId::NONE,
             orderable: true,
             hand: false,
             slot: Slot::Aircraft,
