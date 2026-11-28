@@ -351,10 +351,10 @@ fn place_finished(
         }
         let core=obs.object_type(rules,type_id).filter(|ty|protected_core_structure(rules,ty))
             .map(|ty|super::site_risk::YardSurvey::read(rules,obs,ty,None));
-        let allowed = |cell| space.as_ref().is_none_or(|space| space.ground_at(cell).buildable())
+        let allowed = |cell, census: &Census| space.as_ref().is_none_or(|space| space.ground_at(cell).buildable())
             && (core.is_some() || asset_anchor.is_none_or(|at|super::advance::cell_distance(at,cell)<=8))
-            && core.as_ref().is_none_or(|risk|core_plot(brain.census.base_cell,cell)
-                && risk.settled_site(&brain.census,None,cell,4));
+            && core.as_ref().is_none_or(|risk|core_plot(census.base_cell,cell)
+                && risk.settled_site(census,None,cell,4));
         let mut placement = Placement::new(obs, rules).reserving(reserved.clone());
         let outpost = if core.is_some(){None}else{brain.outpost_builds.get(&type_id).copied()};
         if let Some(anchor) = outpost {
@@ -394,7 +394,7 @@ fn place_finished(
                 let blockers = own_units_on_foundation(obs, rules, type_id, cell);
                 if blockers.is_empty() {
                     if obs.object_type(rules, type_id).is_some_and(|ty| {
-                        allowed(cell) && obs.placement_admits(rules, ty, cell.0, cell.1)
+                        allowed(cell, &brain.census) && obs.placement_admits(rules, ty, cell.0, cell.1)
                     }) {
                         out.intent(Intent::PlaceBuilding { type_id, cell });
                         job.submitted(cell, now);
@@ -439,7 +439,7 @@ fn place_finished(
         // A ready wall must *never* fall back to an arbitrary build site:
         // that bypasses the traffic safeguards and can close the miner road.
         let cell = if is_wall { planned } else {
-            placement.cell_for_where(type_id, attempt, &allowed)
+            placement.cell_for_where(type_id, attempt, |cell| allowed(cell, &brain.census))
         };
         let Some(cell) = cell else {
             if is_wall && release_stalled_wall(brain, obs, type_id, out) {
@@ -448,7 +448,7 @@ fn place_finished(
                 continue;
             }
             if !is_wall && obs.forces_enabled()
-                && let Some((blocked, units)) = placement.site_blocked_by_own_units(type_id, &allowed)
+                && let Some((blocked, units)) = placement.site_blocked_by_own_units(type_id, |cell| allowed(cell, &brain.census))
             {
                 log::info!(
                     "auto play: site {blocked:?} for {type_id} blocked by {} owned units; clearing before placement",
