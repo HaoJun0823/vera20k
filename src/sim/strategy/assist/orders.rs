@@ -1832,7 +1832,7 @@ pub(super) fn garrison(
     // Choose *which soldiers get a turn* by strategic objective, not entity
     // storage order. The nearest home soldier no longer takes the frame's
     // order budget before the soldier beside the contested ore field.
-    let home_reserve = brain.squads.squad(Role::Defend)
+    let home_reserve = brain.squads.squad(super::squads::Role::Defend)
         .map(|s| s.members.clone()).unwrap_or_default();
     let regional_foothold = regional && billets.iter().any(|b| {
         let assigned = obs.passengers(b.building_id)
