@@ -254,8 +254,8 @@ impl Director {
     }
 
     pub(super) fn recon_request(&self, obs: &Observation<'_>) -> Option<(u16, u16)> {
-        self.sites.values().filter(|site| site.phase == Phase::Recon
-            && obs.tick().saturating_sub(site.last_seen) < SIGHTING_TTL)
+        self.sites.values().filter(|site|site.phase==Phase::Recon && !site.hostile
+            && obs.tick().saturating_sub(site.last_seen)<SIGHTING_TTL)
             .max_by_key(|site| (site.value.score(), std::cmp::Reverse(site.cell)))
             .map(|site| site.cell)
     }
@@ -272,6 +272,12 @@ impl Director {
         }
         self.surveyed_at = Some(now);
         let owned: BTreeSet<u64> = obs.own_entities().map(|entity| entity.entity_id).collect();
+        let mut native_claims=BTreeMap::new();
+        for unit in census.units.iter().filter(|u|u.traits.engineer) {
+            if let Some(target)=super::safety::native_capture_target(obs,unit) {
+                native_claims.entry(target).or_insert(unit.entity_id);
+            }
+        }
         let threats: Vec<_> = obs.visible_enemy_entities().collect();
         let mut visible = BTreeSet::new();
         // Capture targets are enumerated globally by the native simulation;
@@ -316,6 +322,16 @@ impl Director {
                 }
                 site.phase = Phase::Owned;
                 site.claimant = None;
+            } else if let Some(&actor)=native_claims.get(id) {
+                // Even a vetoed job keeps the exclusive prize while its
+                // original native Capture is still live. Ownership above is
+                // the success receipt; neither an attempted Stop nor fog
+                // releases a still-running native claim.
+                if site.claimant!=Some(actor) && site.phase!=Phase::Capturing {
+                    site.submitted_at=now;
+                }
+                site.phase=Phase::Capturing;
+                site.claimant=Some(actor);
             } else if !visible.contains(id) {
                 if obs.is_cell_visible(site.cell.0, site.cell.1) {
                     // The cell is visible and the building is not capturable:
@@ -333,8 +349,11 @@ impl Director {
                 let active = site.claimant.is_some_and(|actor|
                     tracked.tasks.get(actor).is_some_and(|task|
                         task.kind == JobKind::Engineer && task.target == Some(*id)));
-                if !active && now.saturating_sub(site.submitted_at) >= CAPTURE_SETTLE {
-                    attempt_failed(site, now);
+                if !active && now.saturating_sub(site.submitted_at)>=CAPTURE_SETTLE {
+                    if now<site.retry_after {
+                        site.phase=Phase::Cooldown;
+                        site.claimant=None;
+                    } else {attempt_failed(site,now);}
                 }
             } else if site.phase == Phase::Cooldown {
                 if now >= site.retry_after {
@@ -576,6 +595,38 @@ mod tests {
         assert!(op.sites[&id].retry_after > 120);
     }
 
+
+    #[test]
+    fn v82_aborted_job_does_not_release_a_still_native_capture() {
+        let rules=RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
+            "[InfantryTypes]\n0=ENG\n[BuildingTypes]\n0=OIL\n\
+             [ENG]\nStrength=100\nSpeed=5\nEngineer=yes\nArmor=none\n\
+             Locomotor={4A582744-9839-11d1-B709-00A024DDAFD1}\n\
+             [OIL]\nStrength=500\nFoundation=1x1\nCapturable=yes\nProduceCashAmount=20\n",
+        )).expect("capture receipt fixture");
+        let mut sim=crate::sim::arena_fixture::rival_arena_known(&rules,0xA82);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let owner=sim.interner.intern("Americans");
+        let actor=sim.spawn_object("ENG","Americans",8,20,255,&rules).unwrap();
+        let target=sim.spawn_object("OIL","Russians",22,20,255,&rules).unwrap();
+        assert!(sim.apply_command("Americans",&Goal::Capture{target}.command(actor),Some(&rules)));
+        let obs=Observation::new(&sim,owner);
+        let mut brain=AssistBrain::new(0xA82);
+        brain.rebuild_census(&rules,&obs);
+        let mut op=Director::default();
+        op.observe(&rules,&obs,&brain.census,&brain.tracked);
+        assert!(op.permits_capture(actor,target));
+        assert!(!op.purchase_ready(target));
+        op.aborted(obs.tick(),actor,target);
+        assert!(!op.permits_capture(actor,target));
+        op.surveyed_at=None;
+        op.observe(&rules,&obs,&brain.census,&brain.tracked);
+        assert_eq!(op.sites[&target].claimant,Some(actor));
+        assert_eq!(op.sites[&target].phase,Phase::Capturing);
+        assert!(!op.purchase_ready(target));
+        assert!(!op.permits_capture(actor+1,target));
+    }
 
     #[test]
     fn retail_rules_identify_real_capturable_technology() {

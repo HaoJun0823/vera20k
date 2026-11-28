@@ -154,29 +154,123 @@ pub(super) fn safe_leg(guns: &[Envelope], from: Cell, to: Cell, escape: bool) ->
     })
 }
 
-/// Shared admission for new engineer missions, including the endpoint itself.
-/// Ordinary escorts do not make a lethal tower envelope safe for an engineer.
-pub(super) fn specialist_approach_safe(rules: &RuleSet, obs: &Observation<'_>,
-    actor: u64, target: u64) -> bool {
-    let Some(from) = obs.observed_object_cell(actor) else { return false; };
-    let Some(to) = obs.observed_object_cell(target) else { return false; };
-    let Some(ty)=obs.entity_type(rules,actor) else {return false;};
-    if obs.is_campaign() {
-        if !orders::campaign_building_approachable(rules,obs,ty.movement_zone,from,target) {return false;}
-    } else if !orders::building_approachable(obs,ty.movement_zone,from,to) {return false;}
-    let visible: Vec<_> = obs.visible_enemy_entities().collect();
-    safe_leg(&envelopes(rules, obs, actor, &visible, true), from, to, false)
-        && super::site_risk::capture_direct_safe(rules,obs,target,to,&visible)
+/// Finite segment against a circular cell-space estimate. Ordinary mobile
+/// weapons do not cover every corner of their square bounding box.
+/// Use integer arithmetic and clamp the closest point to the segment.
+/// This is not a native route planner or an exact prediction of moving fire.
+fn crosses_mobile_range(from:Cell,to:Cell,at:Cell,reach:i32)->bool {
+    let dx=i128::from(to.0)-i128::from(from.0);
+    let dy=i128::from(to.1)-i128::from(from.1);
+    let ax=i128::from(at.0)-i128::from(from.0);
+    let ay=i128::from(at.1)-i128::from(from.1);
+    let len=dx*dx+dy*dy;
+    let r=i128::from(reach.max(0));
+    let dot=ax*dx+ay*dy;
+    if len==0 || dot<=0 { return ax*ax+ay*ay<=r*r; }
+    if dot>=len { return (ax-dx)*(ax-dx)+(ay-dy)*(ay-dy)<=r*r; }
+    let cross=ax*dy-ay*dx;
+    cross*cross<=r*r*len
 }
 
-/// A rifleman is exposed until it actually enters the building. The
-/// building's firing ports do not make a dangerous approach safe.
-pub(super) fn garrison_approach_safe(rules:&RuleSet,obs:&Observation<'_>,actor:u64,target:u64)->bool {
-    let Some(from)=obs.observed_object_cell(actor) else {return false;};
-    let Some(to)=obs.observed_object_cell(target) else {return false;};
-    if !obs.can_garrison(rules,actor,target) {return false;}
+/// One approach policy for new and continuing engineering/garrison entry.
+/// Fixed batteries and psychic effects retain their hard envelope. Mobile
+/// ordinary guns use their actual effective weapon reach plus one cell, not
+/// a three-cell speculative engineer margin and a square across the map.
+/// Native present return fire is also a veto. No unseen actors are queried.
+pub(super) struct CaptureRisk {
+    hard:Vec<Envelope>,
+    mobile:Vec<Envelope>,
+    present_fire:bool,
+}
+impl CaptureRisk {
+    pub(super) fn read(rules:&RuleSet,obs:&Observation<'_>,actor:u64,
+        from:Cell,visible:&[EnemyEntity])->Self {
+        let mut risk=Self{hard:Vec::new(),mobile:Vec::new(),present_fire:false};
+        let Some(victim)=obs.entity_type(rules,actor) else{
+            risk.present_fire=true;
+            return risk;
+        };
+        for enemy in visible {
+            let Some(ty)=obs.object_type(rules,enemy.type_id) else{continue;};
+            let fixed=ty.category==ObjectCategory::Building;
+            if fixed && !obs.visible_enemy_building_operational(rules,enemy.entity_id) {
+                continue;
+            }
+            let control=if victim.immune_to_psionics {0}else{
+                tactics::actor_control_reach(rules,obs,enemy.entity_id).unwrap_or(0)
+            };
+            if control>0 {risk.hard.push(Envelope{at:enemy.cell,reach:control+1});}
+            let reach=tactics::effective_reach_against(rules,obs,enemy.entity_id,actor);
+            if reach<=0 {continue;}
+            let (w,h)=ty.foundation.dimensions();
+            let footprint=if fixed {i32::from(w.max(h)).max(1)}else{1};
+            if distance(from,enemy.cell)<=reach.saturating_add(footprint).saturating_add(2)
+                && obs.engage(rules,enemy.entity_id,actor)==Engage::Ready {
+                risk.present_fire=true;
+            }
+            let gun=Envelope{at:enemy.cell,reach:reach+1};
+            if fixed {risk.hard.push(gun);}else{risk.mobile.push(gun);}
+        }
+        risk
+    }
+    pub(super) fn route(&self,from:Cell,to:Cell)->bool {
+        !self.present_fire && safe_leg(&self.hard,from,to,false)
+            && self.mobile.iter().all(|g|!crosses_mobile_range(from,to,g.at,g.reach))
+    }
+}
+
+pub(super) fn capture_leg_safe(rules:&RuleSet,obs:&Observation<'_>,actor:u64,
+    from:Cell,to:Cell,visible:&[EnemyEntity])->bool {
+    CaptureRisk::read(rules,obs,actor,from,visible).route(from,to)
+}
+
+/// Native Capture stores the object in BOTH attack and navigation state.
+/// Capture's native update can restore navigation from the target after a
+/// momentary loss of NavCom. A cancelled L4 job is not a cancelled click.
+/// Only own, controllable actors' existing target IDs are read here; callers
+/// still have to observe the site before issuing a NEW capture.
+pub(super) fn native_capture_target(obs:&Observation<'_>,unit:&Unit)->Option<u64> {
+    if !unit.controllable() || unit.mission.known()!=Some(MissionType::Capture) {
+        return None;
+    }
+    obs.own_destination_object(unit.entity_id)
+        .or_else(||obs.attack_target(unit.entity_id))
+}
+
+fn capture_approach(rules:&RuleSet,obs:&Observation<'_>,actor:u64,target:u64,
+    engineer:bool,visible:&[EnemyEntity],remembered:Option<Cell>)->bool {
+    let Some(from)=obs.observed_object_cell(actor) else{return false;};
+    let Some(ty)=obs.entity_type(rules,actor) else{return false;};
+    let Some(to)=obs.observed_object_cell(target) else {
+        // A continuing native click may pass out of current sight. The
+        // remembered coordinate is not a new click or a hidden entity query.
+        // A visible empty/invalid site cannot use this exception.
+        return remembered.is_some_and(|to|!obs.is_cell_visible(to.0,to.1)
+            && capture_leg_safe(rules,obs,actor,from,to,visible));
+    };
+    if engineer {
+        let reachable=if obs.is_campaign() {
+            orders::campaign_building_approachable(rules,obs,ty.movement_zone,from,target)
+        } else {orders::building_approachable(obs,ty.movement_zone,from,to)};
+        if !reachable || !super::site_risk::capture_direct_safe(rules,obs,target,to,visible) {
+            return false;
+        }
+    } else if !obs.can_garrison(rules,actor,target) {
+        return false;
+    }
+    capture_leg_safe(rules,obs,actor,from,to,visible)
+}
+
+pub(super) fn specialist_approach_safe(rules:&RuleSet,obs:&Observation<'_>,
+    actor:u64,target:u64)->bool {
     let visible:Vec<_>=obs.visible_enemy_entities().collect();
-    safe_leg(&envelopes(rules,obs,actor,&visible,true),from,to,false)
+    capture_approach(rules,obs,actor,target,true,&visible,None)
+}
+
+pub(super) fn garrison_approach_safe(rules:&RuleSet,obs:&Observation<'_>,
+    actor:u64,target:u64)->bool {
+    let visible:Vec<_>=obs.visible_enemy_entities().collect();
+    capture_approach(rules,obs,actor,target,false,&visible,None)
 }
 
 fn ground_actor(rules: &RuleSet, obs: &Observation<'_>, unit: &Unit) -> bool {
@@ -338,82 +432,12 @@ pub(super) fn firing_post(rules: &RuleSet, obs: &Observation<'_>, unit: &Unit,
     best.map(|(_,_,cell)| cell)
 }
 
-/// A support gun may safely fire at a diagonal position that a square
-/// movement envelope would reject. For a real, current shot use the native
-/// range result for *return fire*, not just the proposed path's cell box.
-/// Cannot is not proof of being outside range (e.g. transient weapon state).
-fn fixed_return_fire_risk(in_box: bool, answer: Engage) -> bool {
-    answer == Engage::Ready || (in_box && answer != Engage::OutOfRange)
-}
-
-fn support_current_fire_safe(rules: &RuleSet, obs: &Observation<'_>,
-    unit: &Unit, visible: &[EnemyEntity]) -> bool {
-    let id = unit.entity_id;
-    let immune = tactics::psychic_immune(rules,obs,id);
-    !visible.iter().any(|enemy| {
-        let Some(ty) = obs.object_type(rules,enemy.type_id) else {return false;};
-        let fixed = ty.category == ObjectCategory::Building;
-        if fixed && !obs.visible_enemy_building_operational(rules,enemy.entity_id) {
-            return false;
-        }
-        let d = distance(unit.cell,enemy.cell);
-        // Keep a hard, actor-specific psychic margin. Being out of a
-        // conventional weapon's range is not immunity to mind control.
-        if !immune && tactics::actor_control_reach(rules,obs,enemy.entity_id)
-            .is_some_and(|reach| d <= reach.saturating_add(2)) {return true;}
-        let reach = tactics::effective_reach_against(rules,obs,enemy.entity_id,id);
-        if reach <= 0 {return false;}
-        if !fixed {
-            // Do not preserve an exposed artillery shot as a mobile enemy
-            // closes. Its prospective movement remains conservatively gated.
-            return d <= reach.saturating_add(2);
-        }
-        let (w,h) = ty.foundation.dimensions();
-        let footprint = i32::from(w.max(h)).max(1);
-        if d > reach.saturating_add(footprint).saturating_add(2) {return false;}
-        fixed_return_fire_risk(d <= reach.saturating_add(footprint),
-            obs.engage(rules,enemy.entity_id,id))
-    })
-}
-
-/// Only a genuinely ready, observed building shot of a long-range ground
-/// vehicle gets the precise stationary-fire policy. Never use it to admit
-/// a pursuit, a hypothetical future firing cell, or a specialist's route.
-pub(super) fn support_firing_here(rules: &RuleSet, obs: &Observation<'_>,
-    unit: &Unit, target: u64, visible: &[EnemyEntity]) -> bool {
-    unit.health_permille >= 500 && ground_actor(rules,obs,unit)
-        && super::advance::fire_support::support_reach(rules,obs,unit) >= 8
-        && visible.iter().any(|e|e.entity_id==target)
-        && !obs.visible_enemy_invulnerable(target)
-        && obs.entity_type(rules,target).is_some_and(|ty|ty.category==ObjectCategory::Building)
-        && obs.engage(rules,unit.entity_id,target)==Engage::Ready
-        && orders::admits(rules,obs,unit.entity_id,&Goal::Attack{target})
-        && support_current_fire_safe(rules,obs,unit,visible)
-}
-
-/// Continuity of a real native shot, not a new reservation. A moving gun
-/// is not necessarily holding a firing post. Wounded/service/emergency
-/// owners still run before the ordinary support passes.
-pub(super) fn holding_support_fire(rules: &RuleSet, obs: &Observation<'_>,
-    unit: &Unit, visible: &[EnemyEntity]) -> bool {
-    obs.destination(unit.entity_id).is_none()
-        && obs.own_destination_object(unit.entity_id).is_none()
-        && obs.attack_target(unit.entity_id).is_some_and(|target|
-            support_firing_here(rules,obs,unit,target,visible))
-}
-
 /// A native in-range attack does not need to chase. Reject positions inside
 /// another currently observed fixed weapon or psychic-control envelope.
 pub(super) fn firing_here(rules: &RuleSet, obs: &Observation<'_>, unit: &Unit, target: u64) -> bool {
     if obs.engage(rules,unit.entity_id,target) != Engage::Ready
         || !obs.can_hurt(rules,unit.entity_id,target) { return false; }
     let visible: Vec<_> = obs.visible_enemy_entities().collect();
-    if ground_actor(rules,obs,unit)
-        && super::advance::fire_support::support_reach(rules,obs,unit)>=8
-        && obs.entity_type(rules,target).is_some_and(|ty|ty.category==ObjectCategory::Building)
-    {
-        return support_firing_here(rules,obs,unit,target,&visible);
-    }
     !covered(&envelopes(rules,obs,unit.entity_id,&visible,false),unit.cell)
 }
 
@@ -481,7 +505,7 @@ pub(super) fn safe_attack_leg(rules:&RuleSet,obs:&Observation<'_>,unit:&Unit,
 fn native_goal(obs: &Observation<'_>, unit: &Unit) -> Option<Goal> {
     let id = unit.entity_id;
     match unit.mission.known() {
-        Some(MissionType::Capture) => obs.own_destination_object(id).map(|target| Goal::Capture {target}),
+        Some(MissionType::Capture) => native_capture_target(obs,unit).map(|target|Goal::Capture{target}),
         Some(MissionType::Enter) => obs.own_destination_object(id).map(|target| Goal::Enter {target}),
         Some(MissionType::Attack) => obs.attack_target(id).map(|target| Goal::Attack {target})
             .or_else(|| obs.destination(id).map(|cell| Goal::AttackMove {cell})),
@@ -982,7 +1006,6 @@ fn review_front(brain: &mut AssistBrain, rules: &RuleSet, obs: &Observation<'_>,
         && !u.in_service() && !obs.own_repair_service(rules,u.entity_id)
         && !super::advance::siege_member(brain,tick,u.entity_id)).copied().collect();
     let mut by_type = BTreeMap::new();
-    let visible: Vec<_> = obs.visible_enemy_entities().collect();
     for unit in &units {
         let id=unit.entity_id;
         let next=proposed.get(&id).copied();
@@ -1013,15 +1036,9 @@ fn review_front(brain: &mut AssistBrain, rules: &RuleSet, obs: &Observation<'_>,
             guns
         });
         let released=brain.charge_released.get(&id).copied();
-        let precise = |g: Goal| matches!(g,Goal::Attack{target}
-            if support_firing_here(rules,obs,unit,target,&visible));
-        let native_precise=native.is_some_and(precise);
-        let next_precise=if next==native {native_precise} else {next.is_some_and(precise)};
-        let precise_fire=|g:Goal| (native==Some(g) && native_precise)
-            || (next==Some(g) && next_precise);
         let bad=|g: Goal| {
             let ended=matches!(g,Goal::Attack {target} if Some(target)==released);
-            ended || (!precise_fire(g) && !guns.is_empty() && front_bad(rules,obs,unit,guns,g)
+            ended || (!guns.is_empty() && front_bad(rules,obs,unit,guns,g)
                 && !matches!(g,Goal::Move {cell} if covered(guns,unit.cell)
                     && escape_reduces(guns,unit.cell,cell) && valid_cell(rules,obs,unit,cell))
                 && !supported_ready_fire(brain,rules,obs,unit,g))
@@ -1040,14 +1057,12 @@ fn review_front(brain: &mut AssistBrain, rules: &RuleSet, obs: &Observation<'_>,
             && (safe_leg(guns,unit.cell,cell,true)||escape_reduces(guns,unit.cell,cell))
             && valid_cell(rules,obs,unit,cell));
         let native_bad=native.is_some_and(|g| bad(g))
-            || (exposed && !native.is_some_and(|g| mobile_shot(g)||leaving(g)
-                || (precise_fire(g) && obs.destination(id).is_none()
-                    && obs.own_destination_object(id).is_none())));
+            || (exposed && !native.is_some_and(|g| mobile_shot(g)||leaving(g)));
         if !next_bad && !native_bad { continue; }
         // A safe explicit replacement already supersedes the old pursuit;
         // Stop by itself does not get a tank out of a cannon envelope.
         if native_bad && !next_bad && next.is_some_and(|g| if exposed {
-            mobile_shot(g)||leaving(g)||precise_fire(g)
+            mobile_shot(g)||leaving(g)
         } else { matches!(g,Goal::Move {..}|Goal::Attack {..}|Goal::AttackMove {..}|Goal::Stop) }) { continue; }
         if brain.census.main_available(unit) { brain.tracked.cancel_for_safety(id); }
         else { brain.tracked.forget_primary(id); }
@@ -1228,26 +1243,42 @@ pub(super) fn review(brain: &mut AssistBrain, rules: &RuleSet, obs: &Observation
             let all_weapons=unit.traits.engineer || garrison_entry;
             let guns = by_type.entry((unit.type_id,all_weapons))
                 .or_insert_with(|| envelopes(rules,obs,id,&visible,all_weapons));
-            let native = native_goal(obs,unit).or_else(|| {
-                if unit.mission.known() == Some(MissionType::Capture) {
-                    brain.tracked.primary_goal(id).filter(|g| matches!(g, Goal::Capture {..}))
-                } else { None }
-            });
-            let unsafe_order = |g: Goal| unsafe_goal(rules,obs,unit,guns,g)
-                || (unit.traits.engineer && matches!(g,Goal::Capture {target}
-                    if !super::site_risk::capture_site_safe(&brain.census,rules,obs,target,&visible)
-                        || !orders::building_approachable(obs,
-                            obs.object_type(rules,unit.type_id).map_or(MovementZone::Infantry,|ty|ty.movement_zone),
-                            unit.cell,obs.observed_object_cell(target).unwrap_or(unit.cell))))
-                || (garrison_entry && matches!(g,Goal::Capture {target}
-                    if !obs.can_garrison(rules,id,target)));
-            let next_bad = next.is_some_and(|g| unsafe_order(g));
-            let native_bad = native.is_some_and(|g| unsafe_order(g))
-                || (matches!(unit.mission.known(), Some(MissionType::AttackMove | MissionType::Guard | MissionType::AreaGuard))
-                    && obs.attack_target(id).is_some_and(|target| unsafe_goal(rules,obs,unit,guns,Goal::Attack {target})))
-                || ((unit.traits.engineer || garrison_entry)
-                    && unit.mission.known()==Some(MissionType::Capture) && native.is_none());
-            let exposed = covered(guns,unit.cell);
+            let job=brain.tracked.tasks.get(id);
+            let actual_capture=native_capture_target(obs,unit);
+            let native=native_goal(obs,unit);
+            let capture_valid=|g:Goal,continuing:bool| {
+                let Goal::Capture{target}=g else{return false;};
+                if !unit.traits.engineer && !garrison_entry {return false;}
+                let remembered=if continuing && actual_capture==Some(target) {
+                    job.filter(|j|j.target==Some(target)).and_then(|j|j.cell)
+                } else {None};
+                if obs.observed_object_cell(target).is_some() && unit.traits.engineer
+                    && (!obs.can_take_building(rules,id,target)
+                        || !super::site_risk::capture_site_safe(&brain.census,rules,obs,target,&visible))
+                {return false;}
+                capture_approach(rules,obs,id,target,unit.traits.engineer,&visible,remembered)
+            };
+            let safe_next_capture=next.is_some_and(|g|capture_valid(g,false));
+            let safe_native_capture=native.is_some_and(|g|capture_valid(g,true));
+            let unsafe_order=|g:Goal,continuing:bool| {
+                if matches!(g,Goal::Capture{..}) && (unit.traits.engineer || garrison_entry) {
+                    !(if continuing {safe_native_capture} else {safe_next_capture})
+                } else {unsafe_goal(rules,obs,unit,guns,g)}
+            };
+            let next_bad=next.is_some_and(|g|unsafe_order(g,false));
+            let native_bad=native.is_some_and(|g|unsafe_order(g,true))
+                || (matches!(unit.mission.known(),Some(MissionType::AttackMove|MissionType::Guard|MissionType::AreaGuard))
+                    && obs.attack_target(id).is_some_and(|target|unsafe_goal(rules,obs,unit,guns,Goal::Attack{target})));
+            // The old square exposure check must not undo a Capture which
+            // the shared, actor-specific route policy has already accepted.
+            // Other combat/retreat orders still use the original envelopes.
+            let exposed=covered(guns,unit.cell) && !safe_native_capture && !safe_next_capture;
+            if safe_native_capture && next_bad {
+                // Reject the new bad click, not the already safe native
+                // job. No release or Stop merely because a proposal failed.
+                replacements.insert(id,None);
+                continue;
+            }
             // A new safe movement out of fire supersedes a bad old order.
             let safe_exit = next.is_some_and(|g| matches!(g,Goal::Move {cell}
                 if cell != unit.cell && safe_leg(guns,unit.cell,cell,true) && valid_cell(rules,obs,unit,cell)
@@ -1437,27 +1468,6 @@ mod tests {
         assert!(supported_ready_fire(&brain,&rules,&obs,unit,Goal::Attack {target:tower}));
     }
     #[test]
-    fn v81_stationary_support_distinguishes_diagonal_and_exposed_fire() {
-        let (mut sim,rules)=scene();
-        let owner=sim.interner.intern("Americans");
-        let diagonal=sim.spawn_object("ARTY","Americans",13,14,255,&rules).unwrap();
-        let exposed=sim.spawn_object("ARTY","Americans",16,20,255,&rules).unwrap();
-        let tower=sim.spawn_object("TOWER","Russians",19,20,255,&rules).unwrap();
-        let obs=Observation::new(&sim,owner);
-        let mut brain=AssistBrain::new(0xA436);
-        brain.rebuild_census(&rules,&obs);
-        let visible:Vec<_>=obs.visible_enemy_entities().collect();
-        let a=brain.census.units.iter().find(|u|u.entity_id==diagonal).unwrap();
-        let b=brain.census.units.iter().find(|u|u.entity_id==exposed).unwrap();
-        assert_eq!(obs.engage(&rules,diagonal,tower),Engage::Ready);
-        assert_eq!(obs.engage(&rules,tower,diagonal),Engage::OutOfRange);
-        assert!(covered(&envelopes(&rules,&obs,diagonal,&visible,false),a.cell));
-        assert!(support_firing_here(&rules,&obs,a,tower,&visible));
-        assert_eq!(obs.engage(&rules,tower,exposed),Engage::Ready);
-        assert!(!support_firing_here(&rules,&obs,b,tower,&visible));
-    }
-
-    #[test]
     fn overlapping_escape_must_reduce_exposure_without_new_battery() {
         let guns=[Envelope {at:(20,20),reach:6},Envelope {at:(30,20),reach:6}];
         assert!(escape_reduces(&guns,(25,20),(25,27)));
@@ -1494,6 +1504,30 @@ mod tests {
         assert_eq!(brain.tracked.primary_goal(tank),None);
         assert!(!out.orders.iter().any(|o| o.actor==tank && o.goal==Goal::Stop),
             "rejecting a retarget must not cancel a safe existing detour");
+    }
+
+    #[test]
+    fn mobile_margin_is_not_a_square_around_every_future_capture() {
+        assert!(!crosses_mobile_range((8,20),(22,20),(15,26),5));
+        assert!(crosses_mobile_range((8,20),(22,20),(15,25),5));
+        assert!(crosses_mobile_range((8,20),(22,20),(22,25),5));
+        assert!(!crosses_mobile_range((8,20),(22,20),(29,20),5));
+        let (mut sim,rules)=scene();
+        let owner=sim.interner.intern("Americans");
+        let actor=sim.spawn_object("ENG","Americans",8,20,255,&rules).unwrap();
+        let target=sim.spawn_object("PRIZE","Russians",22,20,255,&rules).unwrap();
+        sim.spawn_object("TANK","Russians",15,26,255,&rules).unwrap();
+        let obs=Observation::new(&sim,owner);
+        let visible:Vec<_>=obs.visible_enemy_entities().collect();
+        assert!(!safe_leg(&envelopes(&rules,&obs,actor,&visible,true),(8,20),(22,20),false));
+        assert!(specialist_approach_safe(&rules,&obs,actor,target));
+        let mut brain=AssistBrain::new(0xA436);
+        brain.rebuild_census(&rules,&obs);
+        let mut out=Outbox::default();
+        out.want(actor,0,Goal::Capture{target});
+        out.resolve();
+        review(&mut brain,&rules,&obs,&mut out);
+        assert!(out.orders.iter().any(|o|o.actor==actor && o.goal==(Goal::Capture{target})));
     }
 
     #[test]
@@ -1620,14 +1654,4 @@ mod tests {
         assert!(recovery_floor(false)>entry_floor(false));
         assert!(recovery_floor(true)>entry_floor(true));
     }
-}
-
-#[cfg(all(test, tests_sim_p_s))]
-#[test]
-fn v81_current_fire_uses_native_range_without_treating_cannot_as_safety() {
-    assert!(fixed_return_fire_risk(true, Engage::Ready));
-    assert!(fixed_return_fire_risk(false, Engage::Ready));
-    assert!(fixed_return_fire_risk(true, Engage::Cannot));
-    assert!(!fixed_return_fire_risk(true, Engage::OutOfRange));
-    assert!(!fixed_return_fire_risk(false, Engage::OutOfRange));
 }

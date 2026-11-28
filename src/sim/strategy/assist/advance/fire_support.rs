@@ -140,10 +140,9 @@ fn pick_visible_target(
                 rules, obs, unit.entity_id, enemy.entity_id) >= MIN_REAR_REACH
             && super::super::orders::admits(rules, obs,
                 unit.entity_id, &Goal::Attack { target: enemy.entity_id })
-            // Attack is a native *chase* until the actual selected weapon
-            // is in range. A Chebyshev estimate alone does not grant fire.
-            && obs.engage(rules,unit.entity_id,enemy.entity_id)
-                == crate::sim::control::observation::Engage::Ready
+            && (cell_distance(unit.cell, enemy.cell) <= reach
+                || super::super::tactics::lethal_approach(
+                    rules, obs, unit.entity_id, unit.cell, enemy.cell).is_none())
     }).min_by_key(|enemy| {
         let ty = obs.entity_type(rules, enemy.entity_id);
         let threat = ty.is_some_and(|ty| ty.is_base_defense)
@@ -152,7 +151,7 @@ fn pick_visible_target(
         let infrastructure = ty.is_some_and(|ty| ty.category == ObjectCategory::Building);
         (!pressing_screen, !threat, !infrastructure,
             cell_distance(unit.cell, enemy.cell), enemy.entity_id)
-    }).filter(|enemy|super::super::safety::firing_here(rules,obs,unit,enemy.entity_id))
+    })
 }
 
 /// Keep supported artillery out of the ordinary frontal AttackMove loop even
@@ -182,8 +181,7 @@ fn push_impl(
 ) -> BTreeSet<u64> {
     let mut held = BTreeSet::new();
     if brain.campaign.holding_fist() && !joint_operation { return held; }
-    let all_visible: Vec<_> = obs.visible_enemy_entities().collect();
-    let visible: Vec<_> = all_visible.iter().copied()
+    let visible: Vec<_> = obs.visible_enemy_entities()
         .filter(|enemy| cell_distance(enemy.cell, objective) <= 16)
         .take(80).collect();
     // Compute fire-support capability once per candidate, not in an
@@ -205,45 +203,9 @@ fn push_impl(
             || super::super::orders::committed_garrison_entry(
                 &brain.tracked, rules, obs, unit.entity_id)
         { continue; }
-        let id = unit.entity_id;
-        // A real safe shot does not disappear when the screen changes
-        // membership. Keep it until its native target/range/safety changes.
-        if super::super::safety::holding_support_fire(rules,obs,unit,&all_visible) {
-            held.insert(id);
-            continue;
-        }
-        // A local live battery is the siege owner's problem even without a
-        // screen. Only an actual standoff weapon is sent to its firing ring.
-        // Do not exempt distant artillery from ordinary army movement.
-        let battery = all_visible.iter().filter(|e|
-            reach >= 8 && cell_distance(unit.cell,e.cell) <= reach + 6
-                && obs.object_type(rules,e.type_id).is_some_and(|ty|
-                    super::super::siege_counter::dangerous_battery(rules,ty)
-                    && super::super::siege_counter::battery_reach(rules,ty)>=4
-                    && super::super::tactics::actual_threat_reach(rules,obs,id,e.entity_id)
-                        > super::super::siege_counter::battery_reach(rules,ty).max(
-                            super::super::tactics::actual_threat_reach(rules,obs,e.entity_id,id))+1)
-                && obs.visible_enemy_building_operational(rules,e.entity_id)
-                && super::super::orders::admits(rules,obs,id,&Goal::Attack{target:e.entity_id})
-                && !brain.tracked.claimed_by_other(obs.tick(),
-                    super::super::tracked::TrackedKind::Capture,e.entity_id,id))
-            .min_by_key(|e|(cell_distance(unit.cell,e.cell),e.entity_id));
-        if let Some(gun) = battery {
-            held.insert(id);
-            if issued < MAX_SUPPORT_ORDERS
-                && !super::super::orders::ordered_this_frame(out,id)
-                && !brain.avoid_retreat_until.get(&id).is_some_and(|end|obs.tick()<*end)
-                && !brain.tracked.held(obs.tick(),id)
-                && !obs.is_deployed(id)
-                && super::super::siege_counter::work_battery(
-                    &mut brain.tracked,brain.trace,rules,obs,out,unit,gun.entity_id,gun.cell,
-                    obs.tick()%15==id%15)
-            { issued += 1; }
-            continue;
-        }
         let Some(screen) = forward_screen(unit, objective, &frontliners)
         else { continue; };
-        held.insert(id);
+        held.insert(unit.entity_id);
         if super::super::orders::ordered_this_frame(out, unit.entity_id)
             || issued >= MAX_SUPPORT_ORDERS
         { continue; }

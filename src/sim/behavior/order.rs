@@ -97,10 +97,19 @@ impl<'a> Funnel<'a> {
 
     /// Translate `goal` into the command to issue for `actor`.
     pub fn prepare(&self, actor: u64, goal: Goal) -> Result<Command, Refusal> {
-        if self.sim.entities().get(actor).is_none() {
+        let Some(entity)=self.sim.entities().get(actor) else {
             return Err(Refusal::NoSuchActor);
-        }
-        let command = goal.command(actor);
+        };
+        let command=goal.command(actor);
+        // IDLE/Stop is the native cancellation event, not an immediate
+        // commence write. Scope this exception to a real Capture whose
+        // target/navigation the native receiver still owns. All other
+        // Stop and non-queued commands keep the original readiness gate.
+        let cancel_capture=matches!(&command,Command::Stop{..})
+            && entity.mission.effective().known()
+                ==Some(crate::sim::mission::MissionType::Capture)
+            && (entity.navigation.nav_com().is_some()
+                || entity.attack_target.target().is_some());
         // The readiness answer is about *writing* the mission now. The
         // MEGAMISSION family does not write it: `EventClass::Execute`'s arm
         // ends in `Queue_Mission` with `commence_now = 0` (`0x004C73B9`), so an
@@ -110,7 +119,8 @@ impl<'a> Funnel<'a> {
         // `0x007360C0`), so the brain could neither pull it out of the walk nor
         // give it the fight in front of it, and asked again every frame for the
         // whole walk. A queued mission is the native answer to exactly this.
-        if !queues_natively(&command) && !self.sim.mission_ready_to_commence(actor, self.rules) {
+        if !cancel_capture && !queues_natively(&command)
+            && !self.sim.mission_ready_to_commence(actor,self.rules) {
             return Err(Refusal::NotReady);
         }
         Ok(command)

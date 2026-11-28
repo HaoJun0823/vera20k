@@ -167,8 +167,6 @@ pub(super) fn can_save_for(free: i32, price: i32, income: Option<i32>) -> bool {
 pub(super) struct InvestmentBank {
     target: Option<(crate::sim::intern::InternedId, u64)>,
     retry_after: u64,
-    // Marker on the *same* research bank, not a competing wallet.
-    advantage: bool,
 }
 
 impl InvestmentBank {
@@ -176,21 +174,11 @@ impl InvestmentBank {
         self.target.filter(|(_,until)| now < *until).map(|(id,_)| id)
     }
 
-    pub(super) fn clear(&mut self) { self.target = None; self.advantage=false; }
-
-    pub(super) fn advantage_selected(&self) -> bool { self.advantage }
-
-    pub(super) fn hold_advantage(&mut self,now:u64,id:crate::sim::intern::InternedId,
-        free:i32,price:i32,income:Option<i32>)->i32 {
-        let held=self.hold_for(now,id,free,price,income,1800,2,false);
-        self.advantage=held>0;
-        held
-    }
+    pub(super) fn clear(&mut self) { self.target = None; }
 
     /// Losing an unfunded optional commitment is not completing it. Keep the
     /// same cooldown as an expired bank, even if another pass displaced it.
     pub(super) fn interrupt(&mut self, now: u64) {
-        self.advantage=false;
         if self.target.take().is_some() {
             self.retry_after = self.retry_after.max(now.saturating_add(450));
         }
@@ -198,7 +186,6 @@ impl InvestmentBank {
 
     pub(super) fn hold(&mut self, now: u64, id: crate::sim::intern::InternedId,
         free: i32, price: i32, income: Option<i32>) -> i32 {
-        self.advantage=false;
         self.hold_for(now,id,free,price,income,900,1,false)
     }
 
@@ -206,7 +193,6 @@ impl InvestmentBank {
     /// measured income. It still expires and cannot borrow future credits.
     pub(super) fn hold_income(&mut self,now:u64,id:crate::sim::intern::InternedId,
         free:i32,price:i32,income:Option<i32>,waiting:bool)->i32 {
-        self.advantage=false;
         self.hold_for(now,id,free,price,income,1800,2,waiting)
     }
 
@@ -248,22 +234,6 @@ pub(super) fn discretionary_floor(free: i32, income: Option<i32>, line: i32) -> 
 #[cfg(all(test, tests_sim_p_s))]
 mod v50_tests {
     use super::*;
-    #[test]
-    fn v81_advantage_bank_does_not_renew_or_survive_interruption() {
-        let id=crate::sim::intern::InternedId::from_index(1);
-        let mut bank=InvestmentBank::default();
-        assert_eq!(bank.hold_advantage(0,id,2000,5000,Some(1800)),5000);
-        assert!(bank.advantage_selected());
-        assert_eq!(bank.hold_advantage(1799,id,2000,5000,Some(1800)),5000);
-        assert_eq!(bank.hold_advantage(1800,id,2000,5000,Some(1800)),0);
-        assert!(!bank.advantage_selected());
-        assert_eq!(bank.hold_advantage(2249,id,2000,5000,Some(1800)),0);
-        assert_eq!(bank.hold_advantage(2250,id,2000,5000,Some(1800)),5000);
-        bank.interrupt(2251);
-        assert!(!bank.advantage_selected());
-        assert_eq!(bank.active(2251),None);
-    }
-
     #[test]
     fn income_bank_waits_for_a_real_busy_line_but_expires() {
         let id=crate::sim::intern::InternedId::from_index(1);

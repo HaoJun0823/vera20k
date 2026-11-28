@@ -445,6 +445,24 @@ pub(super) fn review_liberation(brain:&mut AssistBrain,rules:&RuleSet,
 /// A mine's attacker remains a local clearance objective after the miner
 /// flees. Select only visible live threats, not a hidden enemy location.
 /// The existing base guard remains responsible for its own emergency.
+/// Return a real previously observed mineral cell in this house's
+/// established refinery district. A target need not be attacking a miner
+/// this instant. No ore beyond the observed ledger and no hidden enemy IDs.
+fn nearby_known_mineral(known:&std::collections::BTreeMap<(u16,u16),u8>,
+    bays:&[(u16,u16)],at:(u16,u16),reach:i32)->Option<(u16,u16)> {
+    let reach=reach.clamp(1,12);
+    let r=reach as u16;
+    if !bays.iter().any(|bay|squared_distance(*bay,at)<=(28+reach).pow(2)) {
+        return None;
+    }
+    known.range((at.0.saturating_sub(r),0)..=(at.0.saturating_add(r),u16::MAX))
+        .filter(|(cell,_)|squared_distance(**cell,at)<=reach*reach
+            && bays.iter().any(|bay|squared_distance(*bay,**cell)<=28*28))
+        .min_by_key(|(cell,stage)|(squared_distance(**cell,at),
+            std::cmp::Reverse(**stage),**cell))
+        .map(|(cell,_)|*cell)
+}
+
 pub(super) fn clear_mine_raids(brain:&mut AssistBrain,rules:&RuleSet,
     obs:&Observation<'_>,out:&mut Outbox) {
     use crate::sim::control::observation::Engage;
@@ -468,10 +486,42 @@ pub(super) fn clear_mine_raids(brain:&mut AssistBrain,rules:&RuleSet,
     // district. If it disappears, the old ID is not an attack instruction.
     brain.mine_incidents.retain(|target,(cell,end)|now<*end && visible.iter().any(|e|
         e.entity_id==*target && cell_distance(e.cell,*cell)<=22));
+    // Separate actual mining danger from offensive opportunity. This
+    // transient list is consumed by the existing bounded clearance owner,
+    // never by hostile_mining_ground or the miner's safety veto.
+    let mut contacts:std::collections::BTreeMap<u64,((u16,u16),bool)>=
+        brain.mine_incidents.iter().map(|(id,(cell,_))|(*id,(*cell,false))).collect();
+    if !obs.is_campaign() && !brain.director.under_attack_now()
+        && !brain.director.recovering_under_fire() && !brain.mobilization.active()
+        && !brain.campaign.economy_resting() && !brain.census.refinery_cells.is_empty()
+    {
+        for e in &visible {
+            if contacts.contains_key(&e.entity_id) {continue;}
+            let Some(ty)=obs.object_type(rules,e.type_id) else{continue;};
+            if !matches!(ty.category,ObjectCategory::Infantry|ObjectCategory::Vehicle)
+                || airborne(ty,obs.is_deployed(e.entity_id))
+                || super::tactics::mind_control_reach(rules,ty).is_some()
+                || obs.visible_enemy_invulnerable(e.entity_id)
+                || brain.mining_hostile_sites.values().any(|(cell,radius,_)|
+                    cell_distance(*cell,e.cell)<=*radius)
+            {continue;}
+            let reach=if ty.resource_gatherer {3} else {
+                miners.iter().filter(|m|m.controllable()
+                    && obs.can_hurt(rules,e.entity_id,m.entity_id))
+                    .map(|m|super::tactics::effective_reach_against(
+                        rules,obs,e.entity_id,m.entity_id)).max().unwrap_or(0)
+            };
+            if reach<=0 {continue;}
+            if let Some(field)=nearby_known_mineral(&brain.ore_known,
+                &brain.census.refinery_cells,e.cell,reach) {
+                contacts.insert(e.entity_id,(field,true));
+            }
+        }
+    }
     let live=&brain.census.units;
     brain.mine_clearance_retry.retain(|_,end|now<*end);
     let expired:Vec<_>=brain.mine_clearance.iter().filter(|(_, (target,end))|
-        now>=*end || !brain.mine_incidents.contains_key(target))
+        now>=*end || !contacts.contains_key(target))
         .map(|(actor,(target,_))|(*actor,*target)).collect();
     for (actor,target) in expired {
         brain.mine_clearance.remove(&actor);
@@ -485,11 +535,11 @@ pub(super) fn clear_mine_raids(brain:&mut AssistBrain,rules:&RuleSet,
         }
     }
     brain.mine_clearance.retain(|actor,(target,end)|now<*end
-        && brain.mine_incidents.contains_key(target)
+        && contacts.contains_key(target)
         && live.iter().any(|u|u.entity_id==*actor && u.controllable()
             && !u.in_service() && u.health_permille>=650
             && !brain.safety.reserved(rules,obs,u)));
-    if brain.mine_incidents.is_empty(){return;}
+    if contacts.is_empty(){return;}
     let defenders=brain.squads.squad(Role::Defend)
         .map(|s|s.members.clone()).unwrap_or_default();
     let home=brain.census.base_cell;
@@ -497,11 +547,12 @@ pub(super) fn clear_mine_raids(brain:&mut AssistBrain,rules:&RuleSet,
         && brain.census.available(u) && home.is_some_and(|h|cell_distance(h,u.cell)<=18)).count();
     let mut issued=0;
     let mut spent_home=0;
-    let mut incidents:Vec<_>=brain.mine_incidents.iter().filter_map(|(id,(cell,_))|
-        visible.iter().find(|e|e.entity_id==*id).copied().map(|e|(e,*cell))).collect();
-    incidents.sort_by_key(|(e,_)|(!obs.attack_target(e.entity_id)
+    let mut incidents:Vec<_>=contacts.iter().filter_map(|(id,(cell,regional))|
+        visible.iter().find(|e|e.entity_id==*id).copied()
+            .map(|e|(e,*cell,*regional))).collect();
+    incidents.sort_by_key(|(e,_,regional)|(*regional,!obs.attack_target(e.entity_id)
         .is_some_and(|target|miners.iter().any(|m|m.entity_id==target)),e.entity_id));
-    for (enemy,field) in incidents {
+    for (enemy,field,regional) in incidents {
         if issued>=4 {break;}
         let target=enemy.entity_id;
         let Some(ty)=obs.object_type(rules,enemy.type_id) else {continue;};
@@ -514,7 +565,7 @@ pub(super) fn clear_mine_raids(brain:&mut AssistBrain,rules:&RuleSet,
             let id=u.entity_id;
             let old=brain.mine_clearance.get(&id).is_some_and(|(t,end)|*t==target && now<*end);
             let at_home=home.is_some_and(|h|cell_distance(h,u.cell)<=18);
-            let near=cell_distance(u.cell,enemy.cell)<=48;
+            let near=cell_distance(u.cell,enemy.cell)<=if regional {20}else{48};
             (old || brain.census.available(u)) && u.controllable() && !u.in_service()
                 && !brain.mine_clearance_retry.contains_key(&id)
                 && !out.ordered_this_frame(id)
@@ -524,6 +575,11 @@ pub(super) fn clear_mine_raids(brain:&mut AssistBrain,rules:&RuleSet,
                 && !brain.safety.reserved(rules,obs,u)
                 && !brain.tracked.held(now,id)
                 && brain.tracked.tasks.get(id).is_none()
+                && !brain.crate_claims.contains_key(&id)
+                && !brain.crate_returns.contains_key(&id)
+                && (!regional || (!defenders.contains(&id)
+                    && !brain.census.mobile_aa.contains(&id)
+                    && u.slot==super::census::Slot::Vehicle))
                 && !brain.cover_detail.values().any(|(actor,_,_)|*actor==id)
                 && !brain.joint_ops.reserves(id)
                 && !super::advance::siege_member(brain,now,id)
@@ -540,8 +596,8 @@ pub(super) fn clear_mine_raids(brain:&mut AssistBrain,rules:&RuleSet,
                 && super::orders::admits(rules,obs,id,&Goal::Attack{target})
                 && (obs.attack_target(id)==Some(target)
                     || brain.tracked.admits(now,id,TrackedKind::Engage,Some(target),Some(enemy.cell)))
-                && super::safety::safe_leg(&super::safety::envelopes(rules,obs,id,&other_threats,true),
-                    u.cell,enemy.cell,false)
+                && super::safety::safe_leg(&super::safety::envelopes(
+                    rules,obs,id,&other_threats,!regional),u.cell,enemy.cell,false)
                 && (obs.engage(rules,id,target)==Engage::Ready
                     || super::orders::reachable(rules,obs,id,enemy.cell))
         }).collect();
@@ -565,13 +621,20 @@ pub(super) fn clear_mine_raids(brain:&mut AssistBrain,rules:&RuleSet,
         }).take((4usize.saturating_sub(issued)).max(1)).collect();
         let strength=group.iter().fold(0i64,|sum,u|sum+i64::from(u.points.max(0)));
         let hp=i64::from(obs.health(target).unwrap_or(ty.strength).max(1));
-        let supported=group.len()>=2 && strength>=hp.saturating_mul(2);
+        let supported=if regional {
+            // The healthy local pair may fight ordinary mobile opposition,
+            // but not an unseen or numerically superior force. Fixed guns
+            // and controllers were still vetoed by the route gate above.
+            let local_enemy=i64::from(brain.census.enemy_points(rules,obs,enemy.cell,12).max(0));
+            group.len()>=2 && strength>=hp
+                && strength.saturating_mul(2)>=local_enemy.saturating_mul(3)
+        } else {group.len()>=2 && strength>=hp.saturating_mul(2)};
         for u in group {
             if issued>=4 {break;}
             let id=u.entity_id;
             let ready=obs.engage(rules,id,target)==Engage::Ready;
             let loses=super::tactics::unfavourable_vehicle_duel(rules,obs,id,target);
-            if (!supported && (!ready || loses))
+            if (regional && !supported) || (!supported && (!ready || loses))
                 || (obs.own_elite(id) && !ready && !supported) {continue;}
             let home_loan=defenders.contains(&id) && home.is_some_and(|h|cell_distance(h,u.cell)<=18)
                 && !brain.mine_clearance.contains_key(&id);
@@ -589,7 +652,7 @@ pub(super) fn clear_mine_raids(brain:&mut AssistBrain,rules:&RuleSet,
                 brain.census.unavailable.insert(id);
                 if home_loan {spent_home+=1;}
                 issued+=1;
-                log::info!("auto play: v62_mine_clearance tick={now} actor={id} target={target} field={field:?} supported={supported}");
+                log::info!("auto play: v62_mine_clearance tick={now} actor={id} target={target} field={field:?} supported={supported} regional={regional}");
             }
         }
     }
@@ -1382,4 +1445,14 @@ mod v30_airborne_detection_tests {
         assert!(super::super::tactics::emergency_threat_score(
             &rules, rules.object("TANY").expect("C4 commando")) >= 900);
     }
+}
+
+#[cfg(all(test, tests_sim_p_s))]
+#[test]
+fn v82_mine_contact_survives_worker_absence_without_owning_the_entire_map() {
+    let known=std::collections::BTreeMap::from([((42,40),9u8),((90,90),9),((44,43),2)]);
+    assert_eq!(nearby_known_mineral(&known,&[(20,40)],(43,40),4),Some((42,40)));
+    assert_eq!(nearby_known_mineral(&known,&[(20,40)],(90,90),4),None);
+    assert_eq!(nearby_known_mineral(&known,&[(20,40)],(60,40),4),None);
+    assert_eq!(nearby_known_mineral(&known,&[],(43,40),4),None);
 }

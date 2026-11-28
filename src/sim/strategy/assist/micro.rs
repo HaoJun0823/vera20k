@@ -128,8 +128,7 @@ pub(super) fn run(
     // the "attacked the base while a tank killed it" report.
     // Historic sightings are useful to pick a destination, but not a live
     // firing target. Every prioritisation below uses *current* vision only.
-    let live_contacts: Vec<_>=obs.visible_enemy_entities().collect();
-    let visible_enemies: BTreeSet<u64> = live_contacts.iter()
+    let visible_enemies: BTreeSet<u64> = obs.visible_enemy_entities()
         .map(|enemy| enemy.entity_id).collect();
     let aimed_at: std::collections::BTreeMap<u64, u64> = brain
         .census
@@ -219,13 +218,6 @@ pub(super) fn run(
             || brain.avoid_retreat_until.get(&item.entity_id)
                 .is_some_and(|until| tick < *until)
         { continue; }
-        // Do not replace a safe, in-range siege shot just because an
-        // ordinary local ranking would choose a different target. Emergency,
-        // dodge, repair and psychic danger retain their earlier owners.
-        if !rebuilding && !brain.director.under_attack_now()
-            && !brain.safety.reserved(rules,obs,&item.unit)
-            && super::safety::holding_support_fire(rules,obs,&item.unit,&live_contacts)
-        {continue;}
         // An exposed light vehicle must break an already losing native Attack
         // mission before it can be sent into another duel. A nearby armored
         // escort may change the trade; a lone IFV should save itself instead.

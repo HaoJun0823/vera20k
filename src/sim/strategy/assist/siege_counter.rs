@@ -390,18 +390,6 @@ pub(super) fn work_battery(tracker: &mut super::tracked::Tracker, trace: Option<
     rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox,
     unit: &super::census::Unit, target: u64, at: (u16,u16), search: bool) -> bool {
     let id = unit.entity_id;
-    // Do not move towards a prize protected by a capture reservation or
-    // a target which has disappeared into fog. The ordinary order gate is
-    // authoritative for Attack, and must also guard a preparatory Move.
-    if !orders::admits(rules,obs,id,&Goal::Attack{target})
-        || tracker.claimed_by_other(obs.tick(),TrackedKind::Capture,target,id)
-    {return false;}
-    if obs.attack_target(id).is_some_and(|old|old!=target) {
-        let visible: Vec<_> = obs.visible_enemy_entities().collect();
-        if super::safety::holding_support_fire(rules,obs,unit,&visible) {
-            return false;
-        }
-    }
     if super::safety::firing_here(rules,obs,unit,target) {
         if obs.attack_target(id) == Some(target) { return false; }
         return orders::issue_tracked(tracker,trace,out,rules,obs,id,
@@ -439,8 +427,6 @@ pub(super) fn standoff_strike(brain: &mut AssistBrain, rules: &RuleSet,
         if !members.contains(&unit.entity_id) || brain.joint_ops.reserves(unit.entity_id)
             || !brain.census.main_available(unit)
             || unit.health_permille < 500
-            || brain.avoid_retreat_until.get(&unit.entity_id)
-                .is_some_and(|end|obs.tick()<*end)
             || obs.is_deployed(unit.entity_id)
             || orders::ordered_this_frame(out,unit.entity_id)
         { continue; }

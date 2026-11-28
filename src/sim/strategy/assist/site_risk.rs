@@ -144,7 +144,13 @@ pub(super) fn capture_site_safe(census:&Census,rules:&RuleSet,obs:&Observation<'
     let Some(cell)=obs.observed_object_cell(target) else {return false;};
     let Some(ty)=prize_type(rules,obs,target) else {return true;};
     let (hard,soft)=pressure(&threats(rules,obs,ty,Some(target),visible),cell);
-    !hard && (soft==0 || acceptable(false,soft,supports(census,cell)))
+    // A harmless nearby rival engineer or an armed unit outside direct
+    // site coverage is a reason to contest a neutral public prize promptly,
+    // not a mandatory escort quota. Actual entry safety and hard coverage
+    // are checked independently. Enemy-owned and ordinary military prizes
+    // keep their existing graded support requirement.
+    let neutral_public=!obs.is_hostile(target) && super::orders::strategic_public_asset(ty);
+    !hard && (neutral_public || soft==0 || acceptable(false,soft,supports(census,cell)))
 }
 
 /// A last check on a durable expansion appointment as well as fresh orders.

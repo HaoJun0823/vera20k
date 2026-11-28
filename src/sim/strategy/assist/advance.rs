@@ -1842,9 +1842,6 @@ fn limited_front_skirmish(
                 return Some((priority,near,enemy.entity_id,enemy.cell,true));
             }
             if !targets::unit_target_reachable(enemy,unit,rules,obs) {return None;}
-            if fire_support::support_reach(rules,obs,unit)>=8
-                && !super::safety::firing_here(rules,obs,unit,enemy.entity_id)
-            {return None;}
             // A nearby unarmed structure is a separate, limited opportunity.
             // Require a real local companion rather than global army size.
             let ty=obs.object_type(rules,enemy.type_id)?;
@@ -1877,10 +1874,10 @@ fn limited_front_skirmish(
             // Winning the range comparison with *one* tower does not mean a
             // lone artillery unit may walk into the other towers around it.
             // It can fire from its safe present position, or wait for its wave.
-            if (fire_support::support_reach(rules,obs,unit)>=8
-                || obs.entity_type(rules, enemy.entity_id)
-                    .is_some_and(|ty| super::siege_counter::dangerous_battery(rules, ty)))
-                && !super::safety::firing_here(rules,obs,unit,enemy.entity_id)
+            if obs.entity_type(rules, enemy.entity_id)
+                .is_some_and(|ty| super::siege_counter::dangerous_battery(rules, ty))
+                && (cell_distance(unit.cell, enemy.cell) > ours
+                    || super::tactics::unsafe_post(rules, obs, unit.entity_id, unit.cell))
             { return None; }
             let control = obs.entity_type(rules,enemy.entity_id)
                 .is_some_and(|ty| super::tactics::mind_control_reach(rules,ty).is_some());
@@ -2052,7 +2049,6 @@ pub(super) fn local_contacts(brain:&mut AssistBrain,rules:&RuleSet,
         let id=u.entity_id;
         if super::orders::ordered_this_frame(out,id) || obs.is_deployed(id) {continue;}
         let old=obs.attack_target(id);
-        if super::safety::holding_support_fire(rules,obs,u,&visible) {continue;}
         // An actual live shot at a useful local mobile opponent is more
         // valuable than repeatedly re-aiming at another equally close one.
         if old.is_some_and(|target|visible.iter().any(|e|e.entity_id==target
@@ -2150,13 +2146,6 @@ pub(super) fn trailing_siege(brain:&mut AssistBrain,rules:&RuleSet,
         if super::orders::ordered_this_frame(out,id) || obs.is_deployed(id)
             || brain.tracked.held(now,id) {continue;}
         let Some(ty)=obs.object_type(rules,u.type_id) else{continue;};
-        // Losing a nearby screen is not by itself a reason to break safe
-        // fixed-target fire. Actual exposure, mobile danger or recovery
-        // still takes the original withdrawal path.
-        if !brain.director.under_attack_now() && !brain.director.recovering_under_fire()
-            && !brain.mobilization.active() && !brain.campaign.economy_resting()
-            && super::safety::holding_support_fire(rules,obs,u,&visible)
-        {continue;}
         let threat=visible.iter().filter(|e|cell_distance(e.cell,u.cell)<=18
             && obs.can_hurt(rules,e.entity_id,id)
             && super::tactics::actual_threat_reach(rules,obs,e.entity_id,id)>0)
@@ -2888,8 +2877,6 @@ pub(super) fn advance(
             || brain.crate_claims.contains_key(&unit.entity_id)
             || brain.crate_returns.contains_key(&unit.entity_id)
         { continue; }
-        if support_holds.contains(&unit.entity_id)
-            && super::orders::ordered_this_frame(out,unit.entity_id) {continue;}
         if let Some(since) = brain.armour_wave_wait
             && armour_wave_missing(
                 armour.iter().filter(|other| cell_distance(unit.cell, other.cell) <= 12)
