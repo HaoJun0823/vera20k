@@ -299,22 +299,38 @@ pub(super) fn attempt_liberation(brain:&mut AssistBrain,rules:&RuleSet,
         brain.liberation_retry.insert(victim,now.saturating_add(LIBERATION_RETRY));
     }
     brain.liberation_retry.retain(|_,end|now<*end);
-    if pairs.is_empty(){return;}
+    // A controller must be answered before it acquires the first victim.
+    // Keep existing rescues first, then only controllers threatening a
+    // currently present ground force. Share the original four-order budget.
+    let mut targets:Vec<(bool,i32,u64)>=visible.iter().filter_map(|e|{
+        let rescue=pairs.iter().any(|(_,controller)|*controller==e.entity_id);
+        let reach=super::tactics::actor_control_reach(rules,obs,e.entity_id)?;
+        let near=brain.census.units.iter().filter(|u|brain.census.available(u)
+            && super::census::ground_combatant(rules,obs,u)
+            && !super::tactics::psychic_immune(rules,obs,u.entity_id))
+            .map(|u|cell_distance(u.cell,e.cell)).min();
+        (rescue || near.is_some_and(|d|d<=reach.saturating_add(12)))
+            .then_some((!rescue,near.unwrap_or(i32::MAX),e.entity_id))
+    }).collect();
+    targets.sort_unstable();
+    if targets.is_empty(){return;}
     let mut used=std::collections::BTreeSet::new();
-    let mut checked=std::collections::BTreeSet::new();
     let mut issued=0;
-    for (_,target) in pairs.iter().copied() {
-        if issued>=4 || !checked.insert(target){continue;}
+    for (_,_,target) in targets.into_iter().take(12) {
+        if issued>=4{break;}
         let Some(enemy)=visible.iter().find(|e|e.entity_id==target) else {continue;};
         let Some(ty)=obs.object_type(rules,enemy.type_id) else {continue;};
         if obs.visible_enemy_invulnerable(target){continue;}
         let victims:Vec<_>=pairs.iter().filter_map(|(victim,controller)|
             (*controller==target).then_some(*victim)).collect();
-        if victims.iter().all(|victim|brain.liberation_retry.contains_key(victim)){continue;}
+        if !victims.is_empty() && victims.iter().all(|victim|brain.liberation_retry.contains_key(victim)){continue;}
         let mut candidates=Vec::new();
         for u in brain.census.units.iter().filter(|u|brain.census.available(u)
             && u.health_permille>=700 && !u.traits.irreplaceable
-            && !u.traits.scout && !used.contains(&u.entity_id)
+            && (!u.traits.scout || (super::tactics::psychic_immune(rules,obs,u.entity_id)
+                && cell_distance(u.cell,enemy.cell)<=6
+                && obs.destination(u.entity_id).is_none()))
+            && !used.contains(&u.entity_id)
             && !brain.tracked.held(now,u.entity_id)
             && brain.tracked.tasks.get(u.entity_id).is_none()
             && !brain.cover_detail.values().any(|(id,_,_)|*id==u.entity_id)
@@ -328,16 +344,23 @@ pub(super) fn attempt_liberation(brain:&mut AssistBrain,rules:&RuleSet,
             && super::orders::admits(rules,obs,u.entity_id,&Goal::Attack{target})) {
             let id=u.entity_id;
             let Some(ours)=obs.object_type(rules,u.type_id) else {continue;};
+            let airborne=super::siege_counter::combat_air_actor(rules,obs,id);
             let immune=ours.immune_to_psionics;
             let psychic=super::tactics::actor_control_reach(rules,obs,target).unwrap_or(0);
             let range=super::tactics::actual_threat_reach(rules,obs,id,target);
             let enemy_range=super::tactics::actual_threat_reach(rules,obs,target,id);
             let ready=obs.engage(rules,id,target)==Engage::Ready;
             // Do not feed another victim to the same controller.
-            if !immune && psychic>0 && cell_distance(u.cell,enemy.cell)<=psychic+1 {continue;}
+            if !immune && !airborne && psychic>0 && cell_distance(u.cell,enemy.cell)<=psychic+1 {continue;}
             if obs.attack_target(id).is_some_and(|old|old!=target && !victims.contains(&old)
                 && obs.engage(rules,id,old)==Engage::Ready
                 && obs.attack_target(old)==Some(id)) {continue;}
+            if airborne {
+                if super::siege_counter::air_attack_safe(rules,obs,id,target) {
+                    candidates.push((!ready,cell_distance(u.cell,enemy.cell),id,enemy.cell,Goal::Attack{target}));
+                }
+                continue;
+            }
             let guns=super::safety::envelopes(rules,obs,id,&visible,true);
             if ready {
                 if !super::safety::firing_here(rules,obs,u,target) {continue;}
@@ -345,7 +368,9 @@ pub(super) fn attempt_liberation(brain:&mut AssistBrain,rules:&RuleSet,
                 continue;
             }
             if immune && enemy_range==0 && !obs.is_deployed(id)
-                && super::orders::reachable(rules,obs,id,enemy.cell)
+                && (if ty.category==ObjectCategory::Building {
+                    super::orders::building_approachable(obs,ours.movement_zone,u.cell,enemy.cell)
+                }else{super::orders::reachable(rules,obs,id,enemy.cell)})
                 && super::safety::safe_leg(&guns,u.cell,enemy.cell,false) {
                 candidates.push((true,cell_distance(u.cell,enemy.cell),id,enemy.cell,Goal::Attack{target}));
                 continue;
@@ -387,6 +412,9 @@ pub(super) fn attempt_liberation(brain:&mut AssistBrain,rules:&RuleSet,
                         actor,kind,matches!(goal,Goal::Attack{..}).then_some(target),Some(cell),goal)
                 };
             if requested {
+                if victims.is_empty() && !ready_native && !moving_native && now%150==0 {
+                    log::info!("auto play: v85_control_response tick={now} actor={actor} controller={target} goal={goal:?}");
+                }
                 attempted=true;used.insert(actor);issued+=1;
                 log::debug!("auto play: v62_liberation_attempt tick={now} actor={actor} controller={target} goal={goal:?}");
             }

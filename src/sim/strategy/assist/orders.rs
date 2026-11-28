@@ -185,13 +185,21 @@ pub(super) fn captures(
         .filter(|site|obs.is_cell_visible(site.cell.0,site.cell.1))
         .filter(|site|obs.object_type(rules,site.type_id).is_some_and(|ty|ty.can_be_occupied))
         .map(|site|site.entity_id).collect();
-    let engineer_targets: Vec<EnemyEntity> = if obs.is_campaign() {
-        obs.campaign_engineer_sites(rules).filter_map(|(site,repair)|(!repair).then_some(site)).collect()
-    } else {
-        obs.capturable_buildings(rules).filter(|target|
-            obs.is_cell_visible(target.cell.0,target.cell.1)
-                && !passive_cover.contains(&target.entity_id)).collect()
-    };
+    // Strategic capture candidates use one visible/native rule path.
+    // The campaign-specific query still supplies additional scenario
+    // targets and repairs, but cannot hide a legal public prize.
+    let visible_hostiles:BTreeSet<_>=obs.visible_enemy_entities()
+        .map(|e|e.entity_id).collect();
+    let mut engineer_targets:Vec<_>=obs.capturable_buildings(rules).filter(|target|
+        obs.is_cell_visible(target.cell.0,target.cell.1)
+            && (!obs.is_hostile(target.entity_id) || visible_hostiles.contains(&target.entity_id))
+            && !passive_cover.contains(&target.entity_id)).collect();
+    if obs.is_campaign() {
+        engineer_targets.extend(obs.campaign_engineer_sites(rules)
+            .filter_map(|(site,repair)|(!repair).then_some(site)));
+    }
+    engineer_targets.sort_by_key(|site|site.entity_id);
+    engineer_targets.dedup_by_key(|site|site.entity_id);
     // Book the captures that landed since the last look. A building that was
     // capturable and is not any more either changed hands or was destroyed, and
     // the house owning it now is what tells the two apart. Pairing the two
@@ -1373,10 +1381,16 @@ fn occupier_range(rules:&RuleSet,ty:&ObjectType)->i32 {
 
 fn occupier_covers(rules:&RuleSet,obs:&Observation<'_>,ty:&ObjectType,
     cell:(u16,u16),visible:&[EnemyEntity])->bool {
+    occupier_covers_with_margin(rules,obs,ty,cell,visible,0)
+}
+
+fn occupier_covers_with_margin(rules:&RuleSet,obs:&Observation<'_>,ty:&ObjectType,
+    cell:(u16,u16),visible:&[EnemyEntity],margin:i32)->bool {
     let Some(w)=ty.occupy_weapon.as_deref().and_then(|name|rules.weapon(name))
         else{return false;};
     let reach=occupier_range(rules,ty);
     if reach<=0 {return false;}
+    let reach=reach.saturating_add(margin.clamp(0,3));
     visible.iter().any(|e|squared_distance(e.cell,cell)<=reach*reach
         && !obs.visible_enemy_invulnerable(e.entity_id)
         && obs.object_type(rules,e.type_id).is_some_and(|target|
@@ -1462,9 +1476,9 @@ fn campaign_building_perimeter(rules:&RuleSet,obs:&Observation<'_>,
 
 pub(super) fn engineer_building_approachable(rules:&RuleSet,obs:&Observation<'_>,
     zone:MovementZone,from:(u16,u16),site:&EnemyEntity)->bool {
-    if obs.is_campaign() {
-        campaign_building_approachable(rules,obs,zone,from,site.entity_id)
-    } else {building_approachable(obs,zone,from,site.cell)}
+    // Use the actual building footprint in both modes. Do not mistake
+    // a cell on the opposite side of a cliff for a legal entrance.
+    campaign_building_approachable(rules,obs,zone,from,site.entity_id)
 }
 
 /// An engineer purchase requires a real reachable producer-side approach.
@@ -1694,11 +1708,15 @@ pub(super) fn garrison(
     let reaches:BTreeSet<_>=occupier_types.iter().filter_map(|id|obs.object_type(rules,*id))
         .map(|ty|occupier_range(rules,ty)).filter(|reach|*reach>0).collect();
     let mut tactical_cover=BTreeSet::new();
+    let mut approach_cover=BTreeSet::new();
     for billet in &billets {
         for &id in &occupier_types {
             if obs.object_type(rules,id).is_some_and(|ty|
                 occupier_covers(rules,obs,ty,billet.cell,&visible)) {
                 tactical_cover.insert((billet.building_id,id));
+            } else if obs.object_type(rules,id).is_some_and(|ty|
+                occupier_covers_with_margin(rules,obs,ty,billet.cell,&visible,3)) {
+                approach_cover.insert((billet.building_id,id));
             }
         }
     }
@@ -1913,6 +1931,8 @@ pub(super) fn garrison(
             .filter(|billet|!regional || (reach>0
                 && (ore_cover_cache.get(&(billet.building_id,reach)).is_some_and(|(count,_)|*count>=4)
                     || tactical_cover.contains(&(billet.building_id,unit.type_id))
+                    || (squared_distance(unit.cell,billet.cell)<=6*6
+                        && approach_cover.contains(&(billet.building_id,unit.type_id)))
                     || within(asset_cells.iter().copied(),billet.cell,reach)
                     || restored_cover.contains(&billet.building_id))))
             .filter(|billet| !brain.cover_detail.contains_key(&billet.building_id))
@@ -1968,15 +1988,23 @@ pub(super) fn garrison(
                 let (covered,stock)=ore_cover_cache.get(&(billet.building_id,reach))
                     .copied().unwrap_or_default();
                 let tactical=tactical_cover.contains(&(billet.building_id,unit.type_id));
-                let rank=if tactical || restored_cover.contains(&billet.building_id) {0}
-                    else if covered>=4 {1}else{2};
+                let nearby=squared_distance(unit.cell,billet.cell)<=6*6;
+                let approach=nearby && approach_cover.contains(&(billet.building_id,unit.type_id));
+                let rank=if (tactical && nearby) || restored_cover.contains(&billet.building_id) {0}
+                    else if tactical {1}
+                    else if approach {2}
+                    else if covered>=4 {3}else{4};
                 // Once a useful position has occupants, build up a firing
                 // group rather than treating every empty house as equal.
-                let refill=if rank<2 {
+                let refill=if rank<=2 {
                     if assigned>0 && assigned<4 {0}else if assigned==0 {1}else{2}
                 } else {assigned.min(2)};
-                (rank,std::cmp::Reverse(stock),priority,refill,usize::MAX-ore,
-                    squared_distance(unit.cell, billet.cell), billet.building_id)
+                // A healthy nearby house is also protection for the rifles.
+                // Do not choose a distant house solely for a small ore score.
+                let hp=obs.health(billet.building_id).unwrap_or(0);
+                (rank,if rank<=2 {refill}else{0},std::cmp::Reverse(stock),
+                    priority,std::cmp::Reverse(hp),usize::MAX-ore,
+                    squared_distance(unit.cell,billet.cell),billet.building_id)
             })
         else {
             continue;
@@ -1992,7 +2020,7 @@ pub(super) fn garrison(
         ) {
             brain.tracked.tasks.claim(tick, unit.entity_id,
                 JobKind::Garrison, Some(billet.building_id), Some(billet.cell), unit.cell);
-            if super::trace_enabled("AUTOPLAY_V56_TRACE") {
+            if super::trace_enabled("AUTOPLAY_V56_TRACE") || tick%150==0 {
                 log::info!("auto play: v56_garrison_proposal tick={tick} actor={} target={} asset_cover={}",
                     unit.entity_id,billet.building_id,within(asset_cells.iter().copied(),billet.cell,8));
             }

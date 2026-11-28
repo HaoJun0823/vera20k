@@ -249,9 +249,8 @@ fn capture_approach(rules:&RuleSet,obs:&Observation<'_>,actor:u64,target:u64,
             && capture_leg_safe(rules,obs,actor,from,to,visible));
     };
     if engineer {
-        let reachable=if obs.is_campaign() {
-            orders::campaign_building_approachable(rules,obs,ty.movement_zone,from,target)
-        } else {orders::building_approachable(obs,ty.movement_zone,from,to)};
+        let reachable=orders::campaign_building_approachable(
+            rules,obs,ty.movement_zone,from,target);
         if !reachable || !super::site_risk::capture_direct_safe(rules,obs,target,to,visible) {
             return false;
         }
@@ -924,7 +923,10 @@ fn front_bad(rules: &RuleSet, obs: &Observation<'_>, unit: &Unit,
             if obs.observed_object_cell(target).is_some() && obs.is_hostile(target)
                 && obs.engage(rules,unit.entity_id,target)==Engage::Ready
                 && obs.entity_type(rules,target).is_some_and(|ty|
-                    ty.category != ObjectCategory::Building) { return false; }
+                    ty.category != ObjectCategory::Building)
+                && (tactics::psychic_immune(rules,obs,unit.entity_id)
+                    || tactics::controller_covering(rules,obs,unit.cell).is_none())
+            { return false; }
             unsafe_goal(rules,obs,unit,guns,goal)
         }
         Goal::AttackMove {..} | Goal::Move {..} | Goal::GuardAt {..}
@@ -968,7 +970,7 @@ pub(super) fn ready_battery_contact<'u>(
     let Some(victim)=obs.entity_type(rules,unit.entity_id) else {return false;};
     // Include mobile controllers too; only scan for them after a real
     // supported contact was found.
-    victim.immune_to_psionics || victim.immune_to_psionic_weapons
+    victim.immune_to_psionics
         || !obs.visible_enemy_entities().any(|e|obs.object_type(rules,e.type_id)
             .and_then(|ty|tactics::mind_control_reach(rules,ty))
             .is_some_and(|reach|distance(e.cell,unit.cell)<=reach+1))
@@ -1048,8 +1050,10 @@ fn review_front(brain: &mut AssistBrain, rules: &RuleSet, obs: &Observation<'_>,
         // A stopped tank under an operational battery is not safely staged.
         // Keep a real local mobile defensive shot while healthy, or a legal
         // outward move. Otherwise escape even if no new Attack was proposed.
+        let psychic_exposed=!tactics::psychic_immune(rules,obs,id)
+            && tactics::controller_covering(rules,obs,unit.cell).is_some();
         let mobile_shot=|g:Goal| matches!(g,Goal::Attack {target}
-            if unit.health_permille>=700 && obs.is_hostile(target)
+            if !psychic_exposed && unit.health_permille>=700 && obs.is_hostile(target)
                 && obs.observed_object_cell(target).is_some()
                 && obs.entity_type(rules,target).is_some_and(|ty|ty.category!=ObjectCategory::Building)
                 && obs.engage(rules,id,target)==Engage::Ready && obs.can_hurt(rules,id,target));
@@ -1215,6 +1219,85 @@ fn review_isolated(brain:&mut AssistBrain,rules:&RuleSet,obs:&Observation<'_>,
     }
 }
 
+/// Native automatic targeting can acquire a new AA-covered target after
+/// admission. Reconcile the actual mission too. Stop clears the native
+/// target; the aircraft idle/return path, not a synthetic landing click,
+/// owns fixed-wing docking. Do not touch an existing Enter/reload.
+fn review_air_strikes(brain:&mut AssistBrain,rules:&RuleSet,obs:&Observation<'_>,
+    proposed:&BTreeMap<u64,Goal>,replacements:&mut BTreeMap<u64,Option<Goal>>) {
+    let now=obs.tick();
+    for u in brain.census.units.iter().filter(|u|u.controllable() && u.traits.combat
+        && !u.in_service() && !u.traits.spawned
+        && super::siege_counter::combat_air_actor(rules,obs,u.entity_id)) {
+        let id=u.entity_id;
+        if replacements.contains_key(&id) || brain.tracked.tasks.get(id).is_some()
+            || brain.specialist_shuttles.contains_key(&id)
+            || obs.own_factory_handoff(rules,id).is_some() {continue;}
+        let bad=|g:Goal| match g {
+            Goal::Attack{target}=>!super::siege_counter::air_attack_safe(rules,obs,id,target),
+            Goal::AttackMove{cell}=>!super::siege_counter::air_attack_move_safe(rules,obs,id,cell),
+            _=>false
+        };
+        let next=proposed.get(&id).copied();
+        let next_bad=next.is_some_and(bad);
+        // Inspect the target separately because native AttackMove may keep
+        // a coordinate while acquiring an AA unit en route.
+        let native_bad=!obs.out_of_ammo(id) && (
+            obs.attack_target(id).is_some_and(|target|bad(Goal::Attack{target}))
+            || native_goal(obs,u).is_some_and(bad));
+        if !next_bad && !native_bad {continue;}
+        if native_bad && next.is_some_and(|g|!bad(g)
+            && matches!(g,Goal::Attack{..}|Goal::Move{..}|Goal::Stop|Goal::Enter{..}))
+        {continue;}
+        brain.tracked.void(id,TrackedKind::Attack);
+        brain.tracked.void(id,TrackedKind::AttackMove);
+        brain.tracked.void(id,TrackedKind::Engage);
+        brain.tracked.forget_primary(id);
+        let replacement=if native_bad {
+            let persistent=obs.entity_type(rules,id).is_some_and(|ty|
+                ty.category!=ObjectCategory::Aircraft);
+            let mut goal=Goal::Stop;
+            if persistent {
+                let guns=super::siege_counter::air_envelopes(rules,obs,id);
+                let rear=brain.census.rally.or(brain.census.base_cell).unwrap_or(u.cell);
+                // Do not send a hovering airship through another AA box.
+                // An existing outward flight is kept even when a new
+                // native auto-target briefly appears.
+                let exit=|cell|cell!=u.cell && safe_leg(&guns,u.cell,cell,true)
+                    && (!covered(&guns,u.cell) || escape_reduces(&guns,u.cell,cell))
+                    && orders::reachable(rules,obs,id,cell);
+                if obs.destination(id).is_some_and(exit) {
+                    replacements.insert(id,None);
+                    continue;
+                }
+                let mut best=None;
+                for ring in [4i32,8,12,16] {
+                    for (dx,dy) in [(-ring,0),(ring,0),(0,-ring),(0,ring),
+                        (-ring,-ring),(-ring,ring),(ring,-ring),(ring,ring)] {
+                        let (Ok(x),Ok(y))=(u16::try_from(i32::from(u.cell.0)+dx),
+                            u16::try_from(i32::from(u.cell.1)+dy)) else{continue;};
+                        let cell=(x,y);
+                        if !obs.is_cell_in_playfield(x,y) || !exit(cell){continue;}
+                        let score=(exposure(&guns,cell),distance(cell,rear),ring,cell);
+                        if best.is_none_or(|old|score<old){best=Some(score);}
+                    }
+                }
+                if let Some((_,_,_,cell))=best {goal=Goal::Move{cell};}
+            }
+            // No global bypass of mission readiness.
+            Some(goal).filter(|g|brain.safety.requested.get(&id)
+                .is_none_or(|(old,at)|old!=g || now.saturating_sub(*at)>=RETRY_FRAMES))
+        }else{None};
+        if let Some(g)=replacement{brain.safety.requested.insert(id,(g,now));}
+        if brain.safety.blocked_at.get(&id).is_none_or(|at|now.saturating_sub(*at)>=ABORT_FRAMES) {
+            brain.safety.blocked_at.insert(id,now);
+            log::info!("auto play: v85_air_aa_veto tick={now} actor={id} proposed={next:?} native_target={:?} abort={native_bad}",
+                obs.attack_target(id));
+        }
+        replacements.insert(id,replacement);
+    }
+}
+
 pub(super) fn review(brain: &mut AssistBrain, rules: &RuleSet, obs: &Observation<'_>, out: &mut Outbox) {
     let tick = obs.tick();
     remember_roles(brain,tick);
@@ -1336,6 +1419,7 @@ pub(super) fn review(brain: &mut AssistBrain, rules: &RuleSet, obs: &Observation
             replacements.insert(id,replacement);
         }
     }
+    review_air_strikes(brain,rules,obs,&proposed,&mut replacements);
     review_front(brain,rules,obs,&proposed,&mut replacements);
     review_isolated(brain,rules,obs,&proposed,&mut replacements);
     if replacements.is_empty() { return; }

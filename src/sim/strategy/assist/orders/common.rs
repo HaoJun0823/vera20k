@@ -91,6 +91,7 @@ pub(in crate::sim::strategy::assist) fn admits(
                         && obs.entity_type(rules, unit)
                             .is_some_and(|ty| ty.agent
                                 && super::has_disguise_weapon(rules, ty))))
+                && super::super::siege_counter::air_attack_safe(rules,obs,unit,target)
         }
         // Expendable and bomb-planting units cannot be given autonomous
         // AttackMove/Guard. The native guard target scan may pick a rifleman
@@ -104,6 +105,8 @@ pub(in crate::sim::strategy::assist) fn admits(
             if super::super::doctrine::actor_duty(rules,obs,unit).is_some_and(|duty| matches!(
                 duty, super::super::doctrine::Duty::Disposable |
                     super::super::doctrine::Duty::BombPlanter)) => false,
+        Goal::AttackMove {cell} =>
+            super::super::siege_counter::air_attack_move_safe(rules,obs,unit,cell),
         Goal::Capture { target } => {
             // Ownership or current visibility is required for every fresh
             // Capture click, including neutral assets and empty garrisons.

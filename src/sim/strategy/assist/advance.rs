@@ -538,28 +538,63 @@ pub(super) fn prepare_siege_charge(
             && assault::eligible(rules,obs,u,e)).count();
         (n>=assault::MIN_COLUMN).then_some((n,e,super::siege_counter::battery_reach(rules,ty)))
     }).max_by_key(|(n,e,_)|(*n,std::cmp::Reverse(e.entity_id))).map(|(_,e,reach)|(e,reach));
-    let Some((battery,tower_reach)) = contact.or_else(||
-        (tick%45==0).then(||super::tactics::siege_barrier(rules,obs,campaign_cell,&main)).flatten())
-        else { return; };
-    // Prefer a real in-range safe gun. Merely being able to buy an artillery
-    // unit, or having a launcher stranded behind a cliff, does not veto a wave.
-    if brain.front_review.deferred(tick).is_none_or(|(_,cell)| cell_distance(cell,battery.cell)>12)
-        && main.iter().any(|u| super::safety::firing_here(rules,obs,u,battery.entity_id)
-            && obs.attack_target(u.entity_id) == Some(battery.entity_id)) { return; }
-    let mut candidates: Vec<_> = main.into_iter().filter(|u|
-        cell_distance(u.cell,battery.cell) <= tower_reach + 8
-            && assault::eligible(rules,obs,u,battery)).collect();
-    candidates.sort_by_key(|u| (cell_distance(u.cell,battery.cell),u.entity_id));
-    candidates.truncate(assault::MAX_COHORT_SEARCH);
-    let cells:Vec<_>=candidates.iter().map(|u|u.cell).collect();
-    let Some(leader)=assault::cohesive_leader(&cells) else {return;};
-    let ready: Vec<_> = candidates.into_iter().filter(|u| cell_distance(u.cell,leader)<=8)
-        .take(assault::MAX_COLUMN).collect();
-    let Some(forecast) = assault::estimate(rules,obs,battery,&ready) else { return; };
-    if !forecast.allowed
-        || !retry_allowed(brain.charge_retry.get(&battery.entity_id).copied(),battery.entity_id,tick,forecast.hp,forecast.target_hp) {
-        return;
+    let light_contact=if tick%45==0 {
+        obs.visible_enemy_entities().filter_map(|e|{
+            let ty=obs.entity_type(rules,e.entity_id)?;
+            let reach=super::siege_counter::battery_reach(rules,ty);
+            if !super::siege_counter::dangerous_battery(rules,ty)
+                || !(1..7).contains(&reach)
+                || super::tactics::actor_control_reach(rules,obs,e.entity_id).is_some()
+                || !obs.visible_enemy_building_operational(rules,e.entity_id)
+                || obs.visible_enemy_invulnerable(e.entity_id)
+            {return None;}
+            let local:Vec<_>=main.iter().copied().filter(|u|
+                cell_distance(u.cell,e.cell)<=reach+8
+                    && assault::eligible(rules,obs,u,e)).take(assault::MAX_COHORT_SEARCH).collect();
+            let blocking=cell_distance(e.cell,campaign_cell)<=14
+                || local.iter().any(|u|super::tactics::path_enters_control_box(
+                    u.cell,campaign_cell,e.cell,reach));
+            let threatens=local.iter().any(|u|
+                super::tactics::actual_threat_reach(rules,obs,e.entity_id,u.entity_id)>0);
+            (blocking && threatens && local.len()>=assault::MIN_COLUMN)
+                .then_some((e,reach,local.len()))
+        }).max_by_key(|(e,_,count)|(*count,std::cmp::Reverse(cell_distance(e.cell,campaign_cell)),
+            std::cmp::Reverse(e.entity_id))).map(|(e,reach,_)|(e,reach))
+    }else{None};
+    let heavy=if tick%45==0 {
+        super::tactics::siege_barrier(rules,obs,campaign_cell,&main)
+    }else{None};
+    let mut picked=None;
+    let mut evaluated=BTreeSet::new();
+    for (battery,tower_reach) in [contact,heavy,light_contact].into_iter().flatten() {
+        if !evaluated.insert(battery.entity_id){continue;}
+        // Preserve an already working safe standoff shot. Otherwise the
+        // exact healthy cohort must actually pass the existing forecast.
+        if brain.front_review.deferred(tick).is_none_or(|(_,cell)|cell_distance(cell,battery.cell)>12)
+            && main.iter().any(|u|super::safety::firing_here(rules,obs,u,battery.entity_id)
+                && obs.attack_target(u.entity_id)==Some(battery.entity_id))
+        {continue;}
+        let mut candidates:Vec<_>=main.iter().copied().filter(|u|
+            cell_distance(u.cell,battery.cell)<=tower_reach+8
+                && assault::eligible(rules,obs,u,battery)).collect();
+        candidates.sort_by_key(|u|(cell_distance(u.cell,battery.cell),u.entity_id));
+        candidates.truncate(assault::MAX_COHORT_SEARCH);
+        let cells:Vec<_>=candidates.iter().map(|u|u.cell).collect();
+        let Some(leader)=assault::cohesive_leader(&cells) else{continue;};
+        let ready:Vec<_>=candidates.into_iter().filter(|u|cell_distance(u.cell,leader)<=8)
+            .take(assault::MAX_COLUMN).collect();
+        let Some(forecast)=assault::estimate(rules,obs,battery,&ready) else{continue;};
+        if !forecast.allowed || !retry_allowed(brain.charge_retry.get(&battery.entity_id).copied(),
+            battery.entity_id,tick,forecast.hp,forecast.target_hp) {
+            if tick%450==0 && tower_reach<7 {
+                log::info!("auto play: v85_light_forecast tick={tick} target={} count={} forecast_allowed={} hp={} loss_hp={} frames={}",
+                    battery.entity_id,ready.len(),forecast.allowed,forecast.hp,forecast.loss_hp,forecast.frames);
+            }
+            continue;
+        }
+        picked=Some((battery,ready,forecast));break;
     }
+    let Some((battery,ready,forecast))=picked else{return;};
     let members: BTreeSet<_> = ready.iter().map(|u| u.entity_id).collect();
     let count = members.len();
     for &id in &members {

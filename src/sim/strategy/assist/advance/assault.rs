@@ -147,8 +147,8 @@ fn estimate_with_min(rules:&RuleSet,obs:&Observation<'_>,battery:EnemyEntity,
         let mut opening = 0i64;
         for &u in ready {
             let victim = obs.entity_type(rules,u.entity_id)?;
-            if let Some(control) = tactics::mind_control_reach(rules,ty) {
-                if !victim.immune_to_psionics && !victim.immune_to_psionic_weapons
+            if let Some(control) = tactics::actor_control_reach(rules,obs,enemy.entity_id) {
+                if !victim.immune_to_psionics
                     && tactics::path_enters_control_box(u.cell,battery.cell,enemy.cell,
                         control + if fixed {1} else {7}) { return None; }
             }

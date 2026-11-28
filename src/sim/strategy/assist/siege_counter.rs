@@ -161,7 +161,8 @@ pub(super) fn focus(brain: &AssistBrain, rules: &RuleSet,
             if !dangerous_battery(rules, ty) || !obs.visible_enemy_building_operational(rules, enemy.entity_id)
             { return None; }
             let reach = battery_reach(rules, ty);
-            if reach < 7 { return None; }
+            if reach < 7 && super::tactics::actor_control_reach(rules,obs,enemy.entity_id).is_none()
+                { return None; }
             let near_front = front.is_some_and(|cell| cell_distance(cell, enemy.cell) <= 22);
             let near_army = front_units.iter().any(|cell|
                 cell_distance(*cell, enemy.cell) <= 30);
@@ -206,6 +207,69 @@ fn air_corridor_known(obs: &Observation<'_>, at: (u16,u16)) -> bool {
             obs.is_cell_in_playfield(x,y).then_some(obs.is_cell_visible(x,y))
         });
     surveyed.filter(|seen| *seen).take(2).count() >= 2
+}
+
+/// Combat aircraft only; a landed deployed ground weapon keeps its normal
+/// ground policy. Spawned missiles and aircraft carrying scripted missions
+/// remain owned by their native controllers.
+pub(super) fn combat_air_actor(rules:&RuleSet,obs:&Observation<'_>,actor:u64)->bool {
+    obs.entity_type(rules,actor).is_some_and(|ty|!ty.spawned
+        && (ty.category==ObjectCategory::Aircraft || ty.balloon_hover
+            || (ty.jumpjet && !obs.is_deployed(actor))
+            || ty.movement_zone==MovementZone::Fly))
+}
+
+/// Rule/actor-specific AA, including a gunner's current weapon and mobile
+/// AA. Only visible operational enemies contribute. A fixed-wing sortie
+/// must reach the target area, not just be nominally within weapon range.
+fn live_aa_reach(rules:&RuleSet,obs:&Observation<'_>,gun:u64,actor:u64)->i32 {
+    let ordinary=super::tactics::effective_reach_against(rules,obs,gun,actor);
+    if super::tactics::psychic_immune(rules,obs,actor) {return ordinary;}
+    let Some(ty)=obs.entity_type(rules,gun) else{return ordinary;};
+    if ty.category==ObjectCategory::Building
+        && !obs.visible_enemy_building_operational(rules,gun) {return ordinary;}
+    let control=(0..ty.weapon_record_count()).filter_map(|slot|
+        obs.observed_actor_weapon(rules,gun,slot))
+        .filter(|w|!w.never_use && rules.weapon_projectile(w).is_some_and(|p|p.aa)
+            && w.warhead.as_deref().and_then(|n|rules.warhead(n))
+                .is_some_and(|head|head.mind_control))
+        .map(max_range_cells).max().unwrap_or(0);
+    ordinary.max(control)
+}
+
+pub(super) fn air_envelopes(rules:&RuleSet,obs:&Observation<'_>,actor:u64)
+    ->Vec<super::safety::Envelope> {
+    obs.visible_enemy_entities().filter_map(|e|{
+        let reach=live_aa_reach(rules,obs,e.entity_id,actor);
+        (reach>0).then_some(super::safety::Envelope{at:e.cell,reach:reach+1})
+    }).collect()
+}
+
+pub(super) fn air_leg_clear(rules:&RuleSet,obs:&Observation<'_>,actor:u64,
+    from:(u16,u16),to:(u16,u16))->bool {
+    !obs.visible_enemy_entities().any(|e|{
+        let reach=live_aa_reach(rules,obs,e.entity_id,actor);
+        reach>0 && super::tactics::path_enters_control_box(from,to,e.cell,reach+1)
+    })
+}
+
+pub(super) fn air_attack_safe(rules:&RuleSet,obs:&Observation<'_>,actor:u64,target:u64)->bool {
+    if !combat_air_actor(rules,obs,actor){return true;}
+    if obs.out_of_ammo(actor){return false;}
+    let (Some(from),Some(to))=(obs.observed_object_cell(actor),obs.observed_object_cell(target))
+        else{return false;};
+    let continuous=obs.entity_type(rules,actor)
+        .is_some_and(|ty|ty.category!=ObjectCategory::Aircraft);
+    let firing=continuous && obs.engage(rules,actor,target)
+        ==crate::sim::control::observation::Engage::Ready;
+    air_leg_clear(rules,obs,actor,from,if firing{from}else{to})
+}
+
+pub(super) fn air_attack_move_safe(rules:&RuleSet,obs:&Observation<'_>,actor:u64,
+    to:(u16,u16))->bool {
+    !combat_air_actor(rules,obs,actor) || (!obs.out_of_ammo(actor)
+        && obs.observed_object_cell(actor).is_some_and(|from|
+            air_leg_clear(rules,obs,actor,from,to)))
 }
 
 /// `from`: actual air unit's position when issuing Attack, or None when
@@ -549,6 +613,34 @@ mod tests {
             Some(Counter::Standoff));
         assert_eq!(viable(&rules,magnetron,grand_cannon,
             ground_reach(&rules,grand_cannon),false),None);
+    }
+
+    #[test]
+    fn v85_live_aa_blocks_crossing_and_the_aa_target_but_not_a_clear_lane() {
+        let rules=RuleSet::from_ini(&crate::sim::arena_fixture::clear_ground_ini(
+            "[AircraftTypes]\n0=PLANE\n[BuildingTypes]\n0=AA\n1=LAND\n\
+             [PLANE]\nStrength=150\nArmor=light\nSpeed=14\n\
+             [AA]\nStrength=400\nFoundation=1x1\nPrimary=Flak\nPowered=no\n\
+             [LAND]\nStrength=400\nFoundation=1x1\nPrimary=Gun\nPowered=no\n\
+             [Flak]\nDamage=30\nRange=6\nROF=20\nWarhead=WH\nProjectile=AirShot\n\
+             [Gun]\nDamage=30\nRange=6\nROF=20\nWarhead=WH\nProjectile=GroundShot\n\
+             [AirShot]\nAA=yes\nAG=no\nInviso=yes\n\
+             [GroundShot]\nAA=no\nAG=yes\nInviso=yes\n\
+             [WH]\nVerses=100%,100%,100%,100%,100%,100%,100%,100%,100%,100%,100%\n"
+        )).unwrap();
+        let mut sim=crate::sim::arena_fixture::rival_arena_known(&rules,0xA850);
+        sim.intern_rule_type_ids(&rules);
+        sim.resolve_type_handles(&rules);
+        let owner=sim.interner.intern("Americans");
+        let plane=sim.spawn_object("PLANE","Americans",10,20,255,&rules).unwrap();
+        let aa=sim.spawn_object("AA","Russians",20,20,255,&rules).unwrap();
+        sim.spawn_object("LAND","Russians",20,8,255,&rules).unwrap();
+        let obs=Observation::new(&sim,owner);
+        assert!(combat_air_actor(&rules,&obs,plane));
+        assert!(live_aa_reach(&rules,&obs,aa,plane)>0);
+        assert!(!air_leg_clear(&rules,&obs,plane,(10,20),(30,20)));
+        assert!(!air_leg_clear(&rules,&obs,plane,(10,20),(20,20)));
+        assert!(air_leg_clear(&rules,&obs,plane,(10,8),(30,8)));
     }
 
     #[test]

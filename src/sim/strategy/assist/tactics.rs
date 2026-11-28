@@ -77,6 +77,9 @@ pub(super) fn psychic_immune(rules:&RuleSet,obs:&Observation<'_>,actor:u64)->boo
 
 pub(super) fn actor_control_reach(rules:&RuleSet,obs:&Observation<'_>,actor:u64)->Option<i32> {
     let ty=obs.entity_type(rules,actor)?;
+    if ty.category==crate::rules::object_type::ObjectCategory::Building
+        && obs.is_hostile(actor) && !obs.visible_enemy_building_operational(rules,actor)
+    {return None;}
     (0..ty.weapon_record_count()).filter_map(|slot|obs.observed_actor_weapon(rules,actor,slot))
         .filter(|weapon|!weapon.never_use && weapon.warhead.as_deref()
             .and_then(|name|rules.warhead(name)).is_some_and(|head|head.mind_control))
@@ -469,7 +472,8 @@ pub(super) fn lethal_approach(
 pub(super) fn unsafe_post(
     rules: &RuleSet, obs: &Observation<'_>, actor: u64, post: (u16,u16),
 ) -> bool {
-    controller_covering(rules,obs,post).is_some() || obs.visible_enemy_entities().any(|enemy| {
+    (!psychic_immune(rules,obs,actor) && controller_covering(rules,obs,post).is_some())
+        || obs.visible_enemy_entities().any(|enemy| {
         let Some(ty) = obs.entity_type(rules, enemy.entity_id) else { return false; };
         effective_reach_against(rules, obs, enemy.entity_id, actor) > 0
             && (ty.is_base_defense

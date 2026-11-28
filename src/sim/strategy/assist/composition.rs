@@ -274,29 +274,22 @@ pub(super) fn fill_lines(
         && !brain.director.recovering_income() && brain.census.available_fighters()>=8 {
         budget.free
     } else {budget.free.saturating_sub(prior_quality_hold)};
-    let capture_purchase = if obs.is_campaign()
-        && !air_claimed.contains(&ProductionCategory::Infantry)
+    let capture_line_open=!air_claimed.contains(&ProductionCategory::Infantry)
         && !brain.census.line(ProductionCategory::Infantry).busy()
-        && !super::plan::line_proposed(rules,obs,out,ProductionCategory::Infantry)
-    {
-        campaign_engineer(brain,rules,obs,capture_free)
-            .map(|(ty,id,site)|{capture_target=site;(ty,id)})
-    } else if !obs.is_campaign() && !hard_emergency
-        && !air_claimed.contains(&ProductionCategory::Infantry)
-        && !brain.census.line(ProductionCategory::Infantry).busy()
-        && !brain.director.under_attack_now() && !brain.director.recovering_income()
-    {
+        && !super::plan::line_proposed(rules,obs,out,ProductionCategory::Infantry);
+    // Same valuable-asset selector for both game modes. Scenario cover
+    // repair and other native engineer tasks remain the fallback, not
+    // a competing strategic purchase policy.
+    let capture_purchase=if capture_line_open && !hard_emergency
+        && !brain.director.under_attack_now() && !brain.director.recovering_income() {
         asset_engineer_choice(brain,rules,obs,capture_free)
             .map(|(ty,id,site)|{capture_target=Some(site);(ty,id)})
-    } else { None };
+    }else{None};
     let capture_purchase=capture_purchase.or_else(||{
-        if !obs.is_campaign() && !hard_emergency && !brain.director.under_attack_now()
-            && !air_claimed.contains(&ProductionCategory::Infantry)
-            && !brain.census.line(ProductionCategory::Infantry).busy()
-            && !super::plan::line_proposed(rules,obs,out,ProductionCategory::Infantry)
-        {campaign_engineer(brain,rules,obs,budget.free.saturating_sub(prior_quality_hold))
-            .map(|(ty,id,site)|{capture_target=site;(ty,id)})}
-        else {None}
+        if capture_line_open && (obs.is_campaign() || (!hard_emergency && !brain.director.under_attack_now())) {
+            campaign_engineer(brain,rules,obs,capture_free)
+                .map(|(ty,id,site)|{capture_target=site;(ty,id)})
+        }else{None}
     });
     let capture_claimed = queue_unit(rules,obs,&mut budget,out,capture_purchase);
     if capture_claimed {

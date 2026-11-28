@@ -328,7 +328,33 @@ pub(super) fn choose_focused(
             })
         } else { None }
     } else { None };
-    let nearest = perimeter.or(local_raider).or(focused).unwrap_or(nearest);
+    let prize_cover=if !mopping_up {
+        let mut prizes:Vec<_>=obs.capturable_buildings(rules).filter(|e|
+            obs.is_cell_visible(e.cell.0,e.cell.1)
+                && cell_distance(anchor,e.cell)<=30
+                && !obs.visible_enemy_invulnerable(e.entity_id)
+                && obs.object_type(rules,e.type_id).is_some_and(|ty|
+                    super::super::orders::strategic_public_asset(ty)
+                    || ty.build_const_eligible() || ty.factory_type().is_some()
+                    || rules.build_tech_types.iter().any(|id|*id==ty.id))).collect();
+        prizes.sort_by_key(|e|(cell_distance(anchor,e.cell),e.entity_id));
+        prizes.truncate(12);
+        structures.iter().filter(|(_,e)|!rotated
+            || super::super::convergence::outside_deferred(e,deferred))
+            .filter_map(|(ty,e)|{
+                let reach=super::super::siege_counter::battery_reach(rules,ty);
+                if reach<=0 || !super::super::siege_counter::dangerous_battery(rules,ty)
+                    || !obs.visible_enemy_building_operational(rules,e.entity_id)
+                    || obs.visible_enemy_invulnerable(e.entity_id)
+                    || cell_distance(anchor,e.cell)>30 {return None;}
+                let d=prizes.iter().filter(|p|p.entity_id!=e.entity_id
+                    && cell_distance(p.cell,e.cell)<=reach+4)
+                    .map(|p|cell_distance(anchor,p.cell)).min()?;
+                target_reachable(e,fighters,rules,obs)
+                    .then_some((d,cell_distance(anchor,e.cell),e.entity_id,*e))
+            }).min_by_key(|(d,l,id,_)|(*d,*l,*id)).map(|(_,_,_,e)|e)
+    }else{None};
+    let nearest = local_raider.or(perimeter).or(prize_cover).or(focused).unwrap_or(nearest);
     // The enemy's defenses before its economy while they cover the target: a
     // tesla coil or a pillbox in range of the structure the fist walks at is
     // what kills the fist before it fires a shot, and a spy's blackout only
