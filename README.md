@@ -40,6 +40,8 @@ Stuck? See the [help page](https://vera20k.org/help).
 
 ## Contributing
 
+**Valued PRs** — refactoring, performance, pathfinding, UI/UX, random map generator.
+
 Contributors can take responsibility for engine areas, with broad freedom to make changes that
 move VERA20K forward.
 
@@ -81,6 +83,8 @@ cp config.toml.example config.toml
 # Edit config.toml and set ra2_dir to your game folder before running:
 cargo run --release --bin vera20k
 ```
+
+The game should now start up. Have fun developing and testing!
 
 ## How we work
 
@@ -135,6 +139,14 @@ Payouts to contributors:
   <a href="https://www.youtube.com/@haojunyang2337"><img src="docs/images/haojun0823.webp" width="64" height="64" align="left" alt="HaoJun Yang"></a>
   VERA20K is featured on <a href="https://www.youtube.com/@haojunyang2337">HaoJun Yang</a>.<br>
   <a href="https://www.youtube.com/watch?v=ucz-EiMeW88">Red Alert 2 in VERA20K 0.41</a><br clear="all">
+</p>
+
+## Map editors
+
+<p>
+  <a href="https://github.com/996666925/ra2-map-editor"><img src="https://avatars.githubusercontent.com/u/52450772?s=128" width="64" height="64" align="left" alt="996666925"></a>
+  <a href="https://github.com/996666925/ra2-map-editor">YR Map Editor</a><br>
+  Create Yuri’s Revenge maps and playtest them in VERA20K.<br clear="all">
 </p>
 
 ## Credits and legal

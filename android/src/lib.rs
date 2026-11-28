@@ -38,7 +38,10 @@ fn with_activity<R>(f: impl FnOnce(&mut jni::JNIEnv, &JObject) -> R) -> Option<R
     let mut env = vm.attach_current_thread().ok()?;
     // SAFETY: the activity handle is the loader's JNI global reference above.
     let activity = unsafe { JObject::from_raw(context.context().cast()) };
-    Some(f(&mut env, &activity))
+    // android_main stays attached to the VM for the whole event loop. In
+    // particular, each Mod picker poll returns a local String, even when empty.
+    env.with_local_frame(16, |env| Ok::<_, jni::errors::Error>(f(env, &activity)))
+        .ok()
 }
 
 /// Display-inset hook for `vera20k::util::display_insets`.
@@ -84,6 +87,11 @@ fn activity_flag(method: &str, args: &[&str]) -> bool {
 /// say `done` or `failed`.
 fn mod_export(folder: &str, done: &str, failed: &str) -> bool {
     activity_flag("exportMod", &[folder, done, failed])
+}
+
+/// Mods page: pack `folder` into a ZIP through the system picker.
+fn mod_export_zip(folder: &str, done: &str, failed: &str, progress: &str) -> bool {
+    activity_flag("exportModZip", &[folder, done, failed, progress])
 }
 
 /// Mods page: pick a mod ZIP in the system file manager; the toast says
@@ -592,6 +600,7 @@ fn android_main(app: AndroidApp) {
     // Add Mod's pickers and the shortcut pin run in the activity.
     vera20k::util::mod_actions::install(vera20k::util::mod_actions::Hooks {
         export: mod_export,
+        export_zip: mod_export_zip,
         pin: mod_pin,
         forget: mod_forget,
         pick_zip: mod_pick_zip,
@@ -666,8 +675,7 @@ fn android_main(app: AndroidApp) {
     // for ever. End the process instead, so that tap is a cold start.
     if !claim_event_loop() {
         log::error!("android_main called again; ending this process for a cold relaunch");
-        log::logger().flush();
-        std::process::exit(0);
+        exit_android_process();
     }
 
     let event_loop: winit::event_loop::EventLoop<()> = match winit::event_loop::EventLoop::builder()
@@ -713,13 +721,20 @@ fn android_main(app: AndroidApp) {
         Ok(status) => log::warn!("VERA20k exited with status {status}"),
         Err(error) => log::error!("VERA20k stopped: {error:#}"),
     }
-    log::logger().flush();
-
     // One process runs one game. Exiting here (rather than returning and letting
     // Android cache the process) is what makes the launcher's next tap start
     // from a clean slate: the event loop above cannot be rebuilt, so a cached
     // process would serve the new activity nothing but its splash.
-    std::process::exit(0);
+    exit_android_process();
+}
+
+fn exit_android_process() -> ! {
+    log::logger().flush();
+    // GameTextInput's process-wide destructor uses the activity thread's
+    // JNIEnv. Running it via exit(3) on android_main aborts in CheckJNI.
+    // SAFETY: the engine has finished or declined a second event loop. End
+    // this process directly so the next launch still gets a fresh loop.
+    unsafe { libc::_exit(0) }
 }
 
 /// Claims this process's single event loop.

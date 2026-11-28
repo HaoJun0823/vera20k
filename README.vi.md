@@ -40,6 +40,8 @@ Gặp khó khăn? Xem [trang trợ giúp](https://vera20k.org/help) (tiếng Anh
 
 ## Đóng góp
 
+**Các PR được đánh giá cao** — tái cấu trúc mã, hiệu năng, tìm đường, UI/UX, trình tạo bản đồ ngẫu nhiên.
+
 Người đóng góp có thể nhận phụ trách các phần của engine, với nhiều tự do để thực hiện những thay
 đổi giúp VERA20K tiến lên.
 
@@ -82,6 +84,8 @@ cp config.toml.example config.toml
 # Sửa config.toml và đặt ra2_dir thành thư mục trò chơi của bạn trước khi chạy:
 cargo run --release --bin vera20k
 ```
+
+Giờ thì trò chơi sẽ khởi động. Chúc bạn phát triển và thử nghiệm vui vẻ!
 
 ## Cách chúng tôi làm việc
 
@@ -136,6 +140,14 @@ Các hình thức chi trả cho người đóng góp:
   <a href="https://www.youtube.com/@haojunyang2337"><img src="docs/images/haojun0823.webp" width="64" height="64" align="left" alt="HaoJun Yang"></a>
   VERA20K được giới thiệu trên kênh <a href="https://www.youtube.com/@haojunyang2337">HaoJun Yang</a>.<br>
   <a href="https://www.youtube.com/watch?v=ucz-EiMeW88">Red Alert 2 trên VERA20K 0.41</a><br clear="all">
+</p>
+
+## Trình chỉnh sửa bản đồ
+
+<p>
+  <a href="https://github.com/996666925/ra2-map-editor"><img src="https://avatars.githubusercontent.com/u/52450772?s=128" width="64" height="64" align="left" alt="996666925"></a>
+  <a href="https://github.com/996666925/ra2-map-editor">YR Map Editor</a><br>
+  Tạo bản đồ cho Yuri’s Revenge rồi chơi thử trong VERA20K.<br clear="all">
 </p>
 
 ## Ghi công và pháp lý

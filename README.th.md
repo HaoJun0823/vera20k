@@ -38,6 +38,8 @@ VERA20K สร้างโดยเกมเมอร์ เพื่อเก�
 
 ## ร่วมพัฒนา
 
+**PR ที่เราให้ความสำคัญ** — การปรับโครงสร้างโค้ด, ประสิทธิภาพ, การหาเส้นทาง, UI/UX, เครื่องมือสร้างแผนที่แบบสุ่ม
+
 ผู้ร่วมพัฒนาสามารถรับผิดชอบส่วนต่าง ๆ ของเอนจินได้ โดยมีอิสระอย่างมากในการเปลี่ยนแปลงที่ช่วยผลักดัน VERA20K ไปข้างหน้า
 
 ผู้ดูแลโครงการจะช่วยในการรีวิว การผสานรวม และการเมิร์จ คุณจะได้รับเครดิตเต็มที่สำหรับผลงานของคุณ
@@ -75,6 +77,8 @@ cp config.toml.example config.toml
 # ก่อนรัน ให้แก้ไข config.toml และตั้งค่า ra2_dir เป็นโฟลเดอร์เกมของคุณ:
 cargo run --release --bin vera20k
 ```
+
+ตอนนี้เกมน่าจะเปิดขึ้นมาแล้ว ขอให้สนุกกับการพัฒนาและทดสอบเกม!
 
 ## วิธีทำงานของเรา
 
@@ -122,6 +126,14 @@ VERA20K ใช้กติกาของ Yuri's Revenge ภาคต้นฉ�
   <a href="https://www.youtube.com/@haojunyang2337"><img src="docs/images/haojun0823.webp" width="64" height="64" align="left" alt="HaoJun Yang"></a>
   ช่อง <a href="https://www.youtube.com/@haojunyang2337">HaoJun Yang</a> นำเสนอ VERA20K<br>
   <a href="https://www.youtube.com/watch?v=ucz-EiMeW88">Red Alert 2 ใน VERA20K 0.41</a><br clear="all">
+</p>
+
+## เครื่องมือแก้ไขแผนที่
+
+<p>
+  <a href="https://github.com/996666925/ra2-map-editor"><img src="https://avatars.githubusercontent.com/u/52450772?s=128" width="64" height="64" align="left" alt="996666925"></a>
+  <a href="https://github.com/996666925/ra2-map-editor">YR Map Editor</a><br>
+  สร้างแผนที่สำหรับ Yuri’s Revenge แล้วทดลองเล่นใน VERA20K<br clear="all">
 </p>
 
 ## เครดิตและข้อกฎหมาย

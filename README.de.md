@@ -41,6 +41,8 @@ Kommst du nicht weiter? Schau auf der [Hilfeseite](https://vera20k.org/de/help) 
 
 ## Mitmachen
 
+**Geschätzte Pull Requests** — Refactoring, Performance, Wegfindung, UI/UX, Zufallskartengenerator.
+
 Mitwirkende können Verantwortung für Bereiche der Engine übernehmen und haben dabei viel
 Spielraum für Änderungen, die VERA20K voranbringen.
 
@@ -82,6 +84,8 @@ cp config.toml.example config.toml
 # Bearbeite config.toml und setze ra2_dir auf deinen Spielordner, bevor du das Spiel startest:
 cargo run --release --bin vera20k
 ```
+
+Das Spiel sollte jetzt starten. Viel Spaß beim Entwickeln und Testen!
 
 ## So arbeiten wir
 
@@ -138,6 +142,14 @@ Auszahlungen an Mitwirkende:
   <a href="https://www.youtube.com/@haojunyang2337"><img src="docs/images/haojun0823.webp" width="64" height="64" align="left" alt="HaoJun Yang"></a>
   <a href="https://www.youtube.com/@haojunyang2337">HaoJun Yang</a> stellt VERA20K vor.<br>
   <a href="https://www.youtube.com/watch?v=ucz-EiMeW88">Red Alert 2 in VERA20K 0.41</a><br clear="all">
+</p>
+
+## Karteneditoren
+
+<p>
+  <a href="https://github.com/996666925/ra2-map-editor"><img src="https://avatars.githubusercontent.com/u/52450772?s=128" width="64" height="64" align="left" alt="996666925"></a>
+  <a href="https://github.com/996666925/ra2-map-editor">YR Map Editor</a><br>
+  Erstelle Karten für Yuris Rache und teste sie in VERA20K.<br clear="all">
 </p>
 
 ## Danksagung und Rechtliches

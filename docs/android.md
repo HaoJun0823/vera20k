@@ -28,6 +28,11 @@ artifact is `libvera20k_android.so`, and the manifest's
 
 ## Building
 
+For a test build, run **Android ARM64 APK** in GitHub Actions and download
+`vera20k-android-arm64-debug.apk` from the run's artifacts. Each run uses a fresh
+debug signing key. Switching between these builds requires uninstalling the previous
+copy, which removes its app data, including imported game files.
+
 Prerequisites: `platforms;android-36`, `build-tools;36.1.0`, `ndk;28.2.13676358`,
 `cargo-ndk`, a JDK 17+ that `JAVA_HOME` and `PATH` agree on. The Gradle wrapper
 is committed, so no separate Gradle install is needed — the first `gradlew` run
@@ -114,7 +119,7 @@ other rows are Android's own:
 | Row | Action |
 |---|---|
 | Add Mod | Choose ZIPs and Choose Folder open the system file manager (`VeraActivity.pickModZip`, `pickModFolder`). The activity copies the pick into `files/tmp/mod-import-*/`, keeping its name, and Add Mod's usual preview and install take it from there (`app::shell_mod_import`). The copies are deleted once the import ends or Add Mod closes, and at the next start. |
-| Export Mod | Copies the selected folder into a folder the system picker chooses (`VeraActivity.exportMod`). |
+| Export Mod | Asks for a ZIP or a folder copy. A ZIP is packed into its own cache folder so an earlier share stays readable. Cancel or Back stops packing. The result opens in the system share panel (`VeraActivity.exportModZip`, FileProvider); a folder copy goes to `ACTION_OPEN_DOCUMENT_TREE` (`exportMod`). |
 | Rename Mod | Asks for a new name; renames the folder, keeps a shown `mod.ini` `Name=` and the next start's choice in step. |
 | Delete Mod | Asks first, then removes the folder and its home-screen shortcuts. |
 | Add Desktop Entry | Pins a home-screen shortcut for the selected mod (`VeraActivity.pinMod`). |

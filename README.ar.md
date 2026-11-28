@@ -40,6 +40,8 @@ VERA20K محرك جديد للعبة Red Alert 2: Yuri's Revenge. يُلعب م�
 
 ## المساهمة
 
+**طلبات الدمج التي نقدّرها** — إعادة هيكلة الكود، تحسين الأداء، إيجاد المسارات، واجهة المستخدم وتجربة الاستخدام، مولّد الخرائط العشوائية.
+
 يمكن للمساهمين تولي مسؤولية أجزاء من المحرك، مع حرية واسعة لإجراء تغييرات تدفع VERA20K إلى الأمام.
 
 سيساعد القائمون على المشروع في المراجعة والتكامل والدمج، وسيُنسب إليك الفضل كاملًا في مساهمتك.
@@ -81,6 +83,8 @@ cargo run --release --bin vera20k
 ```
 
 </div>
+
+يُفترض أن تبدأ اللعبة الآن. استمتع بتطويرها واختبارها!
 
 ## كيف نعمل
 
@@ -134,6 +138,14 @@ cargo run --release --bin vera20k
   <a href="https://www.youtube.com/@haojunyang2337"><img src="docs/images/haojun0823.webp" width="64" height="64" align="right" alt="HaoJun Yang"></a>
   تسلّط قناة <a href="https://www.youtube.com/@haojunyang2337">HaoJun Yang</a> الضوء على VERA20K.<br>
   <a href="https://www.youtube.com/watch?v=ucz-EiMeW88">Red Alert 2 في VERA20K 0.41</a><br clear="all">
+</p>
+
+## محررات الخرائط
+
+<p>
+  <a href="https://github.com/996666925/ra2-map-editor"><img src="https://avatars.githubusercontent.com/u/52450772?s=128" width="64" height="64" align="left" alt="996666925"></a>
+  <a href="https://github.com/996666925/ra2-map-editor">YR Map Editor</a><br>
+  أنشئ خرائط Yuri’s Revenge وجرّب اللعب بها في VERA20K.<br clear="all">
 </p>
 
 ## شكر ومعلومات قانونية

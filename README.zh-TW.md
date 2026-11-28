@@ -36,6 +36,8 @@ VERA20K 由玩家打造、為玩家而做，專案的方向由玩家說了算。
 
 ## 參與貢獻
 
+**我們重視的 PR** — 程式碼重構、效能改善、尋路、UI/UX、隨機地圖產生器。
+
 貢獻者可以負責引擎的某些部分，並有很大的自由度去做推動 VERA20K 發展的改動。
 
 維護者會協助審查、整合和合併。你的貢獻會完整保留你的署名。
@@ -74,6 +76,8 @@ cp config.toml.example config.toml
 # 執行前，編輯 config.toml，將 ra2_dir 設為你的遊戲資料夾：
 cargo run --release --bin vera20k
 ```
+
+現在遊戲應該會啟動。祝你開發和測試愉快！
 
 ## 我們如何開發
 
@@ -129,6 +133,14 @@ VERA20K 預設使用《尤里的復仇》原版規則。你可以在 **Options**
   <a href="https://www.youtube.com/@haojunyang2337"><img src="docs/images/haojun0823.webp" width="64" height="64" align="left" alt="HaoJun Yang"></a>
   <a href="https://www.youtube.com/@haojunyang2337">HaoJun Yang</a> 頻道介紹了 VERA20K。<br>
   <a href="https://www.youtube.com/watch?v=ucz-EiMeW88">在 VERA20K 0.41 中玩《紅色警戒 2》</a><br clear="all">
+</p>
+
+## 地圖編輯器
+
+<p>
+  <a href="https://github.com/996666925/ra2-map-editor"><img src="https://avatars.githubusercontent.com/u/52450772?s=128" width="64" height="64" align="left" alt="996666925"></a>
+  <a href="https://github.com/996666925/ra2-map-editor">YR Map Editor</a><br>
+  製作《尤里的復仇》地圖，並在 VERA20K 中試玩。<br clear="all">
 </p>
 
 ## 致謝與法律宣告

@@ -39,6 +39,8 @@ VERA20K делают игроки для игроков, и последнее �
 
 ## Как помочь
 
+**PR, которые мы ценим** — рефакторинг, производительность, поиск пути, UI/UX, генератор случайных карт.
+
 Участники могут брать на себя ответственность за отдельные части движка и с большой свободой
 вносить изменения, которые двигают VERA20K вперёд.
 
@@ -80,6 +82,8 @@ cp config.toml.example config.toml
 # Перед запуском отредактируй config.toml и укажи папку с игрой в ra2_dir:
 cargo run --release --bin vera20k
 ```
+
+Теперь игра должна запуститься. Удачи в разработке и тестировании!
 
 ## Как мы работаем
 
@@ -135,6 +139,14 @@ Phobos по-прежнему нужна версия игры, собранна�
   <a href="https://www.youtube.com/@haojunyang2337"><img src="docs/images/haojun0823.webp" width="64" height="64" align="left" alt="HaoJun Yang"></a>
   Канал <a href="https://www.youtube.com/@haojunyang2337">HaoJun Yang</a> показал VERA20K.<br>
   <a href="https://www.youtube.com/watch?v=ucz-EiMeW88">Red Alert 2 в VERA20K 0.41</a><br clear="all">
+</p>
+
+## Редакторы карт
+
+<p>
+  <a href="https://github.com/996666925/ra2-map-editor"><img src="https://avatars.githubusercontent.com/u/52450772?s=128" width="64" height="64" align="left" alt="996666925"></a>
+  <a href="https://github.com/996666925/ra2-map-editor">YR Map Editor</a><br>
+  Создавайте карты для Yuri’s Revenge и тестируйте их в VERA20K.<br clear="all">
 </p>
 
 ## Благодарности и правовая информация

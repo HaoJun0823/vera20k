@@ -40,6 +40,8 @@ Fastnat? Läs [hjälpsidan](https://vera20k.org/sv/help).
 
 ## Bidra
 
+**Uppskattade PR:er** — refaktorering, prestanda, vägval för enheter, UI/UX, slumpkartgenerator.
+
 Medverkande kan ta ansvar för delar av motorn, med stor frihet att göra ändringar som driver
 VERA20K framåt.
 
@@ -81,6 +83,8 @@ cp config.toml.example config.toml
 # Redigera config.toml och ange din spelmapp i ra2_dir innan du kör:
 cargo run --release --bin vera20k
 ```
+
+Nu borde spelet starta. Ha så kul med att utveckla och testa det!
 
 ## Så arbetar vi
 
@@ -135,6 +139,14 @@ Utbetalningar till medverkande:
   <a href="https://www.youtube.com/@haojunyang2337"><img src="docs/images/haojun0823.webp" width="64" height="64" align="left" alt="HaoJun Yang"></a>
   <a href="https://www.youtube.com/@haojunyang2337">HaoJun Yang</a> visar upp VERA20K.<br>
   <a href="https://www.youtube.com/watch?v=ucz-EiMeW88">Red Alert 2 i VERA20K 0.41</a><br clear="all">
+</p>
+
+## Kartredigerare
+
+<p>
+  <a href="https://github.com/996666925/ra2-map-editor"><img src="https://avatars.githubusercontent.com/u/52450772?s=128" width="64" height="64" align="left" alt="996666925"></a>
+  <a href="https://github.com/996666925/ra2-map-editor">YR Map Editor</a><br>
+  Skapa kartor för Yuri’s Revenge och provspela dem i VERA20K.<br clear="all">
 </p>
 
 ## Tack och juridisk information

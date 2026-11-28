@@ -40,6 +40,8 @@ Takıldınız mı? [Yardım sayfasına](https://vera20k.org/tr/help) göz atın.
 
 ## Katkıda bulunma
 
+**Değer verdiğimiz PR’lar** — kodun yeniden düzenlenmesi, performans, yol bulma, UI/UX, rastgele harita üreteci.
+
 Katkıda bulunanlar motorun belirli alanlarının sorumluluğunu üstlenebilir ve VERA20K'yi
 ileriye taşıyan değişiklikleri geniş bir özgürlükle yapabilir.
 
@@ -81,6 +83,8 @@ cp config.toml.example config.toml
 # Çalıştırmadan önce config.toml dosyasını düzenleyip ra2_dir değerini oyun klasörünüz olarak ayarlayın:
 cargo run --release --bin vera20k
 ```
+
+Oyun artık açılmalı. Geliştirirken ve test ederken iyi eğlenceler!
 
 ## Nasıl çalışıyoruz
 
@@ -136,6 +140,14 @@ Katkıda bulunanlara ödeme yöntemleri:
   <a href="https://www.youtube.com/@haojunyang2337"><img src="docs/images/haojun0823.webp" width="64" height="64" align="left" alt="HaoJun Yang"></a>
   <a href="https://www.youtube.com/@haojunyang2337">HaoJun Yang</a> kanalında VERA20K tanıtılıyor.<br>
   <a href="https://www.youtube.com/watch?v=ucz-EiMeW88">VERA20K 0.41’de Red Alert 2</a><br clear="all">
+</p>
+
+## Harita düzenleyicileri
+
+<p>
+  <a href="https://github.com/996666925/ra2-map-editor"><img src="https://avatars.githubusercontent.com/u/52450772?s=128" width="64" height="64" align="left" alt="996666925"></a>
+  <a href="https://github.com/996666925/ra2-map-editor">YR Map Editor</a><br>
+  Yuri’s Revenge için haritalar oluşturup VERA20K ile test edebilirsiniz.<br clear="all">
 </p>
 
 ## Teşekkürler ve yasal bilgiler
